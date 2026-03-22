@@ -11,8 +11,8 @@ export interface OrphanBranch {
 }
 
 /**
- * Find branches that have been pushed but don't have open PRs.
- * Creates PRs for them so the review loop can pick them up.
+ * Find branches that have been pushed, have commits ahead of main,
+ * and don't have open PRs. Creates PRs for them.
  */
 export function findOrphanBranches(config: OrchestratorConfig): OrphanBranch[] {
   const orphans: OrphanBranch[] = [];
@@ -21,7 +21,14 @@ export function findOrphanBranches(config: OrchestratorConfig): OrphanBranch[] {
     if (!agent.github) continue;
 
     try {
-      // Get remote branches (excluding main/master)
+      // Get open PR branches
+      const prsRaw = execSync(
+        `gh pr list --repo ${agent.github} --state open --json headRefName --jq '.[].headRefName'`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+      const prBranches = new Set(prsRaw ? prsRaw.split("\n") : []);
+
+      // Get branches with commits ahead of main (not just any branch)
       const branchesRaw = execSync(
         `gh api "repos/${agent.github}/branches" --jq '.[].name'`,
         { encoding: "utf-8", timeout: 15000 },
@@ -30,16 +37,20 @@ export function findOrphanBranches(config: OrchestratorConfig): OrphanBranch[] {
 
       const branches = branchesRaw.split("\n").filter((b) => b !== "main" && b !== "master");
 
-      // Get open PR branches
-      const prsRaw = execSync(
-        `gh pr list --repo ${agent.github} --state open --json headRefName --jq '.[].headRefName'`,
-        { encoding: "utf-8", timeout: 15000 },
-      ).trim();
-      const prBranches = new Set(prsRaw ? prsRaw.split("\n") : []);
-
       for (const branch of branches) {
-        if (!prBranches.has(branch)) {
-          orphans.push({ repo: agent.github, branch, agentName });
+        if (prBranches.has(branch)) continue;
+
+        // Check if branch has commits ahead of main
+        try {
+          const ahead = execSync(
+            `gh api "repos/${agent.github}/compare/main...${branch}" --jq '.ahead_by'`,
+            { encoding: "utf-8", timeout: 10000 },
+          ).trim();
+          if (parseInt(ahead, 10) > 0) {
+            orphans.push({ repo: agent.github, branch, agentName });
+          }
+        } catch {
+          // Branch may not be comparable — skip
         }
       }
     } catch {
