@@ -6,6 +6,24 @@ The orchestrator is the control plane for a fleet of Claude Code agents. Each ag
 
 **The orchestrator is itself an agent** in the system. It can receive improvement issues and work on itself.
 
+## CRITICAL: Daemon Must Always Be Running
+
+**The daemon is the heartbeat of the orchestrator. It MUST be running at all times.**
+
+Before doing anything else in a session, check the daemon:
+```bash
+orch service status
+```
+
+If it's not running, start it immediately:
+```bash
+orch service start
+```
+
+The daemon goes down when: the proxy restarts, the process is killed for debugging, or the machine reboots. **Always verify it's running.** If you've restarted the proxy, recreate agents and restart the daemon.
+
+Without the daemon, nothing happens automatically — no issue polling, no verification, no PR reviews, no improvements, no redeployment.
+
 ## Development Workflow
 
 - **All changes must be made on a feature branch** — never commit directly to `main`.
