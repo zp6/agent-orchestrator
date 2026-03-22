@@ -43,6 +43,21 @@ describe("loadConfig", () => {
   it("throws on missing config file", () => {
     expect(() => loadConfig("/nonexistent/path.yaml")).toThrow();
   });
+
+  it("each agent has docker config", () => {
+    const config = loadConfig(configPath);
+    for (const [name, agent] of Object.entries(config.agents)) {
+      expect(agent.docker, `${name} missing docker config`).toBeDefined();
+      expect(agent.docker!.port, `${name} missing docker.port`).toBeGreaterThan(0);
+    }
+  });
+
+  it("agents have unique ports", () => {
+    const config = loadConfig(configPath);
+    const ports = Object.values(config.agents).map((a) => a.docker?.port);
+    const uniquePorts = new Set(ports);
+    expect(uniquePorts.size).toBe(ports.length);
+  });
 });
 
 describe("getAgentDir", () => {
