@@ -60,6 +60,7 @@ describe("dispatchGitHubIssues", () => {
       isProcessed: vi.fn().mockReturnValue(false),
       markProcessed: vi.fn(),
       getTask: vi.fn().mockReturnValue(null),
+      listTasks: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -123,6 +124,7 @@ describe("dispatchLinearChecks", () => {
     mockStore = {
       isProcessed: vi.fn().mockReturnValue(false),
       markProcessed: vi.fn(),
+      listTasks: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "linear-agent", response: { content: "done" } }),
@@ -166,6 +168,7 @@ describe("dispatchSlackChecks", () => {
     mockStore = {
       isProcessed: vi.fn().mockReturnValue(false),
       markProcessed: vi.fn(),
+      listTasks: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "slack-agent", response: { content: "done" } }),
