@@ -14,6 +14,15 @@ export interface TriggerResult {
 }
 
 /**
+ * Check if an agent already has a task in-flight (dispatched but not done/failed).
+ * Only one task per agent at a time to avoid context conflicts.
+ */
+function hasInFlightTask(store: StateStore, agentName: string): boolean {
+  const tasks = store.listTasks({ status: "dispatched", agent_name: agentName, limit: 1 });
+  return tasks.length > 0;
+}
+
+/**
  * Fire-and-forget dispatch: starts the dispatch without blocking.
  * The daemon continues its cycle while the agent works.
  */
@@ -53,6 +62,10 @@ export async function dispatchGitHubIssues(
   for (const [agentName, agent] of Object.entries(config.agents)) {
     if (!agent.github) continue;
     if (registeredAgents && !registeredAgents.has(agentName)) continue;
+    if (hasInFlightTask(store, agentName)) {
+      log.info("Skipping agent with in-flight task", { agentName });
+      continue;
+    }
 
     let issues: GitHubIssue[];
     try {
@@ -108,6 +121,7 @@ export async function dispatchLinearChecks(
   for (const [agentName, agent] of Object.entries(config.agents)) {
     if (!agent.linear) continue;
     if (registeredAgents && !registeredAgents.has(agentName)) continue;
+    if (hasInFlightTask(store, agentName)) continue;
 
     const sourceRef = `linear-check:${agentName}:${new Date().toISOString().slice(0, 13)}`;
 
@@ -161,6 +175,7 @@ export async function dispatchSlackChecks(
   for (const [agentName, agent] of Object.entries(config.agents)) {
     if (!agent.slack) continue;
     if (registeredAgents && !registeredAgents.has(agentName)) continue;
+    if (hasInFlightTask(store, agentName)) continue;
 
     const sourceRef = `slack-check:${agentName}:${new Date().toISOString().slice(0, 13)}`;
 
