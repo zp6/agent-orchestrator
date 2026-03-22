@@ -1,4 +1,4 @@
-import { createProxyClient } from "../client/proxy-client.js";
+import { createLLMClient } from "../client/llm-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { PromptLearner } from "./prompt-learner.js";
 import type { StateStore } from "../state/store.js";
@@ -29,10 +29,7 @@ export class Planner {
 
   async plan(task: string): Promise<Plan> {
     const registry = this.buildRegistryPrompt() + (this.learner?.buildPlannerContext() ?? "");
-    const client = createProxyClient(
-      this.config.proxy,
-      this.config.orchestrator_dir,
-      {},
+    const client = createLLMClient(this.config
     );
 
     const response = await client.messages.create({

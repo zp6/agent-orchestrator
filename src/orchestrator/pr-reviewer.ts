@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { createProxyClient } from "../client/proxy-client.js";
+import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 
@@ -44,10 +44,7 @@ export class PRReviewer {
     const pr = this.fetchPRInfo(repo, prNumber);
     this.log.info("Reviewing PR", { repo, prNumber, title: pr.title, filesChanged: pr.files_changed });
 
-    const client = createProxyClient(
-      this.config.proxy,
-      this.config.orchestrator_dir,
-      {},
+    const client = createLLMClient(this.config
     );
 
     const prompt = `## PR #${pr.number}: ${pr.title}\n**Repo:** ${pr.repo}\n**Author:** ${pr.author}\n**Branch:** ${pr.branch}\n**Files changed:** ${pr.files_changed}\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${pr.diff.slice(0, 15000)}\n\`\`\``;

@@ -1,4 +1,4 @@
-import { createProxyClient } from "../client/proxy-client.js";
+import { createLLMClient } from "../client/llm-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { Task } from "../state/store.js";
 import { createLogger } from "../service/logger.js";
@@ -41,10 +41,7 @@ export class ImprovementDetector {
   async analyze(recentTasks: Task[]): Promise<DetectedImprovement[]> {
     if (recentTasks.length === 0) return [];
 
-    const client = createProxyClient(
-      this.config.proxy,
-      this.config.orchestrator_dir,
-      {},
+    const client = createLLMClient(this.config
     );
 
     const taskSummaries = recentTasks.map((t) => ({
