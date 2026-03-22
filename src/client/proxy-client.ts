@@ -4,18 +4,22 @@ import type { ProxyConfig } from "../config/schema.js";
 export function createProxyClient(
   proxyConfig: ProxyConfig,
   workingDir: string,
-  conversationId?: string,
+  options?: {
+    conversationId?: string;
+    apiKey?: string;
+    baseUrl?: string;
+  },
 ): Anthropic {
   const headers: Record<string, string> = {
     "x-working-dir": workingDir,
   };
-  if (conversationId) {
-    headers["x-conversation-id"] = conversationId;
+  if (options?.conversationId) {
+    headers["x-conversation-id"] = options.conversationId;
   }
 
   return new Anthropic({
-    baseURL: proxyConfig.url,
-    apiKey: "orchestrator",
+    baseURL: options?.baseUrl ?? proxyConfig.url,
+    apiKey: options?.apiKey ?? "not-set",
     defaultHeaders: headers,
     timeout: proxyConfig.timeout_ms,
   });

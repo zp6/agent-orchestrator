@@ -29,7 +29,7 @@ export class ManagementClient {
   private timeout: number;
 
   constructor(proxyConfig: ProxyConfig) {
-    this.baseUrl = proxyConfig.url;
+    this.baseUrl = proxyConfig.manager_url ?? "http://localhost:3400";
     this.timeout = proxyConfig.timeout_ms;
   }
 

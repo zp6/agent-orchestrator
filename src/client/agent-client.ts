@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { createProxyClient } from "./proxy-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
-import { getAgentDir } from "../config/schema.js";
+import { getAgentDir, getAgentApiKey, getAgentBaseUrl } from "../config/schema.js";
 
 export interface AgentResponse {
   content: string;
@@ -23,11 +23,13 @@ export class AgentClient {
     },
   ): Promise<AgentResponse> {
     const workingDir = getAgentDir(this.config, agentName);
-    const client = createProxyClient(
-      this.config.proxy,
-      workingDir,
-      options?.conversationId,
-    );
+    const apiKey = getAgentApiKey(this.config, agentName);
+    const baseUrl = getAgentBaseUrl(this.config, agentName);
+    const client = createProxyClient(this.config.proxy, workingDir, {
+      conversationId: options?.conversationId,
+      apiKey,
+      baseUrl,
+    });
 
     const response = await client.messages.create({
       model: options?.model ?? "claude-sonnet-4-6",
@@ -59,11 +61,13 @@ export class AgentClient {
     },
   ): AsyncGenerator<string> {
     const workingDir = getAgentDir(this.config, agentName);
-    const client = createProxyClient(
-      this.config.proxy,
-      workingDir,
-      options?.conversationId,
-    );
+    const apiKey = getAgentApiKey(this.config, agentName);
+    const baseUrl = getAgentBaseUrl(this.config, agentName);
+    const client = createProxyClient(this.config.proxy, workingDir, {
+      conversationId: options?.conversationId,
+      apiKey,
+      baseUrl,
+    });
 
     const stream = client.messages.stream({
       model: options?.model ?? "claude-sonnet-4-6",
@@ -82,4 +86,3 @@ export class AgentClient {
     }
   }
 }
-
