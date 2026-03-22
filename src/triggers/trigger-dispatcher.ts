@@ -3,11 +3,39 @@ import { reportResult } from "./reporters.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
+import { createLogger } from "../service/logger.js";
+
+const log = createLogger("trigger-dispatcher");
 
 export interface TriggerResult {
   dispatched: number;
   skipped: number;
   errors: string[];
+}
+
+/**
+ * Fire-and-forget dispatch: starts the dispatch without blocking.
+ * The daemon continues its cycle while the agent works.
+ */
+function fireAndForget(
+  dispatcher: Dispatcher,
+  store: StateStore,
+  config: OrchestratorConfig,
+  message: string,
+  options: { agentName: string; source: "github" | "linear" | "slack"; sourceRef: string; title: string },
+): void {
+  dispatcher.dispatch(message, options).then((result) => {
+    store.markProcessed(options.source, options.sourceRef, result.taskId);
+    log.info("Fire-and-forget dispatch completed", { taskId: result.taskId, agentName: options.agentName });
+
+    // Report result back to source
+    const task = store.getTask(result.taskId);
+    if (task) {
+      reportResult(config, task).catch(() => {});
+    }
+  }).catch((err) => {
+    log.error("Fire-and-forget dispatch failed", { agentName: options.agentName, sourceRef: options.sourceRef, error: err instanceof Error ? err.message : String(err) });
+  });
 }
 
 /**
@@ -37,6 +65,7 @@ export async function dispatchGitHubIssues(
     let dispatchedForAgent = 0;
     for (const issue of issues) {
       if (dispatchedForAgent >= maxPerAgent) break;
+
       const sourceRef = `${issue.repo}#${issue.number}`;
 
       if (store.isProcessed("github", sourceRef)) {
@@ -46,30 +75,19 @@ export async function dispatchGitHubIssues(
 
       const message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}`;
 
-      // Mark processed BEFORE dispatching to prevent duplicate dispatches
-      // (dispatch can take minutes; subsequent poll cycles would re-dispatch)
+      // Mark processed immediately to prevent duplicate dispatches
       store.markProcessed("github", sourceRef, "pending");
 
-      try {
-        const dispatchResult = await dispatcher.dispatch(message, {
-          agentName,
-          source: "github",
-          sourceRef,
-          title: `[${issue.repo}#${issue.number}] ${issue.title}`,
-        });
+      // Fire and forget — don't block the daemon cycle
+      fireAndForget(dispatcher, store, config, message, {
+        agentName,
+        source: "github",
+        sourceRef,
+        title: `[${issue.repo}#${issue.number}] ${issue.title}`,
+      });
 
-        // Update with actual task ID
-        store.markProcessed("github", sourceRef, dispatchResult.taskId);
-        result.dispatched++;
-        dispatchedForAgent++;
-
-        const task = store.getTask(dispatchResult.taskId);
-        if (task) {
-          try { await reportResult(config, task); } catch { /* non-blocking */ }
-        }
-      } catch (err) {
-        result.errors.push(`${sourceRef}: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      result.dispatched++;
+      dispatchedForAgent++;
     }
   }
 
@@ -78,7 +96,6 @@ export async function dispatchGitHubIssues(
 
 /**
  * Linear: ask each agent to check its own Linear issues and work on them.
- * The agent uses Linear MCP tools directly — no central fetching needed.
  */
 export async function dispatchLinearChecks(
   config: OrchestratorConfig,
@@ -117,19 +134,14 @@ Report back what you found and what you did.`;
 
     store.markProcessed("linear", sourceRef, "pending");
 
-    try {
-      const dispatchResult = await dispatcher.dispatch(message, {
-        agentName,
-        source: "linear",
-        sourceRef,
-        title: `[linear] Check issues for ${agentName}`,
-      });
+    fireAndForget(dispatcher, store, config, message, {
+      agentName,
+      source: "linear",
+      sourceRef,
+      title: `[linear] Check issues for ${agentName}`,
+    });
 
-      store.markProcessed("linear", sourceRef, dispatchResult.taskId);
-      result.dispatched++;
-    } catch (err) {
-      result.errors.push(`linear/${agentName}: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    result.dispatched++;
   }
 
   return result;
@@ -137,7 +149,6 @@ Report back what you found and what you did.`;
 
 /**
  * Slack: ask each agent to check its Slack channels and respond to mentions.
- * The agent uses Slack MCP tools directly.
  */
 export async function dispatchSlackChecks(
   config: OrchestratorConfig,
@@ -148,8 +159,8 @@ export async function dispatchSlackChecks(
   const result: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
 
   for (const [agentName, agent] of Object.entries(config.agents)) {
-    if (registeredAgents && !registeredAgents.has(agentName)) continue;
     if (!agent.slack) continue;
+    if (registeredAgents && !registeredAgents.has(agentName)) continue;
 
     const sourceRef = `slack-check:${agentName}:${new Date().toISOString().slice(0, 13)}`;
 
@@ -173,19 +184,14 @@ Report back what you found and what you did.`;
 
     store.markProcessed("slack", sourceRef, "pending");
 
-    try {
-      const dispatchResult = await dispatcher.dispatch(message, {
-        agentName,
-        source: "slack",
-        sourceRef,
-        title: `[slack] Check messages for ${agentName}`,
-      });
+    fireAndForget(dispatcher, store, config, message, {
+      agentName,
+      source: "slack",
+      sourceRef,
+      title: `[slack] Check messages for ${agentName}`,
+    });
 
-      store.markProcessed("slack", sourceRef, dispatchResult.taskId);
-      result.dispatched++;
-    } catch (err) {
-      result.errors.push(`slack/${agentName}: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    result.dispatched++;
   }
 
   return result;

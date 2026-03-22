@@ -98,7 +98,10 @@ export class Daemon {
     // Fetch which agents are actually deployed on the proxy
     const registeredAgents = await this.deployer.getRegisteredAgents();
 
-    // 1. Dispatch new work from all trigger sources
+    // 1. Check for stale dispatched tasks (stuck or crashed agents)
+    this.checkStaleTasks(time);
+
+    // 2. Dispatch new work from all trigger sources
     await this.dispatchTriggers(time, registeredAgents);
 
     // 2. Verify recently completed tasks
@@ -120,6 +123,24 @@ export class Daemon {
     // 6. Supervisor review — strategic reasoning about what needs attention
     if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
       await this.runSupervisor(time);
+    }
+  }
+
+  private checkStaleTasks(time: string): void {
+    const STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
+    const dispatched = this.store.listTasks({ status: "dispatched", limit: 20 });
+    const now = Date.now();
+
+    for (const task of dispatched) {
+      const age = now - new Date(task.updated_at).getTime();
+      if (age > STALE_THRESHOLD_MS) {
+        console.log(`[${time}] Stale task ${task.id.slice(0, 8)} (${task.agent_name}): dispatched ${Math.round(age / 60000)}min ago — marking failed`);
+        this.log.warn("Stale task detected", { taskId: task.id, agentName: task.agent_name, ageMinutes: Math.round(age / 60000) });
+        this.store.updateTask(task.id, {
+          status: "failed",
+          result: `Timed out: dispatched ${Math.round(age / 60000)} minutes ago with no response`,
+        });
+      }
     }
   }
 
