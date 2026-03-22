@@ -10,6 +10,7 @@ import { registerImproveCommand } from "./commands/improve.js";
 import { registerSuperviseCommand } from "./commands/supervise.js";
 import { registerReviewCommand } from "./commands/review.js";
 import { registerDashboardCommand } from "./commands/dashboard.js";
+import { registerCreateCommand } from "./commands/create.js";
 
 const program = new Command();
 
@@ -29,5 +30,6 @@ registerImproveCommand(program);
 registerSuperviseCommand(program);
 registerReviewCommand(program);
 registerDashboardCommand(program);
+registerCreateCommand(program);
 
 program.parse();
