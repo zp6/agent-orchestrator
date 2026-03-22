@@ -7,6 +7,7 @@ import { IssueCreator } from "../orchestrator/issue-creator.js";
 import { Deployer } from "../orchestrator/deployer.js";
 import { Supervisor } from "../orchestrator/supervisor.js";
 import { PRReviewer } from "../orchestrator/pr-reviewer.js";
+import { findOrphanBranches, createPRForBranch } from "../orchestrator/pr-creator.js";
 import {
   dispatchGitHubIssues,
   dispatchLinearChecks,
@@ -112,8 +113,9 @@ export class Daemon {
       await this.detectImprovements(time);
     }
 
-    // 4. Review open PRs on agent repos
+    // 4. Create PRs for orphan branches + review open PRs
     if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
+      this.createOrphanPRs(time);
       await this.reviewPRs(time);
     }
 
@@ -250,18 +252,42 @@ export class Daemon {
     }
   }
 
-  private async reviewPRs(time: string): Promise<void> {
-    const repos = Object.entries(this.config.agents)
-      .filter(([, a]) => a.github)
-      .map(([, a]) => a.github!);
+  private createOrphanPRs(time: string): void {
+    try {
+      const orphans = findOrphanBranches(this.config);
+      for (const orphan of orphans) {
+        console.log(`[${time}] Orphan branch: ${orphan.repo}/${orphan.branch} — creating PR`);
+        createPRForBranch(orphan);
+      }
+    } catch (err) {
+      console.error(`[${time}] Orphan branch check failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
 
-    if (repos.length === 0) return;
+  private async reviewPRs(time: string): Promise<void> {
+    const agentsByRepo = new Map<string, string>();
+    for (const [name, agent] of Object.entries(this.config.agents)) {
+      if (agent.github) agentsByRepo.set(agent.github, name);
+    }
+
+    if (agentsByRepo.size === 0) return;
 
     try {
-      for (const repo of repos) {
+      for (const [repo, agentName] of agentsByRepo) {
         const results = await this.prReviewer.reviewOpenPRs(repo);
         for (const { prNumber, result } of results) {
           console.log(`[${time}] PR review: ${repo}#${prNumber} → ${result.decision} (${result.reason})`);
+
+          // Dispatch feedback to agent when changes are requested
+          if (result.decision === "request-changes") {
+            this.log.info("Dispatching PR feedback to agent", { repo, prNumber, agentName });
+            this.dispatcher.dispatch(
+              `Your PR #${prNumber} on ${repo} was reviewed and needs changes:\n\n${result.comment}\n\nPlease fix the issues, commit, and push to the same branch.`,
+              { agentName, source: "manual", title: `[PR feedback] ${repo}#${prNumber}` },
+            ).catch((err) => {
+              this.log.error("Failed to dispatch PR feedback", { repo, prNumber, error: String(err) });
+            });
+          }
         }
       }
     } catch (err) {

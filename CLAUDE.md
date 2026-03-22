@@ -123,14 +123,20 @@ orch service stop                    # Graceful shutdown
 orch service status                  # Show running state + watched sources
 ```
 
-**The daemon poll cycle (every 5 minutes by default):**
+**The daemon poll cycle (every 30s by default):**
 
-1. **Dispatch triggers** — poll GitHub issues, send Linear/Slack checks to agents
-2. **Verify completed tasks** — auto-verify up to 3 unverified tasks per cycle, score quality
-3. **Detect improvements** (every ~30min) — analyze task patterns, create issues on agent repos
-4. **Review open PRs** (every ~15min) — review agent PRs, approve/request changes/escalate to human
-5. **Redeploy stale agents** — rebuild containers when code has new commits
-6. **Supervisor review** (every ~15min) — LLM reasons about system state, follows up on gaps
+1. **Stale task watchdog** — kill tasks stuck in "dispatched" for >10 minutes
+2. **Dispatch triggers** — poll GitHub issues (fire-and-forget, 1 per agent, skip agents with in-flight tasks), send Linear/Slack checks
+3. **Verify completed tasks** — auto-verify up to 3 unverified tasks per cycle, score quality
+4. **Detect improvements** (every ~30 cycles) — analyze task patterns, create issues on agent repos
+5. **Create orphan PRs** (every ~3 cycles) — find pushed branches without PRs, create them
+6. **Review open PRs** (every ~3 cycles) — approve (comment + merge), request changes (comment + dispatch feedback to agent), or escalate to human
+7. **Redeploy stale agents** — rebuild containers when code has new commits
+8. **Supervisor review** (every ~3 cycles) — LLM reasons about system state, follows up on gaps
+
+**Dispatch messages include instructions** for agents to create PRs with `gh pr create` and include "Closes #N" so issues auto-close on merge.
+
+**Change request feedback loop:** When a PR review requests changes, the daemon dispatches the feedback to the agent: "PR #X needs changes: {feedback}. Fix and push." The agent fixes, pushes, and the next review cycle picks it up.
 
 ### Quality Verification
 
