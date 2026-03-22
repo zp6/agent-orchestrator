@@ -6,6 +6,7 @@ import { ImprovementDetector } from "../orchestrator/improvement-detector.js";
 import { IssueCreator } from "../orchestrator/issue-creator.js";
 import { Deployer } from "../orchestrator/deployer.js";
 import { Supervisor } from "../orchestrator/supervisor.js";
+import { PRReviewer } from "../orchestrator/pr-reviewer.js";
 import {
   dispatchGitHubIssues,
   dispatchLinearChecks,
@@ -29,6 +30,7 @@ export class Daemon {
   private issueCreator: IssueCreator;
   private deployer: Deployer;
   private supervisor: Supervisor;
+  private prReviewer: PRReviewer;
   private pollInterval: number;
   private cycleCount = 0;
   private log = createLogger("daemon");
@@ -42,6 +44,7 @@ export class Daemon {
     this.issueCreator = new IssueCreator(this.config);
     this.deployer = new Deployer(this.config);
     this.supervisor = new Supervisor(this.config, this.store);
+    this.prReviewer = new PRReviewer(this.config);
     this.pollInterval = pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   }
 
@@ -103,10 +106,15 @@ export class Daemon {
       await this.detectImprovements(time);
     }
 
-    // 4. Redeploy agents with new code
+    // 4. Review open PRs on agent repos
+    if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
+      await this.reviewPRs(time);
+    }
+
+    // 5. Redeploy agents with new code
     await this.redeployStale(time);
 
-    // 5. Supervisor review — strategic reasoning about what needs attention
+    // 6. Supervisor review — strategic reasoning about what needs attention
     if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
       await this.runSupervisor(time);
     }
@@ -215,6 +223,25 @@ export class Daemon {
       }
     } catch (err) {
       console.error(`[${time}] Deploy check failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  private async reviewPRs(time: string): Promise<void> {
+    const repos = Object.entries(this.config.agents)
+      .filter(([, a]) => a.github)
+      .map(([, a]) => a.github!);
+
+    if (repos.length === 0) return;
+
+    try {
+      for (const repo of repos) {
+        const results = await this.prReviewer.reviewOpenPRs(repo);
+        for (const { prNumber, result } of results) {
+          console.log(`[${time}] PR review: ${repo}#${prNumber} → ${result.decision} (${result.reason})`);
+        }
+      }
+    } catch (err) {
+      console.error(`[${time}] PR review failed: ${err instanceof Error ? err.message : err}`);
     }
   }
 

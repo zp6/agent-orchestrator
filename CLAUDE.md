@@ -49,6 +49,22 @@ orch status --agent=cheese-hater     # Filter by agent
 orch status --state=failed           # Filter by status
 ```
 
+### Review PRs
+
+```bash
+orch review                              # Review all open PRs across agent repos
+orch review rapartlu/cheese-hater        # Review open PRs on a specific repo
+orch review rapartlu/cheese-hater -n 9   # Review a specific PR
+orch review --dry-run                    # List open PRs without reviewing
+```
+
+The PR reviewer reads the diff, evaluates quality, and makes one of three decisions:
+- **approve** — code is correct, complete, safe to merge. Posts approval review.
+- **request-changes** — specific issues found. Posts review with requested changes.
+- **escalate** — needs human eyes (security, architecture, uncertainty). Adds `rapartlu` as reviewer and leaves a comment explaining why.
+
+The daemon runs PR reviews every ~15 minutes automatically.
+
 ### Manage Agent Containers
 
 ```bash
@@ -79,8 +95,9 @@ orch service status                  # Show running state + watched sources
 1. **Dispatch triggers** — poll GitHub issues, send Linear/Slack checks to agents
 2. **Verify completed tasks** — auto-verify up to 3 unverified tasks per cycle, score quality
 3. **Detect improvements** (every ~30min) — analyze task patterns, create issues on agent repos
-4. **Redeploy stale agents** — rebuild containers when code has new commits
-5. **Supervisor review** (every ~15min) — LLM reasons about system state, follows up on gaps
+4. **Review open PRs** (every ~15min) — review agent PRs, approve/request changes/escalate to human
+5. **Redeploy stale agents** — rebuild containers when code has new commits
+6. **Supervisor review** (every ~15min) — LLM reasons about system state, follows up on gaps
 
 ### Quality Verification
 
@@ -164,6 +181,25 @@ When an agent's codebase has new commits:
 - If different (or no marker), triggers rebuild via `PUT /v1/agents/:name`
 - Marker updated after successful redeploy
 - The daemon checks automatically each cycle; `orch agents redeploy` for manual trigger
+
+## PR Review Workflow
+
+When agents create PRs (either from dispatched work or from improvement issues):
+
+1. **Daemon detects open PRs** on agent repos (via `gh pr list`)
+2. **Reviewer reads the diff** and evaluates against the task/issue requirements
+3. **Decision made:**
+   - **Approve** → `gh pr review --approve` with a comment
+   - **Request changes** → `gh pr review --request-changes` with specific feedback. The agent picks up the feedback in its next issue check and addresses it.
+   - **Escalate** → `gh pr edit --add-reviewer rapartlu` + comment explaining why human review is needed. Use this for: security-sensitive changes, architectural decisions, breaking changes, or when uncertain.
+4. **After approval** — PRs can be merged (manually or via the supervisor). The deployer then detects the new commits and rebuilds the agent's container.
+
+**When to escalate to human:**
+- Changes to authentication, secrets, or permissions
+- Changes that affect multiple agents or the orchestrator itself
+- New dependencies or significant architectural shifts
+- Anything the reviewer is genuinely uncertain about
+- The default when parsing fails is always escalate (safe fallback)
 
 ## Self-Improvement Loop
 
@@ -269,6 +305,7 @@ src/
     prompt-learner.ts                    Enrich prompts from task history
     deployer.ts                          Agent container redeployment
     supervisor.ts                        Strategic LLM reviewer
+    pr-reviewer.ts                       Review PRs: approve, request changes, or escalate
   triggers/
     github.ts                            Fetch issues via gh CLI
     trigger-dispatcher.ts                Route triggers + dedup
@@ -289,4 +326,5 @@ src/
       service.ts                         Daemon start/stop/status
       improve.ts                         Detect improvements + verify tasks
       supervise.ts                       Run supervisor review
+      review.ts                          Review open PRs on agent repos
 ```
