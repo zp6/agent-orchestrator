@@ -95,8 +95,11 @@ export class Daemon {
     const time = new Date().toLocaleTimeString();
     this.cycleCount++;
 
+    // Fetch which agents are actually deployed on the proxy
+    const registeredAgents = await this.deployer.getRegisteredAgents();
+
     // 1. Dispatch new work from all trigger sources
-    await this.dispatchTriggers(time);
+    await this.dispatchTriggers(time, registeredAgents);
 
     // 2. Verify recently completed tasks
     await this.verifyCompleted(time);
@@ -111,8 +114,8 @@ export class Daemon {
       await this.reviewPRs(time);
     }
 
-    // 5. Redeploy agents with new code
-    await this.redeployStale(time);
+    // 5. Redeploy agents with new code (only registered ones)
+    await this.redeployStale(time, registeredAgents);
 
     // 6. Supervisor review — strategic reasoning about what needs attention
     if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
@@ -120,12 +123,12 @@ export class Daemon {
     }
   }
 
-  private async dispatchTriggers(time: string): Promise<void> {
+  private async dispatchTriggers(time: string, registeredAgents: Set<string>): Promise<void> {
     try {
       const results = await Promise.allSettled([
-        dispatchGitHubIssues(this.config, this.store, this.dispatcher),
-        dispatchLinearChecks(this.config, this.store, this.dispatcher),
-        dispatchSlackChecks(this.config, this.store, this.dispatcher),
+        dispatchGitHubIssues(this.config, this.store, this.dispatcher, 1, registeredAgents),
+        dispatchLinearChecks(this.config, this.store, this.dispatcher, registeredAgents),
+        dispatchSlackChecks(this.config, this.store, this.dispatcher, registeredAgents),
       ]);
 
       const totals: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
@@ -207,9 +210,9 @@ export class Daemon {
     }
   }
 
-  private async redeployStale(time: string): Promise<void> {
+  private async redeployStale(time: string, registeredAgents?: Set<string>): Promise<void> {
     try {
-      const stale = this.deployer.getStaleAgents();
+      const stale = this.deployer.getStaleAgents(registeredAgents);
       if (stale.length === 0) return;
 
       console.log(`[${time}] Redeploying ${stale.length} agent(s): ${stale.join(", ")}`);

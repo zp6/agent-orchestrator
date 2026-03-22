@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Logs — Orchestrator</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <style>
+    body { background: #0f172a; color: #e2e8f0; }
+    nav a { color: #94a3b8; text-decoration: none; padding: 8px 16px; border-radius: 8px; }
+    nav a:hover, nav a.active { color: #e2e8f0; background: #334155; }
+    #log-container { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; line-height: 1.6; }
+    .log-line { padding: 1px 8px; border-bottom: 1px solid #1e293b; }
+    .log-line:hover { background: #1e293b; }
+    .level-INFO { color: #93c5fd; }
+    .level-ERROR { color: #fca5a5; }
+    .level-WARN { color: #fcd34d; }
+    .level-DEBUG { color: #94a3b8; }
+    .component { color: #c084fc; }
+    .timestamp { color: #64748b; }
+  </style>
+</head>
+<body class="min-h-screen">
+  <nav class="flex items-center gap-2 p-4 border-b border-gray-700">
+    <span class="font-bold text-lg mr-4">Orchestrator</span>
+    <a href="/">Dashboard</a>
+    <a href="/tasks">Tasks</a>
+    <a href="/agents">Agents</a>
+    <a href="/logs" class="active">Logs</a>
+  </nav>
+
+  <div class="p-4">
+    <div class="flex gap-3 mb-3">
+      <input id="filter" type="text" placeholder="Filter logs..." class="bg-gray-800 border border-gray-600 rounded px-3 py-1 text-sm flex-1">
+      <label class="flex items-center gap-1 text-sm text-gray-400">
+        <input type="checkbox" id="auto-scroll" checked> Auto-scroll
+      </label>
+    </div>
+    <div id="log-container" class="overflow-auto" style="height: calc(100vh - 120px);"></div>
+  </div>
+
+  <script>
+    const container = document.getElementById('log-container');
+    const filterInput = document.getElementById('filter');
+    const autoScroll = document.getElementById('auto-scroll');
+    let allLines = [];
+
+    function formatLine(line) {
+      // Parse: TIMESTAMP [LEVEL] [component] message {json}
+      const match = line.match(/^(\S+)\s+\[(\w+)\s*\]\s+\[([^\]]+)\]\s+(.*)/);
+      if (!match) return `<div class="log-line">${escapeHtml(line)}</div>`;
+
+      const [, ts, level, component, message] = match;
+      return `<div class="log-line">` +
+        `<span class="timestamp">${ts.slice(11, 23)}</span> ` +
+        `<span class="level-${level}">[${level.padEnd(5)}]</span> ` +
+        `<span class="component">[${component}]</span> ` +
+        `${escapeHtml(message)}` +
+        `</div>`;
+    }
+
+    function render() {
+      const filter = filterInput.value.toLowerCase();
+      const filtered = filter ? allLines.filter(l => l.toLowerCase().includes(filter)) : allLines;
+      container.innerHTML = filtered.map(formatLine).join('');
+      if (autoScroll.checked) {
+        container.scrollTop = container.scrollHeight;
+      }
+    }
+
+    async function load() {
+      const res = await fetch('/api/logs');
+      allLines = await res.json();
+      render();
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    filterInput.addEventListener('input', render);
+    load();
+    setInterval(load, 5000);
+  </script>
+</body>
+</html>

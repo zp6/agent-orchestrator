@@ -45,13 +45,27 @@ export class Deployer {
   }
 
   /**
-   * Check which agents have new commits since their container was last deployed.
+   * Get names of agents that are actually registered on the proxy.
    */
-  getStaleAgents(): string[] {
+  async getRegisteredAgents(): Promise<Set<string>> {
+    try {
+      const agents = await this.management.listAgents();
+      return new Set(agents.map((a) => a.name));
+    } catch {
+      return new Set();
+    }
+  }
+
+  /**
+   * Check which agents have new commits since their container was last deployed.
+   * Only checks agents that are actually registered on the proxy.
+   */
+  getStaleAgents(registeredAgents?: Set<string>): string[] {
     const stale: string[] = [];
 
     for (const [name, agent] of Object.entries(this.config.agents)) {
       if (!agent.docker?.port) continue;
+      if (registeredAgents && !registeredAgents.has(name)) continue;
 
       const dir = resolve(this.config.base_dir, agent.dir);
       try {
