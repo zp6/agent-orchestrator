@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { DetectedImprovement } from "./improvement-detector.js";
+import { createLogger } from "../service/logger.js";
 
 export interface CreatedIssue {
   repo: string;
@@ -9,6 +10,8 @@ export interface CreatedIssue {
 }
 
 export class IssueCreator {
+  private log = createLogger("issue-creator");
+
   constructor(private config: OrchestratorConfig) {}
 
   createIssue(

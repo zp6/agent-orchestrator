@@ -6,6 +6,7 @@ import { PlanExecutor, type ExecutionResult } from "./executor.js";
 import { StateStore, type TaskSource } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { ulid } from "ulid";
+import { createLogger } from "../service/logger.js";
 
 export interface DispatchResult {
   taskId: string;
@@ -18,6 +19,7 @@ export class Dispatcher {
   private router: Router;
   private store: StateStore;
   private planner: Planner;
+  private log = createLogger("dispatcher");
 
   constructor(
     private config: OrchestratorConfig,
@@ -52,6 +54,7 @@ export class Dispatcher {
       }
       agentName = matches[0].agentName;
       routeReason = `Auto-routed (${matches[0].reason}, confidence: ${matches[0].confidence.toFixed(2)})`;
+      this.log.info("Routed task", { agentName, reason: routeReason, confidence: matches[0].confidence });
     }
 
     // Validate agent exists
@@ -102,6 +105,7 @@ export class Dispatcher {
       });
 
       // Update task to done
+      this.log.info("Task completed", { taskId: task.id, agentName, tokensIn: response.usage.input_tokens, tokensOut: response.usage.output_tokens });
       this.store.updateTask(task.id, {
         status: "done",
         result: response.content,
@@ -110,6 +114,7 @@ export class Dispatcher {
       return { taskId: task.id, agentName, response };
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
+      this.log.error("Task failed", { taskId: task.id, agentName, error: errorMsg });
       this.store.addLog({
         task_id: task.id,
         direction: "system",

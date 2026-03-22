@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ManagementClient } from "../client/management-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
+import { createLogger } from "../service/logger.js";
 
 export interface DeployResult {
   agentName: string;
@@ -12,6 +13,7 @@ export interface DeployResult {
 
 export class Deployer {
   private management: ManagementClient;
+  private log = createLogger("deployer");
 
   constructor(private config: OrchestratorConfig) {
     this.management = new ManagementClient(config.proxy);
@@ -34,8 +36,10 @@ export class Deployer {
         session: agent.docker?.session ?? "fresh",
       });
       this.markDeployed(agentName);
+      this.log.info("Agent redeployed", { agentName });
       return { agentName, action: "redeployed", detail: "Container rebuild triggered" };
     } catch (err) {
+      this.log.error("Redeploy failed", { agentName, error: err instanceof Error ? err.message : String(err) });
       return { agentName, action: "error", detail: err instanceof Error ? err.message : String(err) };
     }
   }

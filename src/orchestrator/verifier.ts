@@ -1,6 +1,7 @@
 import { createProxyClient } from "../client/proxy-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore, Task } from "../state/store.js";
+import { createLogger } from "../service/logger.js";
 
 export interface VerificationResult {
   approved: boolean;
@@ -26,6 +27,8 @@ Scoring guide:
 - Below 0.5: Needs revision — incomplete or incorrect`;
 
 export class Verifier {
+  private log = createLogger("verifier");
+
   constructor(
     private config: OrchestratorConfig,
     private store: StateStore,
@@ -65,6 +68,10 @@ export class Verifier {
 
       const result = this.parseResponse(text);
 
+      this.log.info("Verification complete", {
+        taskId, approved: result.approved, score: result.score, agent: task.agent_name,
+      });
+
       this.store.updateTask(taskId, {
         verification_status: result.approved ? "approved" : "rejected",
         quality_score: result.score,
@@ -73,6 +80,7 @@ export class Verifier {
 
       return result;
     } catch (err) {
+      this.log.error("Verification failed", { taskId, error: err instanceof Error ? err.message : String(err) });
       this.store.updateTask(taskId, { verification_status: null });
       throw new Error(`Verification failed: ${err instanceof Error ? err.message : String(err)}`);
     }
