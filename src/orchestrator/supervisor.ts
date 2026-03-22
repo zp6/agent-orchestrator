@@ -1,6 +1,7 @@
 import { createProxyClient } from "../client/proxy-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore, Task } from "../state/store.js";
+import { createLogger } from "../service/logger.js";
 
 export interface SupervisorDecision {
   action: "dispatch" | "verify" | "redeploy" | "create-issue" | "follow-up" | "none";
@@ -32,6 +33,8 @@ Respond with ONLY a JSON array of decisions (no markdown, no code fences):
 Be specific and actionable. Only suggest actions that address real gaps. Return [] if everything is on track.`;
 
 export class Supervisor {
+  private log = createLogger("supervisor");
+
   constructor(
     private config: OrchestratorConfig,
     private store: StateStore,
@@ -59,8 +62,11 @@ export class Supervisor {
         .map((b) => "text" in b ? b.text : "")
         .join("");
 
-      return this.parseDecisions(text);
-    } catch {
+      const decisions = this.parseDecisions(text);
+      this.log.info("Supervisor review complete", { decisions: decisions.length, actions: decisions.map((d) => d.action) });
+      return decisions;
+    } catch (err) {
+      this.log.error("Supervisor review failed", { error: err instanceof Error ? err.message : String(err) });
       return [];
     }
   }

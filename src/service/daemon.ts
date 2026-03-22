@@ -13,6 +13,7 @@ import {
   type TriggerResult,
 } from "../triggers/trigger-dispatcher.js";
 import { writePid, removePid } from "./pid.js";
+import { createLogger } from "./logger.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
@@ -30,6 +31,7 @@ export class Daemon {
   private supervisor: Supervisor;
   private pollInterval: number;
   private cycleCount = 0;
+  private log = createLogger("daemon");
 
   constructor(configPath?: string, pollIntervalMs?: number) {
     this.config = loadConfig(configPath);
@@ -64,6 +66,7 @@ export class Daemon {
       .filter(([, a]) => a.slack)
       .map(([name]) => name);
 
+    this.log.info("Daemon started", { pid: process.pid, pollInterval: this.pollInterval });
     console.log(`Daemon started (PID ${process.pid})`);
     console.log(`Poll interval: ${this.pollInterval / 1000}s`);
     console.log(`Verification: ${this.config.verification?.enabled ? "on" : "off"}`);

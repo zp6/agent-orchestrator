@@ -1,6 +1,7 @@
 import { createProxyClient } from "../client/proxy-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { Task } from "../state/store.js";
+import { createLogger } from "../service/logger.js";
 
 export interface DetectedImprovement {
   title: string;
@@ -33,6 +34,8 @@ If no improvements are detected, return an empty array: []
 Only suggest improvements that are actionable and specific. Do not suggest generic improvements.`;
 
 export class ImprovementDetector {
+  private log = createLogger("improvement-detector");
+
   constructor(private config: OrchestratorConfig) {}
 
   async analyze(recentTasks: Task[]): Promise<DetectedImprovement[]> {
