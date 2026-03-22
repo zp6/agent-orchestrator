@@ -13,11 +13,23 @@ export interface AgentDockerConfig {
   api_key?: string;
 }
 
+export interface AgentLinearConfig {
+  teams?: string[];
+  projects?: string[];
+}
+
+export interface AgentSlackConfig {
+  channels?: string[];
+  mention_pattern?: string;
+}
+
 export interface AgentConfig {
   dir: string;
   description: string;
   capabilities: string[];
   github?: string;
+  linear?: AgentLinearConfig;
+  slack?: AgentSlackConfig;
   owns_topics: string[];
   system_prompt?: string;
   max_concurrent?: number;
