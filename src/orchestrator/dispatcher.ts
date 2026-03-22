@@ -24,10 +24,10 @@ export class Dispatcher {
     store: StateStore,
   ) {
     this.client = new AgentClient(config);
-    const llmRouter = new LLMRouter(config);
+    const llmRouter = new LLMRouter(config, store);
     this.router = new Router(config, llmRouter);
     this.store = store;
-    this.planner = new Planner(config);
+    this.planner = new Planner(config, store);
   }
 
   async dispatch(

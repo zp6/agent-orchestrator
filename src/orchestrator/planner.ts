@@ -1,5 +1,7 @@
 import { createProxyClient } from "../client/proxy-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
+import { PromptLearner } from "./prompt-learner.js";
+import type { StateStore } from "../state/store.js";
 import { ulid } from "ulid";
 
 export interface PlanStep {
@@ -17,10 +19,16 @@ export interface Plan {
 }
 
 export class Planner {
-  constructor(private config: OrchestratorConfig) {}
+  private learner?: PromptLearner;
+
+  constructor(private config: OrchestratorConfig, store?: StateStore) {
+    if (store) {
+      this.learner = new PromptLearner(store);
+    }
+  }
 
   async plan(task: string): Promise<Plan> {
-    const registry = this.buildRegistryPrompt();
+    const registry = this.buildRegistryPrompt() + (this.learner?.buildPlannerContext() ?? "");
     const client = createProxyClient(
       this.config.proxy,
       this.config.orchestrator_dir,

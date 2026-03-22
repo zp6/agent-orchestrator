@@ -6,6 +6,7 @@ import { registerDispatchCommand } from "./commands/dispatch.js";
 import { registerAskCommand } from "./commands/ask.js";
 import { registerStatusCommand } from "./commands/status.js";
 import { registerServiceCommand } from "./commands/service.js";
+import { registerImproveCommand } from "./commands/improve.js";
 
 const program = new Command();
 
@@ -21,5 +22,6 @@ registerDispatchCommand(program);
 registerAskCommand(program);
 registerStatusCommand(program);
 registerServiceCommand(program);
+registerImproveCommand(program);
 
 program.parse();

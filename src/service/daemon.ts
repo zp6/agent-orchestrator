@@ -7,6 +7,7 @@ import {
   dispatchSlackChecks,
   type TriggerResult,
 } from "../triggers/trigger-dispatcher.js";
+import { Deployer } from "../orchestrator/deployer.js";
 import { writePid, removePid } from "./pid.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
@@ -16,12 +17,14 @@ export class Daemon {
   private config: OrchestratorConfig;
   private store: StateStore;
   private dispatcher: Dispatcher;
+  private deployer: Deployer;
   private pollInterval: number;
 
   constructor(configPath?: string, pollIntervalMs?: number) {
     this.config = loadConfig(configPath);
     this.store = new StateStore();
     this.dispatcher = new Dispatcher(this.config, this.store);
+    this.deployer = new Deployer(this.config);
     this.pollInterval = pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   }
 
@@ -99,6 +102,24 @@ export class Daemon {
       }
     } catch (err) {
       console.error(`[${time}] Poll cycle failed: ${err instanceof Error ? err.message : err}`);
+    }
+
+    // Check for agents with new code that need redeployment
+    try {
+      const stale = this.deployer.getStaleAgents();
+      if (stale.length > 0) {
+        console.log(`[${time}] Redeploying ${stale.length} agent(s) with new code: ${stale.join(", ")}`);
+        const results = await this.deployer.redeployStale();
+        for (const r of results) {
+          if (r.action === "redeployed") {
+            console.log(`  ${r.agentName}: redeployed`);
+          } else if (r.action === "error") {
+            console.error(`  ${r.agentName}: ${r.detail}`);
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[${time}] Deploy check failed: ${err instanceof Error ? err.message : err}`);
     }
   }
 

@@ -6,7 +6,23 @@ proxy:
 base_dir: "/Users/paultarr/Documents/Git"
 orchestrator_dir: "/Users/paultarr/Documents/Git/claude-agent-orchestrator"
 
+verification:
+  enabled: true
+  sources: ["github", "linear"]
+  min_score: 0.7
+
 agents:
+  claude-agent-orchestrator:
+    dir: "claude-agent-orchestrator"
+    description: "The orchestrator itself — manages routing, planning, verification, and cross-agent improvements"
+    capabilities: ["orchestration", "typescript", "planning", "routing", "verification"]
+    github: "rapartlu/claude-agent-orchestrator"
+    owns_topics: ["orchestrator", "orchestration", "routing", "planning", "verification", "improvements"]
+    docker:
+      port: 3468
+      permissions: "auto"
+      session: "continue"
+
   cheese-hater:
     dir: "test-claude-cli"
     description: "Test agent for validating orchestrator communication"

@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { loadConfig } from "../../config/schema.js";
 import { ManagementClient, type ProxyAgentStatus } from "../../client/management-client.js";
 import { planSync, executeSync } from "../../orchestrator/sync.js";
+import { Deployer } from "../../orchestrator/deployer.js";
 
 const STATUS_COLORS: Record<string, (s: string) => string> = {
   running: chalk.green,
@@ -163,6 +164,60 @@ export function registerAgentsCommand(program: Command): void {
         }
       } else {
         console.log(chalk.green("Sync complete."));
+      }
+    });
+
+  // Subcommand: redeploy
+  agentsCmd
+    .command("redeploy")
+    .description("Rebuild agent containers with latest code")
+    .argument("[name]", "Agent to redeploy (all stale agents if omitted)")
+    .option("--dry-run", "Show which agents would be redeployed")
+    .action(async (name?: string, opts?: { dryRun?: boolean }) => {
+      const configPath = program.opts().config;
+      const config = loadConfig(configPath);
+      const deployer = new Deployer(config);
+
+      if (name) {
+        if (opts?.dryRun) {
+          console.log(chalk.dim(`Would redeploy: ${chalk.cyan(name)}`));
+          return;
+        }
+        console.log(chalk.dim(`Redeploying ${chalk.cyan(name)}...`));
+        const result = await deployer.redeploy(name);
+        if (result.action === "redeployed") {
+          console.log(chalk.green(`${name}: ${result.detail}`));
+        } else {
+          console.error(chalk.red(`${name}: ${result.detail}`));
+        }
+      } else {
+        // Redeploy all stale agents
+        const stale = deployer.getStaleAgents();
+
+        if (stale.length === 0) {
+          console.log(chalk.green("All agents are up-to-date."));
+          return;
+        }
+
+        console.log(chalk.bold(`${stale.length} agent(s) have new commits:\n`));
+        for (const agentName of stale) {
+          console.log(`  ${chalk.cyan(agentName)}`);
+        }
+
+        if (opts?.dryRun) {
+          console.log(chalk.dim("\nDry run — no containers rebuilt."));
+          return;
+        }
+
+        console.log();
+        const results = await deployer.redeployStale();
+        for (const result of results) {
+          if (result.action === "redeployed") {
+            console.log(chalk.green(`  ${result.agentName}: ${result.detail}`));
+          } else {
+            console.error(chalk.red(`  ${result.agentName}: ${result.detail}`));
+          }
+        }
       }
     });
 }
