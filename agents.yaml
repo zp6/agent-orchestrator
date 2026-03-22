@@ -12,6 +12,17 @@ verification:
   min_score: 0.7
 
 agents:
+  orchestrator-llm:
+    dir: "claude-agent-orchestrator"
+    description: "Dedicated LLM container for orchestrator operations (routing, reviewing, verifying, supervising). Not for dispatched work."
+    capabilities: ["llm", "orchestration"]
+    owns_topics: []
+    docker:
+      port: 3470
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
   claude-agent-orchestrator:
     dir: "claude-agent-orchestrator"
     description: "The orchestrator itself — manages routing, planning, verification, and cross-agent improvements"

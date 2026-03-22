@@ -36,7 +36,7 @@ describe("loadConfig", () => {
       expect(agent.dir, `${name} missing dir`).toBeTruthy();
       expect(agent.description, `${name} missing description`).toBeTruthy();
       expect(agent.capabilities.length, `${name} missing capabilities`).toBeGreaterThan(0);
-      expect(agent.owns_topics.length, `${name} missing owns_topics`).toBeGreaterThan(0);
+      expect(agent.owns_topics, `${name} missing owns_topics`).toBeDefined();
     }
   });
 
