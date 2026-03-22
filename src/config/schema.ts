@@ -36,6 +36,12 @@ export interface AgentConfig {
   docker?: AgentDockerConfig;
 }
 
+export interface VerificationConfig {
+  enabled: boolean;
+  sources?: string[];
+  min_score?: number;
+}
+
 export interface ProxyConfig {
   url: string;
   manager_url?: string;
@@ -46,6 +52,7 @@ export interface OrchestratorConfig {
   proxy: ProxyConfig;
   base_dir: string;
   orchestrator_dir: string;
+  verification?: VerificationConfig;
   agents: Record<string, AgentConfig>;
 }
 

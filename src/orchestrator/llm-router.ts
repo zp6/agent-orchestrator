@@ -1,5 +1,7 @@
 import { createProxyClient } from "../client/proxy-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
+import { PromptLearner } from "./prompt-learner.js";
+import type { StateStore } from "../state/store.js";
 
 export interface LLMRouteResult {
   agentName: string;
@@ -8,10 +10,16 @@ export interface LLMRouteResult {
 }
 
 export class LLMRouter {
-  constructor(private config: OrchestratorConfig) {}
+  private learner?: PromptLearner;
+
+  constructor(private config: OrchestratorConfig, store?: StateStore) {
+    if (store) {
+      this.learner = new PromptLearner(store);
+    }
+  }
 
   async route(task: string): Promise<LLMRouteResult | null> {
-    const registry = this.buildRegistryPrompt();
+    const registry = this.buildRegistryPrompt() + (this.learner?.buildRouterContext() ?? "");
     const client = createProxyClient(
       this.config.proxy,
       this.config.orchestrator_dir,

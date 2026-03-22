@@ -6,6 +6,11 @@ proxy:
 base_dir: "/Users/paultarr/Documents/Git"
 orchestrator_dir: "/Users/paultarr/Documents/Git/claude-agent-orchestrator"
 
+verification:
+  enabled: true
+  sources: ["github", "linear"]
+  min_score: 0.7
+
 agents:
   cheese-hater:
     dir: "test-claude-cli"

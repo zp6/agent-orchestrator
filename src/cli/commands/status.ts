@@ -26,6 +26,14 @@ function formatTask(task: Task, verbose = false): string {
       const preview = task.result.length > 200 ? task.result.slice(0, 200) + "..." : task.result;
       output += `\n  ${chalk.dim("Result:")}  ${preview}`;
     }
+    if (task.verification_status) {
+      const vColor = task.verification_status === "approved" ? chalk.green : task.verification_status === "rejected" ? chalk.red : chalk.yellow;
+      const score = task.quality_score !== null ? ` (${task.quality_score.toFixed(1)})` : "";
+      output += `\n  ${chalk.dim("Verified:")} ${vColor(task.verification_status)}${score}`;
+      if (task.verification_notes) {
+        output += `\n  ${chalk.dim("Notes:")}    ${task.verification_notes.slice(0, 150)}`;
+      }
+    }
   }
 
   return output;
