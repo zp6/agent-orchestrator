@@ -4,6 +4,7 @@ import { StateStore, type Task } from "../../state/store.js";
 
 const STATUS_COLORS: Record<string, (s: string) => string> = {
   pending: chalk.yellow,
+  planning: chalk.magenta,
   dispatched: chalk.blue,
   in_progress: chalk.cyan,
   done: chalk.green,
@@ -50,6 +51,18 @@ export function registerStatusCommand(program: Command): void {
           process.exit(1);
         }
         console.log(formatTask(match, true));
+
+        // Show sub-tasks if this is a parent task
+        const subTasks = store.getSubTasks(match.id);
+        if (subTasks.length > 0) {
+          console.log(chalk.bold("\nSub-tasks:"));
+          for (const sub of subTasks) {
+            const colorFn = STATUS_COLORS[sub.status] ?? chalk.white;
+            const stepLabel = sub.step_id ? chalk.dim(`[${sub.step_id}]`) : "";
+            const agent = sub.agent_name ? chalk.cyan(sub.agent_name) : "";
+            console.log(`  ${stepLabel} ${colorFn(sub.status.padEnd(10))} ${agent} ${sub.title}`);
+          }
+        }
 
         const logs = store.getLogs(match.id);
         if (logs.length > 0) {

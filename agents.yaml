@@ -3,6 +3,7 @@ proxy:
   timeout_ms: 300000
 
 base_dir: "/Users/paultarr/Documents/Git"
+orchestrator_dir: "/Users/paultarr/Documents/Git/claude-agent-orchestrator"
 
 agents:
   claude-proxy:

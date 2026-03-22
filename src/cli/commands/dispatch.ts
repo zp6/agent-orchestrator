@@ -11,42 +11,19 @@ export function registerDispatchCommand(program: Command): void {
     .argument("<message>", "Task description to send to the agent")
     .option("-a, --agent <name>", "Target agent (auto-routed if omitted)")
     .option("-t, --title <title>", "Task title (defaults to first 100 chars of message)")
-    .action(async (message: string, opts: { agent?: string; title?: string }) => {
+    .option("-p, --plan", "Use the task planner to break complex tasks into sub-tasks")
+    .option("--dry-run", "Show the plan without executing (requires --plan)")
+    .action(async (message: string, opts: { agent?: string; title?: string; plan?: boolean; dryRun?: boolean }) => {
       const config = loadConfig(program.opts().config);
       const store = new StateStore();
       const dispatcher = new Dispatcher(config, store);
 
       try {
-        if (!opts.agent) {
-          const { Router } = await import("../../orchestrator/router.js");
-          const router = new Router(config);
-          const matches = router.route(message);
-          if (matches.length > 0) {
-            console.log(
-              chalk.dim(
-                `Routing to ${chalk.cyan(matches[0].agentName)} (${matches[0].reason})`,
-              ),
-            );
-          }
+        if (opts.plan) {
+          await handlePlanDispatch(dispatcher, store, message, opts);
+        } else {
+          await handleDirectDispatch(dispatcher, store, message, opts);
         }
-
-        console.log(chalk.dim("Dispatching...\n"));
-
-        const result = await dispatcher.dispatch(message, {
-          agentName: opts.agent,
-          title: opts.title,
-        });
-
-        console.log(chalk.green(`Task ${result.taskId} completed`));
-        console.log(chalk.dim(`Agent: ${result.agentName}`));
-        console.log(
-          chalk.dim(
-            `Tokens: ${result.response.usage.input_tokens} in / ${result.response.usage.output_tokens} out`,
-          ),
-        );
-        console.log(`\n${result.response.content}`);
-
-        store.close();
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(chalk.red(`Dispatch failed: ${msg}`));
@@ -54,4 +31,79 @@ export function registerDispatchCommand(program: Command): void {
         process.exit(1);
       }
     });
+}
+
+async function handleDirectDispatch(
+  dispatcher: Dispatcher,
+  store: StateStore,
+  message: string,
+  opts: { agent?: string; title?: string },
+): Promise<void> {
+  console.log(chalk.dim("Dispatching...\n"));
+
+  const result = await dispatcher.dispatch(message, {
+    agentName: opts.agent,
+    title: opts.title,
+  });
+
+  console.log(chalk.green(`Task ${result.taskId} completed`));
+  console.log(chalk.dim(`Agent: ${result.agentName}`));
+  console.log(
+    chalk.dim(
+      `Tokens: ${result.response.usage.input_tokens} in / ${result.response.usage.output_tokens} out`,
+    ),
+  );
+  console.log(`\n${result.response.content}`);
+  store.close();
+}
+
+async function handlePlanDispatch(
+  dispatcher: Dispatcher,
+  store: StateStore,
+  message: string,
+  opts: { agent?: string; title?: string; dryRun?: boolean },
+): Promise<void> {
+  console.log(chalk.dim("Planning...\n"));
+
+  const plan = await dispatcher.planTask(message);
+
+  // Display the plan
+  console.log(chalk.bold(`Plan: ${plan.is_multi_agent ? "multi-agent" : "single-agent"} (${plan.steps.length} step${plan.steps.length > 1 ? "s" : ""})\n`));
+  for (const step of plan.steps) {
+    const deps = step.depends_on.length > 0
+      ? chalk.dim(` (after ${step.depends_on.join(", ")})`)
+      : "";
+    console.log(`  ${chalk.cyan(step.id)} ${chalk.yellow(step.agent)}${deps}`);
+    console.log(`    ${step.task}\n`);
+  }
+
+  if (opts.dryRun) {
+    console.log(chalk.dim("Dry run — no tasks dispatched."));
+    store.close();
+    return;
+  }
+
+  // Execute the plan
+  console.log(chalk.dim("Executing plan...\n"));
+
+  const result = await dispatcher.dispatchWithPlan(message, {
+    title: opts.title,
+  });
+
+  if (result.status === "done") {
+    console.log(chalk.green(`Plan completed (${result.stepResults.length} steps)`));
+    console.log(chalk.dim(`Parent task: ${result.parentTaskId}`));
+
+    for (const step of result.stepResults) {
+      console.log(chalk.dim(`\n--- ${step.stepId} (${step.agentName}) ---`));
+      const preview = step.response.content.length > 300
+        ? step.response.content.slice(0, 300) + "..."
+        : step.response.content;
+      console.log(preview);
+    }
+  } else {
+    console.error(chalk.red(`Plan failed at step ${result.failedStep}: ${result.error}`));
+  }
+
+  store.close();
 }

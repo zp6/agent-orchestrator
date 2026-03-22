@@ -32,6 +32,7 @@ export interface ProxyConfig {
 export interface OrchestratorConfig {
   proxy: ProxyConfig;
   base_dir: string;
+  orchestrator_dir: string;
   agents: Record<string, AgentConfig>;
 }
 
@@ -67,6 +68,11 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
   }
   if (!parsed.agents || Object.keys(parsed.agents).length === 0) {
     throw new Error("Config missing agents");
+  }
+
+  // Default orchestrator_dir to the directory containing agents.yaml
+  if (!parsed.orchestrator_dir) {
+    parsed.orchestrator_dir = dirname(path);
   }
 
   return parsed;

@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { ulid } from "ulid";
 
-export type TaskStatus = "pending" | "dispatched" | "in_progress" | "done" | "failed";
+export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed";
 export type TaskSource = "github" | "linear" | "slack" | "manual";
 
 export interface Task {
@@ -17,6 +17,9 @@ export interface Task {
   agent_name: string | null;
   conversation_id: string | null;
   result: string | null;
+  parent_task_id: string | null;
+  step_id: string | null;
+  plan: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -80,6 +83,21 @@ export class StateStore {
     this.db = new Database(path);
     this.db.pragma("journal_mode = WAL");
     this.db.exec(MIGRATIONS);
+    this.runPhase2Migration();
+  }
+
+  private runPhase2Migration(): void {
+    const columns = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+    const colNames = new Set(columns.map((c) => c.name));
+
+    if (!colNames.has("parent_task_id")) {
+      this.db.exec(`
+        ALTER TABLE tasks ADD COLUMN parent_task_id TEXT REFERENCES tasks(id);
+        ALTER TABLE tasks ADD COLUMN step_id TEXT;
+        ALTER TABLE tasks ADD COLUMN plan TEXT;
+        CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
+      `);
+    }
   }
 
   createTask(params: {
@@ -126,7 +144,28 @@ export class StateStore {
     return this.db.prepare(sql).all(...params) as Task[];
   }
 
-  updateTask(id: string, updates: Partial<Pick<Task, "status" | "agent_name" | "conversation_id" | "result">>): Task | undefined {
+  createSubTask(params: {
+    parent_task_id: string;
+    step_id: string;
+    title: string;
+    description: string;
+    source: TaskSource;
+    agent_name: string;
+  }): Task {
+    const now = new Date().toISOString();
+    const id = ulid();
+    this.db.prepare(`
+      INSERT INTO tasks (id, title, description, source, status, agent_name, parent_task_id, step_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+    `).run(id, params.title, params.description, params.source, params.agent_name, params.parent_task_id, params.step_id, now, now);
+    return this.getTask(id)!;
+  }
+
+  getSubTasks(parentTaskId: string): Task[] {
+    return this.db.prepare("SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY created_at ASC").all(parentTaskId) as Task[];
+  }
+
+  updateTask(id: string, updates: Partial<Pick<Task, "status" | "agent_name" | "conversation_id" | "result" | "plan">>): Task | undefined {
     const fields: string[] = [];
     const params: unknown[] = [];
 
