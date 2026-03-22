@@ -7,6 +7,28 @@ base_dir: "/Users/paultarr/Documents/Git"
 orchestrator_dir: "/Users/paultarr/Documents/Git/claude-agent-orchestrator"
 
 agents:
+  cheese-hater:
+    dir: "test-claude-cli"
+    description: "Test agent for validating orchestrator communication"
+    capabilities: ["testing"]
+    owns_topics: ["test", "cheese"]
+    docker:
+      port: 3457
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "continue"
+
+  ravio-mcp-live:
+    dir: "ravio/ravio-mcp"
+    description: "Ravio MCP server (live container)"
+    capabilities: ["mcp", "ravio-platform"]
+    owns_topics: ["mcp", "ravio-mcp"]
+    docker:
+      port: 3458
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "continue"
+
   claude-proxy:
     dir: "claude-proxy"
     description: "Proxy server exposing Claude Code CLI as Anthropic Messages API"

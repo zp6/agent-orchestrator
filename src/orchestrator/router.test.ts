@@ -31,9 +31,9 @@ describe("Router", () => {
     expect(matches[0].agentName).toBe("interview-notes-summariser");
   });
 
-  it("routes MCP tasks to ravio-mcp", () => {
+  it("routes MCP tasks to an MCP agent", () => {
     const matches = router.route("add a new MCP tool");
-    expect(matches[0].agentName).toBe("ravio-mcp");
+    expect(matches[0].agentName).toMatch(/ravio-mcp/);
   });
 
   it("routes annual report tasks", () => {

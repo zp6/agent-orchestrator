@@ -95,3 +95,10 @@ export function getAgentApiKey(config: OrchestratorConfig, agentName: string): s
   const agent = config.agents[agentName];
   return agent?.docker?.api_key ?? "not-set";
 }
+
+export function getAgentBaseUrl(config: OrchestratorConfig, agentName: string): string | undefined {
+  const agent = config.agents[agentName];
+  if (!agent?.docker?.port) return undefined;
+  const base = new URL(config.proxy.url);
+  return `${base.protocol}//${base.hostname}:${agent.docker.port}`;
+}
