@@ -7,6 +7,10 @@ import { createLogger } from "../service/logger.js";
 
 const log = createLogger("trigger-dispatcher");
 
+// In-memory set of source refs currently being dispatched (prevents duplicates
+// while dispatch is in-flight, without violating DB foreign key constraints)
+const inFlightDispatches = new Set<string>();
+
 export interface TriggerResult {
   dispatched: number;
   skipped: number;
@@ -34,6 +38,7 @@ function fireAndForget(
   options: { agentName: string; source: "github" | "linear" | "slack"; sourceRef: string; title: string },
 ): void {
   dispatcher.dispatch(message, options).then((result) => {
+    inFlightDispatches.delete(options.sourceRef);
     store.markProcessed(options.source, options.sourceRef, result.taskId);
     log.info("Fire-and-forget dispatch completed", { taskId: result.taskId, agentName: options.agentName });
 
@@ -43,6 +48,7 @@ function fireAndForget(
       reportResult(config, task).catch(() => {});
     }
   }).catch((err) => {
+    inFlightDispatches.delete(options.sourceRef);
     log.error("Fire-and-forget dispatch failed", { agentName: options.agentName, sourceRef: options.sourceRef, error: err instanceof Error ? err.message : String(err) });
   });
 }
@@ -81,7 +87,7 @@ export async function dispatchGitHubIssues(
 
       const sourceRef = `${issue.repo}#${issue.number}`;
 
-      if (store.isProcessed("github", sourceRef)) {
+      if (store.isProcessed("github", sourceRef) || inFlightDispatches.has(sourceRef)) {
         result.skipped++;
         continue;
       }
@@ -89,7 +95,7 @@ export async function dispatchGitHubIssues(
       const message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}\n\n---\nWhen done: create a branch, commit, push, and open a PR with \`gh pr create --title "[${agentName}] <title>" --body "Closes #${issue.number}"\`. The "Closes #${issue.number}" is required so the issue auto-closes on merge.`;
 
       // Mark processed immediately to prevent duplicate dispatches
-      store.markProcessed("github", sourceRef, "pending");
+      inFlightDispatches.add(sourceRef);
 
       // Fire and forget — don't block the daemon cycle
       fireAndForget(dispatcher, store, config, message, {
@@ -125,7 +131,7 @@ export async function dispatchLinearChecks(
 
     const sourceRef = `linear-check:${agentName}:${new Date().toISOString().slice(0, 13)}`;
 
-    if (store.isProcessed("linear", sourceRef)) {
+    if (store.isProcessed("linear", sourceRef) || inFlightDispatches.has(sourceRef)) {
       result.skipped++;
       continue;
     }
@@ -146,7 +152,7 @@ export async function dispatchLinearChecks(
 
 Report back what you found and what you did.`;
 
-    store.markProcessed("linear", sourceRef, "pending");
+    inFlightDispatches.add(sourceRef);
 
     fireAndForget(dispatcher, store, config, message, {
       agentName,
@@ -179,7 +185,7 @@ export async function dispatchSlackChecks(
 
     const sourceRef = `slack-check:${agentName}:${new Date().toISOString().slice(0, 13)}`;
 
-    if (store.isProcessed("slack", sourceRef)) {
+    if (store.isProcessed("slack", sourceRef) || inFlightDispatches.has(sourceRef)) {
       result.skipped++;
       continue;
     }
@@ -197,7 +203,7 @@ export async function dispatchSlackChecks(
 
 Report back what you found and what you did.`;
 
-    store.markProcessed("slack", sourceRef, "pending");
+    inFlightDispatches.add(sourceRef);
 
     fireAndForget(dispatcher, store, config, message, {
       agentName,
