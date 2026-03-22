@@ -81,6 +81,7 @@ export class Dispatcher {
     });
 
     // Log the outgoing message
+    this.log.info("Dispatching to agent", { taskId: task.id, agentName, title: task.title });
     this.store.addLog({
       task_id: task.id,
       direction: "to_agent",

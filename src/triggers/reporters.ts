@@ -26,7 +26,7 @@ function reportToGitHub(task: Task): void {
   const repo = sourceRef.slice(0, hashIndex);
   const issueNumber = sourceRef.slice(hashIndex + 1);
 
-  const comment = formatComment(task.result!);
+  const comment = formatComment(task.result!, task.agent_name ?? undefined);
 
   execSync(
     `gh issue comment ${issueNumber} --repo ${repo} --body ${shellEscape(comment)}`,
@@ -34,9 +34,10 @@ function reportToGitHub(task: Task): void {
   );
 }
 
-function formatComment(result: string): string {
+function formatComment(result: string, agentName?: string): string {
   const truncated = result.length > 2000 ? result.slice(0, 2000) + "\n\n...(truncated)" : result;
-  return `**Orchestrator Result:**\n\n${truncated}`;
+  const attribution = agentName ? `**[${agentName}] Orchestrator Result:**` : `**[orchestrator] Result:**`;
+  return `${attribution}\n\n${truncated}`;
 }
 
 function shellEscape(s: string): string {
