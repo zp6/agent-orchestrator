@@ -1,4 +1,4 @@
-import { createProxyClient } from "../client/proxy-client.js";
+import { createLLMClient } from "../client/llm-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore, Task } from "../state/store.js";
 import { createLogger } from "../service/logger.js";
@@ -45,10 +45,7 @@ export class Verifier {
 
     this.store.updateTask(taskId, { verification_status: "pending" });
 
-    const client = createProxyClient(
-      this.config.proxy,
-      this.config.orchestrator_dir,
-      {},
+    const client = createLLMClient(this.config
     );
 
     const prompt = `## Task\n${task.description ?? task.title}\n\n## Agent Response (${task.agent_name})\n${task.result ?? "(no result)"}`;
