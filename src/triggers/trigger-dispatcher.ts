@@ -18,11 +18,13 @@ export async function dispatchGitHubIssues(
   store: StateStore,
   dispatcher: Dispatcher,
   maxPerAgent = 1,
+  registeredAgents?: Set<string>,
 ): Promise<TriggerResult> {
   const result: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
 
   for (const [agentName, agent] of Object.entries(config.agents)) {
     if (!agent.github) continue;
+    if (registeredAgents && !registeredAgents.has(agentName)) continue;
 
     let issues: GitHubIssue[];
     try {
@@ -77,11 +79,13 @@ export async function dispatchLinearChecks(
   config: OrchestratorConfig,
   store: StateStore,
   dispatcher: Dispatcher,
+  registeredAgents?: Set<string>,
 ): Promise<TriggerResult> {
   const result: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
 
   for (const [agentName, agent] of Object.entries(config.agents)) {
     if (!agent.linear) continue;
+    if (registeredAgents && !registeredAgents.has(agentName)) continue;
 
     const sourceRef = `linear-check:${agentName}:${new Date().toISOString().slice(0, 13)}`;
 
@@ -132,10 +136,12 @@ export async function dispatchSlackChecks(
   config: OrchestratorConfig,
   store: StateStore,
   dispatcher: Dispatcher,
+  registeredAgents?: Set<string>,
 ): Promise<TriggerResult> {
   const result: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
 
   for (const [agentName, agent] of Object.entries(config.agents)) {
+    if (registeredAgents && !registeredAgents.has(agentName)) continue;
     if (!agent.slack) continue;
 
     const sourceRef = `slack-check:${agentName}:${new Date().toISOString().slice(0, 13)}`;

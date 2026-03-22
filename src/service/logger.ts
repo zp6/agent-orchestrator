@@ -7,6 +7,9 @@ export type LogLevel = "debug" | "info" | "warn" | "error";
 const LOG_DIR = join(homedir(), ".claude-orchestrator", "logs");
 const LOG_FILE = join(LOG_DIR, "orchestrator.log");
 
+// Disable file logging during tests to prevent test output polluting production logs
+const IS_TEST = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
+
 const LEVEL_ORDER: Record<LogLevel, number> = {
   debug: 0,
   info: 1,
@@ -31,6 +34,7 @@ function formatEntry(level: LogLevel, component: string, message: string, data?:
 }
 
 function writeLog(entry: string): void {
+  if (IS_TEST) return;
   try {
     mkdirSync(dirname(LOG_FILE), { recursive: true });
     appendFileSync(LOG_FILE, entry + "\n");
