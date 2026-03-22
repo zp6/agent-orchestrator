@@ -9,6 +9,7 @@ import { registerServiceCommand } from "./commands/service.js";
 import { registerImproveCommand } from "./commands/improve.js";
 import { registerSuperviseCommand } from "./commands/supervise.js";
 import { registerReviewCommand } from "./commands/review.js";
+import { registerDashboardCommand } from "./commands/dashboard.js";
 
 const program = new Command();
 
@@ -27,5 +28,6 @@ registerServiceCommand(program);
 registerImproveCommand(program);
 registerSuperviseCommand(program);
 registerReviewCommand(program);
+registerDashboardCommand(program);
 
 program.parse();

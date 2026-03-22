@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tasks — Orchestrator</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <style>
+    body { background: #0f172a; color: #e2e8f0; }
+    .card { background: #1e293b; border-radius: 12px; padding: 20px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; }
+    .badge-done { background: #065f46; color: #6ee7b7; }
+    .badge-failed { background: #7f1d1d; color: #fca5a5; }
+    .badge-dispatched { background: #1e3a5f; color: #93c5fd; }
+    .badge-planning { background: #581c87; color: #d8b4fe; }
+    .badge-pending { background: #713f12; color: #fcd34d; }
+    .badge-approved { background: #065f46; color: #6ee7b7; }
+    .badge-rejected { background: #7f1d1d; color: #fca5a5; }
+    nav a { color: #94a3b8; text-decoration: none; padding: 8px 16px; border-radius: 8px; }
+    nav a:hover, nav a.active { color: #e2e8f0; background: #334155; }
+    .detail-panel { background: #1e293b; border-radius: 12px; padding: 20px; margin-top: 16px; display: none; }
+    .log-entry { font-family: monospace; font-size: 12px; padding: 4px 0; border-bottom: 1px solid #334155; }
+  </style>
+</head>
+<body class="min-h-screen">
+  <nav class="flex items-center gap-2 p-4 border-b border-gray-700">
+    <span class="font-bold text-lg mr-4">Orchestrator</span>
+    <a href="/">Dashboard</a>
+    <a href="/tasks" class="active">Tasks</a>
+    <a href="/agents">Agents</a>
+    <a href="/logs">Logs</a>
+  </nav>
+
+  <div class="p-6 max-w-7xl mx-auto">
+    <div class="flex gap-3 mb-4">
+      <select id="filter-status" class="bg-gray-800 border border-gray-600 rounded px-3 py-1 text-sm">
+        <option value="">All statuses</option>
+        <option value="done">Done</option>
+        <option value="failed">Failed</option>
+        <option value="dispatched">Dispatched</option>
+        <option value="planning">Planning</option>
+        <option value="pending">Pending</option>
+      </select>
+      <select id="filter-agent" class="bg-gray-800 border border-gray-600 rounded px-3 py-1 text-sm">
+        <option value="">All agents</option>
+      </select>
+    </div>
+
+    <div class="card">
+      <table class="w-full text-sm">
+        <thead><tr class="text-gray-500 text-left">
+          <th class="pb-2">ID</th><th>Status</th><th>Verification</th><th>Agent</th><th>Source</th><th>Title</th><th>Time</th>
+        </tr></thead>
+        <tbody id="task-list"></tbody>
+      </table>
+    </div>
+
+    <div class="detail-panel" id="detail-panel">
+      <h3 class="font-bold mb-2" id="detail-title"></h3>
+      <div class="grid grid-cols-2 gap-4 text-sm mb-4">
+        <div id="detail-meta"></div>
+        <div id="detail-verification"></div>
+      </div>
+      <div id="detail-result" class="bg-gray-800 rounded p-3 text-sm mb-4" style="display:none"></div>
+      <div id="detail-subtasks" style="display:none" class="mb-4"></div>
+      <div id="detail-logs"></div>
+    </div>
+  </div>
+
+  <script>
+    let allTasks = [];
+
+    async function loadTasks() {
+      const status = document.getElementById('filter-status').value;
+      const agent = document.getElementById('filter-agent').value;
+      const params = new URLSearchParams();
+      if (status) params.set('status', status);
+      if (agent) params.set('agent', agent);
+      params.set('limit', '50');
+
+      const res = await fetch('/api/tasks?' + params);
+      allTasks = await res.json();
+      renderTasks();
+    }
+
+    function renderTasks() {
+      const tbody = document.getElementById('task-list');
+      tbody.innerHTML = allTasks.map(t => `
+        <tr class="border-t border-gray-700 cursor-pointer hover:bg-gray-800" onclick="showDetail('${t.id}')">
+          <td class="py-2 font-mono text-xs text-gray-500">${t.id.slice(0, 8)}</td>
+          <td><span class="badge badge-${t.status}">${t.status}</span></td>
+          <td>${t.verification_status ? `<span class="badge badge-${t.verification_status}">${t.verification_status}</span> ${t.quality_score ? t.quality_score.toFixed(1) : ''}` : '<span class="text-gray-600">-</span>'}</td>
+          <td class="text-blue-400">${t.agent_name || '-'}</td>
+          <td class="text-gray-400">${t.source}${t.source_ref ? ' (' + t.source_ref + ')' : ''}</td>
+          <td class="truncate max-w-sm">${t.title}</td>
+          <td class="text-gray-500 text-xs">${new Date(t.created_at).toLocaleString()}</td>
+        </tr>
+      `).join('');
+    }
+
+    async function showDetail(id) {
+      const res = await fetch('/api/tasks/' + id);
+      const data = await res.json();
+      const panel = document.getElementById('detail-panel');
+      panel.style.display = 'block';
+
+      document.getElementById('detail-title').textContent = data.title;
+      document.getElementById('detail-meta').innerHTML = `
+        <div><strong>ID:</strong> ${data.id}</div>
+        <div><strong>Agent:</strong> ${data.agent_name || 'unassigned'}</div>
+        <div><strong>Status:</strong> <span class="badge badge-${data.status}">${data.status}</span></div>
+        <div><strong>Source:</strong> ${data.source} ${data.source_ref ? '(' + data.source_ref + ')' : ''}</div>
+        <div><strong>Created:</strong> ${new Date(data.created_at).toLocaleString()}</div>
+      `;
+
+      const vDiv = document.getElementById('detail-verification');
+      if (data.verification_status) {
+        vDiv.innerHTML = `
+          <div><strong>Verification:</strong> <span class="badge badge-${data.verification_status}">${data.verification_status}</span></div>
+          <div><strong>Quality:</strong> ${data.quality_score ? data.quality_score.toFixed(2) : 'N/A'}</div>
+          ${data.verification_notes ? '<div><strong>Notes:</strong> ' + data.verification_notes + '</div>' : ''}
+        `;
+      } else {
+        vDiv.innerHTML = '<div class="text-gray-500">Not verified</div>';
+      }
+
+      const resultDiv = document.getElementById('detail-result');
+      if (data.result) {
+        resultDiv.style.display = 'block';
+        resultDiv.innerHTML = '<strong>Result:</strong><pre class="mt-2 whitespace-pre-wrap text-gray-300">' + escapeHtml(data.result) + '</pre>';
+      } else {
+        resultDiv.style.display = 'none';
+      }
+
+      const subDiv = document.getElementById('detail-subtasks');
+      if (data.subTasks && data.subTasks.length > 0) {
+        subDiv.style.display = 'block';
+        subDiv.innerHTML = '<strong>Sub-tasks:</strong>' + data.subTasks.map(s => `
+          <div class="ml-4 mt-1"><span class="badge badge-${s.status}">${s.status}</span> ${s.agent_name} — ${s.title}</div>
+        `).join('');
+      } else {
+        subDiv.style.display = 'none';
+      }
+
+      const logsDiv = document.getElementById('detail-logs');
+      if (data.logs && data.logs.length > 0) {
+        logsDiv.innerHTML = '<strong>Logs:</strong>' + data.logs.map(l => `
+          <div class="log-entry">
+            <span class="text-gray-500">${new Date(l.created_at).toLocaleTimeString()}</span>
+            <span class="${l.direction === 'to_agent' ? 'text-blue-400' : l.direction === 'from_agent' ? 'text-green-400' : 'text-gray-400'}">${l.direction === 'to_agent' ? '→' : l.direction === 'from_agent' ? '←' : '★'}</span>
+            <span class="text-blue-300">${l.agent_name || ''}</span>
+            ${l.content.slice(0, 200)}${l.content.length > 200 ? '...' : ''}
+          </div>
+        `).join('');
+      }
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    // Load agents for filter
+    fetch('/api/agents').then(r => r.json()).then(agents => {
+      const sel = document.getElementById('filter-agent');
+      agents.forEach(a => {
+        const opt = document.createElement('option');
+        opt.value = a.name;
+        opt.textContent = a.name;
+        sel.appendChild(opt);
+      });
+    });
+
+    document.getElementById('filter-status').addEventListener('change', loadTasks);
+    document.getElementById('filter-agent').addEventListener('change', loadTasks);
+
+    loadTasks();
+    setInterval(loadTasks, 15000);
+  </script>
+</body>
+</html>

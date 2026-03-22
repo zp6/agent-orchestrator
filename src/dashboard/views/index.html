@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Orchestrator Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <style>
+    body { background: #0f172a; color: #e2e8f0; }
+    .card { background: #1e293b; border-radius: 12px; padding: 20px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; }
+    .badge-done { background: #065f46; color: #6ee7b7; }
+    .badge-failed { background: #7f1d1d; color: #fca5a5; }
+    .badge-dispatched { background: #1e3a5f; color: #93c5fd; }
+    .badge-planning { background: #581c87; color: #d8b4fe; }
+    .badge-approved { background: #065f46; color: #6ee7b7; }
+    .badge-rejected { background: #7f1d1d; color: #fca5a5; }
+    .badge-running { background: #065f46; color: #6ee7b7; }
+    .badge-stopped { background: #7f1d1d; color: #fca5a5; }
+    nav a { color: #94a3b8; text-decoration: none; padding: 8px 16px; border-radius: 8px; }
+    nav a:hover, nav a.active { color: #e2e8f0; background: #334155; }
+  </style>
+</head>
+<body class="min-h-screen">
+  <nav class="flex items-center gap-2 p-4 border-b border-gray-700">
+    <span class="font-bold text-lg mr-4">Orchestrator</span>
+    <a href="/" class="active">Dashboard</a>
+    <a href="/tasks">Tasks</a>
+    <a href="/agents">Agents</a>
+    <a href="/logs">Logs</a>
+  </nav>
+
+  <div class="p-6 max-w-7xl mx-auto">
+    <!-- Status bar -->
+    <div class="flex gap-4 mb-6" id="status-bar">
+      <div class="card flex-1 text-center">
+        <div class="text-3xl font-bold" id="stat-total">-</div>
+        <div class="text-gray-400 text-sm">Total Tasks</div>
+      </div>
+      <div class="card flex-1 text-center">
+        <div class="text-3xl font-bold text-green-400" id="stat-done">-</div>
+        <div class="text-gray-400 text-sm">Completed</div>
+      </div>
+      <div class="card flex-1 text-center">
+        <div class="text-3xl font-bold text-red-400" id="stat-failed">-</div>
+        <div class="text-gray-400 text-sm">Failed</div>
+      </div>
+      <div class="card flex-1 text-center">
+        <div class="text-3xl font-bold text-blue-400" id="stat-active">-</div>
+        <div class="text-gray-400 text-sm">Active</div>
+      </div>
+      <div class="card flex-1 text-center">
+        <div class="text-3xl font-bold text-yellow-400" id="stat-score">-</div>
+        <div class="text-gray-400 text-sm">Avg Quality</div>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-3 gap-6">
+      <!-- Daemon + Proxy status -->
+      <div class="card">
+        <h2 class="font-bold mb-3 text-gray-300">System Status</h2>
+        <div id="system-status" class="space-y-2 text-sm"></div>
+      </div>
+
+      <!-- Agent cards -->
+      <div class="card col-span-2">
+        <h2 class="font-bold mb-3 text-gray-300">Agents</h2>
+        <div id="agent-cards" class="grid grid-cols-2 gap-3"></div>
+      </div>
+    </div>
+
+    <!-- Active work -->
+    <div class="card mt-6" id="active-section" style="display:none">
+      <h2 class="font-bold mb-3 text-gray-300">Active Work</h2>
+      <div id="active-work"></div>
+    </div>
+
+    <!-- Recent tasks -->
+    <div class="card mt-6">
+      <h2 class="font-bold mb-3 text-gray-300">Recent Tasks</h2>
+      <table class="w-full text-sm">
+        <thead><tr class="text-gray-500 text-left">
+          <th class="pb-2">ID</th><th>Status</th><th>Agent</th><th>Title</th><th>Quality</th><th>Time</th>
+        </tr></thead>
+        <tbody id="recent-tasks"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    async function refresh() {
+      try {
+        const res = await fetch('/api/dashboard');
+        const data = await res.json();
+
+        // Stats
+        document.getElementById('stat-total').textContent = data.stats.totalTasks;
+        document.getElementById('stat-done').textContent = data.stats.done;
+        document.getElementById('stat-failed').textContent = data.stats.failed;
+        document.getElementById('stat-active').textContent = data.stats.active;
+        document.getElementById('stat-score').textContent = data.stats.avgScore ? data.stats.avgScore.toFixed(2) : 'N/A';
+
+        // System status
+        const sys = document.getElementById('system-status');
+        sys.innerHTML = `
+          <div>Daemon: <span class="badge ${data.daemon.running ? 'badge-running' : 'badge-stopped'}">${data.daemon.running ? 'running (PID ' + data.daemon.pid + ')' : 'stopped'}</span></div>
+          <div>Proxy: <span class="badge ${data.proxy.online ? 'badge-running' : 'badge-stopped'}">${data.proxy.online ? 'online' : 'offline'}</span></div>
+          <div>Containers: ${data.proxy.agents.map(a => `<span class="badge badge-${a.status}">${a.name}</span>`).join(' ') || '<span class="text-gray-500">none</span>'}</div>
+        `;
+
+        // Agent cards
+        const ac = document.getElementById('agent-cards');
+        ac.innerHTML = data.agentStats.map(a => `
+          <div class="bg-gray-800 rounded-lg p-3">
+            <div class="font-semibold text-blue-400">${a.agent_name}</div>
+            <div class="text-xs text-gray-400 mt-1">${a.done}/${a.total} done, ${a.failed} failed</div>
+            ${a.avg_score ? `<div class="text-xs text-yellow-400">avg score: ${a.avg_score.toFixed(2)}</div>` : ''}
+          </div>
+        `).join('');
+
+        // Active work
+        const activeSection = document.getElementById('active-section');
+        const aw = document.getElementById('active-work');
+        if (data.activeWork.length > 0) {
+          activeSection.style.display = 'block';
+          aw.innerHTML = data.activeWork.map(t => `
+            <div class="flex items-center gap-3 py-1">
+              <div class="animate-pulse w-2 h-2 bg-blue-400 rounded-full"></div>
+              <span class="text-blue-400">${t.agent_name}</span>
+              <span class="text-gray-400">${t.title}</span>
+            </div>
+          `).join('');
+        } else {
+          activeSection.style.display = 'none';
+        }
+
+        // Recent tasks
+        const rt = document.getElementById('recent-tasks');
+        rt.innerHTML = data.recent.map(t => `
+          <tr class="border-t border-gray-700">
+            <td class="py-2 font-mono text-xs text-gray-500"><a href="/tasks?id=${t.id}" class="hover:text-white">${t.id.slice(0, 8)}</a></td>
+            <td><span class="badge badge-${t.status}">${t.status}</span></td>
+            <td class="text-blue-400">${t.agent_name || '-'}</td>
+            <td class="truncate max-w-xs">${t.title}</td>
+            <td>${t.verification_status ? `<span class="badge badge-${t.verification_status}">${t.verification_status}</span> ${t.quality_score ? t.quality_score.toFixed(1) : ''}` : '<span class="text-gray-600">-</span>'}</td>
+            <td class="text-gray-500 text-xs">${new Date(t.created_at).toLocaleTimeString()}</td>
+          </tr>
+        `).join('');
+      } catch (err) {
+        console.error('Refresh failed:', err);
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 10000);
+  </script>
+</body>
+</html>
