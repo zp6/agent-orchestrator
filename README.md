@@ -8,14 +8,27 @@ Control plane for coordinating multiple [Claude Code](https://docs.anthropic.com
                           ┌─────────────────┐
                           │  Orchestrator    │
                           │  (this repo)     │
-                          └────────┬────────┘
-                                   │
-                    ┌──────────────┼──────────────┐
-                    │              │               │
-               ┌────▼────┐  ┌─────▼─────┐  ┌─────▼─────┐
-               │ Agent A  │  │  Agent B  │  │  Agent C  │
-               │ (Docker) │  │  (Docker) │  │  (Docker) │
-               └──────────┘  └───────────┘  └───────────┘
+                          └───┬─────────┬───┘
+                   tasks &    │         │   lifecycle
+                   messages   │         │   (create/start/stop)
+                              │         │
+                ┌─────────────▼─────────▼──────────────┐
+                │          claude-proxy                  │
+                │  ┌─────────────────────────────────┐  │
+                │  │  Management API (/v1/agents)     │  │
+                │  │  Agent lifecycle, config, status  │  │
+                │  └─────────────────────────────────┘  │
+                │  ┌─────────────────────────────────┐  │
+                │  │  Messages API (/v1/messages)     │  │
+                │  │  Anthropic-compatible, per-agent  │  │
+                │  └─────────────────────────────────┘  │
+                └──────┬───────────┬───────────┬───────┘
+                       │           │           │
+                  ┌────▼───┐ ┌────▼───┐ ┌────▼───┐
+                  │Agent A │ │Agent B │ │Agent C │
+                  │:3460   │ │:3461   │ │:3462   │
+                  │(Docker)│ │(Docker)│ │(Docker)│
+                  └────────┘ └────────┘ └────────┘
 ```
 
 - **`agents.yaml`** declares the desired set of agents — their directories, capabilities, topics, and Docker config
