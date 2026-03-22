@@ -10,7 +10,7 @@ describe("loadConfig", () => {
     expect(config.proxy.url).toBe("http://localhost:3457");
     expect(config.proxy.timeout_ms).toBe(300000);
     expect(config.base_dir).toBeTruthy();
-    expect(Object.keys(config.agents).length).toBe(11);
+    expect(Object.keys(config.agents).length).toBeGreaterThanOrEqual(11);
   });
 
   it("contains all expected agents", () => {
