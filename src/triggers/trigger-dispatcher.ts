@@ -46,6 +46,10 @@ export async function dispatchGitHubIssues(
 
       const message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}`;
 
+      // Mark processed BEFORE dispatching to prevent duplicate dispatches
+      // (dispatch can take minutes; subsequent poll cycles would re-dispatch)
+      store.markProcessed("github", sourceRef, "pending");
+
       try {
         const dispatchResult = await dispatcher.dispatch(message, {
           agentName,
@@ -54,6 +58,7 @@ export async function dispatchGitHubIssues(
           title: `[${issue.repo}#${issue.number}] ${issue.title}`,
         });
 
+        // Update with actual task ID
         store.markProcessed("github", sourceRef, dispatchResult.taskId);
         result.dispatched++;
         dispatchedForAgent++;
@@ -110,6 +115,8 @@ export async function dispatchLinearChecks(
 
 Report back what you found and what you did.`;
 
+    store.markProcessed("linear", sourceRef, "pending");
+
     try {
       const dispatchResult = await dispatcher.dispatch(message, {
         agentName,
@@ -163,6 +170,8 @@ export async function dispatchSlackChecks(
 4. If it's not for you, skip it
 
 Report back what you found and what you did.`;
+
+    store.markProcessed("slack", sourceRef, "pending");
 
     try {
       const dispatchResult = await dispatcher.dispatch(message, {
