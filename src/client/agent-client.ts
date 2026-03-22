@@ -31,10 +31,17 @@ export class AgentClient {
       baseUrl,
     });
 
+    // Build system prompt with agent identity for GitHub attribution
+    const agent = this.config.agents[agentName];
+    const identityPrompt = `You are the agent "${agentName}". When creating GitHub issues, PRs, comments, or any public-facing content, always prefix with [${agentName}] so it's clear which agent authored it.`;
+    const systemPrompt = options?.systemPrompt
+      ? `${identityPrompt}\n\n${options.systemPrompt}`
+      : identityPrompt;
+
     const response = await client.messages.create({
       model: options?.model ?? "claude-sonnet-4-6",
       max_tokens: 16384,
-      system: options?.systemPrompt,
+      system: systemPrompt,
       messages: [{ role: "user", content: message }],
     });
 
@@ -69,10 +76,15 @@ export class AgentClient {
       baseUrl,
     });
 
+    const identityPrompt = `You are the agent "${agentName}". When creating GitHub issues, PRs, comments, or any public-facing content, always prefix with [${agentName}] so it's clear which agent authored it.`;
+    const systemPrompt = options?.systemPrompt
+      ? `${identityPrompt}\n\n${options.systemPrompt}`
+      : identityPrompt;
+
     const stream = client.messages.stream({
       model: options?.model ?? "claude-sonnet-4-6",
       max_tokens: 16384,
-      system: options?.systemPrompt,
+      system: systemPrompt,
       messages: [{ role: "user", content: message }],
     });
 
