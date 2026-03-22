@@ -1,5 +1,6 @@
 proxy:
   url: "http://localhost:3457"
+  manager_url: "http://localhost:3400"
   timeout_ms: 300000
 
 base_dir: "/Users/paultarr/Documents/Git"

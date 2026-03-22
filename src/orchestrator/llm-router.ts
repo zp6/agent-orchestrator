@@ -15,6 +15,7 @@ export class LLMRouter {
     const client = createProxyClient(
       this.config.proxy,
       this.config.orchestrator_dir,
+      {},
     );
 
     try {

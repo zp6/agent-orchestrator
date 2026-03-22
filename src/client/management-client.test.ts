@@ -91,7 +91,7 @@ afterAll(() => {
 });
 
 function createClient() {
-  return new ManagementClient({ url: `http://localhost:${port}`, timeout_ms: 5000 });
+  return new ManagementClient({ url: `http://localhost:${port}`, manager_url: `http://localhost:${port}`, timeout_ms: 5000 });
 }
 
 describe("ManagementClient", () => {
@@ -101,7 +101,7 @@ describe("ManagementClient", () => {
   });
 
   it("reports unreachable for bad URL", async () => {
-    const client = new ManagementClient({ url: "http://localhost:1", timeout_ms: 1000 });
+    const client = new ManagementClient({ url: "http://localhost:1", manager_url: "http://localhost:1", timeout_ms: 1000 });
     expect(await client.isReachable()).toBe(false);
   });
 

@@ -26,6 +26,7 @@ export interface AgentConfig {
 
 export interface ProxyConfig {
   url: string;
+  manager_url?: string;
   timeout_ms: number;
 }
 
@@ -84,4 +85,13 @@ export function getAgentDir(config: OrchestratorConfig, agentName: string): stri
     throw new Error(`Unknown agent: ${agentName}`);
   }
   return resolve(config.base_dir, agent.dir);
+}
+
+export function getManagerUrl(config: OrchestratorConfig): string {
+  return config.proxy.manager_url ?? "http://localhost:3400";
+}
+
+export function getAgentApiKey(config: OrchestratorConfig, agentName: string): string {
+  const agent = config.agents[agentName];
+  return agent?.docker?.api_key ?? "not-set";
 }

@@ -24,6 +24,7 @@ export class Planner {
     const client = createProxyClient(
       this.config.proxy,
       this.config.orchestrator_dir,
+      {},
     );
 
     const response = await client.messages.create({
