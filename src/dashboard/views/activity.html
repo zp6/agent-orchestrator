@@ -13,6 +13,8 @@
     .to-agent { border-left: 3px solid #3b82f6; }
     .from-agent { border-left: 3px solid #22c55e; }
     .system-msg { border-left: 3px solid #64748b; }
+    .failed-task { opacity: 0.6; border-color: #991b1b; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
     .content-preview { max-height: 200px; overflow-y: auto; white-space: pre-wrap; font-size: 13px; line-height: 1.5; }
     .content-preview.expanded { max-height: none; }
     .badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; }
@@ -77,6 +79,13 @@
         const time = new Date(entry.created_at).toLocaleTimeString();
         const agent = entry.agent_name || 'unknown';
         const taskTitle = entry.task?.title || entry.task_id.slice(0, 8);
+        const taskStatus = entry.task?.status || 'unknown';
+        const isFailed = taskStatus === 'failed';
+        const statusBadge = isFailed
+          ? '<span style="background:#7f1d1d;color:#fca5a5;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600;margin-left:6px">FAILED</span>'
+          : taskStatus === 'dispatched'
+          ? '<span style="background:#1e3a5f;color:#93c5fd;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600;margin-left:6px;animation:pulse 2s infinite">IN PROGRESS</span>'
+          : '';
         const tokens = (entry.tokens_in || entry.tokens_out)
           ? `<span class="text-gray-500 text-xs ml-2">${entry.tokens_in || 0} in / ${entry.tokens_out || 0} out</span>`
           : '';
@@ -86,7 +95,7 @@
         const isLong = content.length > 500;
 
         return `
-          <div class="message-card ${dirClass}">
+          <div class="message-card ${dirClass} ${isFailed ? 'failed-task' : ''}">
             <div class="flex justify-between items-start mb-2">
               <div>
                 <span class="badge ${badgeClass}">${dirLabel}</span>
@@ -95,7 +104,7 @@
               </div>
               <span class="text-gray-500 text-xs">${time}</span>
             </div>
-            <div class="text-gray-400 text-xs mb-2">${taskTitle}</div>
+            <div class="text-gray-400 text-xs mb-2">${taskTitle}${statusBadge}</div>
             <div class="content-preview" id="${contentId}">${isLong ? content.slice(0, 500) + '...' : content}</div>
             ${isLong ? `<button onclick="toggleExpand('${contentId}', this, \`${content.replace(/`/g, '\\`').replace(/\\/g, '\\\\')}\`)" class="text-blue-400 text-xs mt-1 hover:underline">Show more</button>` : ''}
           </div>
