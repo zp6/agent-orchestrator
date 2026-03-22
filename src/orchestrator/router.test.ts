@@ -10,35 +10,25 @@ describe("Router", () => {
   const router = new Router(config);
 
   it("routes by topic keyword", () => {
-    const matches = router.route("update the blog post about AI");
-    expect(matches[0].agentName).toBe("blog-articles");
+    const matches = router.route("tell me about cheese");
+    expect(matches[0].agentName).toBe("cheese-hater");
     expect(matches[0].confidence).toBeGreaterThan(0);
   });
 
   it("routes by agent name mention", () => {
-    const matches = router.route("fix something in temporal");
-    expect(matches[0].agentName).toBe("temporal");
+    const matches = router.route("fix something in hermitcraft-agent");
+    expect(matches[0].agentName).toBe("hermitcraft-agent");
     expect(matches[0].confidence).toBeGreaterThanOrEqual(0.8);
   });
 
-  it("routes proxy-related tasks", () => {
-    const matches = router.route("fix the proxy streaming bug");
-    expect(matches[0].agentName).toBe("claude-proxy");
+  it("routes hermitcraft tasks", () => {
+    const matches = router.route("research the latest minecraft hermitcraft season");
+    expect(matches[0].agentName).toBe("hermitcraft-agent");
   });
 
-  it("routes interview-related tasks", () => {
-    const matches = router.route("summarise the latest interview notes");
-    expect(matches[0].agentName).toBe("interview-notes-summariser");
-  });
-
-  it("routes MCP tasks to an MCP agent", () => {
-    const matches = router.route("add a new MCP tool");
-    expect(matches[0].agentName).toMatch(/ravio-mcp/);
-  });
-
-  it("routes annual report tasks", () => {
-    const matches = router.route("crawl the annual report for Tesla");
-    expect(matches[0].agentName).toBe("annual-report-crawler");
+  it("routes cheese tasks", () => {
+    const matches = router.route("rate some cheese for me");
+    expect(matches[0].agentName).toBe("cheese-hater");
   });
 
   it("returns empty array for unmatched tasks", () => {
@@ -47,7 +37,7 @@ describe("Router", () => {
   });
 
   it("returns matches sorted by confidence descending", () => {
-    const matches = router.route("temporal workflows");
+    const matches = router.route("hermitcraft minecraft smp");
     for (let i = 1; i < matches.length; i++) {
       expect(matches[i].confidence).toBeLessThanOrEqual(matches[i - 1].confidence);
     }
@@ -58,7 +48,7 @@ describe("Router.routeToRepo", () => {
   const router = new Router(config);
 
   it("finds agent by GitHub repo", () => {
-    expect(router.routeToRepo("rapartlu/claude-proxy")).toBe("claude-proxy");
+    expect(router.routeToRepo("rapartlu/cheese-hater")).toBe("cheese-hater");
   });
 
   it("returns undefined for unknown repo", () => {

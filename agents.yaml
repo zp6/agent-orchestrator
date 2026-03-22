@@ -23,17 +23,6 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
-  claude-agent-orchestrator:
-    dir: "claude-agent-orchestrator"
-    description: "The orchestrator itself — manages routing, planning, verification, and cross-agent improvements"
-    capabilities: ["orchestration", "typescript", "planning", "routing", "verification"]
-    github: "rapartlu/claude-agent-orchestrator"
-    owns_topics: ["orchestrator", "orchestration", "routing", "planning", "verification", "improvements"]
-    docker:
-      port: 3468
-      permissions: "auto"
-      session: "continue"
-
   hermitcraft-agent:
     dir: "hermitcraft-agent"
     description: "Self-learning Hermitcraft knowledge agent — researches, organizes, and maintains a comprehensive knowledge base about the Hermitcraft Minecraft SMP"
@@ -48,104 +37,12 @@ agents:
 
   cheese-hater:
     dir: "cheese-hater"
-    description: "Test agent for validating orchestrator communication"
-    capabilities: ["testing"]
+    description: "The ultimate cheese-hating agent — rates, reviews, and dismantles every argument for cheese"
+    capabilities: ["testing", "cheese-hatred", "express", "api"]
     github: "rapartlu/cheese-hater"
     owns_topics: ["test", "cheese"]
     docker:
       port: 3457
       api_key: "cheese"
       permissions: "bypassPermissions"
-      session: "continue"
-
-  ravio-mcp-live:
-    dir: "ravio/ravio-mcp"
-    description: "Ravio MCP server (live container)"
-    capabilities: ["mcp", "ravio-platform"]
-    owns_topics: ["mcp", "ravio-mcp"]
-    docker:
-      port: 3458
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "continue"
-
-  claude-proxy:
-    dir: "claude-proxy"
-    description: "Proxy server exposing Claude Code CLI as Anthropic Messages API"
-    capabilities: ["express", "typescript", "api-server", "cli-integration"]
-    github: "rapartlu/claude-proxy"
-    owns_topics: ["proxy", "api-gateway", "claude-proxy"]
-    docker:
-      port: 3460
-      permissions: "auto"
-      session: "continue"
-
-  annual-report-crawler:
-    dir: "annual-report-crawler"
-    description: "Crawls and processes annual reports"
-    capabilities: ["web-scraping", "data-extraction", "pdf-processing"]
-    owns_topics: ["annual-reports", "annual report", "crawling", "reports", "crawler"]
-    docker:
-      port: 3461
-      permissions: "auto"
-      session: "continue"
-
-  ravio-agents:
-    dir: "ravio-agents"
-    description: "Ravio AI agent implementations"
-    capabilities: ["agents", "ravio-platform"]
-    owns_topics: ["ravio-agents", "ravio agents"]
-    docker:
-      port: 3462
-      permissions: "auto"
-      session: "continue"
-
-  ravio-mcp:
-    dir: "ravio-mcp"
-    description: "Ravio MCP (Model Context Protocol) server"
-    capabilities: ["mcp", "ravio-platform", "tool-server"]
-    owns_topics: ["mcp", "ravio-tools", "ravio-mcp"]
-    docker:
-      port: 3463
-      permissions: "auto"
-      session: "continue"
-
-  ask-ravio:
-    dir: "ask-ravio"
-    description: "Ask Ravio - Q&A interface"
-    capabilities: ["qa", "ravio-platform", "user-facing"]
-    owns_topics: ["ask-ravio", "qa", "questions"]
-    docker:
-      port: 3464
-      permissions: "auto"
-      session: "continue"
-
-  blog-articles:
-    dir: "blog-articles"
-    description: "Blog article generation and management"
-    capabilities: ["content-generation", "writing", "blog"]
-    owns_topics: ["blog", "content", "articles", "writing"]
-    docker:
-      port: 3465
-      permissions: "auto"
-      session: "continue"
-
-  interview-notes-summariser:
-    dir: "interview-notes-summariser"
-    description: "Summarises interview notes"
-    capabilities: ["summarisation", "notes", "interviews"]
-    owns_topics: ["interviews", "summaries", "notes"]
-    docker:
-      port: 3466
-      permissions: "auto"
-      session: "continue"
-
-  temporal:
-    dir: "temporal"
-    description: "Temporal workflow orchestration"
-    capabilities: ["temporal", "workflows", "scheduling"]
-    owns_topics: ["temporal", "workflows", "scheduling"]
-    docker:
-      port: 3467
-      permissions: "auto"
       session: "continue"

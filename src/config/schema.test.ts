@@ -10,21 +10,12 @@ describe("loadConfig", () => {
     expect(config.proxy.url).toBe("http://localhost:3457");
     expect(config.proxy.timeout_ms).toBe(300000);
     expect(config.base_dir).toBeTruthy();
-    expect(Object.keys(config.agents).length).toBeGreaterThanOrEqual(11);
+    expect(Object.keys(config.agents).length).toBeGreaterThanOrEqual(3);
   });
 
-  it("contains all expected agents", () => {
+  it("contains active agents", () => {
     const config = loadConfig(configPath);
-    const expected = [
-      "claude-proxy",
-      "annual-report-crawler",
-      "ravio-agents",
-      "ravio-mcp",
-      "ask-ravio",
-      "blog-articles",
-      "interview-notes-summariser",
-      "temporal",
-    ];
+    const expected = ["orchestrator-llm", "hermitcraft-agent", "cheese-hater"];
     for (const name of expected) {
       expect(config.agents[name]).toBeDefined();
     }
@@ -65,8 +56,8 @@ describe("getAgentDir", () => {
 
   it("resolves agent directory path", () => {
     const config = loadConfig(configPath);
-    const dir = getAgentDir(config, "claude-proxy");
-    expect(dir).toBe(resolve(config.base_dir, "claude-proxy"));
+    const dir = getAgentDir(config, "cheese-hater");
+    expect(dir).toBe(resolve(config.base_dir, "cheese-hater"));
   });
 
   it("throws for unknown agent", () => {
