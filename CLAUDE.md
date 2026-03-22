@@ -219,6 +219,22 @@ When agents create PRs (either from dispatched work or from improvement issues):
 - Anything the reviewer is genuinely uncertain about
 - The default when parsing fails is always escalate (safe fallback)
 
+## PR Review & Merge Workflow
+
+The orchestrator reviews open PRs on agent repos. Since all agents use the same GitHub account, we can't use `gh pr review --approve` (GitHub doesn't allow reviewing your own PRs). Instead:
+
+- **Approve** → posts a `[orchestrator] PR Review — Approved` comment, then **merges via `gh pr merge --squash --delete-branch`**
+- **Request changes** → posts a `[orchestrator] PR Review — Changes Requested` comment with specific feedback
+- **Escalate** → adds `rapartlu` as reviewer + explanatory comment for human review
+
+The daemon runs PR reviews every ~15 minutes. All decisions are logged.
+
+**When to escalate to human:**
+- Changes to authentication, secrets, or permissions
+- Changes affecting multiple agents or the orchestrator itself
+- New dependencies or significant architectural shifts
+- Anything the reviewer is genuinely uncertain about
+
 ## Self-Improvement Loop
 
 The orchestrator is registered as an agent (`claude-agent-orchestrator` in agents.yaml). The full cycle:
