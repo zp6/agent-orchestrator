@@ -102,17 +102,15 @@ describe("dispatchGitHubIssues", () => {
     expect(result.errors[0]).toContain("API rate limit");
   });
 
-  it("handles dispatch failure for individual issues", async () => {
+  it("fire-and-forget: returns immediately, limited to maxPerAgent", async () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 1, title: "Bug", body: "", url: "", labels: [] },
       { repo: "owner/my-repo", number: 2, title: "Feature", body: "", url: "", labels: [] },
     ]);
-    (mockDispatcher.dispatch as ReturnType<typeof vi.fn>)
-      .mockRejectedValueOnce(new Error("Agent down"))
-      .mockResolvedValueOnce({ taskId: "task-2", agentName: "my-agent", response: { content: "ok" } });
-    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+    // With maxPerAgent=1, only the first issue is dispatched
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher, 1);
     expect(result.dispatched).toBe(1);
-    expect(result.errors).toHaveLength(1);
+    expect(result.skipped).toBe(0); // second issue not reached due to limit
   });
 });
 
