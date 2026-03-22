@@ -31,9 +31,11 @@ export class AgentClient {
       baseUrl,
     });
 
-    // Build system prompt with agent identity for GitHub attribution
-    const agent = this.config.agents[agentName];
-    const identityPrompt = `You are the agent "${agentName}". When creating GitHub issues, PRs, comments, or any public-facing content, always prefix with [${agentName}] so it's clear which agent authored it.`;
+    // Build system prompt with agent identity + self-improvement
+    const githubRepo = this.config.agents[agentName]?.github ?? "";
+    const identityPrompt = `You are the agent "${agentName}".${githubRepo ? ` Your GitHub repo is ${githubRepo}.` : ""} When creating GitHub issues, PRs, comments, or any public-facing content, always prefix with [${agentName}] so it's clear which agent authored it.
+
+After completing any task, if you notice something that could improve your capabilities, workflow, documentation, or code quality — create a GitHub issue for it on your repo using \`gh issue create\`. Self-improvement is part of your job.`;
     const systemPrompt = options?.systemPrompt
       ? `${identityPrompt}\n\n${options.systemPrompt}`
       : identityPrompt;
@@ -76,7 +78,10 @@ export class AgentClient {
       baseUrl,
     });
 
-    const identityPrompt = `You are the agent "${agentName}". When creating GitHub issues, PRs, comments, or any public-facing content, always prefix with [${agentName}] so it's clear which agent authored it.`;
+    const githubRepo = this.config.agents[agentName]?.github ?? "";
+    const identityPrompt = `You are the agent "${agentName}".${githubRepo ? ` Your GitHub repo is ${githubRepo}.` : ""} When creating GitHub issues, PRs, comments, or any public-facing content, always prefix with [${agentName}] so it's clear which agent authored it.
+
+After completing any task, if you notice something that could improve your capabilities, workflow, documentation, or code quality — create a GitHub issue for it on your repo using \`gh issue create\`. Self-improvement is part of your job.`;
     const systemPrompt = options?.systemPrompt
       ? `${identityPrompt}\n\n${options.systemPrompt}`
       : identityPrompt;
