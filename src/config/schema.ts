@@ -3,6 +3,16 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
+export interface AgentDockerConfig {
+  port?: number;
+  permissions?: string;
+  session?: "fresh" | "continue" | "resume";
+  session_id?: string;
+  packages?: string[];
+  allowed_tools?: string;
+  api_key?: string;
+}
+
 export interface AgentConfig {
   dir: string;
   description: string;
@@ -11,6 +21,7 @@ export interface AgentConfig {
   owns_topics: string[];
   system_prompt?: string;
   max_concurrent?: number;
+  docker?: AgentDockerConfig;
 }
 
 export interface ProxyConfig {

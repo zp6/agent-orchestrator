@@ -27,7 +27,9 @@ TypeScript/Node.js orchestrator for coordinating multiple Claude Code agent dire
 npm run dev          # Run CLI via tsx
 npm run build        # Compile TypeScript
 npm test             # Run tests (vitest)
-orch agents          # List configured agents
+orch agents          # List agents with live container status
+orch agents <name>   # Agent detail (config + Docker info)
+orch agents sync     # Reconcile agents.yaml with proxy containers
 orch dispatch <msg>  # Dispatch task to an agent
 orch ask <q> -a <agent>  # Ask an agent a question
 orch status          # View task status
@@ -37,12 +39,21 @@ orch status          # View task status
 
 ```
 src/
-  config/schema.ts           — Config types + YAML loader
-  client/proxy-client.ts     — Anthropic SDK wrapper → claude-proxy
-  client/agent-client.ts     — High-level agent interaction
-  orchestrator/router.ts     — Task → agent routing
-  orchestrator/dispatcher.ts — Dispatch + state recording
-  state/store.ts             — SQLite persistence
-  cli/                       — Commander.js CLI
-agents.yaml                  — Agent registry
+  config/schema.ts               — Config types + YAML loader (incl. Docker config)
+  client/proxy-client.ts         — Anthropic SDK wrapper → claude-proxy
+  client/agent-client.ts         — High-level agent interaction
+  client/management-client.ts    — Proxy management API (create/destroy/list/start/stop agents)
+  orchestrator/router.ts         — Task → agent routing
+  orchestrator/dispatcher.ts     — Dispatch + state recording
+  orchestrator/sync.ts           — Desired-state reconciliation (agents.yaml ↔ proxy)
+  state/store.ts                 — SQLite persistence
+  cli/                           — Commander.js CLI
+agents.yaml                      — Agent registry (with Docker config per agent)
 ```
+
+## Agent Architecture
+
+Each agent runs in its own Docker container managed by the claude-proxy. The orchestrator
+uses `agents.yaml` as the desired-state declaration and reconciles against the proxy's
+actual state via `orch agents sync`. The proxy's management API (`/v1/agents`) handles
+container lifecycle (create, start, stop, destroy).
