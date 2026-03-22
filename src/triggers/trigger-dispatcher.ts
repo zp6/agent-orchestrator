@@ -17,6 +17,7 @@ export async function dispatchGitHubIssues(
   config: OrchestratorConfig,
   store: StateStore,
   dispatcher: Dispatcher,
+  maxPerAgent = 1,
 ): Promise<TriggerResult> {
   const result: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
 
@@ -31,7 +32,9 @@ export async function dispatchGitHubIssues(
       continue;
     }
 
+    let dispatchedForAgent = 0;
     for (const issue of issues) {
+      if (dispatchedForAgent >= maxPerAgent) break;
       const sourceRef = `${issue.repo}#${issue.number}`;
 
       if (store.isProcessed("github", sourceRef)) {
@@ -51,6 +54,7 @@ export async function dispatchGitHubIssues(
 
         store.markProcessed("github", sourceRef, dispatchResult.taskId);
         result.dispatched++;
+        dispatchedForAgent++;
 
         const task = store.getTask(dispatchResult.taskId);
         if (task) {

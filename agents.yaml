@@ -27,6 +27,7 @@ agents:
     dir: "cheese-hater"
     description: "Test agent for validating orchestrator communication"
     capabilities: ["testing"]
+    github: "rapartlu/cheese-hater"
     owns_topics: ["test", "cheese"]
     docker:
       port: 3457
