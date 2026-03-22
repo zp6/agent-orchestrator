@@ -110,6 +110,28 @@ export function createDashboardServer(configPath?: string) {
     res.json(agents);
   });
 
+  app.get("/activity", (_req, res) => res.sendFile(resolve(viewsDir, "activity.html")));
+
+  app.get("/api/activity", (req, res) => {
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+    const logs = store.getRecentActivity(limit);
+
+    // Enrich with task context
+    const taskCache = new Map<string, ReturnType<typeof formatTask>>();
+    const enriched = logs.map((log) => {
+      if (!taskCache.has(log.task_id)) {
+        const task = store.getTask(log.task_id);
+        if (task) taskCache.set(log.task_id, formatTask(task));
+      }
+      return {
+        ...log,
+        task: taskCache.get(log.task_id) ?? null,
+      };
+    });
+
+    res.json(enriched);
+  });
+
   app.get("/api/logs", (_req, res) => {
     try {
       const logPath = getLogPath();

@@ -243,6 +243,12 @@ export class StateStore {
     `).run(source, sourceRef, taskId, new Date().toISOString());
   }
 
+  getRecentActivity(limit = 50): TaskLog[] {
+    return this.db.prepare(
+      "SELECT * FROM task_logs ORDER BY created_at DESC LIMIT ?",
+    ).all(limit) as TaskLog[];
+  }
+
   getRecentCompleted(limit = 20): Task[] {
     return this.db.prepare(
       "SELECT * FROM tasks WHERE status = 'done' AND parent_task_id IS NULL ORDER BY created_at DESC LIMIT ?",
