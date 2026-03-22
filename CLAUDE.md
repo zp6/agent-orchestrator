@@ -24,6 +24,21 @@ The daemon goes down when: the proxy restarts, the process is killed for debuggi
 
 Without the daemon, nothing happens automatically — no issue polling, no verification, no PR reviews, no improvements, no redeployment.
 
+## CRITICAL: Long-Running Processes Must Run in Background
+
+**When starting the daemon, dashboard, or any long-running process, ALWAYS use `run_in_background: true` on the Bash tool.** Never let them block the conversation or require the user to manually background them.
+
+```
+# CORRECT — runs in background, doesn't block
+Bash(command: "npx tsx src/cli/index.ts service start --poll-interval 30000", run_in_background: true)
+Bash(command: "npx tsx src/cli/index.ts dashboard", run_in_background: true)
+
+# WRONG — blocks the conversation, user has to manually background
+Bash(command: "npx tsx src/cli/index.ts service start --foreground")
+```
+
+This applies to: `orch service start`, `orch dashboard`, any `dispatch` that may take minutes, and any other command that doesn't return quickly.
+
 ## Development Workflow
 
 - **All changes must be made on a feature branch** — never commit directly to `main`.
