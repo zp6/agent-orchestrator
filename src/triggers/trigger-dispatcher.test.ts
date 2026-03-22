@@ -9,6 +9,11 @@ vi.mock("./github.js", () => ({
   fetchOpenIssues: vi.fn(),
 }));
 
+// Mock reporters (non-blocking, don't need to test here)
+vi.mock("./reporters.js", () => ({
+  reportResult: vi.fn(),
+}));
+
 import { fetchOpenIssues } from "./github.js";
 const mockFetchIssues = vi.mocked(fetchOpenIssues);
 
@@ -42,6 +47,7 @@ describe("dispatchGitHubIssues", () => {
     mockStore = {
       isProcessed: vi.fn().mockReturnValue(false),
       markProcessed: vi.fn(),
+      getTask: vi.fn().mockReturnValue(null),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),

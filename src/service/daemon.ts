@@ -1,7 +1,12 @@
 import { loadConfig, type OrchestratorConfig } from "../config/schema.js";
 import { StateStore } from "../state/store.js";
 import { Dispatcher } from "../orchestrator/dispatcher.js";
-import { dispatchGitHubIssues } from "../triggers/trigger-dispatcher.js";
+import {
+  dispatchGitHubIssues,
+  dispatchLinearIssues,
+  dispatchSlackMessages,
+  type TriggerResult,
+} from "../triggers/trigger-dispatcher.js";
 import { writePid, removePid } from "./pid.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
@@ -31,13 +36,21 @@ export class Daemon {
     process.on("SIGINT", handleSignal);
     process.on("SIGTERM", handleSignal);
 
-    const repos = Object.entries(this.config.agents)
+    const githubRepos = Object.entries(this.config.agents)
       .filter(([, a]) => a.github)
       .map(([name, a]) => `${name} (${a.github})`);
+    const linearTeams = Object.entries(this.config.agents)
+      .filter(([, a]) => a.linear)
+      .map(([name]) => name);
+    const slackChannels = Object.entries(this.config.agents)
+      .filter(([, a]) => a.slack)
+      .map(([name]) => name);
 
     console.log(`Daemon started (PID ${process.pid})`);
     console.log(`Poll interval: ${this.pollInterval / 1000}s`);
-    console.log(`Watching ${repos.length} repo(s): ${repos.join(", ")}`);
+    if (githubRepos.length) console.log(`GitHub: ${githubRepos.join(", ")}`);
+    if (linearTeams.length) console.log(`Linear: ${linearTeams.join(", ")}`);
+    if (slackChannels.length) console.log(`Slack: ${slackChannels.join(", ")}`);
     console.log();
 
     while (this.running) {
@@ -55,17 +68,34 @@ export class Daemon {
 
   private async pollCycle(): Promise<void> {
     const time = new Date().toLocaleTimeString();
+
     try {
-      const result = await dispatchGitHubIssues(this.config, this.store, this.dispatcher);
-      if (result.dispatched > 0 || result.errors.length > 0) {
+      const results = await Promise.allSettled([
+        dispatchGitHubIssues(this.config, this.store, this.dispatcher),
+        dispatchLinearIssues(this.config, this.store, this.dispatcher),
+        dispatchSlackMessages(this.config, this.store, this.dispatcher),
+      ]);
+
+      const totals: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
+      for (const r of results) {
+        if (r.status === "fulfilled") {
+          totals.dispatched += r.value.dispatched;
+          totals.skipped += r.value.skipped;
+          totals.errors.push(...r.value.errors);
+        } else {
+          totals.errors.push(r.reason instanceof Error ? r.reason.message : String(r.reason));
+        }
+      }
+
+      if (totals.dispatched > 0 || totals.errors.length > 0) {
         console.log(
-          `[${time}] Dispatched: ${result.dispatched}, Skipped: ${result.skipped}, Errors: ${result.errors.length}`,
+          `[${time}] Dispatched: ${totals.dispatched}, Skipped: ${totals.skipped}, Errors: ${totals.errors.length}`,
         );
-        for (const err of result.errors) {
+        for (const err of totals.errors) {
           console.error(`  Error: ${err}`);
         }
       } else {
-        console.log(`[${time}] No new issues (${result.skipped} already processed)`);
+        console.log(`[${time}] No new items (${totals.skipped} already processed)`);
       }
     } catch (err) {
       console.error(`[${time}] Poll cycle failed: ${err instanceof Error ? err.message : err}`);
@@ -81,7 +111,6 @@ export class Daemon {
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => {
       const timer = setTimeout(resolve, ms);
-      // Check running flag periodically to allow fast shutdown
       const check = setInterval(() => {
         if (!this.running) {
           clearTimeout(timer);

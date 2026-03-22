@@ -108,18 +108,33 @@ export function registerServiceCommand(program: Command): void {
         console.log(chalk.dim("Daemon is not running."));
       }
 
-      // Show watched repos
+      // Show watched sources
       try {
         const config = loadConfig(configPath);
-        const repos = Object.entries(config.agents)
+        const github = Object.entries(config.agents)
           .filter(([, a]) => a.github)
           .map(([name, a]) => `  ${chalk.cyan(name)}: ${a.github}`);
+        const linear = Object.entries(config.agents)
+          .filter(([, a]) => a.linear)
+          .map(([name, a]) => `  ${chalk.cyan(name)}: teams=${a.linear?.teams?.join(",") ?? "all"}`);
+        const slack = Object.entries(config.agents)
+          .filter(([, a]) => a.slack)
+          .map(([name, a]) => `  ${chalk.cyan(name)}: ${a.slack?.channels?.join(", ") ?? "all channels"}`);
 
-        if (repos.length > 0) {
-          console.log(chalk.bold(`\nWatched repos (${repos.length}):`));
-          for (const r of repos) console.log(r);
-        } else {
-          console.log(chalk.dim("\nNo agents have github repos configured."));
+        if (github.length) {
+          console.log(chalk.bold(`\nGitHub (${github.length}):`));
+          for (const r of github) console.log(r);
+        }
+        if (linear.length) {
+          console.log(chalk.bold(`\nLinear (${linear.length}):`));
+          for (const r of linear) console.log(r);
+        }
+        if (slack.length) {
+          console.log(chalk.bold(`\nSlack (${slack.length}):`));
+          for (const r of slack) console.log(r);
+        }
+        if (!github.length && !linear.length && !slack.length) {
+          console.log(chalk.dim("\nNo trigger sources configured."));
         }
       } catch {
         // Config not available
