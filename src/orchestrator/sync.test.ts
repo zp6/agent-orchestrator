@@ -5,6 +5,7 @@ import type { ProxyAgentStatus } from "../client/management-client.js";
 
 const baseConfig: OrchestratorConfig = {
   proxy: { url: "http://localhost:3457", timeout_ms: 300000 },
+  orchestrator_dir: "/projects/orchestrator",
   base_dir: "/projects",
   agents: {
     "agent-a": {

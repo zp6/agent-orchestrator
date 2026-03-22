@@ -1,4 +1,7 @@
 import type { OrchestratorConfig, AgentConfig } from "../config/schema.js";
+import type { LLMRouter } from "./llm-router.js";
+
+export const LLM_FALLBACK_THRESHOLD = 0.3;
 
 export interface AgentMatch {
   agentName: string;
@@ -7,7 +10,14 @@ export interface AgentMatch {
 }
 
 export class Router {
-  constructor(private config: OrchestratorConfig) {}
+  private llmRouter?: LLMRouter;
+
+  constructor(
+    private config: OrchestratorConfig,
+    llmRouter?: LLMRouter,
+  ) {
+    this.llmRouter = llmRouter;
+  }
 
   route(task: string, sourceRepo?: string): AgentMatch[] {
     const matches: AgentMatch[] = [];
@@ -29,6 +39,42 @@ export class Router {
       }
     }
     return undefined;
+  }
+
+  async routeWithFallback(task: string, sourceRepo?: string): Promise<AgentMatch[]> {
+    const matches = this.route(task, sourceRepo);
+
+    // If deterministic routing is confident enough, use it
+    if (matches.length > 0 && matches[0].confidence >= LLM_FALLBACK_THRESHOLD) {
+      return matches;
+    }
+
+    // Fall back to LLM routing
+    if (!this.llmRouter) {
+      return matches;
+    }
+
+    const llmResult = await this.llmRouter.route(task);
+    if (!llmResult) {
+      return matches;
+    }
+
+    // Merge LLM result with deterministic matches
+    const llmMatch: AgentMatch = {
+      agentName: llmResult.agentName,
+      confidence: llmResult.confidence,
+      reason: `LLM: ${llmResult.reason}`,
+    };
+
+    // Replace or insert the LLM match
+    const existing = matches.findIndex((m) => m.agentName === llmMatch.agentName);
+    if (existing >= 0 && matches[existing].confidence < llmMatch.confidence) {
+      matches[existing] = llmMatch;
+    } else if (existing < 0) {
+      matches.push(llmMatch);
+    }
+
+    return matches.sort((a, b) => b.confidence - a.confidence);
   }
 
   private score(
