@@ -1,6 +1,4 @@
 import { fetchOpenIssues, type GitHubIssue } from "./github.js";
-import { fetchLinearIssues, type LinearIssue } from "./linear.js";
-import { fetchSlackMessages, type SlackMessage } from "./slack.js";
 import { reportResult } from "./reporters.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { StateStore } from "../state/store.js";
@@ -12,6 +10,9 @@ export interface TriggerResult {
   errors: string[];
 }
 
+/**
+ * GitHub: fetch issues centrally via gh CLI, dispatch each to the owning agent.
+ */
 export async function dispatchGitHubIssues(
   config: OrchestratorConfig,
   store: StateStore,
@@ -51,7 +52,6 @@ export async function dispatchGitHubIssues(
         store.markProcessed("github", sourceRef, dispatchResult.taskId);
         result.dispatched++;
 
-        // Report result back to GitHub
         const task = store.getTask(dispatchResult.taskId);
         if (task) {
           try { await reportResult(config, task); } catch { /* non-blocking */ }
@@ -65,7 +65,11 @@ export async function dispatchGitHubIssues(
   return result;
 }
 
-export async function dispatchLinearIssues(
+/**
+ * Linear: ask each agent to check its own Linear issues and work on them.
+ * The agent uses Linear MCP tools directly — no central fetching needed.
+ */
+export async function dispatchLinearChecks(
   config: OrchestratorConfig,
   store: StateStore,
   dispatcher: Dispatcher,
@@ -75,49 +79,52 @@ export async function dispatchLinearIssues(
   for (const [agentName, agent] of Object.entries(config.agents)) {
     if (!agent.linear) continue;
 
-    let issues: LinearIssue[];
-    try {
-      issues = await fetchLinearIssues(config, agent.linear);
-    } catch (err) {
-      result.errors.push(`linear/${agentName}: ${err instanceof Error ? err.message : String(err)}`);
+    const sourceRef = `linear-check:${agentName}:${new Date().toISOString().slice(0, 13)}`;
+
+    if (store.isProcessed("linear", sourceRef)) {
+      result.skipped++;
       continue;
     }
 
-    for (const issue of issues) {
-      const sourceRef = issue.identifier;
+    const filters: string[] = [];
+    if (agent.linear.teams?.length) {
+      filters.push(`in teams: ${agent.linear.teams.join(", ")}`);
+    }
+    if (agent.linear.projects?.length) {
+      filters.push(`in projects: ${agent.linear.projects.join(", ")}`);
+    }
 
-      if (store.isProcessed("linear", sourceRef)) {
-        result.skipped++;
-        continue;
-      }
+    const message = `Check Linear for open issues assigned to you${filters.length ? " " + filters.join(" and ") : ""}. For each issue you find:
+1. Review the issue description
+2. If you can address it, do the work
+3. Comment on the Linear issue with your progress or result
+4. If you can't address it, note why
 
-      const message = `Linear Issue ${issue.identifier}: ${issue.title}\nStatus: ${issue.status}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.description}\n\nURL: ${issue.url}`;
+Report back what you found and what you did.`;
 
-      try {
-        const dispatchResult = await dispatcher.dispatch(message, {
-          agentName,
-          source: "linear",
-          sourceRef,
-          title: `[${issue.identifier}] ${issue.title}`,
-        });
+    try {
+      const dispatchResult = await dispatcher.dispatch(message, {
+        agentName,
+        source: "linear",
+        sourceRef,
+        title: `[linear] Check issues for ${agentName}`,
+      });
 
-        store.markProcessed("linear", sourceRef, dispatchResult.taskId);
-        result.dispatched++;
-
-        const task = store.getTask(dispatchResult.taskId);
-        if (task) {
-          try { await reportResult(config, task); } catch { /* non-blocking */ }
-        }
-      } catch (err) {
-        result.errors.push(`${sourceRef}: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      store.markProcessed("linear", sourceRef, dispatchResult.taskId);
+      result.dispatched++;
+    } catch (err) {
+      result.errors.push(`linear/${agentName}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   return result;
 }
 
-export async function dispatchSlackMessages(
+/**
+ * Slack: ask each agent to check its Slack channels and respond to mentions.
+ * The agent uses Slack MCP tools directly.
+ */
+export async function dispatchSlackChecks(
   config: OrchestratorConfig,
   store: StateStore,
   dispatcher: Dispatcher,
@@ -127,42 +134,38 @@ export async function dispatchSlackMessages(
   for (const [agentName, agent] of Object.entries(config.agents)) {
     if (!agent.slack) continue;
 
-    let messages: SlackMessage[];
-    try {
-      messages = await fetchSlackMessages(config, agent.slack);
-    } catch (err) {
-      result.errors.push(`slack/${agentName}: ${err instanceof Error ? err.message : String(err)}`);
+    const sourceRef = `slack-check:${agentName}:${new Date().toISOString().slice(0, 13)}`;
+
+    if (store.isProcessed("slack", sourceRef)) {
+      result.skipped++;
       continue;
     }
 
-    for (const msg of messages) {
-      const sourceRef = `${msg.channel_id}:${msg.ts}`;
+    const pattern = agent.slack.mention_pattern ?? "@orchestrator";
+    const channelFilter = agent.slack.channels?.length
+      ? ` in channels: ${agent.slack.channels.join(", ")}`
+      : "";
 
-      if (store.isProcessed("slack", sourceRef)) {
-        result.skipped++;
-        continue;
-      }
+    const message = `Check Slack for recent messages mentioning "${pattern}"${channelFilter}. For each relevant message:
+1. Read the message and any thread context
+2. If it's a task or question you can handle, do the work
+3. Reply in the Slack thread with your response
+4. If it's not for you, skip it
 
-      const message = `Slack message from ${msg.user} in #${msg.channel}:\n\n${msg.text}`;
+Report back what you found and what you did.`;
 
-      try {
-        const dispatchResult = await dispatcher.dispatch(message, {
-          agentName,
-          source: "slack",
-          sourceRef,
-          title: `[slack/#${msg.channel}] ${msg.text.slice(0, 80)}`,
-        });
+    try {
+      const dispatchResult = await dispatcher.dispatch(message, {
+        agentName,
+        source: "slack",
+        sourceRef,
+        title: `[slack] Check messages for ${agentName}`,
+      });
 
-        store.markProcessed("slack", sourceRef, dispatchResult.taskId);
-        result.dispatched++;
-
-        const task = store.getTask(dispatchResult.taskId);
-        if (task) {
-          try { await reportResult(config, task); } catch { /* non-blocking */ }
-        }
-      } catch (err) {
-        result.errors.push(`${sourceRef}: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      store.markProcessed("slack", sourceRef, dispatchResult.taskId);
+      result.dispatched++;
+    } catch (err) {
+      result.errors.push(`slack/${agentName}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

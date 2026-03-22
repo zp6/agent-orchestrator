@@ -3,8 +3,8 @@ import { StateStore } from "../state/store.js";
 import { Dispatcher } from "../orchestrator/dispatcher.js";
 import {
   dispatchGitHubIssues,
-  dispatchLinearIssues,
-  dispatchSlackMessages,
+  dispatchLinearChecks,
+  dispatchSlackChecks,
   type TriggerResult,
 } from "../triggers/trigger-dispatcher.js";
 import { writePid, removePid } from "./pid.js";
@@ -72,8 +72,8 @@ export class Daemon {
     try {
       const results = await Promise.allSettled([
         dispatchGitHubIssues(this.config, this.store, this.dispatcher),
-        dispatchLinearIssues(this.config, this.store, this.dispatcher),
-        dispatchSlackMessages(this.config, this.store, this.dispatcher),
+        dispatchLinearChecks(this.config, this.store, this.dispatcher),
+        dispatchSlackChecks(this.config, this.store, this.dispatcher),
       ]);
 
       const totals: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
