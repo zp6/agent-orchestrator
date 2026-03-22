@@ -24,7 +24,7 @@ agents:
       session: "continue"
 
   cheese-hater:
-    dir: "test-claude-cli"
+    dir: "cheese-hater"
     description: "Test agent for validating orchestrator communication"
     capabilities: ["testing"]
     owns_topics: ["test", "cheese"]
