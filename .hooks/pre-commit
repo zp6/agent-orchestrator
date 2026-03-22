@@ -1,0 +1,8 @@
+#!/bin/sh
+echo "Running type check..."
+npx tsc --noEmit || exit 1
+
+echo "Running tests..."
+npx vitest run || exit 1
+
+echo "All checks passed."

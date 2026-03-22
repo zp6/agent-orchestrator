@@ -1,0 +1,61 @@
+import { describe, it, expect } from "vitest";
+import { loadConfig, getAgentDir } from "./schema.js";
+import { resolve } from "node:path";
+
+describe("loadConfig", () => {
+  const configPath = resolve(import.meta.dirname, "..", "..", "agents.yaml");
+
+  it("loads and parses agents.yaml", () => {
+    const config = loadConfig(configPath);
+    expect(config.proxy.url).toBe("http://localhost:3457");
+    expect(config.proxy.timeout_ms).toBe(300000);
+    expect(config.base_dir).toBeTruthy();
+    expect(Object.keys(config.agents).length).toBe(8);
+  });
+
+  it("contains all expected agents", () => {
+    const config = loadConfig(configPath);
+    const expected = [
+      "claude-proxy",
+      "annual-report-crawler",
+      "ravio-agents",
+      "ravio-mcp",
+      "ask-ravio",
+      "blog-articles",
+      "interview-notes-summariser",
+      "temporal",
+    ];
+    for (const name of expected) {
+      expect(config.agents[name]).toBeDefined();
+    }
+  });
+
+  it("each agent has required fields", () => {
+    const config = loadConfig(configPath);
+    for (const [name, agent] of Object.entries(config.agents)) {
+      expect(agent.dir, `${name} missing dir`).toBeTruthy();
+      expect(agent.description, `${name} missing description`).toBeTruthy();
+      expect(agent.capabilities.length, `${name} missing capabilities`).toBeGreaterThan(0);
+      expect(agent.owns_topics.length, `${name} missing owns_topics`).toBeGreaterThan(0);
+    }
+  });
+
+  it("throws on missing config file", () => {
+    expect(() => loadConfig("/nonexistent/path.yaml")).toThrow();
+  });
+});
+
+describe("getAgentDir", () => {
+  const configPath = resolve(import.meta.dirname, "..", "..", "agents.yaml");
+
+  it("resolves agent directory path", () => {
+    const config = loadConfig(configPath);
+    const dir = getAgentDir(config, "claude-proxy");
+    expect(dir).toBe(resolve(config.base_dir, "claude-proxy"));
+  });
+
+  it("throws for unknown agent", () => {
+    const config = loadConfig(configPath);
+    expect(() => getAgentDir(config, "nonexistent")).toThrow("Unknown agent: nonexistent");
+  });
+});

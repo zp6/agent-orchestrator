@@ -1,0 +1,55 @@
+proxy:
+  url: "http://localhost:3457"
+  timeout_ms: 300000
+
+base_dir: "/Users/paultarr/Documents/Git"
+
+agents:
+  claude-proxy:
+    dir: "claude-proxy"
+    description: "Proxy server exposing Claude Code CLI as Anthropic Messages API"
+    capabilities: ["express", "typescript", "api-server", "cli-integration"]
+    github: "rapartlu/claude-proxy"
+    owns_topics: ["proxy", "api-gateway", "claude-proxy"]
+
+  annual-report-crawler:
+    dir: "annual-report-crawler"
+    description: "Crawls and processes annual reports"
+    capabilities: ["web-scraping", "data-extraction", "pdf-processing"]
+    owns_topics: ["annual-reports", "annual report", "crawling", "reports", "crawler"]
+
+  ravio-agents:
+    dir: "ravio-agents"
+    description: "Ravio AI agent implementations"
+    capabilities: ["agents", "ravio-platform"]
+    owns_topics: ["ravio-agents", "ravio agents"]
+
+  ravio-mcp:
+    dir: "ravio-mcp"
+    description: "Ravio MCP (Model Context Protocol) server"
+    capabilities: ["mcp", "ravio-platform", "tool-server"]
+    owns_topics: ["mcp", "ravio-tools", "ravio-mcp"]
+
+  ask-ravio:
+    dir: "ask-ravio"
+    description: "Ask Ravio - Q&A interface"
+    capabilities: ["qa", "ravio-platform", "user-facing"]
+    owns_topics: ["ask-ravio", "qa", "questions"]
+
+  blog-articles:
+    dir: "blog-articles"
+    description: "Blog article generation and management"
+    capabilities: ["content-generation", "writing", "blog"]
+    owns_topics: ["blog", "content", "articles", "writing"]
+
+  interview-notes-summariser:
+    dir: "interview-notes-summariser"
+    description: "Summarises interview notes"
+    capabilities: ["summarisation", "notes", "interviews"]
+    owns_topics: ["interviews", "summaries", "notes"]
+
+  temporal:
+    dir: "temporal"
+    description: "Temporal workflow orchestration"
+    capabilities: ["temporal", "workflows", "scheduling"]
+    owns_topics: ["temporal", "workflows", "scheduling"]
