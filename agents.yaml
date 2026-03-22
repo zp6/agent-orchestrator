@@ -23,6 +23,18 @@ agents:
       permissions: "auto"
       session: "continue"
 
+  hermitcraft-agent:
+    dir: "hermitcraft-agent"
+    description: "Self-learning Hermitcraft knowledge agent — researches, organizes, and maintains a comprehensive knowledge base about the Hermitcraft Minecraft SMP"
+    capabilities: ["research", "web-search", "knowledge-base", "minecraft", "hermitcraft"]
+    github: "rapartlu/agent-hermitcraft"
+    owns_topics: ["hermitcraft", "minecraft", "hermits", "smp"]
+    docker:
+      port: 3469
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "continue"
+
   cheese-hater:
     dir: "cheese-hater"
     description: "Test agent for validating orchestrator communication"

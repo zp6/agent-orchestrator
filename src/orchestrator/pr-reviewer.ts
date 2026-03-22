@@ -95,25 +95,30 @@ export class PRReviewer {
     switch (result.decision) {
       case "approve":
         try {
+          // Comment with the review, then merge (can't approve own PRs on GitHub)
           execSync(
-            `gh pr review ${prNumber} --repo ${repo} --approve --body ${shellEscape(result.comment)}`,
+            `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**[orchestrator] PR Review — Approved**\n\n${result.comment}`)}`,
             { encoding: "utf-8", timeout: 30000 },
           );
-          this.log.info("PR approved", { repo, prNumber });
+          execSync(
+            `gh pr merge ${prNumber} --repo ${repo} --squash --delete-branch`,
+            { encoding: "utf-8", timeout: 30000 },
+          );
+          this.log.info("PR approved and merged", { repo, prNumber });
         } catch (err) {
-          this.log.error("Failed to approve PR", { repo, prNumber, error: String(err) });
+          this.log.error("Failed to approve/merge PR", { repo, prNumber, error: String(err) });
         }
         break;
 
       case "request-changes":
         try {
           execSync(
-            `gh pr review ${prNumber} --repo ${repo} --request-changes --body ${shellEscape(result.comment)}`,
+            `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**[orchestrator] PR Review — Changes Requested**\n\n${result.comment}`)}`,
             { encoding: "utf-8", timeout: 30000 },
           );
           this.log.info("PR changes requested", { repo, prNumber });
         } catch (err) {
-          this.log.error("Failed to request changes", { repo, prNumber, error: String(err) });
+          this.log.error("Failed to request changes on PR", { repo, prNumber, error: String(err) });
         }
         break;
 
