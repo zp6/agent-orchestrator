@@ -47,7 +47,7 @@ export class PRReviewer {
     const client = createLLMClient(this.config
     );
 
-    const prompt = `## PR #${pr.number}: ${pr.title}\n**Repo:** ${pr.repo}\n**Author:** ${pr.author}\n**Branch:** ${pr.branch}\n**Files changed:** ${pr.files_changed}\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${pr.diff.slice(0, 15000)}\n\`\`\``;
+    const prompt = `## PR #${pr.number}: ${pr.title}\n**Repo:** ${pr.repo}\n**Author:** ${pr.author}\n**Branch:** ${pr.branch}\n**Files changed:** ${pr.files_changed}\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${pr.diff.slice(0, 100000)}\n\`\`\``;
 
     try {
       const response = await client.messages.create({
