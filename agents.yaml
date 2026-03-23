@@ -3,6 +3,7 @@ proxy:
   manager_url: "http://localhost:3400"
   timeout_ms: 300000
   ssh_key: "~/.ssh/claude-proxy-agents"
+  # gh_token loaded from GH_TOKEN env var at runtime
 
 base_dir: "/Users/paultarr/Documents/Git"
 orchestrator_dir: "/Users/paultarr/Documents/Git/claude-agent-orchestrator"

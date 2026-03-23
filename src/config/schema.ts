@@ -47,6 +47,7 @@ export interface ProxyConfig {
   manager_url?: string;
   timeout_ms: number;
   ssh_key?: string;
+  gh_token?: string;
 }
 
 export interface OrchestratorConfig {
@@ -94,6 +95,11 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
   // Default orchestrator_dir to the directory containing agents.yaml
   if (!parsed.orchestrator_dir) {
     parsed.orchestrator_dir = dirname(path);
+  }
+
+  // Fall back to GH_TOKEN env var for proxy.gh_token
+  if (!parsed.proxy.gh_token && process.env.GH_TOKEN) {
+    parsed.proxy.gh_token = process.env.GH_TOKEN;
   }
 
   return parsed;
