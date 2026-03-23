@@ -124,11 +124,23 @@ export class PRReviewer {
 
       case "escalate":
         try {
-          // Add human reviewer
-          execSync(
-            `gh pr edit ${prNumber} --repo ${repo} --add-reviewer rapartlu`,
-            { encoding: "utf-8", timeout: 30000 },
-          );
+          // Try to add human reviewer (may fail if rapartlu is the PR author)
+          try {
+            execSync(
+              `gh pr edit ${prNumber} --repo ${repo} --add-reviewer rapartlu`,
+              { encoding: "utf-8", timeout: 30000 },
+            );
+          } catch {
+            // Can't request review from PR author — add label instead
+            try {
+              execSync(
+                `gh pr edit ${prNumber} --repo ${repo} --add-label "needs-human-review"`,
+                { encoding: "utf-8", timeout: 30000 },
+              );
+            } catch {
+              // Label may not exist, that's fine — the comment below is the important part
+            }
+          }
           // Leave a comment explaining why
           execSync(
             `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**Orchestrator escalation:** ${result.comment}`)}`,
