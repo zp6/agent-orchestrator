@@ -24,6 +24,18 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
+  claude-proxy:
+    dir: "claude-proxy"
+    description: "Development proxy server that wraps Claude Code CLI instances and exposes them via the Anthropic Messages API. Manages agent containers, Docker lifecycle, and multi-agent routing."
+    capabilities: ["typescript", "docker", "proxy", "api", "infrastructure"]
+    github: "rapartlu/claude-proxy"
+    owns_topics: ["proxy", "docker", "container", "infrastructure", "auth", "ssh"]
+    docker:
+      port: 3471
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
   hermitcraft-agent:
     dir: "hermitcraft-agent"
     description: "Self-learning Hermitcraft knowledge agent — researches, organizes, and maintains a comprehensive knowledge base about the Hermitcraft Minecraft SMP"
