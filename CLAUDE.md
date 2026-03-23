@@ -24,6 +24,23 @@ The daemon goes down when: the proxy restarts, the process is killed for debuggi
 
 Without the daemon, nothing happens automatically — no issue polling, no verification, no PR reviews, no improvements, no redeployment.
 
+## CRITICAL: Actively Monitor the System
+
+**You must proactively monitor the daemon, agents, and task progress — do not wait for the user to ask.** At the start of every session, set up a recurring monitoring loop (every 3 minutes) that checks:
+
+- Daemon status (is it running?)
+- Recent task progress (stuck, failed, or idle agents?)
+- Logs for errors or repeated failures
+- PR review outcomes (merge conflicts, escalations, change requests)
+- Whether agents are producing work or stalled
+
+If something needs attention — fix it or dispatch work. Flag issues to the user only when human input is needed. **The goal is autonomous oversight: you are the operator, not a passive observer.**
+
+```bash
+# Use /loop to set up recurring monitoring
+/loop 3m Check daemon status, recent logs, and task progress. Fix issues or dispatch work.
+```
+
 ## CRITICAL: Long-Running Processes Must Run in Background
 
 **When starting the daemon, dashboard, or any long-running process, ALWAYS use `run_in_background: true` on the Bash tool.** Never let them block the conversation or require the user to manually background them.
