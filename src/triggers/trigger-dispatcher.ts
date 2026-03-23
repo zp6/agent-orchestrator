@@ -1,5 +1,6 @@
 import { fetchOpenIssues, type GitHubIssue } from "./github.js";
 import { reportResult } from "./reporters.js";
+import { checkDuplicate } from "./duplicate-guard.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
@@ -87,7 +88,15 @@ export async function dispatchGitHubIssues(
 
       const sourceRef = `${issue.repo}#${issue.number}`;
 
-      if (store.isProcessed("github", sourceRef) || inFlightDispatches.has(sourceRef)) {
+      // inFlightDispatches catches same-cycle duplicates before the task
+      // record is written to the DB.  checkDuplicate queries the tasks table
+      // directly so active or recently-completed tasks are detected even after
+      // a daemon restart (when inFlightDispatches is empty).
+      const dupCheck = checkDuplicate(store, "github", sourceRef);
+      if (inFlightDispatches.has(sourceRef) || dupCheck.isDuplicate) {
+        if (dupCheck.isDuplicate) {
+          log.info("Skipping duplicate GitHub issue", { sourceRef, reason: dupCheck.reason });
+        }
         result.skipped++;
         continue;
       }

@@ -61,6 +61,8 @@ describe("dispatchGitHubIssues", () => {
       markProcessed: vi.fn(),
       getTask: vi.fn().mockReturnValue(null),
       listTasks: vi.fn().mockReturnValue([]),
+      // checkDuplicate calls this; return undefined by default (no prior task)
+      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -79,8 +81,16 @@ describe("dispatchGitHubIssues", () => {
     );
   });
 
-  it("skips already processed issues", async () => {
-    (mockStore.isProcessed as ReturnType<typeof vi.fn>).mockReturnValue(true);
+  it("skips issues that already have an active task (duplicate-guard)", async () => {
+    // Simulate an active dispatched task for this source_ref
+    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: "task-existing",
+      status: "dispatched",
+      source: "github",
+      source_ref: "owner/my-repo#1",
+      verification_status: null,
+      updated_at: new Date().toISOString(),
+    });
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 1, title: "Bug", body: "", url: "", labels: [] },
     ]);

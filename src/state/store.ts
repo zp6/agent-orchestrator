@@ -184,6 +184,19 @@ export class StateStore {
     return this.db.prepare("SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY created_at ASC").all(parentTaskId) as Task[];
   }
 
+  /**
+   * Return the most-recently-created top-level task whose source and
+   * source_ref match exactly. Used by the duplicate-guard to detect
+   * in-flight or recently-completed tasks that survive daemon restarts.
+   */
+  findTaskBySourceRef(source: string, sourceRef: string): Task | undefined {
+    return this.db
+      .prepare(
+        "SELECT * FROM tasks WHERE source = ? AND source_ref = ? AND parent_task_id IS NULL ORDER BY created_at DESC LIMIT 1",
+      )
+      .get(source, sourceRef) as Task | undefined;
+  }
+
   updateTask(id: string, updates: Partial<Pick<Task, "status" | "agent_name" | "conversation_id" | "result" | "plan" | "verification_status" | "quality_score" | "verification_notes">>): Task | undefined {
     const fields: string[] = [];
     const params: unknown[] = [];
