@@ -1,6 +1,7 @@
 import { ManagementClient, type ProxyAgentStatus, type ProxyAgentConfig } from "../client/management-client.js";
 import type { OrchestratorConfig, AgentConfig } from "../config/schema.js";
 import { resolve } from "node:path";
+import { execSync } from "node:child_process";
 
 export interface SyncAction {
   type: "create" | "start" | "update" | "remove" | "skip";
@@ -93,6 +94,7 @@ function toProxyConfig(
     permissions: agent.docker?.permissions ?? "auto",
     session: agent.docker?.session ?? "fresh",
     sessionId: agent.docker?.session_id ?? "",
+    sshKey: config.proxy.ssh_key,
     packages: agent.docker?.packages,
     apiKey: agent.docker?.api_key ?? "",
     allowedTools: agent.docker?.allowed_tools,
@@ -145,5 +147,46 @@ export async function executeSync(
     }
   }
 
+  // After creating/starting agents, set up gh auth in containers
+  if (!options?.dryRun) {
+    const created = actions.filter((a) => a.type === "create" || a.type === "start");
+    if (created.length > 0) {
+      await setupGitHubAuth(created.map((a) => a.agentName));
+    }
+  }
+
   return result;
+}
+
+/**
+ * Set up gh CLI auth in agent containers by piping the host's gh token.
+ * Also configures git protocol to SSH for push operations.
+ */
+async function setupGitHubAuth(agentNames: string[]): Promise<void> {
+  let token: string;
+  try {
+    token = execSync("gh auth token", { encoding: "utf-8", timeout: 5000 }).trim();
+  } catch {
+    return; // No local gh auth — skip
+  }
+  if (!token) return;
+
+  // Wait for containers to be ready
+  await new Promise((r) => setTimeout(r, 3000));
+
+  for (const name of agentNames) {
+    const container = `claude-proxy-${name}-1`;
+    try {
+      execSync(`echo "${token}" | docker exec -i ${container} gh auth login --with-token`, {
+        encoding: "utf-8",
+        timeout: 10000,
+      });
+      execSync(`docker exec ${container} gh config set git_protocol ssh --host github.com`, {
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+    } catch {
+      // Container may not be ready yet — not fatal
+    }
+  }
 }

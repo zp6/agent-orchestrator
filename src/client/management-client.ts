@@ -9,6 +9,7 @@ export interface ProxyAgentConfig {
   tunnel?: boolean;
   session?: string;
   sessionId?: string;
+  sshKey?: string;
   packages?: string[];
   allowedTools?: string;
 }

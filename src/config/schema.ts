@@ -46,6 +46,7 @@ export interface ProxyConfig {
   url: string;
   manager_url?: string;
   timeout_ms: number;
+  ssh_key?: string;
 }
 
 export interface OrchestratorConfig {
