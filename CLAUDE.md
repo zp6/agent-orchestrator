@@ -56,6 +56,24 @@ Bash(command: "npx tsx src/cli/index.ts service start --foreground")
 
 This applies to: `orch service start`, `orch dashboard`, any `dispatch` that may take minutes, and any other command that doesn't return quickly.
 
+## CRITICAL: PR and Issue Hygiene
+
+**Every PR must link to its issue with `Closes #N` in the body.** This is non-negotiable — it ensures issues auto-close when PRs merge.
+
+Three layers of defense:
+1. **Agent prompt** — agents are instructed to always include `Closes #N` and verify issues closed after merge
+2. **Daemon cleanup** — every ~30 minutes, the daemon scans for open issues that match merged PR titles and auto-closes them
+3. **Human/orchestrator oversight** — during monitoring, check for stale open issues and close them manually if needed
+
+**Before creating an issue**, agents must check:
+- `gh issue list --state open` — does a similar issue already exist?
+- `gh pr list --state merged -L 20` — has this feature already shipped?
+
+**During monitoring**, regularly check for issue/PR drift:
+- Open issues with no corresponding branch or PR → stale, close or re-dispatch
+- Merged PRs whose issues are still open → close the issues
+- Duplicate issues for the same feature → close the duplicates
+
 ## Development Workflow
 
 - **All changes must be made on a feature branch** — never commit directly to `main`.

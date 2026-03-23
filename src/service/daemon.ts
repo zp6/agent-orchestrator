@@ -16,6 +16,7 @@ import {
 } from "../triggers/trigger-dispatcher.js";
 import { writePid, removePid } from "./pid.js";
 import { createLogger } from "./logger.js";
+import { execSync } from "node:child_process";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
@@ -125,6 +126,11 @@ export class Daemon {
     // 6. Supervisor review — strategic reasoning about what needs attention
     if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
       await this.runSupervisor(time);
+    }
+
+    // 7. Clean up stale issues (issues with merged PRs that didn't auto-close)
+    if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
+      this.cleanupStaleIssues(time);
     }
   }
 
@@ -331,6 +337,55 @@ export class Daemon {
     removePid();
     this.store.close();
     console.log("Daemon stopped.");
+  }
+
+  private cleanupStaleIssues(time: string): void {
+    for (const [agentName, agent] of Object.entries(this.config.agents)) {
+      if (!agent.github) continue;
+
+      try {
+        // Get open issues
+        const issuesRaw = execSync(
+          `gh issue list --repo ${agent.github} --state open --json number,title -L 50`,
+          { encoding: "utf-8", timeout: 15000 },
+        ).trim();
+        if (!issuesRaw) continue;
+        const issues = JSON.parse(issuesRaw) as Array<{ number: number; title: string }>;
+        if (issues.length === 0) continue;
+
+        // Get recently merged PR titles to match against
+        const prsRaw = execSync(
+          `gh pr list --repo ${agent.github} --state merged --json title -L 30 --jq '.[].title'`,
+          { encoding: "utf-8", timeout: 15000 },
+        ).trim();
+        const mergedTitles = prsRaw ? prsRaw.toLowerCase().split("\n") : [];
+
+        for (const issue of issues) {
+          // Check if a merged PR likely addresses this issue
+          const issueWords = issue.title.toLowerCase().replace(/\[.*?\]/g, "").trim();
+          const matched = mergedTitles.some((prTitle) => {
+            const prWords = prTitle.replace(/\[.*?\]/g, "").trim();
+            // Match if the PR title contains the key part of the issue title
+            return prWords.includes(issueWords.slice(0, 30)) || issueWords.includes(prWords.slice(0, 30));
+          });
+
+          if (matched) {
+            try {
+              execSync(
+                `gh issue close ${issue.number} --repo ${agent.github} --comment "Auto-closed: matching PR was merged."`,
+                { encoding: "utf-8", timeout: 10000 },
+              );
+              console.log(`[${time}] Closed stale issue ${agent.github}#${issue.number}: ${issue.title.slice(0, 60)}`);
+              this.log.info("Closed stale issue", { repo: agent.github, issue: issue.number, title: issue.title });
+            } catch {
+              // Issue may already be closed
+            }
+          }
+        }
+      } catch {
+        // Skip repos we can't access
+      }
+    }
   }
 
   private sleep(ms: number): Promise<void> {

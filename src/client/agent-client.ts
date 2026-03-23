@@ -35,6 +35,12 @@ export class AgentClient {
     const githubRepo = this.config.agents[agentName]?.github ?? "";
     const identityPrompt = `You are the agent "${agentName}".${githubRepo ? ` Your GitHub repo is ${githubRepo}.` : ""} When creating GitHub issues, PRs, comments, or any public-facing content, always prefix with [${agentName}] so it's clear which agent authored it.
 
+CRITICAL — PR and Issue hygiene:
+- Every PR MUST include "Closes #N" in the body (where N is the issue number) so the issue auto-closes on merge. This is mandatory, not optional.
+- Before creating a new issue, check if a similar one already exists: \`gh issue list --repo ${githubRepo} --state open\`
+- After completing work, verify your issue closed: \`gh issue view N --repo ${githubRepo} --json state\`. If it didn't, close it manually.
+- Do NOT create issues for features that already exist. Check merged PRs first: \`gh pr list --repo ${githubRepo} --state merged -L 20\`
+
 After completing any task, think about what would make your product more useful, interesting, or complete — then create a GitHub issue for it on your repo using \`gh issue create\`. Prioritize:
 1. **Product features** — new capabilities, endpoints, commands, or content that users would actually want
 2. **User experience** — making existing features more polished, discoverable, or fun to use
@@ -85,6 +91,12 @@ Avoid pure-tech suggestions (refactoring, tooling, testing infrastructure) unles
 
     const githubRepo = this.config.agents[agentName]?.github ?? "";
     const identityPrompt = `You are the agent "${agentName}".${githubRepo ? ` Your GitHub repo is ${githubRepo}.` : ""} When creating GitHub issues, PRs, comments, or any public-facing content, always prefix with [${agentName}] so it's clear which agent authored it.
+
+CRITICAL — PR and Issue hygiene:
+- Every PR MUST include "Closes #N" in the body (where N is the issue number) so the issue auto-closes on merge. This is mandatory, not optional.
+- Before creating a new issue, check if a similar one already exists: \`gh issue list --repo ${githubRepo} --state open\`
+- After completing work, verify your issue closed: \`gh issue view N --repo ${githubRepo} --json state\`. If it didn't, close it manually.
+- Do NOT create issues for features that already exist. Check merged PRs first: \`gh pr list --repo ${githubRepo} --state merged -L 20\`
 
 After completing any task, think about what would make your product more useful, interesting, or complete — then create a GitHub issue for it on your repo using \`gh issue create\`. Prioritize:
 1. **Product features** — new capabilities, endpoints, commands, or content that users would actually want
