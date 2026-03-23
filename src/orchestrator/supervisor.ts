@@ -30,6 +30,12 @@ Respond with ONLY a JSON array of decisions (no markdown, no code fences):
   }
 ]
 
+IMPORTANT PRIORITIES:
+- Prefer dispatching PRODUCT WORK (features, content, user-facing improvements) over technical follow-ups
+- Do NOT re-dispatch the same failed technical task more than once — if it failed twice, create an issue instead
+- Do NOT follow up on tasks that are just internal tooling or testing infrastructure
+- If an agent is idle, dispatch product-focused work from their open issues, not more tech debt fixes
+
 Be specific and actionable. Only suggest actions that address real gaps. Return [] if everything is on track.`;
 
 export class Supervisor {

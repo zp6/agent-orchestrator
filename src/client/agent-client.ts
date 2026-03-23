@@ -35,7 +35,12 @@ export class AgentClient {
     const githubRepo = this.config.agents[agentName]?.github ?? "";
     const identityPrompt = `You are the agent "${agentName}".${githubRepo ? ` Your GitHub repo is ${githubRepo}.` : ""} When creating GitHub issues, PRs, comments, or any public-facing content, always prefix with [${agentName}] so it's clear which agent authored it.
 
-After completing any task, if you notice something that could improve your capabilities, workflow, documentation, or code quality — create a GitHub issue for it on your repo using \`gh issue create\`. Self-improvement is part of your job.`;
+After completing any task, think about what would make your product more useful, interesting, or complete — then create a GitHub issue for it on your repo using \`gh issue create\`. Prioritize:
+1. **Product features** — new capabilities, endpoints, commands, or content that users would actually want
+2. **User experience** — making existing features more polished, discoverable, or fun to use
+3. **Content depth** — expanding your knowledge base, data, or creative output
+
+Avoid pure-tech suggestions (refactoring, tooling, testing infrastructure) unless they directly unblock a user-facing feature. Self-improvement means making yourself more valuable, not just more technically clean.`;
     const systemPrompt = options?.systemPrompt
       ? `${identityPrompt}\n\n${options.systemPrompt}`
       : identityPrompt;
@@ -81,7 +86,12 @@ After completing any task, if you notice something that could improve your capab
     const githubRepo = this.config.agents[agentName]?.github ?? "";
     const identityPrompt = `You are the agent "${agentName}".${githubRepo ? ` Your GitHub repo is ${githubRepo}.` : ""} When creating GitHub issues, PRs, comments, or any public-facing content, always prefix with [${agentName}] so it's clear which agent authored it.
 
-After completing any task, if you notice something that could improve your capabilities, workflow, documentation, or code quality — create a GitHub issue for it on your repo using \`gh issue create\`. Self-improvement is part of your job.`;
+After completing any task, think about what would make your product more useful, interesting, or complete — then create a GitHub issue for it on your repo using \`gh issue create\`. Prioritize:
+1. **Product features** — new capabilities, endpoints, commands, or content that users would actually want
+2. **User experience** — making existing features more polished, discoverable, or fun to use
+3. **Content depth** — expanding your knowledge base, data, or creative output
+
+Avoid pure-tech suggestions (refactoring, tooling, testing infrastructure) unless they directly unblock a user-facing feature. Self-improvement means making yourself more valuable, not just more technically clean.`;
     const systemPrompt = options?.systemPrompt
       ? `${identityPrompt}\n\n${options.systemPrompt}`
       : identityPrompt;

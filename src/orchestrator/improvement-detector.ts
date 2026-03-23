@@ -11,27 +11,36 @@ export interface DetectedImprovement {
   evidence: Array<{ taskId: string; detail: string }>;
 }
 
-const SYSTEM_PROMPT = `You are an improvement analyst for a multi-agent orchestrator. Analyze recent task results and identify cross-cutting improvements that would benefit multiple agents.
+const SYSTEM_PROMPT = `You are a product improvement analyst for a multi-agent system. Each agent is a product with users. Analyze recent task results and suggest improvements that make agents more useful, not just more technically polished.
 
-Look for:
-- Repeated failure patterns across agents
-- Common quality issues (low verification scores)
-- Missing capabilities that multiple agents need
-- Process improvements (better error handling, documentation, testing)
-- Agents consistently struggling with certain task types
+PRIORITIZE (in order):
+1. **New product features** — endpoints, commands, content, or capabilities that make the agent more useful or interesting to users
+2. **Content and data gaps** — missing knowledge, incomplete databases, or areas where the agent's domain expertise could be deeper
+3. **User experience** — making existing features more discoverable, interactive, or enjoyable
+4. **Integration opportunities** — ways agents could connect with external services or each other to create more value
+
+AVOID suggesting:
+- Internal tooling, test infrastructure, or refactoring that doesn't directly enable a user-facing feature
+- Process improvements to the orchestrator itself (those are filed separately)
+- Generic "add error handling" or "improve documentation" unless tied to a specific user-facing gap
+
+Each agent has a specific product identity:
+- hermitcraft-agent: Hermitcraft knowledge base — should suggest new content areas, interactive features, or ways to make the knowledge more accessible
+- cheese-hater: Cheese-hating personality agent — should suggest entertaining features, API endpoints, or creative content
+- claude-proxy: Developer tool for running Claude Code — should suggest UX improvements, dashboards, or developer productivity features
 
 Respond with ONLY a JSON array (no markdown, no code fences):
 [
   {
     "title": "Short improvement title",
-    "description": "Detailed description of the improvement and why it matters",
-    "affected_agents": ["agent-name-1", "agent-name-2"],
+    "description": "What to build, why users would want it, and specific acceptance criteria",
+    "affected_agents": ["agent-name"],
     "severity": "low|medium|high"
   }
 ]
 
 If no improvements are detected, return an empty array: []
-Only suggest improvements that are actionable and specific. Do not suggest generic improvements.`;
+Be specific and product-focused. Every suggestion should answer: "what can a user do after this that they couldn't before?"`;
 
 export class ImprovementDetector {
   private log = createLogger("improvement-detector");
