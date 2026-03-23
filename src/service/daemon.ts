@@ -306,11 +306,15 @@ export class Daemon {
 
         if ((d.action === "dispatch" || d.action === "follow-up") && d.agentName && d.message) {
           try {
-            const result = await this.dispatcher.dispatch(d.message, {
+            // Fire-and-forget: don't block the daemon cycle waiting for agent response
+            this.dispatcher.dispatch(d.message, {
               agentName: d.agentName,
               title: `[supervisor] ${d.reason.slice(0, 80)}`,
+            }).then((result) => {
+              console.log(`  ${d.action} → ${d.agentName} (task ${result.taskId.slice(0, 8)}): ${d.reason}`);
+            }).catch((err) => {
+              this.log.error("Supervisor dispatch failed", { agentName: d.agentName, error: String(err) });
             });
-            console.log(`  ${d.action} → ${d.agentName} (task ${result.taskId.slice(0, 8)}): ${d.reason}`);
           } catch (err) {
             console.error(`  Failed ${d.action} → ${d.agentName}: ${err instanceof Error ? err.message : err}`);
           }
