@@ -105,15 +105,16 @@
               <span class="text-gray-500 text-xs">${time}</span>
             </div>
             <div class="text-gray-400 text-xs mb-2">${taskTitle}${statusBadge}</div>
-            <div class="content-preview" id="${contentId}">${isLong ? content.slice(0, 500) + '...' : content}</div>
-            ${isLong ? `<button onclick="toggleExpand('${contentId}', this, \`${content.replace(/`/g, '\\`').replace(/\\/g, '\\\\')}\`)" class="text-blue-400 text-xs mt-1 hover:underline">Show more</button>` : ''}
+            <div class="content-preview" id="${contentId}" data-full="${content.replace(/"/g, '&quot;')}">${isLong ? content.slice(0, 500) + '...' : content}</div>
+            ${isLong ? `<button onclick="toggleExpand('${contentId}', this)" class="text-blue-400 text-xs mt-1 hover:underline">Show more</button>` : ''}
           </div>
         `;
       }).join('');
     }
 
-    function toggleExpand(id, btn, fullContent) {
+    function toggleExpand(id, btn) {
       const el = document.getElementById(id);
+      const fullContent = el.getAttribute('data-full');
       if (el.classList.contains('expanded')) {
         el.classList.remove('expanded');
         el.innerHTML = fullContent.slice(0, 500) + '...';
