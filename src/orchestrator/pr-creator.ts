@@ -21,9 +21,9 @@ export function findOrphanBranches(config: OrchestratorConfig): OrphanBranch[] {
     if (!agent.github) continue;
 
     try {
-      // Get open PR branches
+      // Get branches that already have PRs (open, merged, or closed)
       const prsRaw = execSync(
-        `gh pr list --repo ${agent.github} --state open --json headRefName --jq '.[].headRefName'`,
+        `gh pr list --repo ${agent.github} --state all --json headRefName --jq '.[].headRefName'`,
         { encoding: "utf-8", timeout: 15000 },
       ).trim();
       const prBranches = new Set(prsRaw ? prsRaw.split("\n") : []);
