@@ -8,7 +8,7 @@ describe("loadConfig", () => {
   it("loads and parses agents.yaml", () => {
     const config = loadConfig(configPath);
     expect(config.proxy.url).toMatch(/^http:\/\/(localhost|host\.docker\.internal):3457$/);
-    expect(config.proxy.timeout_ms).toBe(300000);
+    expect(config.proxy.timeout_ms).toBe(900000);
     expect(config.base_dir).toBeTruthy();
     expect(Object.keys(config.agents).length).toBeGreaterThanOrEqual(2);
   });
