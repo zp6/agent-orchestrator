@@ -13,6 +13,7 @@ export interface PRInfo {
   branch: string;
   diff: string;
   files_changed: number;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
 }
 
 export interface PRReviewResult {
@@ -46,7 +47,19 @@ export class PRReviewer {
 
   async reviewPR(repo: string, prNumber: number): Promise<PRReviewResult> {
     const pr = this.fetchPRInfo(repo, prNumber);
-    this.log.info("Reviewing PR", { repo, prNumber, title: pr.title, filesChanged: pr.files_changed });
+    this.log.info("Reviewing PR", { repo, prNumber, title: pr.title, filesChanged: pr.files_changed, mergeable: pr.mergeable });
+
+    // Short-circuit: skip review entirely if PR has merge conflicts
+    if (pr.mergeable === "CONFLICTING") {
+      const result: PRReviewResult = {
+        decision: "request-changes",
+        comment: `This PR has merge conflicts and cannot be merged. Please rebase onto main:\n\n\`\`\`\ngit fetch origin\ngit rebase origin/main\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``,
+        reason: "Merge conflict detected — skipping review",
+      };
+      this.log.info("PR has merge conflicts, skipping review", { repo, prNumber });
+      await this.executeDecision(repo, prNumber, result);
+      return result;
+    }
 
     // PR body linter: agent PRs must include "Closes #N"
     if (this.isAgentPR(pr) && !this.hasIssueRef(pr)) {
@@ -192,7 +205,7 @@ export class PRReviewer {
 
   private fetchPRInfo(repo: string, prNumber: number): PRInfo {
     const prJson = execSync(
-      `gh pr view ${prNumber} --repo ${repo} --json number,title,body,author,headRefName,changedFiles`,
+      `gh pr view ${prNumber} --repo ${repo} --json number,title,body,author,headRefName,changedFiles,mergeable`,
       { encoding: "utf-8", timeout: 30000 },
     );
     const pr = JSON.parse(prJson);
@@ -211,6 +224,7 @@ export class PRReviewer {
       branch: pr.headRefName,
       diff,
       files_changed: pr.changedFiles ?? 0,
+      mergeable: pr.mergeable ?? "UNKNOWN",
     };
   }
 

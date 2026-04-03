@@ -17,6 +17,7 @@ let mockPRViewResponse = JSON.stringify({
   author: { login: "agent" },
   headRefName: "feature-branch",
   changedFiles: 2,
+  mergeable: "MERGEABLE",
 });
 
 vi.mock("node:child_process", () => ({
@@ -59,6 +60,7 @@ beforeEach(() => {
     author: { login: "agent" },
     headRefName: "feature-branch",
     changedFiles: 2,
+    mergeable: "MERGEABLE",
   });
 });
 
@@ -136,6 +138,28 @@ describe("PRReviewer", () => {
     expect(results).toHaveLength(2);
   });
 
+  describe("merge conflict detection", () => {
+    it("short-circuits conflicting PRs without calling LLM", async () => {
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "Test PR",
+        body: "Description\n\nCloses #1",
+        author: { login: "agent" },
+        headRefName: "feature-branch",
+        changedFiles: 2,
+        mergeable: "CONFLICTING",
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("request-changes");
+      expect(result.comment).toContain("merge conflict");
+      expect(result.reason).toContain("Merge conflict");
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
+  });
+
   describe("PR body linter", () => {
     it("short-circuits agent PR without Closes #N to request-changes", async () => {
       mockPRViewResponse = JSON.stringify({
@@ -145,6 +169,7 @@ describe("PRReviewer", () => {
         author: { login: "agent" },
         headRefName: "feature-branch",
         changedFiles: 2,
+        mergeable: "MERGEABLE",
       });
 
       const reviewer = new PRReviewer(config);
@@ -163,6 +188,7 @@ describe("PRReviewer", () => {
         author: { login: "agent" },
         headRefName: "feature-branch",
         changedFiles: 2,
+        mergeable: "MERGEABLE",
       });
       mockCreate.mockResolvedValueOnce({
         content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Good", reason: "Clean" }) }],
@@ -183,6 +209,7 @@ describe("PRReviewer", () => {
         author: { login: "human" },
         headRefName: "feature-branch",
         changedFiles: 2,
+        mergeable: "MERGEABLE",
       });
       mockCreate.mockResolvedValueOnce({
         content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Good", reason: "Clean" }) }],
