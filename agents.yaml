@@ -14,13 +14,14 @@ verification:
   min_score: 0.7
 
 agents:
-  orchestrator-llm:
+  claude-agent-orchestrator:
     dir: "claude-agent-orchestrator"
-    description: "Dedicated LLM container for orchestrator operations (routing, reviewing, verifying, supervising). Not for dispatched work."
-    capabilities: ["llm", "orchestration"]
-    owns_topics: []
+    description: "The orchestrator's own codebase. Handles self-improvement: daemon logic, routing, PR review, supervisor, verification, issue creation, and CLI commands."
+    capabilities: ["typescript", "orchestration", "cli", "sqlite"]
+    github: "rapartlu/claude-agent-orchestrator"
+    owns_topics: ["orchestrator", "daemon", "supervisor", "routing", "dispatcher", "verifier", "planner", "deployer", "pr-review"]
     docker:
-      port: 3470
+      port: 3472
       api_key: "cheese"
       permissions: "bypassPermissions"
       session: "fresh"

@@ -15,7 +15,7 @@ describe("loadConfig", () => {
 
   it("contains active agents", () => {
     const config = loadConfig(configPath);
-    const expected = ["orchestrator-llm", "claude-proxy"];
+    const expected = ["claude-agent-orchestrator", "claude-proxy"];
     for (const name of expected) {
       expect(config.agents[name]).toBeDefined();
     }
