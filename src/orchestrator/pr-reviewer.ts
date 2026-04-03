@@ -22,20 +22,26 @@ export interface PRReviewResult {
   reason: string;
 }
 
-const SYSTEM_PROMPT = `You are a code reviewer for a multi-agent system. Review the pull request diff and decide:
+const SYSTEM_PROMPT = `You are a code reviewer for a multi-agent system. Your job is to catch real bugs and security issues, NOT to enforce style preferences.
 
-1. **approve** — the code is correct, complete, well-structured, and safe to merge
-2. **request-changes** — there are specific issues that need fixing (list them)
-3. **escalate** — this needs human review (security concerns, architectural decisions, breaking changes, or you're unsure)
+Decide ONE of:
+
+1. **approve** — the code works, is safe, and achieves its goal. Approve even if you'd write it differently.
+2. **request-changes** — there are BLOCKING issues only: bugs that will break at runtime, security vulnerabilities, data loss risks, or missing critical functionality. Style, naming, structure preferences, and "could be cleaner" observations are NOT blocking.
+3. **escalate** — needs human review (security-sensitive, architectural, breaking changes, or genuinely uncertain)
+
+IMPORTANT:
+- Default to APPROVE. Most PRs that work correctly should be approved.
+- Only request changes for issues that would cause real failures or security problems.
+- Never block on: code style, naming conventions, missing comments/docs, "could use a helper function", edge cases that are unlikely in practice, or suggestions for follow-up work.
+- If you have minor suggestions, include them in an approval comment — don't block the PR for them.
 
 Respond with ONLY a JSON object (no markdown, no code fences):
 {
   "decision": "approve|request-changes|escalate",
   "comment": "Your review comment to post on the PR",
   "reason": "Brief internal reason for the decision"
-}
-
-Be thorough but pragmatic. Approve good work. Don't block on style nitpicks. Escalate when genuinely uncertain.`;
+}`;
 
 export class PRReviewer {
   private log = createLogger("pr-reviewer");
@@ -69,6 +75,19 @@ export class PRReviewer {
         reason: "PR body missing issue reference (Closes #N)",
       };
       this.log.info("PR body linter: missing issue ref", { repo, prNumber, title: pr.title });
+      await this.executeDecision(repo, prNumber, result);
+      return result;
+    }
+
+    // Escalate after too many review rounds instead of endlessly requesting changes
+    const priorReviews = this.countPriorReviews(repo, prNumber);
+    if (priorReviews >= 3) {
+      const result: PRReviewResult = {
+        decision: "escalate",
+        comment: `This PR has been through ${priorReviews} review cycles. Escalating to human reviewer rather than continuing to request changes.`,
+        reason: `${priorReviews} review cycles — escalating to break the loop`,
+      };
+      this.log.info("PR review cycle cap reached, escalating", { repo, prNumber, priorReviews });
       await this.executeDecision(repo, prNumber, result);
       return result;
     }
@@ -182,6 +201,18 @@ export class PRReviewer {
           this.log.error("Failed to escalate PR", { repo, prNumber, error: String(err) });
         }
         break;
+    }
+  }
+
+  private countPriorReviews(repo: string, prNumber: number): number {
+    try {
+      const raw = execSync(
+        `gh api "repos/${repo}/issues/${prNumber}/comments?per_page=100" --jq '[.[] | select(.body | startswith("**[orchestrator] PR Review"))] | length'`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+      return parseInt(raw, 10) || 0;
+    } catch {
+      return 0; // fail-open
     }
   }
 
