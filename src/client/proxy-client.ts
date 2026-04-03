@@ -22,5 +22,6 @@ export function createProxyClient(
     apiKey: options?.apiKey ?? "not-set",
     defaultHeaders: headers,
     timeout: proxyConfig.timeout_ms,
+    maxRetries: 0,
   });
 }

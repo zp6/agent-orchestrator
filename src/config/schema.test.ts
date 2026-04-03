@@ -57,8 +57,8 @@ describe("getAgentDir", () => {
   it("resolves agent directory path", () => {
     const config = loadConfig(configPath);
     const dir = getAgentDir(config, "claude-proxy");
-    // claude-proxy has a repo field, so getAgentDir returns the container path
-    expect(dir).toBe("/home/claude/workspace/claude-proxy");
+    // All agents use base_dir + dir for the host path sent to the proxy
+    expect(dir).toContain("claude-proxy");
   });
 
   it("throws for unknown agent", () => {

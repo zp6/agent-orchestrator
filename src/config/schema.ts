@@ -111,10 +111,6 @@ export function getAgentDir(config: OrchestratorConfig, agentName: string): stri
   if (!agent) {
     throw new Error(`Unknown agent: ${agentName}`);
   }
-  if (agent.repo) {
-    const repoName = agent.repo.replace(/.*\//, "").replace(/\.git$/, "");
-    return `/home/claude/workspace/${repoName}`;
-  }
   return resolve(config.base_dir, agent.dir);
 }
 
