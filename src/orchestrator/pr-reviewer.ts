@@ -92,10 +92,32 @@ export class PRReviewer {
       return result;
     }
 
+    // Diff size safety check
+    const DIFF_WARN_THRESHOLD = 80_000;   // 80 KB — warn LLM that diff is truncated
+    const DIFF_ESCALATE_THRESHOLD = 200_000; // 200 KB — auto-escalate, too large to review safely
+    const diffSize = pr.diff.length;
+
+    if (diffSize > DIFF_ESCALATE_THRESHOLD) {
+      const result: PRReviewResult = {
+        decision: "escalate",
+        comment: `This PR's diff is ${Math.round(diffSize / 1024)} KB, which exceeds the safe review limit (200 KB). Automated review would only see a small fraction of the changes and could give false confidence. Escalating to human review.`,
+        reason: `Diff too large for automated review (${Math.round(diffSize / 1024)} KB > 200 KB threshold)`,
+      };
+      this.log.warn("PR diff too large — auto-escalating", { repo, prNumber, diffSize });
+      await this.executeDecision(repo, prNumber, result);
+      return result;
+    }
+
+    const diffTruncated = diffSize > DIFF_WARN_THRESHOLD;
+    const truncatedDiff = pr.diff.slice(0, 100_000);
+    const diffWarning = diffTruncated
+      ? `\n\n> ⚠️ **TRUNCATED DIFF WARNING**: The full diff is ${Math.round(diffSize / 1024)} KB but only the first ~${Math.round(truncatedDiff.length / 1024)} KB is shown here. Your review is INCOMPLETE — you have not seen all the changes. Factor this into your decision: note in your comment which files/areas you could not review, and consider escalating if the unseen portion looks significant based on file names or context.`
+      : "";
+
     const client = createLLMClient(this.config
     );
 
-    const prompt = `## PR #${pr.number}: ${pr.title}\n**Repo:** ${pr.repo}\n**Author:** ${pr.author}\n**Branch:** ${pr.branch}\n**Files changed:** ${pr.files_changed}\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${pr.diff.slice(0, 100000)}\n\`\`\``;
+    const prompt = `## PR #${pr.number}: ${pr.title}\n**Repo:** ${pr.repo}\n**Author:** ${pr.author}\n**Branch:** ${pr.branch}\n**Files changed:** ${pr.files_changed}${diffWarning}\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${truncatedDiff}\n\`\`\``;
 
     try {
       const response = await client.messages.create({

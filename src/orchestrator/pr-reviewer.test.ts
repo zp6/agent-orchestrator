@@ -20,13 +20,15 @@ let mockPRViewResponse = JSON.stringify({
   mergeable: "MERGEABLE",
 });
 
+let mockDiffResponse = "+added line\n-removed line";
+
 vi.mock("node:child_process", () => ({
   execSync: vi.fn().mockImplementation((cmd: string) => {
     if (cmd.includes("gh pr view")) {
       return mockPRViewResponse;
     }
     if (cmd.includes("gh pr diff")) {
-      return "+added line\n-removed line";
+      return mockDiffResponse;
     }
     if (cmd.includes("gh pr list")) {
       return JSON.stringify([
@@ -62,6 +64,7 @@ beforeEach(() => {
     changedFiles: 2,
     mergeable: "MERGEABLE",
   });
+  mockDiffResponse = "+added line\n-removed line";
 });
 
 describe("PRReviewer", () => {
@@ -220,6 +223,56 @@ describe("PRReviewer", () => {
 
       expect(result.decision).toBe("approve");
       expect(mockCreate).toHaveBeenCalled();
+    });
+  });
+
+  describe("diff size safety", () => {
+    it("auto-escalates when diff exceeds 200 KB without calling LLM", async () => {
+      // Generate a diff larger than 200,000 characters
+      mockDiffResponse = "+line\n".repeat(35_000); // ~210 KB
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("escalate");
+      expect(result.comment).toContain("exceeds the safe review limit");
+      expect(result.reason).toContain("Diff too large");
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    it("includes truncation warning in prompt when diff is between 80 KB and 200 KB", async () => {
+      // Generate a diff between 80,000 and 200,000 characters
+      mockDiffResponse = "+line\n".repeat(15_000); // ~90 KB
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Looks good", reason: "Clean" }) }],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("approve");
+      expect(mockCreate).toHaveBeenCalledOnce();
+
+      // Verify the prompt sent to the LLM contains the truncation warning
+      const callArgs = mockCreate.mock.calls[0][0];
+      const userMessage = callArgs.messages[0].content as string;
+      expect(userMessage).toContain("TRUNCATED DIFF WARNING");
+      expect(userMessage).toContain("INCOMPLETE");
+    });
+
+    it("does not add truncation warning for small diffs under 80 KB", async () => {
+      mockDiffResponse = "+small diff\n-removed line\n"; // well under 80 KB
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Looks good", reason: "Clean" }) }],
+      });
+
+      const reviewer = new PRReviewer(config);
+      await reviewer.reviewPR("owner/repo", 9);
+
+      expect(mockCreate).toHaveBeenCalledOnce();
+      const callArgs = mockCreate.mock.calls[0][0];
+      const userMessage = callArgs.messages[0].content as string;
+      expect(userMessage).not.toContain("TRUNCATED DIFF WARNING");
     });
   });
 });
