@@ -28,9 +28,15 @@ export class Deployer {
       return { agentName, action: "error", detail: `Unknown agent: ${agentName}` };
     }
 
+    const repoName = agent.repo ? agent.repo.replace(/.*\//, "").replace(/\.git$/, "") : undefined;
+    const project = agent.repo
+      ? `/home/claude/workspace/${repoName}`
+      : resolve(this.config.base_dir, agent.dir);
+
     try {
       await this.management.updateAgent(agentName, {
-        project: resolve(this.config.base_dir, agent.dir),
+        project,
+        repo: agent.repo,
         port: agent.docker?.port ?? 3460,
         permissions: agent.docker?.permissions ?? "auto",
         session: agent.docker?.session ?? "fresh",
@@ -40,6 +46,22 @@ export class Deployer {
       return { agentName, action: "redeployed", detail: "Container rebuild triggered" };
     } catch (err) {
       this.log.error("Redeploy failed", { agentName, error: err instanceof Error ? err.message : String(err) });
+      return { agentName, action: "error", detail: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * Restart an agent's container (stop + start). For repo-based agents, the
+   * entrypoint script will pull latest main on startup.
+   */
+  async restartAgent(agentName: string): Promise<DeployResult> {
+    try {
+      await this.management.stopAgent(agentName);
+      await this.management.startAgent(agentName);
+      this.log.info("Agent restarted", { agentName });
+      return { agentName, action: "redeployed", detail: "Container restarted (pull on start)" };
+    } catch (err) {
+      this.log.error("Restart failed", { agentName, error: err instanceof Error ? err.message : String(err) });
       return { agentName, action: "error", detail: err instanceof Error ? err.message : String(err) };
     }
   }
@@ -66,6 +88,8 @@ export class Deployer {
     for (const [name, agent] of Object.entries(this.config.agents)) {
       if (!agent.docker?.port) continue;
       if (registeredAgents && !registeredAgents.has(name)) continue;
+      // Repo-based agents sync via container restart, not host SHA comparison
+      if (agent.repo) continue;
 
       const dir = resolve(this.config.base_dir, agent.dir);
       try {

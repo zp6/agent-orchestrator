@@ -25,6 +25,7 @@ export interface AgentSlackConfig {
 
 export interface AgentConfig {
   dir: string;
+  repo?: string;
   description: string;
   capabilities: string[];
   github?: string;
@@ -109,6 +110,10 @@ export function getAgentDir(config: OrchestratorConfig, agentName: string): stri
   const agent = config.agents[agentName];
   if (!agent) {
     throw new Error(`Unknown agent: ${agentName}`);
+  }
+  if (agent.repo) {
+    const repoName = agent.repo.replace(/.*\//, "").replace(/\.git$/, "");
+    return `/home/claude/workspace/${repoName}`;
   }
   return resolve(config.base_dir, agent.dir);
 }

@@ -21,6 +21,7 @@ import { execSync } from "node:child_process";
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
 const SUPERVISOR_CHECK_EVERY_N_CYCLES = 3; // ~15min at default interval
+const STALE_ISSUE_AGE_DAYS = 7;
 
 export class Daemon {
   private running = false;
@@ -129,8 +130,10 @@ export class Daemon {
     }
 
     // 7. Clean up stale issues (issues with merged PRs that didn't auto-close)
+    //    Also reap orchestrator-labeled issues open >7 days with no linked PR
     if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
       this.cleanupStaleIssues(time);
+      this.reapStaleOrchestratorIssues(time);
     }
   }
 
@@ -340,7 +343,7 @@ export class Daemon {
   }
 
   private cleanupStaleIssues(time: string): void {
-    for (const [agentName, agent] of Object.entries(this.config.agents)) {
+    for (const [_agentName, agent] of Object.entries(this.config.agents)) {
       if (!agent.github) continue;
 
       try {
@@ -353,38 +356,107 @@ export class Daemon {
         const issues = JSON.parse(issuesRaw) as Array<{ number: number; title: string }>;
         if (issues.length === 0) continue;
 
-        // Get recently merged PR titles to match against
+        // Get recently merged PRs with bodies for Closes #N scanning
         const prsRaw = execSync(
-          `gh pr list --repo ${agent.github} --state merged --json title -L 30 --jq '.[].title'`,
+          `gh pr list --repo ${agent.github} --state merged --json number,title,body -L 30`,
           { encoding: "utf-8", timeout: 15000 },
         ).trim();
-        const mergedTitles = prsRaw ? prsRaw.toLowerCase().split("\n") : [];
+        const mergedPRs = prsRaw
+          ? (JSON.parse(prsRaw) as Array<{ number: number; title: string; body: string }>)
+          : [];
+
+        // Phase 1: Body scan — extract issue numbers referenced in merged PR bodies
+        const closedByBody = new Set<number>();
+        for (const pr of mergedPRs) {
+          for (const num of extractClosedIssueNumbers(pr.body ?? "")) {
+            closedByBody.add(num);
+          }
+        }
+
+        const closedIssues = new Set<number>();
 
         for (const issue of issues) {
-          // Check if a merged PR likely addresses this issue
+          // Phase 1: close if referenced in a merged PR body
+          if (closedByBody.has(issue.number)) {
+            if (this.closeIssue(agent.github, issue, time, "Auto-closed: referenced in merged PR.")) {
+              closedIssues.add(issue.number);
+            }
+            continue;
+          }
+
+          // Phase 2: fallback title matching
           const issueWords = issue.title.toLowerCase().replace(/\[.*?\]/g, "").trim();
+          const mergedTitles = mergedPRs.map((pr) => pr.title.toLowerCase());
           const matched = mergedTitles.some((prTitle) => {
             const prWords = prTitle.replace(/\[.*?\]/g, "").trim();
-            // Match if the PR title contains the key part of the issue title
             return prWords.includes(issueWords.slice(0, 30)) || issueWords.includes(prWords.slice(0, 30));
           });
 
           if (matched) {
-            try {
-              execSync(
-                `gh issue close ${issue.number} --repo ${agent.github} --comment "Auto-closed: matching PR was merged."`,
-                { encoding: "utf-8", timeout: 10000 },
-              );
-              console.log(`[${time}] Closed stale issue ${agent.github}#${issue.number}: ${issue.title.slice(0, 60)}`);
-              this.log.info("Closed stale issue", { repo: agent.github, issue: issue.number, title: issue.title });
-            } catch {
-              // Issue may already be closed
-            }
+            this.closeIssue(agent.github, issue, time, "Auto-closed: matching PR title found.");
           }
         }
       } catch {
         // Skip repos we can't access
       }
+    }
+  }
+
+  private reapStaleOrchestratorIssues(time: string): void {
+    const cutoff = Date.now() - STALE_ISSUE_AGE_DAYS * 24 * 60 * 60 * 1000;
+
+    for (const [_agentName, agent] of Object.entries(this.config.agents)) {
+      if (!agent.github) continue;
+
+      try {
+        // Get open issues with orchestrator label
+        const issuesRaw = execSync(
+          `gh issue list --repo ${agent.github} --state open --label orchestrator --json number,title,createdAt -L 50`,
+          { encoding: "utf-8", timeout: 15000 },
+        ).trim();
+        if (!issuesRaw) continue;
+        const issues = JSON.parse(issuesRaw) as Array<{ number: number; title: string; createdAt: string }>;
+
+        const staleIssues = issues.filter((i) => new Date(i.createdAt).getTime() < cutoff);
+        if (staleIssues.length === 0) continue;
+
+        // Get open PRs to check for linked work
+        const prsRaw = execSync(
+          `gh pr list --repo ${agent.github} --state open --json number,body,headRefName -L 50`,
+          { encoding: "utf-8", timeout: 15000 },
+        ).trim();
+        const openPRs = prsRaw
+          ? (JSON.parse(prsRaw) as Array<{ number: number; body: string; headRefName: string }>)
+          : [];
+
+        for (const issue of staleIssues) {
+          const hasLinkedPR = openPRs.some((pr) => {
+            const bodyRefs = extractClosedIssueNumbers(pr.body ?? "");
+            const branchHasIssue = pr.headRefName.includes(`${issue.number}`);
+            return bodyRefs.includes(issue.number) || branchHasIssue;
+          });
+
+          if (!hasLinkedPR) {
+            this.closeIssue(agent.github, issue, time, "Auto-closed: open >7 days with no linked PR.");
+          }
+        }
+      } catch {
+        // Skip repos we can't access
+      }
+    }
+  }
+
+  private closeIssue(repo: string, issue: { number: number; title: string }, time: string, comment: string): boolean {
+    try {
+      execSync(
+        `gh issue close ${issue.number} --repo ${repo} --comment "${comment}"`,
+        { encoding: "utf-8", timeout: 10000 },
+      );
+      console.log(`[${time}] Closed stale issue ${repo}#${issue.number}: ${issue.title.slice(0, 60)}`);
+      this.log.info("Closed stale issue", { repo, issue: issue.number, title: issue.title, reason: comment });
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -400,4 +472,15 @@ export class Daemon {
       }, 500);
     });
   }
+}
+
+/** Extract issue numbers from PR body patterns like "Closes #42", "Fixes #7", "Resolves #100" */
+export function extractClosedIssueNumbers(prBody: string): number[] {
+  const pattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
+  const numbers = new Set<number>();
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(prBody)) !== null) {
+    numbers.add(parseInt(match[1], 10));
+  }
+  return [...numbers];
 }

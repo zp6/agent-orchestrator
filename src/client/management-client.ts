@@ -3,6 +3,7 @@ import type { ProxyConfig } from "../config/schema.js";
 export interface ProxyAgentConfig {
   name: string;
   project: string;
+  repo?: string;
   port: number;
   apiKey?: string;
   permissions?: string;

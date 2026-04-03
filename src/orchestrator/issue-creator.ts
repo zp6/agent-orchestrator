@@ -9,6 +9,8 @@ export interface CreatedIssue {
   url: string;
 }
 
+const MAX_OPEN_ORCHESTRATOR_ISSUES = 10;
+
 export class IssueCreator {
   private log = createLogger("issue-creator");
 
@@ -34,12 +36,33 @@ export class IssueCreator {
     return { repo, number, url };
   }
 
+  getOpenOrchestratorIssueCount(repo: string): number {
+    try {
+      const raw = execSync(
+        `gh issue list --repo ${shellEscape(repo)} --state open --label orchestrator --json number -L 100`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+      if (!raw) return 0;
+      return (JSON.parse(raw) as unknown[]).length;
+    } catch {
+      return 0; // fail-open
+    }
+  }
+
   createAcrossRepos(improvement: DetectedImprovement): CreatedIssue[] {
     const created: CreatedIssue[] = [];
 
     for (const agentName of improvement.affected_agents) {
       const agent = this.config.agents[agentName];
       if (!agent?.github) continue;
+
+      const openCount = this.getOpenOrchestratorIssueCount(agent.github);
+      if (openCount >= MAX_OPEN_ORCHESTRATOR_ISSUES) {
+        this.log.warn("Skipping issue creation: too many open orchestrator issues", {
+          repo: agent.github, openCount, threshold: MAX_OPEN_ORCHESTRATOR_ISSUES,
+        });
+        continue;
+      }
 
       const body = this.formatIssueBody(improvement, agentName);
 

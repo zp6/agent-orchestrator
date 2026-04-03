@@ -65,4 +65,51 @@ describe("reportResult", () => {
     await reportResult(config, task);
     expect(mockExecSync).not.toHaveBeenCalled();
   });
+
+  describe("comment dedup", () => {
+    it("skips posting when result comment already exists", async () => {
+      mockExecSync.mockImplementation((cmd: string) => {
+        if (typeof cmd === "string" && cmd.includes("gh api")) {
+          return "**[test-agent] Orchestrator Result:**\n\nPrevious result";
+        }
+        return "";
+      });
+      const task = makeTask({ source: "github", source_ref: "owner/repo#42", result: "New result", agent_name: "test-agent" });
+      await reportResult(config, task);
+      // Only the dedup check call, no comment posting
+      expect(mockExecSync).toHaveBeenCalledTimes(1);
+      expect(mockExecSync).toHaveBeenCalledWith(
+        expect.stringContaining("gh api"),
+        expect.any(Object),
+      );
+    });
+
+    it("posts comment when no existing result comment", async () => {
+      mockExecSync.mockImplementation((cmd: string) => {
+        if (typeof cmd === "string" && cmd.includes("gh api")) return "Some other comment";
+        return "";
+      });
+      const task = makeTask({ source: "github", source_ref: "owner/repo#42", result: "Done", agent_name: "test-agent" });
+      await reportResult(config, task);
+      expect(mockExecSync).toHaveBeenCalledTimes(2);
+      expect(mockExecSync).toHaveBeenLastCalledWith(
+        expect.stringContaining("gh issue comment"),
+        expect.any(Object),
+      );
+    });
+
+    it("fails open when dedup check errors", async () => {
+      mockExecSync.mockImplementation((cmd: string) => {
+        if (typeof cmd === "string" && cmd.includes("gh api")) throw new Error("API error");
+        return "";
+      });
+      const task = makeTask({ source: "github", source_ref: "owner/repo#42", result: "Done" });
+      await reportResult(config, task);
+      expect(mockExecSync).toHaveBeenCalledTimes(2);
+      expect(mockExecSync).toHaveBeenLastCalledWith(
+        expect.stringContaining("gh issue comment"),
+        expect.any(Object),
+      );
+    });
+  });
 });

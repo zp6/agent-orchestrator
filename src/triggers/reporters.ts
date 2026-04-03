@@ -26,12 +26,30 @@ function reportToGitHub(task: Task): void {
   const repo = sourceRef.slice(0, hashIndex);
   const issueNumber = sourceRef.slice(hashIndex + 1);
 
+  if (hasExistingResultComment(repo, issueNumber, task.agent_name ?? undefined)) {
+    return;
+  }
+
   const comment = formatComment(task.result!, task.agent_name ?? undefined);
 
   execSync(
     `gh issue comment ${issueNumber} --repo ${repo} --body ${shellEscape(comment)}`,
     { encoding: "utf-8", timeout: 30000 },
   );
+}
+
+function hasExistingResultComment(repo: string, issueNumber: string, agentName?: string): boolean {
+  try {
+    const prefix = agentName ? `**[${agentName}] Orchestrator Result:**` : `**[orchestrator] Result:**`;
+    const raw = execSync(
+      `gh api "repos/${repo}/issues/${issueNumber}/comments?per_page=100" --jq '.[].body'`,
+      { encoding: "utf-8", timeout: 15000 },
+    ).trim();
+    if (!raw) return false;
+    return raw.split("\n").some((line) => line.startsWith(prefix));
+  } catch {
+    return false; // fail-open
+  }
 }
 
 function formatComment(result: string, agentName?: string): string {

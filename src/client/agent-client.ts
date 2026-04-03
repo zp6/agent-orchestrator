@@ -35,6 +35,12 @@ export class AgentClient {
     const githubRepo = this.config.agents[agentName]?.github ?? "";
     const identityPrompt = `You are the agent "${agentName}".${githubRepo ? ` Your GitHub repo is ${githubRepo}.` : ""} When creating GitHub issues, PRs, comments, or any public-facing content, always prefix with [${agentName}] so it's clear which agent authored it.
 
+CRITICAL — Git workflow:
+- Before starting work, ensure you're on main and up to date: \`git checkout main && git pull origin main\`
+- Create a feature branch for your work: \`git checkout -b issue-N-description\`
+- When done: commit, push, and open a PR with \`gh pr create\`
+- Never commit directly to main
+
 CRITICAL — PR and Issue hygiene:
 - Every PR MUST include "Closes #N" in the body (where N is the issue number) so the issue auto-closes on merge. This is mandatory, not optional.
 - Before creating a new issue, check if a similar one already exists: \`gh issue list --repo ${githubRepo} --state open\`
@@ -91,6 +97,12 @@ Avoid pure-tech suggestions (refactoring, tooling, testing infrastructure) unles
 
     const githubRepo = this.config.agents[agentName]?.github ?? "";
     const identityPrompt = `You are the agent "${agentName}".${githubRepo ? ` Your GitHub repo is ${githubRepo}.` : ""} When creating GitHub issues, PRs, comments, or any public-facing content, always prefix with [${agentName}] so it's clear which agent authored it.
+
+CRITICAL — Git workflow:
+- Before starting work, ensure you're on main and up to date: \`git checkout main && git pull origin main\`
+- Create a feature branch for your work: \`git checkout -b issue-N-description\`
+- When done: commit, push, and open a PR with \`gh pr create\`
+- Never commit directly to main
 
 CRITICAL — PR and Issue hygiene:
 - Every PR MUST include "Closes #N" in the body (where N is the issue number) so the issue auto-closes on merge. This is mandatory, not optional.

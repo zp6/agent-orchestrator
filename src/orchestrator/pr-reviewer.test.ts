@@ -10,17 +10,19 @@ vi.mock("../client/proxy-client.js", () => ({
   }),
 }));
 
+let mockPRViewResponse = JSON.stringify({
+  number: 9,
+  title: "Test PR",
+  body: "Description",
+  author: { login: "agent" },
+  headRefName: "feature-branch",
+  changedFiles: 2,
+});
+
 vi.mock("node:child_process", () => ({
   execSync: vi.fn().mockImplementation((cmd: string) => {
     if (cmd.includes("gh pr view")) {
-      return JSON.stringify({
-        number: 9,
-        title: "Test PR",
-        body: "Description",
-        author: { login: "agent" },
-        headRefName: "feature-branch",
-        changedFiles: 2,
-      });
+      return mockPRViewResponse;
     }
     if (cmd.includes("gh pr diff")) {
       return "+added line\n-removed line";
@@ -31,7 +33,7 @@ vi.mock("node:child_process", () => ({
         { number: 10, title: "Another PR" },
       ]);
     }
-    if (cmd.includes("gh pr review") || cmd.includes("gh pr edit") || cmd.includes("gh pr comment")) {
+    if (cmd.includes("gh pr review") || cmd.includes("gh pr edit") || cmd.includes("gh pr comment") || cmd.includes("gh pr merge")) {
       return "";
     }
     return "";
@@ -42,11 +44,22 @@ const config: OrchestratorConfig = {
   proxy: { url: "http://localhost:3457", timeout_ms: 5000 },
   orchestrator_dir: "/tmp/orchestrator",
   base_dir: "/projects",
-  agents: {},
+  agents: {
+    "agent-a": { dir: "a", description: "A", capabilities: ["test"], owns_topics: ["a"], github: "owner/repo" },
+  },
 };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Reset to default non-agent PR
+  mockPRViewResponse = JSON.stringify({
+    number: 9,
+    title: "Test PR",
+    body: "Description",
+    author: { login: "agent" },
+    headRefName: "feature-branch",
+    changedFiles: 2,
+  });
 });
 
 describe("PRReviewer", () => {
@@ -121,5 +134,65 @@ describe("PRReviewer", () => {
     const results = await reviewer.reviewOpenPRs("owner/repo");
 
     expect(results).toHaveLength(2);
+  });
+
+  describe("PR body linter", () => {
+    it("short-circuits agent PR without Closes #N to request-changes", async () => {
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Add feature",
+        body: "Some description without issue ref",
+        author: { login: "agent" },
+        headRefName: "feature-branch",
+        changedFiles: 2,
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("request-changes");
+      expect(result.comment).toContain("Closes #N");
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    it("allows agent PR with Closes #N to proceed to LLM review", async () => {
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Add feature",
+        body: "Implements the feature.\n\nCloses #42",
+        author: { login: "agent" },
+        headRefName: "feature-branch",
+        changedFiles: 2,
+      });
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Good", reason: "Clean" }) }],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("approve");
+      expect(mockCreate).toHaveBeenCalled();
+    });
+
+    it("does not lint non-agent PRs", async () => {
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "Human PR without issue ref",
+        body: "Some changes",
+        author: { login: "human" },
+        headRefName: "feature-branch",
+        changedFiles: 2,
+      });
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Good", reason: "Clean" }) }],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("approve");
+      expect(mockCreate).toHaveBeenCalled();
+    });
   });
 });

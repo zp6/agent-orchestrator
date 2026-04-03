@@ -2,6 +2,7 @@ import { execSync } from "node:child_process";
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { OrchestratorConfig } from "../config/schema.js";
+import { Deployer } from "./deployer.js";
 
 export interface PRInfo {
   number: number;
@@ -37,12 +38,27 @@ Be thorough but pragmatic. Approve good work. Don't block on style nitpicks. Esc
 
 export class PRReviewer {
   private log = createLogger("pr-reviewer");
+  private deployer: Deployer;
 
-  constructor(private config: OrchestratorConfig) {}
+  constructor(private config: OrchestratorConfig) {
+    this.deployer = new Deployer(config);
+  }
 
   async reviewPR(repo: string, prNumber: number): Promise<PRReviewResult> {
     const pr = this.fetchPRInfo(repo, prNumber);
     this.log.info("Reviewing PR", { repo, prNumber, title: pr.title, filesChanged: pr.files_changed });
+
+    // PR body linter: agent PRs must include "Closes #N"
+    if (this.isAgentPR(pr) && !this.hasIssueRef(pr)) {
+      const result: PRReviewResult = {
+        decision: "request-changes",
+        comment: 'PR body must include "Closes #N" (where N is the issue number) so the issue auto-closes on merge. Please update the PR body and push again.',
+        reason: "PR body missing issue reference (Closes #N)",
+      };
+      this.log.info("PR body linter: missing issue ref", { repo, prNumber, title: pr.title });
+      await this.executeDecision(repo, prNumber, result);
+      return result;
+    }
 
     const client = createLLMClient(this.config
     );
@@ -105,6 +121,8 @@ export class PRReviewer {
             { encoding: "utf-8", timeout: 30000 },
           );
           this.log.info("PR approved and merged", { repo, prNumber });
+          // Restart repo-based agent containers so they pull latest main
+          await this.restartAgentsForRepo(repo);
         } catch (err) {
           this.log.error("Failed to approve/merge PR", { repo, prNumber, error: String(err) });
         }
@@ -151,6 +169,24 @@ export class PRReviewer {
           this.log.error("Failed to escalate PR", { repo, prNumber, error: String(err) });
         }
         break;
+    }
+  }
+
+  private isAgentPR(pr: PRInfo): boolean {
+    const agentNames = Object.keys(this.config.agents);
+    return agentNames.some((name) => pr.title.includes(`[${name}]`));
+  }
+
+  private hasIssueRef(pr: PRInfo): boolean {
+    return /(?:closes|fixes|resolves)\s+#\d+/i.test(pr.body);
+  }
+
+  private async restartAgentsForRepo(repo: string): Promise<void> {
+    for (const [name, agent] of Object.entries(this.config.agents)) {
+      if (agent.github === repo && agent.repo) {
+        this.log.info("Restarting agent after PR merge", { agentName: name, repo });
+        await this.deployer.restartAgent(name);
+      }
     }
   }
 

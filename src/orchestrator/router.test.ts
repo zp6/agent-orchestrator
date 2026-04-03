@@ -10,25 +10,20 @@ describe("Router", () => {
   const router = new Router(config);
 
   it("routes by topic keyword", () => {
-    const matches = router.route("tell me about cheese");
-    expect(matches[0].agentName).toBe("cheese-hater");
+    const matches = router.route("fix the proxy docker container");
+    expect(matches[0].agentName).toBe("claude-proxy");
     expect(matches[0].confidence).toBeGreaterThan(0);
   });
 
   it("routes by agent name mention", () => {
-    const matches = router.route("fix something in hermitcraft-agent");
-    expect(matches[0].agentName).toBe("hermitcraft-agent");
+    const matches = router.route("fix something in claude-proxy");
+    expect(matches[0].agentName).toBe("claude-proxy");
     expect(matches[0].confidence).toBeGreaterThanOrEqual(0.8);
   });
 
-  it("routes hermitcraft tasks", () => {
-    const matches = router.route("research the latest minecraft hermitcraft season");
-    expect(matches[0].agentName).toBe("hermitcraft-agent");
-  });
-
-  it("routes cheese tasks", () => {
-    const matches = router.route("rate some cheese for me");
-    expect(matches[0].agentName).toBe("cheese-hater");
+  it("routes proxy tasks", () => {
+    const matches = router.route("update the docker infrastructure and proxy auth");
+    expect(matches[0].agentName).toBe("claude-proxy");
   });
 
   it("returns empty array for unmatched tasks", () => {
@@ -37,7 +32,7 @@ describe("Router", () => {
   });
 
   it("returns matches sorted by confidence descending", () => {
-    const matches = router.route("hermitcraft minecraft smp");
+    const matches = router.route("docker container proxy infrastructure");
     for (let i = 1; i < matches.length; i++) {
       expect(matches[i].confidence).toBeLessThanOrEqual(matches[i - 1].confidence);
     }
@@ -48,7 +43,7 @@ describe("Router.routeToRepo", () => {
   const router = new Router(config);
 
   it("finds agent by GitHub repo", () => {
-    expect(router.routeToRepo("rapartlu/cheese-hater")).toBe("cheese-hater");
+    expect(router.routeToRepo("rapartlu/claude-proxy")).toBe("claude-proxy");
   });
 
   it("returns undefined for unknown repo", () => {

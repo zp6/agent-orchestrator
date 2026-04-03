@@ -27,6 +27,7 @@ agents:
 
   claude-proxy:
     dir: "claude-proxy"
+    repo: "git@github.com:rapartlu/claude-proxy.git"
     description: "Development proxy server that wraps Claude Code CLI instances and exposes them via the Anthropic Messages API. Manages agent containers, Docker lifecycle, and multi-agent routing."
     capabilities: ["typescript", "docker", "proxy", "api", "infrastructure"]
     github: "rapartlu/claude-proxy"
@@ -37,26 +38,3 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
-  hermitcraft-agent:
-    dir: "hermitcraft-agent"
-    description: "Self-learning Hermitcraft knowledge agent — researches, organizes, and maintains a comprehensive knowledge base about the Hermitcraft Minecraft SMP"
-    capabilities: ["research", "web-search", "knowledge-base", "minecraft", "hermitcraft"]
-    github: "rapartlu/agent-hermitcraft"
-    owns_topics: ["hermitcraft", "minecraft", "hermits", "smp"]
-    docker:
-      port: 3469
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "continue"
-
-  cheese-hater:
-    dir: "cheese-hater"
-    description: "The ultimate cheese-hating agent — rates, reviews, and dismantles every argument for cheese"
-    capabilities: ["testing", "cheese-hatred", "express", "api"]
-    github: "rapartlu/cheese-hater"
-    owns_topics: ["test", "cheese"]
-    docker:
-      port: 3457
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "continue"

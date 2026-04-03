@@ -10,12 +10,12 @@ describe("loadConfig", () => {
     expect(config.proxy.url).toMatch(/^http:\/\/(localhost|host\.docker\.internal):3457$/);
     expect(config.proxy.timeout_ms).toBe(300000);
     expect(config.base_dir).toBeTruthy();
-    expect(Object.keys(config.agents).length).toBeGreaterThanOrEqual(3);
+    expect(Object.keys(config.agents).length).toBeGreaterThanOrEqual(2);
   });
 
   it("contains active agents", () => {
     const config = loadConfig(configPath);
-    const expected = ["orchestrator-llm", "hermitcraft-agent", "cheese-hater"];
+    const expected = ["orchestrator-llm", "claude-proxy"];
     for (const name of expected) {
       expect(config.agents[name]).toBeDefined();
     }
@@ -56,8 +56,9 @@ describe("getAgentDir", () => {
 
   it("resolves agent directory path", () => {
     const config = loadConfig(configPath);
-    const dir = getAgentDir(config, "cheese-hater");
-    expect(dir).toBe(resolve(config.base_dir, "cheese-hater"));
+    const dir = getAgentDir(config, "claude-proxy");
+    // claude-proxy has a repo field, so getAgentDir returns the container path
+    expect(dir).toBe("/home/claude/workspace/claude-proxy");
   });
 
   it("throws for unknown agent", () => {
