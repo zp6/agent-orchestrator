@@ -34,6 +34,7 @@ export interface AgentConfig {
   owns_topics: string[];
   system_prompt?: string;
   max_concurrent?: number;
+  stale_timeout_ms?: number;
   docker?: AgentDockerConfig;
 }
 

@@ -138,15 +138,17 @@ export class Daemon {
   }
 
   private checkStaleTasks(time: string): void {
-    const STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
+    const DEFAULT_STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
     const dispatched = this.store.listTasks({ status: "dispatched", limit: 20 });
     const now = Date.now();
 
     for (const task of dispatched) {
+      const agentConfig = task.agent_name ? this.config.agents[task.agent_name] : undefined;
+      const staleThresholdMs = agentConfig?.stale_timeout_ms ?? DEFAULT_STALE_THRESHOLD_MS;
       const age = now - new Date(task.updated_at).getTime();
-      if (age > STALE_THRESHOLD_MS) {
+      if (age > staleThresholdMs) {
         console.log(`[${time}] Stale task ${task.id.slice(0, 8)} (${task.agent_name}): dispatched ${Math.round(age / 60000)}min ago — marking failed`);
-        this.log.warn("Stale task detected", { taskId: task.id, agentName: task.agent_name, ageMinutes: Math.round(age / 60000) });
+        this.log.warn("Stale task detected", { taskId: task.id, agentName: task.agent_name, ageMinutes: Math.round(age / 60000), staleThresholdMs });
         this.store.updateTask(task.id, {
           status: "failed",
           result: `Timed out: dispatched ${Math.round(age / 60000)} minutes ago with no response`,
