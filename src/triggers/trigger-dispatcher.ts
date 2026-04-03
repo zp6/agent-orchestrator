@@ -18,13 +18,9 @@ export interface TriggerResult {
   errors: string[];
 }
 
-/**
- * Check if an agent already has a task in-flight (dispatched but not done/failed).
- * Only one task per agent at a time to avoid context conflicts.
- */
+/** @deprecated Use store.hasActiveTask() directly */
 function hasInFlightTask(store: StateStore, agentName: string): boolean {
-  const tasks = store.listTasks({ status: "dispatched", agent_name: agentName, limit: 1 });
-  return tasks.length > 0;
+  return store.hasActiveTask(agentName);
 }
 
 /**

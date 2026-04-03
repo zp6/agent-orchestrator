@@ -140,6 +140,11 @@ export class StateStore {
     return this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Task | undefined;
   }
 
+  hasActiveTask(agentName: string): boolean {
+    const tasks = this.listTasks({ status: "dispatched", agent_name: agentName, limit: 1 });
+    return tasks.length > 0;
+  }
+
   listTasks(filters?: { status?: TaskStatus; agent_name?: string; limit?: number }): Task[] {
     let sql = "SELECT * FROM tasks WHERE 1=1";
     const params: unknown[] = [];

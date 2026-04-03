@@ -31,6 +31,7 @@ Respond with ONLY a JSON array of decisions (no markdown, no code fences):
 ]
 
 IMPORTANT PRIORITIES:
+- Do NOT dispatch to agents that already have active (dispatched) tasks — they can only handle one task at a time
 - Prefer dispatching PRODUCT WORK (features, content, user-facing improvements) over technical follow-ups
 - Do NOT re-dispatch the same failed technical task more than once — if it failed twice, create an issue instead
 - Do NOT follow up on tasks that are just internal tooling or testing infrastructure
@@ -103,6 +104,14 @@ export class Supervisor {
       const lines = failed.map((t) => `- ${t.id.slice(0, 8)} (${t.agent_name}): ${t.title}\n  Error: ${t.result?.slice(0, 100)}`).join("\n");
       sections.push(`## Recent Failures\n${lines}`);
     }
+
+    // Agent load (active dispatched tasks)
+    const loadLines: string[] = [];
+    for (const name of Object.keys(this.config.agents)) {
+      const active = this.store.listTasks({ status: "dispatched", agent_name: name, limit: 10 });
+      loadLines.push(`- ${name}: ${active.length} active task(s)`);
+    }
+    sections.push(`## Agent Load\n${loadLines.join("\n")}`);
 
     // Agent stats
     const stats = this.store.getAgentStats();

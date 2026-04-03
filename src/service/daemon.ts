@@ -287,15 +287,19 @@ export class Daemon {
         for (const { prNumber, result } of results) {
           console.log(`[${time}] PR review: ${repo}#${prNumber} → ${result.decision} (${result.reason})`);
 
-          // Dispatch feedback to agent when changes are requested
+          // Dispatch feedback to agent when changes are requested (skip if agent busy)
           if (result.decision === "request-changes") {
-            this.log.info("Dispatching PR feedback to agent", { repo, prNumber, agentName });
-            this.dispatcher.dispatch(
-              `Your PR #${prNumber} on ${repo} was reviewed and needs changes:\n\n${result.comment}\n\nPlease fix the issues, commit, and push to the same branch.`,
-              { agentName, source: "manual", title: `[PR feedback] ${repo}#${prNumber}` },
-            ).catch((err) => {
-              this.log.error("Failed to dispatch PR feedback", { repo, prNumber, error: String(err) });
-            });
+            if (this.store.hasActiveTask(agentName)) {
+              this.log.info("Skipping PR feedback dispatch: agent busy", { agentName, repo, prNumber });
+            } else {
+              this.log.info("Dispatching PR feedback to agent", { repo, prNumber, agentName });
+              this.dispatcher.dispatch(
+                `Your PR #${prNumber} on ${repo} was reviewed and needs changes:\n\n${result.comment}\n\nPlease fix the issues, commit, and push to the same branch.`,
+                { agentName, source: "manual", title: `[PR feedback] ${repo}#${prNumber}` },
+              ).catch((err) => {
+                this.log.error("Failed to dispatch PR feedback", { repo, prNumber, error: String(err) });
+              });
+            }
           }
         }
       }
@@ -314,18 +318,23 @@ export class Daemon {
         if (d.action === "none") continue;
 
         if ((d.action === "dispatch" || d.action === "follow-up") && d.agentName && d.message) {
-          try {
-            // Fire-and-forget: don't block the daemon cycle waiting for agent response
-            this.dispatcher.dispatch(d.message, {
-              agentName: d.agentName,
-              title: `[supervisor] ${d.reason.slice(0, 80)}`,
-            }).then((result) => {
-              console.log(`  ${d.action} → ${d.agentName} (task ${result.taskId.slice(0, 8)}): ${d.reason}`);
-            }).catch((err) => {
-              this.log.error("Supervisor dispatch failed", { agentName: d.agentName, error: String(err) });
-            });
-          } catch (err) {
-            console.error(`  Failed ${d.action} → ${d.agentName}: ${err instanceof Error ? err.message : err}`);
+          if (this.store.hasActiveTask(d.agentName)) {
+            this.log.info("Skipping supervisor dispatch: agent busy", { agentName: d.agentName, reason: d.reason });
+            console.log(`  ${d.action} → ${d.agentName} SKIPPED (agent busy): ${d.reason}`);
+          } else {
+            try {
+              // Fire-and-forget: don't block the daemon cycle waiting for agent response
+              this.dispatcher.dispatch(d.message, {
+                agentName: d.agentName,
+                title: `[supervisor] ${d.reason.slice(0, 80)}`,
+              }).then((result) => {
+                console.log(`  ${d.action} → ${d.agentName} (task ${result.taskId.slice(0, 8)}): ${d.reason}`);
+              }).catch((err) => {
+                this.log.error("Supervisor dispatch failed", { agentName: d.agentName, error: String(err) });
+              });
+            } catch (err) {
+              console.error(`  Failed ${d.action} → ${d.agentName}: ${err instanceof Error ? err.message : err}`);
+            }
           }
         } else {
           console.log(`  ${d.action}${d.agentName ? ` → ${d.agentName}` : ""}: ${d.reason}`);

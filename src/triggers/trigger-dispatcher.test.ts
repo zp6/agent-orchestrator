@@ -61,6 +61,7 @@ describe("dispatchGitHubIssues", () => {
       markProcessed: vi.fn(),
       getTask: vi.fn().mockReturnValue(null),
       listTasks: vi.fn().mockReturnValue([]),
+      hasActiveTask: vi.fn().mockReturnValue(false),
       // checkDuplicate calls this; return undefined by default (no prior task)
       findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
@@ -135,6 +136,7 @@ describe("dispatchLinearChecks", () => {
       isProcessed: vi.fn().mockReturnValue(false),
       markProcessed: vi.fn(),
       listTasks: vi.fn().mockReturnValue([]),
+      hasActiveTask: vi.fn().mockReturnValue(false),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "linear-agent", response: { content: "done" } }),
@@ -179,6 +181,7 @@ describe("dispatchSlackChecks", () => {
       isProcessed: vi.fn().mockReturnValue(false),
       markProcessed: vi.fn(),
       listTasks: vi.fn().mockReturnValue([]),
+      hasActiveTask: vi.fn().mockReturnValue(false),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "slack-agent", response: { content: "done" } }),
