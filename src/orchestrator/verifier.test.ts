@@ -109,9 +109,12 @@ describe("Verifier", () => {
     await expect(verifier.verify(task.id)).rejects.toThrow("not done");
   });
 
-  describe("verifyAndRevise — capacity guard", () => {
-    it("defers verification when the agent already has an active (dispatched) task", async () => {
-      // Create the task to verify (done)
+  describe("verifyAndRevise — runs independently of agent state", () => {
+    it("verifies even when agent has active tasks (uses LLM client, not agent)", async () => {
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ approved: true, score: 0.9, notes: "Good" }) }],
+      });
+
       const done = store.createTask({
         title: "Done task",
         description: "Do something",
@@ -120,7 +123,7 @@ describe("Verifier", () => {
       });
       store.updateTask(done.id, { status: "done", result: "Result" });
 
-      // Create another task for the same agent that is still dispatched
+      // Agent has an active task — verification should still proceed
       const active = store.createTask({
         title: "Active task",
         source: "manual",
@@ -131,40 +134,9 @@ describe("Verifier", () => {
       const verifier = new Verifier(config, store);
       const result = await verifier.verifyAndRevise(done.id);
 
-      // Should return deferred sentinel without running the LLM
-      expect(result.notes).toBe("Deferred: agent busy");
-      expect(result.approved).toBe(false);
-      expect(mockCreate).not.toHaveBeenCalled();
-
-      // verification_status must remain NULL so the daemon retries next cycle
-      const updated = store.getTask(done.id);
-      expect(updated?.verification_status).toBeNull();
-    });
-
-    it("defers verification when the agent already has an active (in_progress) task", async () => {
-      const done = store.createTask({
-        title: "Done task",
-        description: "Do something",
-        source: "manual",
-        agent_name: "busy-agent",
-      });
-      store.updateTask(done.id, { status: "done", result: "Result" });
-
-      const active = store.createTask({
-        title: "Active task",
-        source: "manual",
-        agent_name: "busy-agent",
-      });
-      store.updateTask(active.id, { status: "in_progress" });
-
-      const verifier = new Verifier(config, store);
-      const result = await verifier.verifyAndRevise(done.id);
-
-      expect(result.notes).toBe("Deferred: agent busy");
-      expect(mockCreate).not.toHaveBeenCalled();
-
-      const updated = store.getTask(done.id);
-      expect(updated?.verification_status).toBeNull();
+      // LLM was called — verification was NOT deferred
+      expect(mockCreate).toHaveBeenCalled();
+      expect(result.approved).toBe(true);
     });
 
     it("proceeds with verification when the agent is idle (only done tasks)", async () => {
@@ -219,13 +191,9 @@ describe("Verifier.verifyAndRevise — retry mechanism", () => {
     const task = store.createTask({ title: "Test task", description: "Do something", source: "manual", agent_name: "busy-agent" });
     store.updateTask(task.id, { status: "done", result: "Partial work" });
 
-    // Spy on hasActiveTask so that:
-    //   - pre-verify check (first call): returns false → lets the LLM run
-    //   - post-verify check (second call): returns true → defers revision dispatch
-    // This tests the post-verify capacity guard (the pre-verify guard is covered by
-    // the "verifyAndRevise — capacity guard" describe block above).
+    // Spy on hasActiveTask — the post-verify capacity guard checks before re-dispatch.
+    // (The pre-verify guard was removed since verification uses the LLM client, not the agent.)
     const hasActiveTaskSpy = vi.spyOn(store, "hasActiveTask")
-      .mockReturnValueOnce(false)
       .mockReturnValueOnce(true);
 
     const verifier = new Verifier(config, store);
