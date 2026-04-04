@@ -31,6 +31,7 @@ export interface Task {
   retry_count: number;
   /** ISO timestamp after which the task is eligible for retry, or null if not scheduled. */
   next_retry_at: string | null;
+  reported: number;
   created_at: string;
   updated_at: string;
 }
@@ -290,6 +291,10 @@ export class StateStore {
         ALTER TABLE tasks ADD COLUMN next_retry_at TEXT;
         CREATE INDEX IF NOT EXISTS idx_tasks_retry ON tasks(next_retry_at) WHERE next_retry_at IS NOT NULL;
       `);
+    }
+
+    if (!colNames.has("reported")) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN reported INTEGER NOT NULL DEFAULT 0");
     }
   }
 
@@ -903,6 +908,10 @@ export class StateStore {
       score_delta,
       cycle_duration_delta,
     };
+  }
+
+  markReported(taskId: string): void {
+    this.db.prepare("UPDATE tasks SET reported = 1 WHERE id = ?").run(taskId);
   }
 
   close(): void {
