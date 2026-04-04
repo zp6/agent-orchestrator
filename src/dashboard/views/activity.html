@@ -107,7 +107,7 @@
         const isLong = content.length > 500;
 
         return `
-          <div class="message-card ${dirClass} ${isFailed ? 'failed-task' : ''}">
+          <div class="message-card ${dirClass} ${taskStatus === 'failed' ? 'failed-task' : ''}">
             <div class="flex justify-between items-start mb-2">
               <div>
                 <span class="badge ${badgeClass}">${dirLabel}</span>
