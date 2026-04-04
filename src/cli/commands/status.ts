@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { StateStore, type Task, type SystemMetrics, type ScoreDistribution, type ScoreTrend } from "../../state/store.js";
+import { StateStore, type Task, type SystemMetrics, type ScoreDistribution, type ScoreTrend, type MetricsTrend } from "../../state/store.js";
 import { loadConfig } from "../../config/schema.js";
 
 const STATUS_COLORS: Record<string, (s: string) => string> = {
@@ -197,6 +197,124 @@ function printMetrics(metrics: SystemMetrics, improvement?: ImprovementStats): v
   }
 }
 
+// Unicode block characters for sparklines, lightest → darkest
+const SPARK_CHARS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+/**
+ * Build a Unicode sparkline from an array of nullable numbers.
+ * Null / undefined values are rendered as a dim dash.
+ */
+function sparkline(values: Array<number | null>, width = 8): string {
+  const defined = values.filter((v): v is number => v !== null);
+  if (defined.length === 0) return chalk.dim("─".repeat(width));
+
+  const min = Math.min(...defined);
+  const max = Math.max(...defined);
+  const range = max - min || 1;
+
+  return values
+    .map((v) => {
+      if (v === null) return chalk.dim("▁");
+      const idx = Math.min(SPARK_CHARS.length - 1, Math.floor(((v - min) / range) * SPARK_CHARS.length));
+      return SPARK_CHARS[idx];
+    })
+    .join("");
+}
+
+/** Format a Δ delta value with ↑/↓ arrow and color. */
+function formatDelta(delta: number | null, unit = "", invert = false): string {
+  if (delta === null) return chalk.dim("—");
+  const positive = invert ? delta < 0 : delta > 0;
+  const color = positive ? chalk.green : delta === 0 ? chalk.dim : chalk.red;
+  const arrow = delta > 0 ? "↑" : delta < 0 ? "↓" : "→";
+  const sign = delta > 0 ? "+" : "";
+  return color(`${arrow} ${sign}${delta.toFixed(2)}${unit}`);
+}
+
+function printTrend(trend: MetricsTrend): void {
+  const { days, task_days, cycle_days } = trend;
+  console.log(chalk.bold(`Metrics Trend — Last ${days} Days\n`));
+
+  // ── Task throughput table ──────────────────────────────────────────────
+  console.log(chalk.bold("Task Throughput"));
+  const taskHeader = `  ${"Date".padEnd(12)} ${"Done".padStart(5)} ${"Failed".padStart(7)} ${"Avg Time".padStart(10)} ${"Pass%".padStart(7)} ${"Score".padStart(6)}  Throughput`;
+  console.log(chalk.dim(taskHeader));
+  console.log(chalk.dim("  " + "─".repeat(65)));
+
+  const completedValues = task_days.map((d) => d.tasks_completed as number | null);
+  const scoreValues = task_days.map((d) => d.avg_quality_score);
+  const passValues = task_days.map((d) => d.verification_pass_rate);
+
+  if (task_days.length === 0) {
+    console.log(chalk.dim("  No task data in this window"));
+  } else {
+    for (const day of task_days) {
+      const date = chalk.dim(day.date);
+      const done = chalk.green(String(day.tasks_completed).padStart(5));
+      const failed = (day.tasks_failed > 0 ? chalk.red(String(day.tasks_failed)) : chalk.dim("0")).padStart(7);
+      const dur = formatDuration(day.avg_duration_ms).padStart(10);
+      const pass = formatPercent(day.verification_pass_rate).padStart(7);
+      const score = (day.avg_quality_score !== null ? day.avg_quality_score.toFixed(2) : chalk.dim("—")).padStart(6);
+      // Mini bar: 1 char per task completed (max 8)
+      const bar = "█".repeat(Math.min(day.tasks_completed, 8));
+      console.log(`  ${date.padEnd(14)} ${done} ${failed} ${dur} ${pass} ${score}  ${chalk.cyan(bar)}`);
+    }
+  }
+
+  // Throughput sparkline across the window
+  console.log();
+  console.log(`  Throughput sparkline: ${chalk.cyan(sparkline(completedValues, days))}`);
+  console.log(`  Score sparkline:      ${chalk.cyan(sparkline(scoreValues, days))}`);
+  console.log(`  Pass-rate sparkline:  ${chalk.cyan(sparkline(passValues, days))}`);
+
+  // ── Daemon cycle table ─────────────────────────────────────────────────
+  console.log(chalk.bold("\nDaemon Cycle Duration"));
+  const cycleHeader = `  ${"Date".padEnd(12)} ${"Cycles".padStart(7)} ${"Avg Duration".padStart(14)}`;
+  console.log(chalk.dim(cycleHeader));
+  console.log(chalk.dim("  " + "─".repeat(38)));
+
+  if (cycle_days.length === 0) {
+    console.log(chalk.dim("  No cycle data in this window"));
+  } else {
+    for (const day of cycle_days) {
+      const date = chalk.dim(day.date);
+      const count = String(day.cycle_count).padStart(7);
+      const dur = formatDuration(day.avg_duration_ms).padStart(14);
+      console.log(`  ${date.padEnd(14)} ${count} ${dur}`);
+    }
+  }
+
+  // Cycle duration sparkline
+  const cycleDurValues = cycle_days.map((d) => d.avg_duration_ms);
+  console.log();
+  console.log(`  Cycle duration sparkline: ${chalk.cyan(sparkline(cycleDurValues, days))}`);
+
+  // ── Delta summary vs prior period ──────────────────────────────────────
+  console.log(chalk.bold(`\nΔ vs Prior ${days} Days`));
+  console.log(
+    `  Throughput:     ${formatDelta(trend.throughput_delta, " tasks/day")}`,
+  );
+  console.log(
+    `  Pass rate:      ${formatDelta(trend.pass_rate_delta !== null ? trend.pass_rate_delta * 100 : null, "%")}`,
+  );
+  console.log(
+    `  Quality score:  ${formatDelta(trend.score_delta)}`,
+  );
+  console.log(
+    // invert=true: lower cycle duration is better
+    `  Cycle duration: ${formatDelta(trend.cycle_duration_delta !== null ? trend.cycle_duration_delta / 1000 : null, "s", true)}`,
+  );
+
+  if (
+    trend.throughput_delta === null &&
+    trend.pass_rate_delta === null &&
+    trend.score_delta === null &&
+    trend.cycle_duration_delta === null
+  ) {
+    console.log(chalk.dim("  (Not enough data to compute deltas — need data in both windows)"));
+  }
+}
+
 export function registerStatusCommand(program: Command): void {
   program
     .command("status")
@@ -207,8 +325,17 @@ export function registerStatusCommand(program: Command): void {
     .option("-T, --type <type>", "Filter by task type (implementation, research)")
     .option("-n, --limit <n>", "Number of tasks to show", "20")
     .option("-m, --metrics", "Show aggregated system metrics")
-    .action((taskId?: string, opts?: { agent?: string; state?: string; type?: string; limit?: string; metrics?: boolean }) => {
+    .option("--trend [days]", "Show day-by-day metrics trend (default: 7 days)")
+    .action((taskId?: string, opts?: { agent?: string; state?: string; type?: string; limit?: string; metrics?: boolean; trend?: string | boolean }) => {
       const store = new StateStore();
+
+      if (opts?.trend !== undefined) {
+        const days = typeof opts.trend === "string" ? parseInt(opts.trend, 10) || 7 : 7;
+        const trend = store.getDailyTrend(days);
+        printTrend(trend);
+        store.close();
+        return;
+      }
 
       if (opts?.metrics) {
         const metrics = store.getMetrics();

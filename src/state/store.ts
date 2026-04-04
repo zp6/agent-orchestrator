@@ -103,6 +103,47 @@ export interface ScoreTrend {
   window_size: number;
 }
 
+/** Per-day task metrics for trend view */
+export interface DailyTaskMetrics {
+  /** ISO date string: 'YYYY-MM-DD' */
+  date: string;
+  tasks_completed: number;
+  tasks_failed: number;
+  /** Average ms from creation → done for tasks completed on this day */
+  avg_duration_ms: number | null;
+  /** Fraction of verified tasks that passed on this day */
+  verification_pass_rate: number | null;
+  /** Average quality score for verified tasks on this day */
+  avg_quality_score: number | null;
+}
+
+/** Per-day daemon cycle metrics for trend view */
+export interface DailyCycleMetrics {
+  /** ISO date string: 'YYYY-MM-DD' */
+  date: string;
+  cycle_count: number;
+  avg_duration_ms: number | null;
+}
+
+/**
+ * Time-series metrics over a rolling N-day window, plus Δ deltas
+ * comparing that window to the equally-sized prior window.
+ */
+export interface MetricsTrend {
+  /** Number of days in the window */
+  days: number;
+  task_days: DailyTaskMetrics[];
+  cycle_days: DailyCycleMetrics[];
+  /** Δ avg tasks-completed/day vs prior period. Positive = more throughput. */
+  throughput_delta: number | null;
+  /** Δ verification pass rate vs prior period */
+  pass_rate_delta: number | null;
+  /** Δ avg quality score vs prior period */
+  score_delta: number | null;
+  /** Δ avg cycle duration (ms) vs prior period. Negative = faster. */
+  cycle_duration_delta: number | null;
+}
+
 export interface SystemMetrics {
   /** Aggregated across all agents / tasks */
   total_tasks: number;
@@ -731,6 +772,136 @@ export class StateStore {
         avg_duration_ms: cycleRow.avg_duration_ms,
         last_cycle_at: cycleRow.last_cycle_at,
       },
+    };
+  }
+
+  /**
+   * Compute a time-series trend over the last `days` days, and compare
+   * it to the equally-sized prior window to produce Δ deltas.
+   *
+   * Task rows are bucketed by the date part of `updated_at` (completion date)
+   * so that "tasks_completed" counts tasks that finished on that day.
+   * Cycle rows are bucketed by date part of `started_at`.
+   *
+   * Only top-level tasks (parent_task_id IS NULL) are counted.
+   */
+  getDailyTrend(days = 7): MetricsTrend {
+    // We need 2× days to compute prior-period deltas
+    const windowDays = days;
+
+    // --- Task trend: bucket by completion date ---
+    const taskRows = this.db.prepare(`
+      SELECT
+        date(updated_at)  AS date,
+        COALESCE(SUM(CASE WHEN status = 'done'   THEN 1 ELSE 0 END), 0) AS tasks_completed,
+        COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS tasks_failed,
+        AVG(CASE
+          WHEN status = 'done'
+          THEN (julianday(updated_at) - julianday(created_at)) * 86400000.0
+        END) AS avg_duration_ms,
+        1.0 * SUM(CASE WHEN verification_status = 'approved' THEN 1 ELSE 0 END) /
+          NULLIF(SUM(CASE WHEN verification_status IN ('approved','rejected') THEN 1 ELSE 0 END), 0)
+          AS verification_pass_rate,
+        AVG(CASE WHEN verification_status IS NOT NULL THEN quality_score END) AS avg_quality_score
+      FROM tasks
+      WHERE parent_task_id IS NULL
+        AND date(updated_at) >= date('now', ? || ' days')
+      GROUP BY date(updated_at)
+      ORDER BY date(updated_at) ASC
+    `).all(`-${windowDays * 2}`) as Array<{
+      date: string;
+      tasks_completed: number;
+      tasks_failed: number;
+      avg_duration_ms: number | null;
+      verification_pass_rate: number | null;
+      avg_quality_score: number | null;
+    }>;
+
+    // --- Cycle trend: bucket by start date ---
+    const cycleRows = this.db.prepare(`
+      SELECT
+        date(started_at) AS date,
+        COUNT(*) AS cycle_count,
+        AVG(duration_ms) AS avg_duration_ms
+      FROM daemon_cycles
+      WHERE finished_at IS NOT NULL
+        AND date(started_at) >= date('now', ? || ' days')
+      GROUP BY date(started_at)
+      ORDER BY date(started_at) ASC
+    `).all(`-${windowDays * 2}`) as Array<{
+      date: string;
+      cycle_count: number;
+      avg_duration_ms: number | null;
+    }>;
+
+    // Split rows into recent window vs prior window using date comparison
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - windowDays);
+    const cutoffStr = cutoff.toISOString().slice(0, 10); // 'YYYY-MM-DD'
+
+    const recentTaskDays = taskRows.filter((r) => r.date >= cutoffStr);
+    const priorTaskDays = taskRows.filter((r) => r.date < cutoffStr);
+
+    const recentCycleDays = cycleRows.filter((r) => r.date >= cutoffStr);
+    const priorCycleDays = cycleRows.filter((r) => r.date < cutoffStr);
+
+    // Helper: average a nullable numeric field across rows
+    const avgField = <T>(rows: T[], field: keyof T): number | null => {
+      const vals = rows.map((r) => r[field] as number | null).filter((v): v is number => v !== null);
+      return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+    };
+
+    const sum = <T>(rows: T[], field: keyof T): number =>
+      rows.reduce((acc, r) => acc + ((r[field] as number) ?? 0), 0);
+
+    // Throughput: avg tasks_completed per day.
+    // Only compute if both windows have at least one day of data, so we're
+    // comparing apples to apples rather than a real period vs an empty one.
+    const recentThroughput =
+      recentTaskDays.length > 0 && windowDays > 0
+        ? sum(recentTaskDays, "tasks_completed") / windowDays
+        : null;
+    const priorThroughput =
+      priorTaskDays.length > 0 && windowDays > 0
+        ? sum(priorTaskDays, "tasks_completed") / windowDays
+        : null;
+    const throughput_delta =
+      recentThroughput !== null && priorThroughput !== null ? recentThroughput - priorThroughput : null;
+
+    const recentPassRate = avgField(recentTaskDays, "verification_pass_rate");
+    const priorPassRate = avgField(priorTaskDays, "verification_pass_rate");
+    const pass_rate_delta = recentPassRate !== null && priorPassRate !== null ? recentPassRate - priorPassRate : null;
+
+    const recentScore = avgField(recentTaskDays, "avg_quality_score");
+    const priorScore = avgField(priorTaskDays, "avg_quality_score");
+    const score_delta = recentScore !== null && priorScore !== null ? recentScore - priorScore : null;
+
+    const recentCycleDuration = avgField(recentCycleDays, "avg_duration_ms");
+    const priorCycleDuration = avgField(priorCycleDays, "avg_duration_ms");
+    const cycle_duration_delta =
+      recentCycleDuration !== null && priorCycleDuration !== null
+        ? recentCycleDuration - priorCycleDuration
+        : null;
+
+    return {
+      days: windowDays,
+      task_days: recentTaskDays.map((r) => ({
+        date: r.date,
+        tasks_completed: r.tasks_completed,
+        tasks_failed: r.tasks_failed,
+        avg_duration_ms: r.avg_duration_ms,
+        verification_pass_rate: r.verification_pass_rate,
+        avg_quality_score: r.avg_quality_score,
+      })),
+      cycle_days: recentCycleDays.map((r) => ({
+        date: r.date,
+        cycle_count: r.cycle_count,
+        avg_duration_ms: r.avg_duration_ms,
+      })),
+      throughput_delta,
+      pass_rate_delta,
+      score_delta,
+      cycle_duration_delta,
     };
   }
 

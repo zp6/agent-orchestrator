@@ -602,4 +602,137 @@ describe("StateStore", () => {
       expect(m.per_agent_score_trends["trendy"].direction).toBe("improving");
     });
   });
+
+  describe("getDailyTrend", () => {
+    it("returns empty arrays when no tasks or cycles exist", () => {
+      const trend = store.getDailyTrend(7);
+      expect(trend.days).toBe(7);
+      expect(trend.task_days).toEqual([]);
+      expect(trend.cycle_days).toEqual([]);
+      expect(trend.throughput_delta).toBeNull();
+      expect(trend.pass_rate_delta).toBeNull();
+      expect(trend.score_delta).toBeNull();
+      expect(trend.cycle_duration_delta).toBeNull();
+    });
+
+    it("reflects today's completed tasks in the trend window", () => {
+      // Create and complete 3 top-level tasks today
+      for (let i = 0; i < 3; i++) {
+        const t = store.createTask({ title: `Trend task ${i}`, source: "manual" });
+        store.updateTask(t.id, {
+          status: "done",
+          verification_status: "approved",
+          quality_score: 0.8,
+        });
+      }
+
+      const trend = store.getDailyTrend(7);
+      // Should have at least one day entry (today)
+      expect(trend.task_days.length).toBeGreaterThanOrEqual(1);
+      const total = trend.task_days.reduce((s, d) => s + d.tasks_completed, 0);
+      expect(total).toBe(3);
+    });
+
+    it("counts failed tasks separately from completed", () => {
+      const done = store.createTask({ title: "Done task", source: "manual" });
+      store.updateTask(done.id, { status: "done" });
+
+      const failed = store.createTask({ title: "Failed task", source: "manual" });
+      store.updateTask(failed.id, { status: "failed" });
+
+      const trend = store.getDailyTrend(7);
+      const totalDone = trend.task_days.reduce((s, d) => s + d.tasks_completed, 0);
+      const totalFailed = trend.task_days.reduce((s, d) => s + d.tasks_failed, 0);
+      expect(totalDone).toBe(1);
+      expect(totalFailed).toBe(1);
+    });
+
+    it("excludes sub-tasks from trend counts", () => {
+      const parent = store.createTask({ title: "Parent", source: "manual" });
+      store.updateTask(parent.id, { status: "done" });
+
+      // Sub-task should not appear in trend
+      const sub = store.createSubTask({
+        parent_task_id: parent.id,
+        step_id: "step-1",
+        title: "Sub",
+        description: "sub desc",
+        source: "manual",
+        agent_name: "agent",
+      });
+      store.updateTask(sub.id, { status: "done" });
+
+      const trend = store.getDailyTrend(7);
+      const totalDone = trend.task_days.reduce((s, d) => s + d.tasks_completed, 0);
+      // Only the parent should count
+      expect(totalDone).toBe(1);
+    });
+
+    it("computes avg_quality_score for verified tasks", () => {
+      const scores = [0.9, 0.8, 0.7];
+      for (const score of scores) {
+        const t = store.createTask({ title: `T-${score}`, source: "manual" });
+        store.updateTask(t.id, {
+          status: "done",
+          verification_status: "approved",
+          quality_score: score,
+        });
+      }
+
+      const trend = store.getDailyTrend(7);
+      const todayEntry = trend.task_days[trend.task_days.length - 1];
+      expect(todayEntry).toBeDefined();
+      expect(todayEntry.avg_quality_score).toBeCloseTo(0.8, 2);
+    });
+
+    it("computes verification_pass_rate for verified tasks", () => {
+      // 2 approved, 1 rejected
+      const t1 = store.createTask({ title: "T1", source: "manual" });
+      store.updateTask(t1.id, { status: "done", verification_status: "approved", quality_score: 0.9 });
+
+      const t2 = store.createTask({ title: "T2", source: "manual" });
+      store.updateTask(t2.id, { status: "done", verification_status: "approved", quality_score: 0.8 });
+
+      const t3 = store.createTask({ title: "T3", source: "manual" });
+      store.updateTask(t3.id, { status: "done", verification_status: "rejected", quality_score: 0.3 });
+
+      const trend = store.getDailyTrend(7);
+      const todayEntry = trend.task_days[trend.task_days.length - 1];
+      expect(todayEntry).toBeDefined();
+      // 2/3 approved
+      expect(todayEntry.verification_pass_rate).toBeCloseTo(2 / 3, 2);
+    });
+
+    it("reflects today's daemon cycles in cycle_days", () => {
+      const cycleId = store.recordCycleStart();
+      const start = new Date();
+      // Simulate a 200ms cycle
+      store.recordCycleEnd(cycleId, new Date(start.getTime() - 200));
+
+      const trend = store.getDailyTrend(7);
+      const totalCycles = trend.cycle_days.reduce((s, d) => s + d.cycle_count, 0);
+      expect(totalCycles).toBeGreaterThanOrEqual(1);
+    });
+
+    it("respects the days parameter — 1-day window only includes today", () => {
+      const t = store.createTask({ title: "Today", source: "manual" });
+      store.updateTask(t.id, { status: "done" });
+
+      const trend1 = store.getDailyTrend(1);
+      expect(trend1.days).toBe(1);
+      // Should still find today's task
+      const total = trend1.task_days.reduce((s, d) => s + d.tasks_completed, 0);
+      expect(total).toBe(1);
+    });
+
+    it("throughput_delta is null when no prior-period data exists", () => {
+      // All tasks are today → prior period is empty → delta is null
+      const t = store.createTask({ title: "T", source: "manual" });
+      store.updateTask(t.id, { status: "done" });
+
+      const trend = store.getDailyTrend(7);
+      // Prior 7 days before today will have no data in a fresh DB
+      expect(trend.throughput_delta).toBeNull();
+    });
+  });
 });
