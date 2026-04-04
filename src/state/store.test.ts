@@ -131,4 +131,108 @@ describe("StateStore", () => {
       expect(store.isProcessed("github", "repo#1")).toBe(true);
     });
   });
+
+  describe("daemon cycle tracking", () => {
+    it("records cycle start and returns a numeric id", () => {
+      const id = store.recordCycleStart();
+      expect(typeof id).toBe("number");
+      expect(id).toBeGreaterThan(0);
+    });
+
+    it("records cycle end and updates the row", () => {
+      const start = new Date();
+      const id = store.recordCycleStart();
+      // Simulate a short pause
+      store.recordCycleEnd(id, start);
+
+      const metrics = store.getMetrics();
+      expect(metrics.cycles.total_cycles).toBe(1);
+      expect(metrics.cycles.avg_duration_ms).toBeGreaterThanOrEqual(0);
+      expect(metrics.cycles.last_cycle_at).toBeTruthy();
+    });
+
+    it("accumulates multiple cycles", () => {
+      for (let i = 0; i < 3; i++) {
+        const start = new Date();
+        const id = store.recordCycleStart();
+        store.recordCycleEnd(id, start);
+      }
+      const metrics = store.getMetrics();
+      expect(metrics.cycles.total_cycles).toBe(3);
+    });
+  });
+
+  describe("getMetrics", () => {
+    it("returns zeroed metrics when empty", () => {
+      const m = store.getMetrics();
+      expect(m.total_tasks).toBe(0);
+      expect(m.done_tasks).toBe(0);
+      expect(m.failed_tasks).toBe(0);
+      expect(m.avg_task_duration_ms).toBeNull();
+      expect(m.verification_pass_rate).toBeNull();
+      expect(m.avg_quality_score).toBeNull();
+      expect(m.per_agent).toHaveLength(0);
+      expect(m.cycles.total_cycles).toBe(0);
+    });
+
+    it("computes global task counts correctly", () => {
+      store.createTask({ title: "A", source: "manual" });
+      const b = store.createTask({ title: "B", source: "manual", agent_name: "alpha" });
+      const c = store.createTask({ title: "C", source: "manual", agent_name: "alpha" });
+      store.updateTask(b.id, { status: "done" });
+      store.updateTask(c.id, { status: "failed" });
+
+      const m = store.getMetrics();
+      expect(m.total_tasks).toBe(3);
+      expect(m.done_tasks).toBe(1);
+      expect(m.failed_tasks).toBe(1);
+    });
+
+    it("excludes sub-tasks from global counts", () => {
+      const parent = store.createTask({ title: "Parent", source: "manual" });
+      store.createSubTask({
+        parent_task_id: parent.id,
+        step_id: "step-1",
+        title: "Child",
+        description: "sub",
+        source: "manual",
+        agent_name: "alpha",
+      });
+
+      const m = store.getMetrics();
+      // only the parent should be counted (no parent_task_id)
+      expect(m.total_tasks).toBe(1);
+    });
+
+    it("computes per-agent metrics", () => {
+      const t1 = store.createTask({ title: "T1", source: "manual", agent_name: "alpha" });
+      const t2 = store.createTask({ title: "T2", source: "manual", agent_name: "alpha" });
+      store.updateTask(t1.id, { status: "done", verification_status: "approved", quality_score: 0.9 });
+      store.updateTask(t2.id, { status: "failed", verification_status: "rejected", quality_score: 0.4 });
+
+      const m = store.getMetrics();
+      const alpha = m.per_agent.find((a) => a.agent_name === "alpha");
+      expect(alpha).toBeDefined();
+      expect(alpha!.total).toBe(2);
+      expect(alpha!.done).toBe(1);
+      expect(alpha!.failed).toBe(1);
+      expect(alpha!.avg_quality_score).toBeCloseTo(0.65, 1);
+      // 1 approved / (1 approved + 1 rejected) = 0.5
+      expect(alpha!.verification_pass_rate).toBeCloseTo(0.5, 2);
+    });
+
+    it("computes verification pass rate correctly", () => {
+      const tasks = Array.from({ length: 4 }, (_, i) =>
+        store.createTask({ title: `T${i}`, source: "manual", agent_name: "beta" }),
+      );
+      store.updateTask(tasks[0].id, { status: "done", verification_status: "approved", quality_score: 1.0 });
+      store.updateTask(tasks[1].id, { status: "done", verification_status: "approved", quality_score: 0.8 });
+      store.updateTask(tasks[2].id, { status: "done", verification_status: "rejected", quality_score: 0.3 });
+      store.updateTask(tasks[3].id, { status: "done" }); // unverified — should not count
+
+      const m = store.getMetrics();
+      // 2 approved / 3 verified = 0.666…
+      expect(m.verification_pass_rate).toBeCloseTo(2 / 3, 2);
+    });
+  });
 });

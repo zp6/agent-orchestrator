@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { StateStore, type Task } from "../../state/store.js";
+import { StateStore, type Task, type SystemMetrics } from "../../state/store.js";
 
 const STATUS_COLORS: Record<string, (s: string) => string> = {
   pending: chalk.yellow,
@@ -39,6 +39,62 @@ function formatTask(task: Task, verbose = false): string {
   return output;
 }
 
+function formatDuration(ms: number | null): string {
+  if (ms === null) return chalk.dim("—");
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  const mins = Math.floor(ms / 60000);
+  const secs = Math.round((ms % 60000) / 1000);
+  return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+}
+
+function formatPercent(rate: number | null): string {
+  if (rate === null) return chalk.dim("—");
+  const pct = Math.round(rate * 100);
+  const color = pct >= 80 ? chalk.green : pct >= 50 ? chalk.yellow : chalk.red;
+  return color(`${pct}%`);
+}
+
+function printMetrics(metrics: SystemMetrics): void {
+  console.log(chalk.bold("System Metrics\n"));
+
+  // --- Task summary ---
+  console.log(chalk.bold("Tasks"));
+  console.log(`  Total:        ${metrics.total_tasks}`);
+  console.log(`  Done:         ${chalk.green(String(metrics.done_tasks))}`);
+  console.log(`  Failed:       ${chalk.red(String(metrics.failed_tasks))}`);
+  console.log(`  Avg duration: ${formatDuration(metrics.avg_task_duration_ms)}`);
+  console.log(`  Pass rate:    ${formatPercent(metrics.verification_pass_rate)}`);
+  console.log(`  Avg score:    ${metrics.avg_quality_score !== null ? metrics.avg_quality_score.toFixed(2) : chalk.dim("—")}`);
+
+  // --- Cycle summary ---
+  console.log(chalk.bold("\nDaemon Cycles"));
+  console.log(`  Total:        ${metrics.cycles.total_cycles}`);
+  console.log(`  Avg duration: ${formatDuration(metrics.cycles.avg_duration_ms)}`);
+  const lastCycle = metrics.cycles.last_cycle_at
+    ? chalk.dim(new Date(metrics.cycles.last_cycle_at).toLocaleString())
+    : chalk.dim("—");
+  console.log(`  Last cycle:   ${lastCycle}`);
+
+  // --- Per-agent table ---
+  if (metrics.per_agent.length > 0) {
+    console.log(chalk.bold("\nPer-Agent Metrics"));
+    const header = `  ${"Agent".padEnd(28)} ${"Total".padStart(6)} ${"Done".padStart(6)} ${"Failed".padStart(7)} ${"Avg Time".padStart(10)} ${"Pass%".padStart(7)} ${"Score".padStart(6)}`;
+    console.log(chalk.dim(header));
+    console.log(chalk.dim("  " + "─".repeat(75)));
+    for (const a of metrics.per_agent) {
+      const agent = chalk.cyan(a.agent_name.slice(0, 26).padEnd(28));
+      const total = String(a.total).padStart(6);
+      const done = chalk.green(String(a.done).padStart(6));
+      const failed = (a.failed > 0 ? chalk.red(String(a.failed)) : chalk.dim("0")).padStart(7);
+      const dur = formatDuration(a.avg_duration_ms).padStart(10);
+      const pass = formatPercent(a.verification_pass_rate).padStart(7);
+      const score = (a.avg_quality_score !== null ? a.avg_quality_score.toFixed(2) : chalk.dim("—")).padStart(6);
+      console.log(`  ${agent} ${total} ${done} ${failed} ${dur} ${pass} ${score}`);
+    }
+  }
+}
+
 export function registerStatusCommand(program: Command): void {
   program
     .command("status")
@@ -47,8 +103,15 @@ export function registerStatusCommand(program: Command): void {
     .option("-a, --agent <name>", "Filter by agent")
     .option("-s, --state <status>", "Filter by status")
     .option("-n, --limit <n>", "Number of tasks to show", "20")
-    .action((taskId?: string, opts?: { agent?: string; state?: string; limit?: string }) => {
+    .option("-m, --metrics", "Show aggregated system metrics")
+    .action((taskId?: string, opts?: { agent?: string; state?: string; limit?: string; metrics?: boolean }) => {
       const store = new StateStore();
+
+      if (opts?.metrics) {
+        printMetrics(store.getMetrics());
+        store.close();
+        return;
+      }
 
       if (taskId) {
         const allTasks = store.listTasks({ limit: 100 });

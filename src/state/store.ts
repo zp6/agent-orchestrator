@@ -40,6 +40,40 @@ export interface TaskLog {
   created_at: string;
 }
 
+export interface AgentMetrics {
+  agent_name: string;
+  total: number;
+  done: number;
+  failed: number;
+  /** Average time from task creation to completion, in milliseconds */
+  avg_duration_ms: number | null;
+  /** Fraction of verified tasks that passed (approved / (approved + rejected)) */
+  verification_pass_rate: number | null;
+  /** Average quality score across verified tasks */
+  avg_quality_score: number | null;
+}
+
+export interface CycleMetrics {
+  total_cycles: number;
+  avg_duration_ms: number | null;
+  last_cycle_at: string | null;
+}
+
+export interface SystemMetrics {
+  /** Aggregated across all agents / tasks */
+  total_tasks: number;
+  done_tasks: number;
+  failed_tasks: number;
+  /** Average ms from task creation → done across all completed top-level tasks */
+  avg_task_duration_ms: number | null;
+  /** Global verification pass rate */
+  verification_pass_rate: number | null;
+  /** Global average quality score */
+  avg_quality_score: number | null;
+  per_agent: AgentMetrics[];
+  cycles: CycleMetrics;
+}
+
 const MIGRATIONS = `
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
@@ -74,9 +108,17 @@ CREATE TABLE IF NOT EXISTS processed_triggers (
   PRIMARY KEY (source, source_ref)
 );
 
+CREATE TABLE IF NOT EXISTS daemon_cycles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  duration_ms INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(agent_name);
 CREATE INDEX IF NOT EXISTS idx_task_logs_task ON task_logs(task_id);
+CREATE INDEX IF NOT EXISTS idx_daemon_cycles_started ON daemon_cycles(started_at);
 `;
 
 export class StateStore {
@@ -90,6 +132,7 @@ export class StateStore {
     this.db.exec(MIGRATIONS);
     this.runPhase2Migration();
     this.runPhase5Migration();
+    this.runPhase6Migration();
   }
 
   private runPhase2Migration(): void {
@@ -117,6 +160,20 @@ export class StateStore {
         ALTER TABLE tasks ADD COLUMN verification_notes TEXT;
       `);
     }
+  }
+
+  private runPhase6Migration(): void {
+    // daemon_cycles table is already created in MIGRATIONS; this is a no-op for existing DBs
+    // that may have been created before the table was added to MIGRATIONS.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS daemon_cycles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        duration_ms INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_daemon_cycles_started ON daemon_cycles(started_at);
+    `);
   }
 
   createTask(params: {
@@ -290,6 +347,131 @@ export class StateStore {
       WHERE agent_name IS NOT NULL AND parent_task_id IS NULL
       GROUP BY agent_name
     `).all() as Array<{ agent_name: string; total: number; done: number; failed: number; avg_score: number | null }>;
+  }
+
+  // ── Daemon cycle tracking ────────────────────────────────────────────────
+
+  /** Record the start of a daemon poll cycle. Returns the row id for later completion. */
+  recordCycleStart(): number {
+    const result = this.db
+      .prepare("INSERT INTO daemon_cycles (started_at) VALUES (?)")
+      .run(new Date().toISOString());
+    return result.lastInsertRowid as number;
+  }
+
+  /** Mark a cycle as finished, recording duration. */
+  recordCycleEnd(cycleId: number, startedAt: Date): void {
+    const finishedAt = new Date();
+    const durationMs = finishedAt.getTime() - startedAt.getTime();
+    this.db
+      .prepare("UPDATE daemon_cycles SET finished_at = ?, duration_ms = ? WHERE id = ?")
+      .run(finishedAt.toISOString(), durationMs, cycleId);
+  }
+
+  // ── Aggregated metrics ───────────────────────────────────────────────────
+
+  /** Compute aggregated system metrics from existing task and cycle data. */
+  getMetrics(): SystemMetrics {
+    // --- Global task counts ---
+    const global = this.db.prepare(`
+      SELECT
+        COUNT(*) AS total_tasks,
+        COALESCE(SUM(CASE WHEN status = 'done'   THEN 1 ELSE 0 END), 0) AS done_tasks,
+        COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_tasks,
+        AVG(CASE
+          WHEN status = 'done'
+          THEN (julianday(updated_at) - julianday(created_at)) * 86400000.0
+        END) AS avg_task_duration_ms
+      FROM tasks
+      WHERE parent_task_id IS NULL
+    `).get() as {
+      total_tasks: number;
+      done_tasks: number;
+      failed_tasks: number;
+      avg_task_duration_ms: number | null;
+    };
+
+    // --- Global verification metrics ---
+    const verify = this.db.prepare(`
+      SELECT
+        AVG(quality_score) AS avg_quality_score,
+        1.0 * SUM(CASE WHEN verification_status = 'approved' THEN 1 ELSE 0 END) /
+          NULLIF(SUM(CASE WHEN verification_status IN ('approved','rejected') THEN 1 ELSE 0 END), 0)
+          AS verification_pass_rate
+      FROM tasks
+      WHERE parent_task_id IS NULL AND verification_status IS NOT NULL
+    `).get() as {
+      avg_quality_score: number | null;
+      verification_pass_rate: number | null;
+    };
+
+    // --- Per-agent metrics ---
+    const perAgentRows = this.db.prepare(`
+      SELECT
+        agent_name,
+        COUNT(*) AS total,
+        COALESCE(SUM(CASE WHEN status = 'done'   THEN 1 ELSE 0 END), 0) AS done,
+        COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+        AVG(CASE
+          WHEN status = 'done'
+          THEN (julianday(updated_at) - julianday(created_at)) * 86400000.0
+        END) AS avg_duration_ms,
+        AVG(quality_score) AS avg_quality_score,
+        1.0 * SUM(CASE WHEN verification_status = 'approved' THEN 1 ELSE 0 END) /
+          NULLIF(SUM(CASE WHEN verification_status IN ('approved','rejected') THEN 1 ELSE 0 END), 0)
+          AS verification_pass_rate
+      FROM tasks
+      WHERE agent_name IS NOT NULL AND parent_task_id IS NULL
+      GROUP BY agent_name
+      ORDER BY total DESC
+    `).all() as Array<{
+      agent_name: string;
+      total: number;
+      done: number;
+      failed: number;
+      avg_duration_ms: number | null;
+      avg_quality_score: number | null;
+      verification_pass_rate: number | null;
+    }>;
+
+    const per_agent: AgentMetrics[] = perAgentRows.map((r) => ({
+      agent_name: r.agent_name,
+      total: r.total,
+      done: r.done,
+      failed: r.failed,
+      avg_duration_ms: r.avg_duration_ms,
+      avg_quality_score: r.avg_quality_score,
+      verification_pass_rate: r.verification_pass_rate,
+    }));
+
+    // --- Cycle metrics ---
+    const cycleRow = this.db.prepare(`
+      SELECT
+        COALESCE(COUNT(*), 0) AS total_cycles,
+        AVG(duration_ms) AS avg_duration_ms,
+        MAX(started_at) AS last_cycle_at
+      FROM daemon_cycles
+      WHERE finished_at IS NOT NULL
+    `).get() as {
+      total_cycles: number;
+      avg_duration_ms: number | null;
+      last_cycle_at: string | null;
+    };
+
+    return {
+      total_tasks: global.total_tasks,
+      done_tasks: global.done_tasks,
+      failed_tasks: global.failed_tasks,
+      avg_task_duration_ms: global.avg_task_duration_ms,
+      verification_pass_rate: verify.verification_pass_rate,
+      avg_quality_score: verify.avg_quality_score,
+      per_agent,
+      cycles: {
+        total_cycles: cycleRow.total_cycles,
+        avg_duration_ms: cycleRow.avg_duration_ms,
+        last_cycle_at: cycleRow.last_cycle_at,
+      },
+    };
   }
 
   close(): void {

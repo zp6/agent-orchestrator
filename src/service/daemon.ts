@@ -95,45 +95,55 @@ export class Daemon {
   }
 
   private async pollCycle(): Promise<void> {
-    const time = new Date().toLocaleTimeString();
+    const cycleStartedAt = new Date();
+    const time = cycleStartedAt.toLocaleTimeString();
     this.cycleCount++;
 
-    // Fetch which agents are actually deployed on the proxy
-    const registeredAgents = await this.deployer.getRegisteredAgents();
+    const cycleId = this.store.recordCycleStart();
 
-    // 1. Check for stale dispatched tasks (stuck or crashed agents)
-    this.checkStaleTasks(time);
+    try {
+      // Fetch which agents are actually deployed on the proxy
+      const registeredAgents = await this.deployer.getRegisteredAgents();
 
-    // 2. Dispatch new work from all trigger sources
-    await this.dispatchTriggers(time, registeredAgents);
+      // 1. Check for stale dispatched tasks (stuck or crashed agents)
+      this.checkStaleTasks(time);
 
-    // 2. Verify recently completed tasks
-    await this.verifyCompleted(time);
+      // 2. Dispatch new work from all trigger sources
+      await this.dispatchTriggers(time, registeredAgents);
 
-    // 3. Periodically detect improvements and create issues
-    if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
-      await this.detectImprovements(time);
-    }
+      // 2. Verify recently completed tasks
+      await this.verifyCompleted(time);
 
-    // 4. Create PRs for orphan branches + review open PRs
-    if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
-      this.createOrphanPRs(time);
-      await this.reviewPRs(time);
-    }
+      // 3. Periodically detect improvements and create issues
+      if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
+        await this.detectImprovements(time);
+      }
 
-    // 5. Redeploy agents with new code (only registered ones)
-    await this.redeployStale(time, registeredAgents);
+      // 4. Create PRs for orphan branches + review open PRs
+      if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
+        this.createOrphanPRs(time);
+        await this.reviewPRs(time);
+      }
 
-    // 6. Supervisor review — strategic reasoning about what needs attention
-    if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
-      await this.runSupervisor(time);
-    }
+      // 5. Redeploy agents with new code (only registered ones)
+      await this.redeployStale(time, registeredAgents);
 
-    // 7. Clean up stale issues (issues with merged PRs that didn't auto-close)
-    //    Also reap orchestrator-labeled issues open >7 days with no linked PR
-    if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
-      this.cleanupStaleIssues(time);
-      this.reapStaleOrchestratorIssues(time);
+      // 6. Supervisor review — strategic reasoning about what needs attention
+      if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
+        await this.runSupervisor(time);
+      }
+
+      // 7. Clean up stale issues (issues with merged PRs that didn't auto-close)
+      //    Also reap orchestrator-labeled issues open >7 days with no linked PR
+      if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
+        this.cleanupStaleIssues(time);
+        this.reapStaleOrchestratorIssues(time);
+      }
+    } finally {
+      this.store.recordCycleEnd(cycleId, cycleStartedAt);
+      const durationMs = Date.now() - cycleStartedAt.getTime();
+      this.log.info("Cycle complete", { cycle: this.cycleCount, durationMs });
+      console.log(`[${time}] Cycle #${this.cycleCount} complete (${durationMs}ms)`);
     }
   }
 
