@@ -3,10 +3,10 @@ import { PRLister, toPRRow, extractLinkedIssue, formatAge } from "./pr-lister.js
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { PRListItem } from "./pr-lister.js";
 
-const mockExecSync = vi.fn();
+const mockExecFileSync = vi.fn();
 
 vi.mock("node:child_process", () => ({
-  execSync: (...args: unknown[]) => mockExecSync(...args),
+  execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
 }));
 
 const config: OrchestratorConfig = {
@@ -138,15 +138,17 @@ describe("toPRRow", () => {
 
 describe("PRLister", () => {
   beforeEach(() => {
-    mockExecSync.mockReset();
+    mockExecFileSync.mockReset();
   });
 
   it("fetches PRs from all repos with github configured", () => {
-    mockExecSync.mockImplementation((cmd: string) => {
-      if (cmd.includes("repo-a")) {
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repoIdx = args.indexOf("--repo") + 1;
+      const repo = args[repoIdx] ?? "";
+      if (repo.includes("repo-a")) {
         return JSON.stringify([makePR({ number: 1, title: "PR in repo-a" })]);
       }
-      if (cmd.includes("repo-b")) {
+      if (repo.includes("repo-b")) {
         return JSON.stringify([makePR({ number: 2, title: "PR in repo-b" })]);
       }
       return "[]";
@@ -161,15 +163,19 @@ describe("PRLister", () => {
   });
 
   it("skips agents without github field", () => {
-    mockExecSync.mockReturnValue("[]");
+    mockExecFileSync.mockReturnValue("[]");
     const lister = new PRLister(config);
     const { rows } = lister.listAll();
 
     // Only repo-a and repo-b should be queried, not agent-no-github
-    const calledRepos = mockExecSync.mock.calls.map((c) => c[0] as string);
-    expect(calledRepos.some((cmd) => cmd.includes("repo-a"))).toBe(true);
-    expect(calledRepos.some((cmd) => cmd.includes("repo-b"))).toBe(true);
-    expect(calledRepos.some((cmd) => cmd.includes("agent-no-github"))).toBe(false);
+    const getRepo = (c: unknown[]) => {
+      const args = c[1] as string[];
+      return args[args.indexOf("--repo") + 1] ?? "";
+    };
+    const calledRepos = mockExecFileSync.mock.calls.map(getRepo);
+    expect(calledRepos.some((r) => r.includes("repo-a"))).toBe(true);
+    expect(calledRepos.some((r) => r.includes("repo-b"))).toBe(true);
+    expect(calledRepos.some((r) => r.includes("agent-no-github"))).toBe(false);
     expect(rows).toHaveLength(0);
   });
 
@@ -182,15 +188,16 @@ describe("PRLister", () => {
       },
     };
 
-    mockExecSync.mockReturnValue(JSON.stringify([makePR({ number: 5 })]));
+    mockExecFileSync.mockReturnValue(JSON.stringify([makePR({ number: 5 })]));
 
     const lister = new PRLister(sharedConfig);
     lister.listAll();
 
     // Should only call gh pr list once for shared-repo
-    const calls = mockExecSync.mock.calls.filter((c) =>
-      (c[0] as string).includes("owner/shared-repo"),
-    );
+    const calls = mockExecFileSync.mock.calls.filter((c) => {
+      const args = c[1] as string[];
+      return (args[args.indexOf("--repo") + 1] ?? "").includes("owner/shared-repo");
+    });
     expect(calls).toHaveLength(1);
   });
 
@@ -198,8 +205,9 @@ describe("PRLister", () => {
     const old = makePR({ number: 1, title: "Old PR", createdAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString() });
     const fresh = makePR({ number: 2, title: "Fresh PR", createdAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString() });
 
-    mockExecSync.mockImplementation((cmd: string) => {
-      if (cmd.includes("repo-a")) return JSON.stringify([old, fresh]);
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo.includes("repo-a")) return JSON.stringify([old, fresh]);
       return "[]";
     });
 
@@ -214,8 +222,9 @@ describe("PRLister", () => {
     const conflicting = makePR({ number: 3, title: "Conflict PR", mergeable: "CONFLICTING" });
     const clean = makePR({ number: 4, title: "Clean PR", mergeable: "MERGEABLE" });
 
-    mockExecSync.mockImplementation((cmd: string) => {
-      if (cmd.includes("repo-a")) return JSON.stringify([conflicting, clean]);
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo.includes("repo-a")) return JSON.stringify([conflicting, clean]);
       return "[]";
     });
 
@@ -230,8 +239,9 @@ describe("PRLister", () => {
     const conflicting = makePR({ number: 3, mergeable: "CONFLICTING" });
     const clean = makePR({ number: 4, mergeable: "MERGEABLE" });
 
-    mockExecSync.mockImplementation((cmd: string) => {
-      if (cmd.includes("repo-a")) return JSON.stringify([conflicting, clean]);
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo.includes("repo-a")) return JSON.stringify([conflicting, clean]);
       return "[]";
     });
 
@@ -244,8 +254,9 @@ describe("PRLister", () => {
   it("reports hasConflicts=false when no PR has conflicts", () => {
     const clean = makePR({ number: 1, mergeable: "MERGEABLE" });
 
-    mockExecSync.mockImplementation((cmd: string) => {
-      if (cmd.includes("repo-a")) return JSON.stringify([clean]);
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo.includes("repo-a")) return JSON.stringify([clean]);
       return "[]";
     });
 
@@ -259,8 +270,9 @@ describe("PRLister", () => {
     const clean = makePR({ number: 1, mergeable: "MERGEABLE", createdAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString() });
     const conflicting = makePR({ number: 2, mergeable: "CONFLICTING", createdAt: new Date(Date.now() - 0).toISOString() });
 
-    mockExecSync.mockImplementation((cmd: string) => {
-      if (cmd.includes("repo-a")) return JSON.stringify([clean, conflicting]);
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo.includes("repo-a")) return JSON.stringify([clean, conflicting]);
       return "[]";
     });
 
@@ -272,18 +284,18 @@ describe("PRLister", () => {
   });
 
   it("limits to a specific repo when --repo is provided", () => {
-    mockExecSync.mockReturnValue("[]");
+    mockExecFileSync.mockReturnValue("[]");
 
     const lister = new PRLister(config);
     lister.listAll({ repo: "custom/repo" });
 
-    const calls = mockExecSync.mock.calls.map((c) => c[0] as string);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("custom/repo");
+    expect(mockExecFileSync.mock.calls).toHaveLength(1);
+    const args = mockExecFileSync.mock.calls[0][1] as string[];
+    expect(args[args.indexOf("--repo") + 1]).toBe("custom/repo");
   });
 
   it("returns empty rows when gh CLI fails", () => {
-    mockExecSync.mockImplementation(() => {
+    mockExecFileSync.mockImplementation(() => {
       throw new Error("gh: command not found");
     });
 

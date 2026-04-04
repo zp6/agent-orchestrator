@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import type { OrchestratorConfig } from "../config/schema.js";
 
 export interface PRListItem {
@@ -70,8 +70,18 @@ export class PRLister {
 
   fetchOpenPRs(repo: string): PRListItem[] {
     try {
-      const output = execSync(
-        `gh pr list --repo ${repo} --state open --json number,title,createdAt,mergeable,reviewDecision,headRefName,body`,
+      const output = execFileSync(
+        "gh",
+        [
+          "pr",
+          "list",
+          "--repo",
+          repo,
+          "--state",
+          "open",
+          "--json",
+          "number,title,createdAt,mergeable,reviewDecision,headRefName,body",
+        ],
         { encoding: "utf-8", timeout: 30000 },
       );
       return JSON.parse(output) as PRListItem[];

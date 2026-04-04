@@ -5,27 +5,39 @@ import { PRLister } from "../../orchestrator/pr-lister.js";
 import type { PRRow } from "../../orchestrator/pr-lister.js";
 import { formatAge } from "../../orchestrator/pr-lister.js";
 
-function formatReviewStatus(status: PRRow["reviewStatus"]): string {
+function formatReviewStatus(status: PRRow["reviewStatus"], width = 0): string {
+  const plain =
+    status === "approved" ? "approved" : status === "changes-requested" ? "changes-req" : "pending";
+  const padded = plain.padEnd(width);
   switch (status) {
     case "approved":
-      return chalk.green("approved");
+      return chalk.green(padded);
     case "changes-requested":
-      return chalk.yellow("changes-req");
+      return chalk.yellow(padded);
     case "pending":
-      return chalk.dim("pending");
+      return chalk.dim(padded);
   }
 }
 
-function formatMergeable(mergeable: PRRow["mergeable"]): string {
+function formatMergeable(mergeable: PRRow["mergeable"], width = 0): string {
+  const plain =
+    mergeable === "yes"
+      ? "yes"
+      : mergeable === "conflict"
+        ? "conflict"
+        : mergeable === "no"
+          ? "no"
+          : "unknown";
+  const padded = plain.padEnd(width);
   switch (mergeable) {
     case "yes":
-      return chalk.green("yes");
+      return chalk.green(padded);
     case "conflict":
-      return chalk.red("conflict");
+      return chalk.red(padded);
     case "no":
-      return chalk.red("no");
+      return chalk.red(padded);
     case "unknown":
-      return chalk.dim("unknown");
+      return chalk.dim(padded);
   }
 }
 
@@ -70,9 +82,9 @@ function printTable(rows: PRRow[]): void {
       "  " +
       formatAge(row.ageDays).padEnd(6) +
       "  " +
-      formatReviewStatus(row.reviewStatus).padEnd(12) +
+      formatReviewStatus(row.reviewStatus, 12) +
       "  " +
-      formatMergeable(row.mergeable).padEnd(8) +
+      formatMergeable(row.mergeable, 8) +
       "  " +
       chalk.dim(row.linkedIssue);
 
