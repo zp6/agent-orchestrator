@@ -138,13 +138,43 @@ export function registerServiceCommand(program: Command): void {
           console.log(chalk.dim("\nNo trigger sources configured."));
         }
 
-        // --- Improvement detection stats ---
+        // --- Daemon cycle + verification stats ---
         const minScore = config.verification?.min_score ?? 0.7;
         try {
           const store = new StateStore();
+          const metrics = store.getMetrics();
           const qualified = store.getRecentVerified(20, minScore);
+          const unverifiedCount = store.countUnverified();
           store.close();
 
+          // Last cycle timestamp
+          console.log(chalk.bold("\nDaemon Cycles"));
+          const lastCycleAt = metrics.cycles.last_cycle_at;
+          if (lastCycleAt) {
+            const lastCycleDate = new Date(lastCycleAt);
+            const ageMs = Date.now() - lastCycleDate.getTime();
+            const ageMins = Math.floor(ageMs / 60000);
+            const ageStr = ageMins < 1 ? "< 1 min ago" : ageMins < 60 ? `${ageMins} min ago` : `${Math.floor(ageMins / 60)}h ago`;
+            const cycleColor = ageMs < 5 * 60 * 1000 ? chalk.green : ageMs < 15 * 60 * 1000 ? chalk.yellow : chalk.red;
+            console.log(`  Last cycle:   ${cycleColor(lastCycleDate.toLocaleString())} ${chalk.dim(`(${ageStr})`)}`);
+          } else {
+            console.log(`  Last cycle:   ${chalk.dim("never (daemon hasn't run yet)")}`);
+          }
+          console.log(`  Total cycles: ${metrics.cycles.total_cycles}`);
+
+          // Verification lag summary
+          console.log(chalk.bold("\nVerification"));
+          const unverifiedColor = unverifiedCount === 0 ? chalk.green : unverifiedCount < 10 ? chalk.yellow : chalk.red;
+          console.log(`  Unverified done tasks: ${unverifiedColor(String(unverifiedCount))}`);
+          if (unverifiedCount >= 10) {
+            console.log(chalk.yellow(`  ⚠ High verification lag — run \`orch improve verify\` to catch up`));
+          } else if (unverifiedCount > 0) {
+            console.log(chalk.dim(`  Run \`orch improve verify\` to verify pending tasks`));
+          } else {
+            console.log(chalk.dim(`  ✓ All done tasks have been verified`));
+          }
+
+          // --- Improvement detection stats ---
           const count = qualified.length;
           const threshold = minScore.toFixed(2);
           const countColor = count >= 5 ? chalk.green : count > 0 ? chalk.yellow : chalk.red;

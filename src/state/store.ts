@@ -501,6 +501,14 @@ export class StateStore {
     ).all(limit) as Task[];
   }
 
+  /** Count all done top-level tasks with no verification result yet. */
+  countUnverified(): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) as count FROM tasks WHERE status = 'done' AND verification_status IS NULL AND parent_task_id IS NULL",
+    ).get() as { count: number };
+    return row.count;
+  }
+
   /**
    * Compute the quality score distribution across all verified top-level tasks.
    * Buckets: excellent (≥0.90), good (0.70–0.89), fair (0.50–0.69), poor (<0.50),

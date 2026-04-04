@@ -277,6 +277,71 @@ describe("StateStore", () => {
     });
   });
 
+  describe("countUnverified and getUnverified", () => {
+    it("countUnverified returns 0 when no done tasks exist", () => {
+      expect(store.countUnverified()).toBe(0);
+    });
+
+    it("countUnverified counts done top-level tasks with no verification_status", () => {
+      const t1 = store.createTask({ title: "Done unverified 1", source: "manual" });
+      const t2 = store.createTask({ title: "Done unverified 2", source: "manual" });
+      const t3 = store.createTask({ title: "Done approved", source: "manual" });
+      store.updateTask(t1.id, { status: "done" });
+      store.updateTask(t2.id, { status: "done" });
+      store.updateTask(t3.id, { status: "done", verification_status: "approved" });
+
+      expect(store.countUnverified()).toBe(2);
+    });
+
+    it("countUnverified excludes in_progress and failed tasks", () => {
+      const t1 = store.createTask({ title: "In progress", source: "manual" });
+      const t2 = store.createTask({ title: "Failed", source: "manual" });
+      store.updateTask(t1.id, { status: "in_progress" });
+      store.updateTask(t2.id, { status: "failed" });
+
+      expect(store.countUnverified()).toBe(0);
+    });
+
+    it("countUnverified excludes sub-tasks", () => {
+      const parent = store.createTask({ title: "Parent", source: "manual" });
+      const child = store.createSubTask({
+        parent_task_id: parent.id,
+        step_id: "step-1",
+        title: "Child",
+        description: "sub",
+        source: "manual",
+        agent_name: "agent-a",
+      });
+      store.updateTask(parent.id, { status: "done" });
+      store.updateTask(child.id, { status: "done" });
+
+      // Only the parent should count — child is a sub-task
+      expect(store.countUnverified()).toBe(1);
+    });
+
+    it("getUnverified returns done tasks with no verification in descending order", () => {
+      const t1 = store.createTask({ title: "First", source: "manual" });
+      const t2 = store.createTask({ title: "Second", source: "manual" });
+      const t3 = store.createTask({ title: "Approved", source: "manual" });
+      store.updateTask(t1.id, { status: "done" });
+      store.updateTask(t2.id, { status: "done" });
+      store.updateTask(t3.id, { status: "done", verification_status: "approved" });
+
+      const results = store.getUnverified(10);
+      expect(results.map((t) => t.id)).toContain(t1.id);
+      expect(results.map((t) => t.id)).toContain(t2.id);
+      expect(results.map((t) => t.id)).not.toContain(t3.id);
+    });
+
+    it("getUnverified respects the limit", () => {
+      for (let i = 0; i < 5; i++) {
+        const t = store.createTask({ title: `Task ${i}`, source: "manual" });
+        store.updateTask(t.id, { status: "done" });
+      }
+      expect(store.getUnverified(3)).toHaveLength(3);
+    });
+  });
+
   describe("getScoreDistribution", () => {
     it("returns all-zero distribution when no verified tasks exist", () => {
       const dist = store.getScoreDistribution();

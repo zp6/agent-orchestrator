@@ -315,6 +315,9 @@ function printTrend(trend: MetricsTrend): void {
   }
 }
 
+/** Warning threshold: surface a lag notice when this many done tasks are unverified. */
+const UNVERIFIED_WARN_THRESHOLD = 10;
+
 export function registerStatusCommand(program: Command): void {
   program
     .command("status")
@@ -326,7 +329,8 @@ export function registerStatusCommand(program: Command): void {
     .option("-n, --limit <n>", "Number of tasks to show", "20")
     .option("-m, --metrics", "Show aggregated system metrics")
     .option("--trend [days]", "Show day-by-day metrics trend (default: 7 days)")
-    .action((taskId?: string, opts?: { agent?: string; state?: string; type?: string; limit?: string; metrics?: boolean; trend?: string | boolean }) => {
+    .option("--unverified", "Show only done tasks that have not been verified yet")
+    .action((taskId?: string, opts?: { agent?: string; state?: string; type?: string; limit?: string; metrics?: boolean; trend?: string | boolean; unverified?: boolean }) => {
       const store = new StateStore();
 
       if (opts?.trend !== undefined) {
@@ -391,21 +395,62 @@ export function registerStatusCommand(program: Command): void {
           }
         }
       } else {
-        const tasks = store.listTasks({
-          status: opts?.state as Task["status"] | undefined,
-          agent_name: opts?.agent,
-          task_type: opts?.type as Task["task_type"] | undefined,
-          limit: parseInt(opts?.limit ?? "20"),
-        });
+        const limit = parseInt(opts?.limit ?? "20");
 
-        if (tasks.length === 0) {
-          console.log(chalk.dim("No tasks found"));
-        } else {
-          console.log(chalk.bold("Tasks\n"));
-          for (const task of tasks) {
-            console.log(formatTask(task));
+        // --unverified: show only done tasks that haven't been verified yet
+        if (opts?.unverified) {
+          const tasks = store.getUnverified(limit);
+          if (tasks.length === 0) {
+            console.log(chalk.green("✓ No unverified done tasks — all caught up!"));
+          } else {
+            console.log(chalk.bold(`Unverified Done Tasks (${tasks.length})\n`));
+            for (const task of tasks) {
+              console.log(formatTask(task));
+            }
+            console.log(chalk.dim(`\n${tasks.length} task(s) pending verification`));
+            console.log(chalk.dim("Run `orch improve verify` to verify these tasks."));
           }
-          console.log(chalk.dim(`\n${tasks.length} task(s)`));
+        } else {
+          const tasks = store.listTasks({
+            status: opts?.state as Task["status"] | undefined,
+            agent_name: opts?.agent,
+            task_type: opts?.type as Task["task_type"] | undefined,
+            limit,
+          });
+
+          if (tasks.length === 0) {
+            console.log(chalk.dim("No tasks found"));
+          } else {
+            console.log(chalk.bold("Tasks\n"));
+            for (const task of tasks) {
+              console.log(formatTask(task));
+            }
+            console.log(chalk.dim(`\n${tasks.length} task(s)`));
+          }
+
+          // Show verification summary after the task list
+          const unverifiedCount = store.countUnverified();
+          const doneTasks = store.listTasks({ status: "done", limit: 9999 });
+          const doneCount = doneTasks.length;
+          const verifiedCount = doneCount - unverifiedCount;
+
+          if (doneCount > 0) {
+            console.log();
+            const verifiedStr = verifiedCount > 0
+              ? chalk.green(`${verifiedCount} verified`)
+              : chalk.dim("0 verified");
+            const pendingStr = unverifiedCount > 0
+              ? chalk.yellow(`${unverifiedCount} pending verification`)
+              : chalk.dim("0 pending verification");
+            console.log(`Verification: ${chalk.green(String(doneCount))} done, ${verifiedStr}, ${pendingStr}`);
+
+            if (unverifiedCount >= UNVERIFIED_WARN_THRESHOLD) {
+              console.log(
+                chalk.yellow(`⚠ ${unverifiedCount} done tasks have never been verified.`) +
+                  chalk.dim(" Run `orch improve verify` to check quality."),
+              );
+            }
+          }
         }
       }
 
