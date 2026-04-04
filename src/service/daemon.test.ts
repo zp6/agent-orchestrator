@@ -231,4 +231,22 @@ describe("shouldVerifyTask", () => {
       expect(shouldVerifyTask("github", ["manual"])).toBe(false);
     });
   });
+
+  describe("pr-feedback source", () => {
+    it("verifies pr-feedback tasks when no filter configured", () => {
+      expect(shouldVerifyTask("pr-feedback")).toBe(true);
+    });
+
+    it("always verifies pr-feedback tasks even when not in allowlist", () => {
+      expect(shouldVerifyTask("pr-feedback", ["github", "linear"])).toBe(true);
+    });
+
+    it("verifies pr-feedback tasks even when allowlist is manual-only", () => {
+      expect(shouldVerifyTask("pr-feedback", ["manual"])).toBe(true);
+    });
+
+    it("verifies pr-feedback tasks when filter is empty array", () => {
+      expect(shouldVerifyTask("pr-feedback", [])).toBe(true);
+    });
+  });
 });

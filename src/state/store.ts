@@ -5,7 +5,7 @@ import { mkdirSync } from "node:fs";
 import { ulid } from "ulid";
 
 export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed";
-export type TaskSource = "github" | "linear" | "slack" | "manual";
+export type TaskSource = "github" | "linear" | "slack" | "manual" | "pr-feedback";
 export type TaskType = "implementation" | "research";
 
 export type VerificationStatus = "pending" | "approved" | "rejected" | null;
@@ -324,6 +324,26 @@ export class StateStore {
     const dispatched = this.listTasks({ status: "dispatched", agent_name: agentName, limit: 1 });
     const inProgress = this.listTasks({ status: "in_progress", agent_name: agentName, limit: 1 });
     return dispatched.length > 0 || inProgress.length > 0;
+  }
+
+  /**
+   * Returns true if there is already a pending/dispatched/in-progress
+   * "pr-feedback" task for the given repo + PR number.  Used to prevent
+   * the daemon from queuing duplicate feedback dispatches for the same PR
+   * within a single review cycle window.
+   */
+  hasActivePrFeedbackTask(repo: string, prNumber: number | string): boolean {
+    const sourceRef = `${repo}#${prNumber}`;
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM tasks
+         WHERE source = 'pr-feedback'
+           AND source_ref = ?
+           AND status IN ('pending', 'dispatched', 'in_progress')
+         LIMIT 1`,
+      )
+      .get(sourceRef);
+    return !!row;
   }
 
   listTasks(filters?: { status?: TaskStatus; agent_name?: string; task_type?: TaskType; limit?: number }): Task[] {

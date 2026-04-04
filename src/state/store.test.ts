@@ -800,4 +800,94 @@ describe("StateStore", () => {
       expect(trend.throughput_delta).toBeNull();
     });
   });
+
+  describe("hasActivePrFeedbackTask", () => {
+    it("returns false when no pr-feedback task exists for that PR", () => {
+      expect(store.hasActivePrFeedbackTask("owner/repo", 42)).toBe(false);
+    });
+
+    it("returns true when a pending pr-feedback task exists", () => {
+      store.createTask({
+        title: "[PR feedback] owner/repo#42",
+        source: "pr-feedback",
+        source_ref: "owner/repo#42",
+        agent_name: "my-agent",
+      });
+      expect(store.hasActivePrFeedbackTask("owner/repo", 42)).toBe(true);
+    });
+
+    it("returns true when a dispatched pr-feedback task exists", () => {
+      const task = store.createTask({
+        title: "[PR feedback] owner/repo#7",
+        source: "pr-feedback",
+        source_ref: "owner/repo#7",
+        agent_name: "my-agent",
+      });
+      store.updateTask(task.id, { status: "dispatched" });
+      expect(store.hasActivePrFeedbackTask("owner/repo", 7)).toBe(true);
+    });
+
+    it("returns true when an in_progress pr-feedback task exists", () => {
+      const task = store.createTask({
+        title: "[PR feedback] owner/repo#9",
+        source: "pr-feedback",
+        source_ref: "owner/repo#9",
+        agent_name: "my-agent",
+      });
+      store.updateTask(task.id, { status: "in_progress" });
+      expect(store.hasActivePrFeedbackTask("owner/repo", 9)).toBe(true);
+    });
+
+    it("returns false when the pr-feedback task is done", () => {
+      const task = store.createTask({
+        title: "[PR feedback] owner/repo#10",
+        source: "pr-feedback",
+        source_ref: "owner/repo#10",
+        agent_name: "my-agent",
+      });
+      store.updateTask(task.id, { status: "done" });
+      expect(store.hasActivePrFeedbackTask("owner/repo", 10)).toBe(false);
+    });
+
+    it("returns false when the pr-feedback task is failed", () => {
+      const task = store.createTask({
+        title: "[PR feedback] owner/repo#11",
+        source: "pr-feedback",
+        source_ref: "owner/repo#11",
+        agent_name: "my-agent",
+      });
+      store.updateTask(task.id, { status: "failed" });
+      expect(store.hasActivePrFeedbackTask("owner/repo", 11)).toBe(false);
+    });
+
+    it("does not match a different PR number on the same repo", () => {
+      store.createTask({
+        title: "[PR feedback] owner/repo#42",
+        source: "pr-feedback",
+        source_ref: "owner/repo#42",
+        agent_name: "my-agent",
+      });
+      expect(store.hasActivePrFeedbackTask("owner/repo", 43)).toBe(false);
+    });
+
+    it("does not match a different repo with the same PR number", () => {
+      store.createTask({
+        title: "[PR feedback] owner/repo#5",
+        source: "pr-feedback",
+        source_ref: "owner/repo#5",
+        agent_name: "my-agent",
+      });
+      expect(store.hasActivePrFeedbackTask("owner/other-repo", 5)).toBe(false);
+    });
+
+    it("accepts prNumber as a string", () => {
+      store.createTask({
+        title: "[PR feedback] owner/repo#20",
+        source: "pr-feedback",
+        source_ref: "owner/repo#20",
+        agent_name: "my-agent",
+      });
+      expect(store.hasActivePrFeedbackTask("owner/repo", "20")).toBe(true);
+    });
+  });
 });

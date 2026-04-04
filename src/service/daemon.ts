@@ -346,15 +346,17 @@ export class Daemon {
         for (const { prNumber, result } of results) {
           console.log(`[${time}] PR review: ${repo}#${prNumber} → ${result.decision} (${result.reason})`);
 
-          // Dispatch feedback to agent when changes are requested (skip if agent busy)
+          // Dispatch feedback to agent when changes are requested (skip if agent busy or duplicate)
           if (result.decision === "request-changes") {
             if (this.store.hasActiveTask(agentName)) {
               this.log.info("Skipping PR feedback dispatch: agent busy", { agentName, repo, prNumber });
+            } else if (this.store.hasActivePrFeedbackTask(repo, prNumber)) {
+              this.log.info("Skipping PR feedback dispatch: feedback already in-flight", { agentName, repo, prNumber });
             } else {
               this.log.info("Dispatching PR feedback to agent", { repo, prNumber, agentName });
               this.dispatcher.dispatch(
                 `Your PR #${prNumber} on ${repo} was reviewed and needs changes:\n\n${result.comment}\n\nPlease fix the issues, commit, and push to the same branch.`,
-                { agentName, source: "manual", title: `[PR feedback] ${repo}#${prNumber}` },
+                { agentName, source: "pr-feedback", sourceRef: `${repo}#${prNumber}`, title: `[PR feedback] ${repo}#${prNumber}` },
               ).catch((err) => {
                 this.log.error("Failed to dispatch PR feedback", { repo, prNumber, error: String(err) });
               });
@@ -602,7 +604,9 @@ export class Daemon {
  */
 export function shouldVerifyTask(taskSource: string, sourcesFilter?: string[]): boolean {
   if (!sourcesFilter || sourcesFilter.length === 0) return true;
-  if (taskSource === "manual") return true;
+  // "manual" and "pr-feedback" tasks are always verified so the quality loop
+  // never silently excludes supervisor dispatches or PR change-request feedback.
+  if (taskSource === "manual" || taskSource === "pr-feedback") return true;
   return sourcesFilter.includes(taskSource);
 }
 
