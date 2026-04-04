@@ -256,11 +256,14 @@ export class Daemon {
 
   private async redeployStale(time: string, registeredAgents?: Set<string>): Promise<void> {
     try {
-      const stale = this.deployer.getStaleAgents(registeredAgents);
-      if (stale.length === 0) return;
+      const staleLocal = this.deployer.getStaleAgents(registeredAgents);
+      const staleRepo = this.deployer.getStaleRepoAgents(registeredAgents);
+      const totalStale = staleLocal.length + staleRepo.length;
+      if (totalStale === 0) return;
 
-      console.log(`[${time}] Redeploying ${stale.length} agent(s): ${stale.join(", ")}`);
-      const results = await this.deployer.redeployStale();
+      const allStale = [...staleLocal, ...staleRepo];
+      console.log(`[${time}] Redeploying ${totalStale} agent(s): ${allStale.join(", ")}`);
+      const results = await this.deployer.redeployStale(registeredAgents);
       for (const r of results) {
         if (r.action === "redeployed") {
           console.log(`  ${r.agentName}: redeployed`);
