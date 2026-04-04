@@ -74,6 +74,27 @@ Three layers of defense:
 - Merged PRs whose issues are still open → close the issues
 - Duplicate issues for the same feature → close the duplicates
 
+## Backlog Triage and Roadmap Maintenance
+
+Agents keep their repos clean through a three-layer approach:
+
+1. **Agent system prompt** — `buildAgentIdentityPrompt()` in `src/client/agent-client.ts` injects backlog hygiene instructions into every agent's system prompt. Agents are taught to:
+   - Close duplicate issues (keeping the more detailed one, explaining why)
+   - Close stale issues open >14 days with no linked PR and no recent activity
+   - Maintain `ROADMAP.md` with top 5 priorities sorted by user impact
+
+2. **Daemon housekeeping dispatch** (every ~5 hours) — `triageBacklogs()` in `src/service/daemon.ts` dispatches a structured triage task to each agent. This is a fire-and-forget dispatch (skipped for busy agents) that instructs the agent to systematically: close duplicates, close stale issues, update `ROADMAP.md`, and check for orphan PRs.
+
+3. **Orchestrator fallback review** — during monitoring, the orchestrator checks for:
+   - Open issues with no linked PR that are >7 days old (auto-closed by `reapStaleOrchestratorIssues`)
+   - Merged PRs whose issues didn't auto-close (auto-fixed by `cleanupStaleIssues`)
+   - Any remaining drift that requires manual intervention
+
+To trigger a manual triage for a specific agent:
+```bash
+orch dispatch "Please do a full backlog triage: close duplicate issues, close stale issues >14 days with no PR, and update ROADMAP.md with current top 5 priorities." --agent=<agent-name>
+```
+
 ## Development Workflow
 
 - **All changes must be made on a feature branch** — never commit directly to `main`.
@@ -168,6 +189,7 @@ orch service status                  # Show running state + watched sources
 6. **Review open PRs** (every ~3 cycles) — approve (comment + merge), request changes (comment + dispatch feedback to agent), or escalate to human
 7. **Redeploy stale agents** — rebuild containers when code has new commits
 8. **Supervisor review** (every ~3 cycles) — LLM reasons about system state, follows up on gaps
+9. **Backlog triage** (every ~60 cycles / ~5h) — dispatch housekeeping task to each agent: close duplicates, close stale issues, update ROADMAP.md
 
 **Dispatch messages include instructions** for agents to create PRs with `gh pr create` and include "Closes #N" so issues auto-close on merge.
 

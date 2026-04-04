@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractClosedIssueNumbers, shouldVerifyTask } from "./daemon.js";
+import { extractClosedIssueNumbers, shouldVerifyTask, buildHousekeepingMessage } from "./daemon.js";
 
 describe("extractClosedIssueNumbers", () => {
   it("extracts Closes #N", () => {
@@ -36,6 +36,49 @@ describe("extractClosedIssueNumbers", () => {
 
   it("handles refs inline with other text", () => {
     expect(extractClosedIssueNumbers("This PR closes #42 and fixes #43.")).toEqual([42, 43]);
+  });
+});
+
+describe("buildHousekeepingMessage", () => {
+  const agentName = "my-agent";
+  const githubRepo = "owner/my-agent";
+
+  it("includes the github repo in the message", () => {
+    const msg = buildHousekeepingMessage(agentName, githubRepo);
+    expect(msg).toContain(githubRepo);
+  });
+
+  it("instructs closing duplicate issues", () => {
+    const msg = buildHousekeepingMessage(agentName, githubRepo);
+    expect(msg.toLowerCase()).toContain("duplicate");
+  });
+
+  it("instructs closing stale issues", () => {
+    const msg = buildHousekeepingMessage(agentName, githubRepo);
+    expect(msg.toLowerCase()).toContain("stale");
+  });
+
+  it("instructs maintaining ROADMAP.md", () => {
+    const msg = buildHousekeepingMessage(agentName, githubRepo);
+    expect(msg).toContain("ROADMAP.md");
+  });
+
+  it("instructs checking for orphan PRs", () => {
+    const msg = buildHousekeepingMessage(agentName, githubRepo);
+    expect(msg.toLowerCase()).toContain("orphan");
+  });
+
+  it("includes gh issue list command referencing the repo", () => {
+    const msg = buildHousekeepingMessage(agentName, githubRepo);
+    expect(msg).toContain(`gh issue list --repo ${githubRepo}`);
+  });
+
+  it("produces different messages for different agents", () => {
+    const msg1 = buildHousekeepingMessage("agent-a", "org/agent-a");
+    const msg2 = buildHousekeepingMessage("agent-b", "org/agent-b");
+    expect(msg1).not.toEqual(msg2);
+    expect(msg1).toContain("org/agent-a");
+    expect(msg2).toContain("org/agent-b");
   });
 });
 

@@ -21,6 +21,7 @@ import { execSync } from "node:child_process";
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
 const SUPERVISOR_CHECK_EVERY_N_CYCLES = 3; // ~15min at default interval
+const BACKLOG_TRIAGE_EVERY_N_CYCLES = 60; // ~5h at default interval
 const STALE_ISSUE_AGE_DAYS = 7;
 
 export class Daemon {
@@ -138,6 +139,11 @@ export class Daemon {
       if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
         this.cleanupStaleIssues(time);
         this.reapStaleOrchestratorIssues(time);
+      }
+
+      // 8. Periodic backlog triage — dispatch housekeeping task to each agent (~every 5h)
+      if (this.cycleCount % BACKLOG_TRIAGE_EVERY_N_CYCLES === 0) {
+        await this.triageBacklogs(time);
       }
     } finally {
       this.store.recordCycleEnd(cycleId, cycleStartedAt);
@@ -395,6 +401,41 @@ export class Daemon {
     }
   }
 
+  private async triageBacklogs(time: string): Promise<void> {
+    const agents = Object.entries(this.config.agents).filter(([, a]) => a.github);
+    if (agents.length === 0) return;
+
+    console.log(`[${time}] Backlog triage: dispatching housekeeping to ${agents.length} agent(s)`);
+    this.log.info("Starting backlog triage cycle", { agentCount: agents.length });
+
+    for (const [agentName, agent] of agents) {
+      try {
+        if (this.store.hasActiveTask(agentName)) {
+          this.log.info("Skipping backlog triage: agent busy", { agentName });
+          console.log(`  ${agentName}: skipped (agent busy)`);
+          continue;
+        }
+
+        const message = buildHousekeepingMessage(agentName, agent.github!);
+        // Fire-and-forget: don't block the daemon waiting for each agent
+        this.dispatcher.dispatch(message, {
+          agentName,
+          source: "manual",
+          title: `[housekeeping] Periodic backlog triage for ${agentName}`,
+        }).then((result) => {
+          console.log(`  ${agentName}: housekeeping dispatched (task ${result.taskId.slice(0, 8)})`);
+          this.log.info("Housekeeping task dispatched", { agentName, taskId: result.taskId });
+        }).catch((err) => {
+          console.error(`  ${agentName}: housekeeping dispatch failed — ${err instanceof Error ? err.message : err}`);
+          this.log.error("Housekeeping dispatch failed", { agentName, error: String(err) });
+        });
+      } catch (err) {
+        console.error(`[${time}] Backlog triage failed for ${agentName}: ${err instanceof Error ? err.message : err}`);
+        this.log.error("Backlog triage error", { agentName, error: String(err) });
+      }
+    }
+  }
+
   private cleanup(): void {
     removePid();
     this.store.close();
@@ -547,6 +588,26 @@ export function shouldVerifyTask(taskSource: string, sourcesFilter?: string[]): 
   if (!sourcesFilter || sourcesFilter.length === 0) return true;
   if (taskSource === "manual") return true;
   return sourcesFilter.includes(taskSource);
+}
+
+/**
+ * Build the housekeeping message dispatched to an agent during periodic backlog triage.
+ *
+ * Exported for unit testing. Agents receive this every ~5 hours to keep their
+ * repos clean: closing duplicates, triaging stale issues, and maintaining ROADMAP.md.
+ */
+export function buildHousekeepingMessage(agentName: string, githubRepo: string): string {
+  return `Time for your periodic backlog triage. Please do the following for your repo (${githubRepo}):
+
+1. **Close duplicate issues** — scan open issues for duplicates. Keep the newer/more detailed one, close the other with a comment like "Duplicate of #N — closing in favour of the more detailed issue."
+
+2. **Close stale issues** — close any issues open >14 days with no linked PR and no recent comments. Add a comment explaining why (e.g. "Closing as stale — no activity in 14+ days. Reopen if this is still relevant.").
+
+3. **Maintain ROADMAP.md** — update (or create) ROADMAP.md in your repo root with your top 5 priorities sorted by user impact. Reflect any work completed since the last update.
+
+4. **Check for orphan PRs** — ensure every open PR has an issue linked via "Closes #N". If a PR is missing one, either create the issue or add the reference to the PR body.
+
+Be concise and systematic. Use \`gh issue list --repo ${githubRepo} --state open -L 50\` to get a full picture before acting. After completing the triage, briefly summarise what you closed or updated.`;
 }
 
 /** Extract issue numbers from PR body patterns like "Closes #42", "Fixes #7", "Resolves #100" */
