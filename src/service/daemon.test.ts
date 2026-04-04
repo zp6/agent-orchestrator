@@ -1,5 +1,67 @@
 import { describe, it, expect, vi } from "vitest";
-import { extractClosedIssueNumbers, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged } from "./daemon.js";
+import { extractClosedIssueNumbers, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry } from "./daemon.js";
+import { TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
+
+// ────────────────────────────────────────────────────────────────────────────
+// computeTimeoutRetry — timeout retry scheduling
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("computeTimeoutRetry", () => {
+  const NOW = 1_700_000_000_000; // fixed timestamp for deterministic tests
+
+  it("first timeout (retry_count=0): schedules retry and increments retry_count", () => {
+    const result = computeTimeoutRetry(0, NOW);
+    expect(result.retry_count).toBe(1);
+    expect(result.next_retry_at).not.toBeNull();
+  });
+
+  it("first timeout: next_retry_at is exactly TIMEOUT_RETRY_BACKOFF_MS in the future", () => {
+    const result = computeTimeoutRetry(0, NOW);
+    const expected = new Date(NOW + TIMEOUT_RETRY_BACKOFF_MS).toISOString();
+    expect(result.next_retry_at).toBe(expected);
+  });
+
+  it("second timeout (retry_count=1): still within limit — schedules another retry", () => {
+    const result = computeTimeoutRetry(1, NOW);
+    expect(result.retry_count).toBe(2);
+    expect(result.next_retry_at).not.toBeNull();
+  });
+
+  it("at TIMEOUT_RETRY_MAX (retry_count=TIMEOUT_RETRY_MAX): no more retries — next_retry_at is null", () => {
+    const result = computeTimeoutRetry(TIMEOUT_RETRY_MAX, NOW);
+    expect(result.retry_count).toBe(TIMEOUT_RETRY_MAX + 1);
+    expect(result.next_retry_at).toBeNull();
+  });
+
+  it("exceeding TIMEOUT_RETRY_MAX (retry_count > TIMEOUT_RETRY_MAX): next_retry_at remains null", () => {
+    const result = computeTimeoutRetry(TIMEOUT_RETRY_MAX + 5, NOW);
+    expect(result.next_retry_at).toBeNull();
+  });
+
+  it("TIMEOUT_RETRY_MAX is 2 (matches the issue spec of max 2 retries)", () => {
+    expect(TIMEOUT_RETRY_MAX).toBe(2);
+  });
+
+  it("TIMEOUT_RETRY_BACKOFF_MS is 2 minutes", () => {
+    expect(TIMEOUT_RETRY_BACKOFF_MS).toBe(2 * 60 * 1000);
+  });
+
+  it("defaults nowMs to Date.now() when omitted", () => {
+    const before = Date.now();
+    const result = computeTimeoutRetry(0);
+    const after = Date.now();
+    const retryTime = new Date(result.next_retry_at!).getTime();
+    expect(retryTime).toBeGreaterThanOrEqual(before + TIMEOUT_RETRY_BACKOFF_MS);
+    expect(retryTime).toBeLessThanOrEqual(after + TIMEOUT_RETRY_BACKOFF_MS);
+  });
+
+  it("retry_count increments by exactly 1 regardless of current count", () => {
+    for (const n of [0, 1, 2, 3, 10]) {
+      const result = computeTimeoutRetry(n, NOW);
+      expect(result.retry_count).toBe(n + 1);
+    }
+  });
+});
 
 describe("extractClosedIssueNumbers", () => {
   it("extracts Closes #N", () => {

@@ -14,6 +14,19 @@ export const MAX_RETRIES = 3;
 /** Backoff delays in milliseconds for each retry attempt (index = retry_count - 1). */
 export const RETRY_DELAYS_MS = [30_000, 120_000, 600_000] as const;
 
+/**
+ * Maximum number of automatic retries for timeout failures (exit code 143 / SIGTERM).
+ * Kept lower than MAX_RETRIES so transient timeouts self-heal quickly without burning
+ * the full generic retry budget before the supervisor notices.
+ */
+export const TIMEOUT_RETRY_MAX = 2;
+
+/**
+ * Backoff in milliseconds before the first retry of a timeout failure.
+ * 2 minutes gives the container/proxy time to recover before the next attempt.
+ */
+export const TIMEOUT_RETRY_BACKOFF_MS = 2 * 60 * 1000; // 2 minutes
+
 export interface DispatchResult {
   taskId: string;
   agentName: string;

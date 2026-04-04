@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { Dispatcher, MAX_RETRIES, RETRY_DELAYS_MS } from "./dispatcher.js";
+import { Dispatcher, MAX_RETRIES, RETRY_DELAYS_MS, TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "./dispatcher.js";
 import { StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 
@@ -80,6 +80,18 @@ describe("Dispatcher — retry constants", () => {
 
   it("first retry delay is at least 10 seconds", () => {
     expect(RETRY_DELAYS_MS[0]).toBeGreaterThanOrEqual(10_000);
+  });
+
+  it("TIMEOUT_RETRY_MAX is less than MAX_RETRIES (timeout policy is stricter)", () => {
+    expect(TIMEOUT_RETRY_MAX).toBeLessThan(MAX_RETRIES);
+  });
+
+  it("TIMEOUT_RETRY_MAX is 2 (matches the issue spec)", () => {
+    expect(TIMEOUT_RETRY_MAX).toBe(2);
+  });
+
+  it("TIMEOUT_RETRY_BACKOFF_MS is 2 minutes", () => {
+    expect(TIMEOUT_RETRY_BACKOFF_MS).toBe(2 * 60 * 1000);
   });
 });
 

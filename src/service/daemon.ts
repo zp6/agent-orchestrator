@@ -1,6 +1,6 @@
 import { loadConfig, type OrchestratorConfig } from "../config/schema.js";
 import { StateStore } from "../state/store.js";
-import { Dispatcher } from "../orchestrator/dispatcher.js";
+import { Dispatcher, MAX_RETRIES, TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
 import { Verifier } from "../orchestrator/verifier.js";
 import { ImprovementDetector } from "../orchestrator/improvement-detector.js";
 import { IssueCreator } from "../orchestrator/issue-creator.js";
@@ -113,8 +113,13 @@ export class Daemon {
       // Fetch which agents are actually deployed on the proxy
       registeredAgents = await this.deployer.getRegisteredAgents();
 
-      // 1. Check for stale dispatched tasks (stuck or crashed agents)
+      // 1. Check for stale dispatched tasks (stuck or crashed agents).
+      //    Timeout failures are scheduled for retry (up to TIMEOUT_RETRY_MAX times)
+      //    rather than being permanently failed immediately.
       this.checkStaleTasks(time);
+
+      // 1b. Process tasks whose retry backoff has elapsed.
+      await this.processRetries(time);
 
       // 2. Dispatch new work from all trigger sources
       await this.dispatchTriggers(time, registeredAgents);
@@ -193,13 +198,76 @@ export class Daemon {
       const staleThresholdMs = agentConfig?.stale_timeout_ms ?? DEFAULT_STALE_THRESHOLD_MS;
       const age = now - new Date(task.updated_at).getTime();
       if (age > staleThresholdMs) {
-        console.log(`[${time}] Stale task ${task.id.slice(0, 8)} (${task.agent_name}): dispatched ${Math.round(age / 60000)}min ago — marking failed`);
-        this.log.warn("Stale task detected", { taskId: task.id, agentName: task.agent_name, ageMinutes: Math.round(age / 60000), staleThresholdMs });
+        const { retry_count: newRetryCount, next_retry_at: nextRetryAt } =
+          computeTimeoutRetry(task.retry_count ?? 0, now);
+        const willRetry = nextRetryAt !== null;
+
+        console.log(
+          `[${time}] Stale task ${task.id.slice(0, 8)} (${task.agent_name}): dispatched ${Math.round(age / 60000)}min ago — ${
+            willRetry
+              ? `retry ${newRetryCount}/${TIMEOUT_RETRY_MAX} in 2min`
+              : "permanently failed (retries exhausted)"
+          }`,
+        );
+        this.log.warn("Stale task detected (exit 143)", {
+          taskId: task.id,
+          agentName: task.agent_name,
+          ageMinutes: Math.round(age / 60000),
+          staleThresholdMs,
+          willRetry,
+          retryCount: newRetryCount,
+        });
         this.store.updateTask(task.id, {
           status: "failed",
-          result: `Timed out: dispatched ${Math.round(age / 60000)} minutes ago with no response`,
+          result: `Timed out: dispatched ${Math.round(age / 60000)} minutes ago with no response (exit 143)`,
+          retry_count: newRetryCount,
+          next_retry_at: nextRetryAt,
         });
       }
+    }
+  }
+
+  /**
+   * Fire off retry attempts for all failed tasks whose backoff delay has elapsed.
+   * Skips agents that are already busy to avoid queuing work on top of in-flight tasks.
+   * Each retry is fire-and-forget so we don't block the daemon cycle on agent I/O.
+   */
+  private async processRetries(time: string): Promise<void> {
+    try {
+      const retryable = this.store.getRetryableTasks(MAX_RETRIES);
+      if (retryable.length === 0) return;
+
+      console.log(`[${time}] Retries: ${retryable.length} task(s) ready for retry`);
+      this.log.info("Processing retryable tasks", { count: retryable.length });
+
+      for (const task of retryable) {
+        if (task.agent_name && this.store.hasActiveTask(task.agent_name)) {
+          this.log.info("Retry deferred: agent busy", {
+            taskId: task.id,
+            agentName: task.agent_name,
+            retryCount: task.retry_count,
+          });
+          console.log(
+            `[${time}] Retry deferred ${task.id.slice(0, 8)} (${task.agent_name}): agent busy, will try next cycle`,
+          );
+          continue;
+        }
+
+        // Fire-and-forget: retryTask manages its own state transitions and
+        // schedules further retries or marks permanently failed on exhaustion.
+        this.dispatcher.retryTask(task).then(() => {
+          this.log.info("Retry task completed", { taskId: task.id, agentName: task.agent_name });
+        }).catch((err) => {
+          // retryTask doesn't throw on agent errors — only on unexpected internal failures
+          this.log.error("Unexpected error in retryTask", {
+            taskId: task.id,
+            agentName: task.agent_name,
+            error: String(err),
+          });
+        });
+      }
+    } catch (err) {
+      console.error(`[${time}] Retry processing step failed: ${err instanceof Error ? err.message : err}`);
     }
   }
 
@@ -624,6 +692,30 @@ export class Daemon {
       }, 500);
     });
   }
+}
+
+/**
+ * Compute the retry state update for a task that timed out (exit code 143 / SIGTERM).
+ *
+ * Encapsulates the timeout-specific retry policy so both `checkStaleTasks` and
+ * unit tests can share the same logic without re-implementing it.
+ *
+ * @param currentRetryCount - the task's current `retry_count` before this failure
+ * @param nowMs - current timestamp in ms (defaults to `Date.now()`, injectable for tests)
+ * @returns update fields to apply to the task record
+ */
+export function computeTimeoutRetry(
+  currentRetryCount: number,
+  nowMs: number = Date.now(),
+): { retry_count: number; next_retry_at: string | null } {
+  const newRetryCount = currentRetryCount + 1;
+  const willRetry = currentRetryCount < TIMEOUT_RETRY_MAX;
+  return {
+    retry_count: newRetryCount,
+    next_retry_at: willRetry
+      ? new Date(nowMs + TIMEOUT_RETRY_BACKOFF_MS).toISOString()
+      : null,
+  };
 }
 
 /**
