@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { StateStore, type Task, type SystemMetrics, type ScoreDistribution } from "../../state/store.js";
+import { StateStore, type Task, type SystemMetrics, type ScoreDistribution, type ScoreTrend } from "../../state/store.js";
 import { loadConfig } from "../../config/schema.js";
 
 const STATUS_COLORS: Record<string, (s: string) => string> = {
@@ -65,6 +65,22 @@ function scoreBar(count: number, total: number, color: (s: string) => string): s
   const bar = "█".repeat(filled) + chalk.dim("░".repeat(BAR_WIDTH - filled));
   const pct = `${Math.round((count / total) * 100)}%`.padStart(4);
   return `${color(bar)} ${chalk.dim(pct)} ${String(count).padStart(4)}`;
+}
+
+/**
+ * Render a ScoreTrend as a compact colored string, e.g. "↑ +0.08" or "→ stable".
+ */
+function formatTrend(trend: ScoreTrend): string {
+  switch (trend.direction) {
+    case "improving":
+      return chalk.green(`↑ +${trend.delta!.toFixed(2)}`);
+    case "declining":
+      return chalk.red(`↓ ${trend.delta!.toFixed(2)}`);
+    case "stable":
+      return chalk.dim("→ stable");
+    case "insufficient_data":
+      return chalk.dim(`— (${trend.scored_count}/${trend.window_size})`);
+  }
 }
 
 function printScoreDistribution(dist: ScoreDistribution): void {
@@ -136,7 +152,7 @@ function printMetrics(metrics: SystemMetrics, improvement?: ImprovementStats): v
   const distEntries = Object.entries(metrics.per_agent_score_distribution);
   if (distEntries.length > 0) {
     console.log(chalk.bold("\nPer-Agent Score Distribution"));
-    const COL = { agent: 24, exc: 5, good: 5, fair: 5, poor: 5, unscored: 8 };
+    const COL = { agent: 24, exc: 5, good: 5, fair: 5, poor: 5, unscored: 8, trend: 14 };
     const hdr = [
       "  " + "Agent".padEnd(COL.agent),
       chalk.green("Exc".padStart(COL.exc)),
@@ -144,9 +160,10 @@ function printMetrics(metrics: SystemMetrics, improvement?: ImprovementStats): v
       chalk.yellow("Fair".padStart(COL.fair)),
       chalk.red("Poor".padStart(COL.poor)),
       chalk.dim("Unscrd".padStart(COL.unscored)),
+      "Trend".padStart(COL.trend),
     ].join("  ");
     console.log(chalk.dim(hdr));
-    console.log(chalk.dim("  " + "─".repeat(COL.agent + (COL.exc + COL.good + COL.fair + COL.poor + COL.unscored) + 10)));
+    console.log(chalk.dim("  " + "─".repeat(COL.agent + (COL.exc + COL.good + COL.fair + COL.poor + COL.unscored + COL.trend) + 12)));
     for (const [agentName, dist] of distEntries) {
       const name = chalk.cyan(agentName.slice(0, COL.agent).padEnd(COL.agent));
       const exc = (dist.excellent > 0 ? chalk.green(String(dist.excellent)) : chalk.dim("0")).padStart(COL.exc + 2);
@@ -154,7 +171,9 @@ function printMetrics(metrics: SystemMetrics, improvement?: ImprovementStats): v
       const fair = (dist.fair > 0 ? chalk.yellow(String(dist.fair)) : chalk.dim("0")).padStart(COL.fair + 2);
       const poor = (dist.poor > 0 ? chalk.red(String(dist.poor)) : chalk.dim("0")).padStart(COL.poor + 2);
       const unscored = (dist.unscored > 0 ? chalk.dim(String(dist.unscored)) : chalk.dim("0")).padStart(COL.unscored + 2);
-      console.log(`  ${name}  ${exc}  ${good}  ${fair}  ${poor}  ${unscored}`);
+      const trendData = metrics.per_agent_score_trends[agentName];
+      const trend = trendData ? formatTrend(trendData) : chalk.dim("—");
+      console.log(`  ${name}  ${exc}  ${good}  ${fair}  ${poor}  ${unscored}  ${trend}`);
     }
   }
 

@@ -84,6 +84,25 @@ export interface ScoreDistribution {
   total: number;
 }
 
+/**
+ * Quality score trend for a single agent, comparing the most recent N tasks
+ * to the prior N tasks.
+ */
+export interface ScoreTrend {
+  /** Average quality score of the most recent `window_size` scored tasks */
+  recent_avg: number | null;
+  /** Average quality score of the N tasks before the recent window */
+  prior_avg: number | null;
+  /** Delta = recent_avg - prior_avg. Positive = improving. */
+  delta: number | null;
+  /** Human-readable direction */
+  direction: "improving" | "stable" | "declining" | "insufficient_data";
+  /** Number of scored tasks available (across both windows) */
+  scored_count: number;
+  /** Window size used for each half of the comparison */
+  window_size: number;
+}
+
 export interface SystemMetrics {
   /** Aggregated across all agents / tasks */
   total_tasks: number;
@@ -99,6 +118,8 @@ export interface SystemMetrics {
   score_distribution: ScoreDistribution;
   /** Per-agent quality score distributions (keyed by agent_name) */
   per_agent_score_distribution: Record<string, ScoreDistribution>;
+  /** Per-agent quality score trends (keyed by agent_name) */
+  per_agent_score_trends: Record<string, ScoreTrend>;
   per_agent: AgentMetrics[];
   cycles: CycleMetrics;
 }
@@ -480,6 +501,89 @@ export class StateStore {
     return result;
   }
 
+  /**
+   * Compute a quality score trend for a single agent.
+   *
+   * Compares the average score of the most recent `windowSize` scored tasks
+   * against the prior `windowSize` scored tasks (i.e., tasks ranked windowSize+1
+   * through 2*windowSize by recency).
+   *
+   * Direction thresholds:
+   * - improving: delta > +0.05
+   * - declining: delta < -0.05
+   * - stable:    |delta| <= 0.05
+   * - insufficient_data: fewer than windowSize scored tasks exist
+   */
+  getAgentScoreTrend(agentName: string, windowSize = 10): ScoreTrend {
+    // Count total scored tasks for this agent so we can report it and gate on it
+    const countRow = this.db.prepare(`
+      SELECT COUNT(*) AS cnt
+      FROM tasks
+      WHERE agent_name = ? AND parent_task_id IS NULL
+        AND verification_status IS NOT NULL AND quality_score IS NOT NULL
+    `).get(agentName) as { cnt: number };
+
+    const scored_count = countRow.cnt;
+
+    if (scored_count < windowSize) {
+      return {
+        recent_avg: null,
+        prior_avg: null,
+        delta: null,
+        direction: "insufficient_data",
+        scored_count,
+        window_size: windowSize,
+      };
+    }
+
+    // Use a window function (ROW_NUMBER) to rank tasks newest-first, then
+    // split into two buckets: rows 1..windowSize (recent) and (windowSize+1)..(2*windowSize) (prior).
+    // Only tasks with a numeric quality_score are included.
+    const row = this.db.prepare(`
+      SELECT
+        AVG(CASE WHEN rn <= ? THEN quality_score END)                              AS recent_avg,
+        AVG(CASE WHEN rn > ? AND rn <= ?        THEN quality_score END)            AS prior_avg
+      FROM (
+        SELECT quality_score,
+               ROW_NUMBER() OVER (ORDER BY created_at DESC, id DESC) AS rn
+        FROM tasks
+        WHERE agent_name = ?
+          AND parent_task_id IS NULL
+          AND verification_status IS NOT NULL
+          AND quality_score IS NOT NULL
+      )
+      WHERE rn <= ?
+    `).get(windowSize, windowSize, windowSize * 2, agentName, windowSize * 2) as {
+      recent_avg: number | null;
+      prior_avg: number | null;
+    };
+
+    const recent_avg = row.recent_avg;
+    const prior_avg = row.prior_avg;
+
+    let delta: number | null = null;
+    let direction: ScoreTrend["direction"] = "insufficient_data";
+
+    if (recent_avg !== null && prior_avg !== null) {
+      delta = recent_avg - prior_avg;
+      if (delta > 0.05) direction = "improving";
+      else if (delta < -0.05) direction = "declining";
+      else direction = "stable";
+    } else if (recent_avg !== null) {
+      // Only one window of data — stable by default
+      direction = "stable";
+    }
+
+    return {
+      recent_avg,
+      prior_avg,
+      delta,
+      direction,
+      scored_count,
+      window_size: windowSize,
+    };
+  }
+
   getAgentStats(): Array<{ agent_name: string; total: number; done: number; failed: number; avg_score: number | null }> {
     return this.db.prepare(`
       SELECT agent_name,
@@ -605,6 +709,12 @@ export class StateStore {
     const score_distribution = this.getScoreDistribution();
     const per_agent_score_distribution = this.getScoreDistributionByAgent();
 
+    // Compute score trends for every agent that has at least some scored tasks
+    const per_agent_score_trends: Record<string, ScoreTrend> = {};
+    for (const agentName of Object.keys(per_agent_score_distribution)) {
+      per_agent_score_trends[agentName] = this.getAgentScoreTrend(agentName);
+    }
+
     return {
       total_tasks: global.total_tasks,
       done_tasks: global.done_tasks,
@@ -614,6 +724,7 @@ export class StateStore {
       avg_quality_score: verify.avg_quality_score,
       score_distribution,
       per_agent_score_distribution,
+      per_agent_score_trends,
       per_agent,
       cycles: {
         total_cycles: cycleRow.total_cycles,

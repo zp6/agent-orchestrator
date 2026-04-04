@@ -504,4 +504,102 @@ describe("StateStore", () => {
       expect(m.per_agent_score_distribution["beta"].poor).toBe(1);
     });
   });
+
+  describe("getAgentScoreTrend", () => {
+    /** Helper: create a verified task for `agentName` with `score` */
+    const makeScored = (agentName: string, score: number) => {
+      const t = store.createTask({ title: `t-${agentName}-${score}`, source: "manual", agent_name: agentName });
+      store.updateTask(t.id, { status: "done", verification_status: "approved", quality_score: score });
+    };
+
+    it("returns insufficient_data when agent has no scored tasks", () => {
+      const trend = store.getAgentScoreTrend("nobody", 10);
+      expect(trend.direction).toBe("insufficient_data");
+      expect(trend.scored_count).toBe(0);
+      expect(trend.recent_avg).toBeNull();
+      expect(trend.prior_avg).toBeNull();
+      expect(trend.delta).toBeNull();
+    });
+
+    it("returns insufficient_data when agent has fewer than windowSize scored tasks", () => {
+      for (let i = 0; i < 5; i++) makeScored("alpha", 0.8);
+      const trend = store.getAgentScoreTrend("alpha", 10);
+      expect(trend.direction).toBe("insufficient_data");
+      expect(trend.scored_count).toBe(5);
+    });
+
+    it("returns stable when recent and prior averages are within ±0.05", () => {
+      // Create 20 tasks: first 10 (prior) avg 0.80, last 10 (recent) avg 0.82 → delta = +0.02 → stable
+      for (let i = 0; i < 10; i++) makeScored("alpha", 0.80);
+      for (let i = 0; i < 10; i++) makeScored("alpha", 0.82);
+      const trend = store.getAgentScoreTrend("alpha", 10);
+      expect(trend.direction).toBe("stable");
+      expect(trend.delta).not.toBeNull();
+      expect(Math.abs(trend.delta!)).toBeLessThanOrEqual(0.05);
+    });
+
+    it("returns improving when recent avg is more than 0.05 higher than prior avg", () => {
+      // prior window: avg 0.40, recent window: avg 0.90 → large positive delta
+      for (let i = 0; i < 10; i++) makeScored("beta", 0.40);
+      for (let i = 0; i < 10; i++) makeScored("beta", 0.90);
+      const trend = store.getAgentScoreTrend("beta", 10);
+      expect(trend.direction).toBe("improving");
+      expect(trend.delta).toBeGreaterThan(0.05);
+      // recent avg should be much higher than prior avg
+      expect(trend.recent_avg!).toBeGreaterThan(trend.prior_avg!);
+    });
+
+    it("returns declining when recent avg is more than 0.05 lower than prior avg", () => {
+      // prior window: avg 0.90, recent window: avg 0.40 → large negative delta
+      for (let i = 0; i < 10; i++) makeScored("gamma", 0.90);
+      for (let i = 0; i < 10; i++) makeScored("gamma", 0.40);
+      const trend = store.getAgentScoreTrend("gamma", 10);
+      expect(trend.direction).toBe("declining");
+      expect(trend.delta).toBeLessThan(-0.05);
+      // recent avg should be much lower than prior avg
+      expect(trend.recent_avg!).toBeLessThan(trend.prior_avg!);
+    });
+
+    it("ignores sub-tasks and unscored tasks", () => {
+      // Add unverified and sub-tasks — these should not count toward the window
+      const parent = store.createTask({ title: "Parent", source: "manual", agent_name: "delta" });
+      const child = store.createSubTask({
+        parent_task_id: parent.id,
+        step_id: "s1",
+        title: "Child",
+        description: "sub",
+        source: "manual",
+        agent_name: "delta",
+      });
+      store.updateTask(parent.id, { status: "done", verification_status: "approved", quality_score: 0.90 });
+      store.updateTask(child.id, { status: "done", verification_status: "approved", quality_score: 0.90 });
+      // Add an unverified task
+      const unverified = store.createTask({ title: "Unverified", source: "manual", agent_name: "delta" });
+      store.updateTask(unverified.id, { status: "done" });
+
+      // Only 1 top-level scored task → insufficient_data with windowSize=10
+      const trend = store.getAgentScoreTrend("delta", 10);
+      expect(trend.direction).toBe("insufficient_data");
+      expect(trend.scored_count).toBe(1);
+    });
+
+    it("reports window_size correctly", () => {
+      for (let i = 0; i < 10; i++) makeScored("epsilon", 0.80);
+      const trend = store.getAgentScoreTrend("epsilon", 5);
+      expect(trend.window_size).toBe(5);
+      // 10 scored tasks with windowSize=5 → should have both windows
+      expect(trend.direction).not.toBe("insufficient_data");
+    });
+
+    it("getMetrics includes per_agent_score_trends", () => {
+      // Create 20 tasks for "trendy": prior 10 avg 0.60, recent 10 avg 0.90 → improving
+      for (let i = 0; i < 10; i++) makeScored("trendy", 0.60);
+      for (let i = 0; i < 10; i++) makeScored("trendy", 0.90);
+
+      const m = store.getMetrics();
+      expect(m.per_agent_score_trends).toBeDefined();
+      expect(m.per_agent_score_trends["trendy"]).toBeDefined();
+      expect(m.per_agent_score_trends["trendy"].direction).toBe("improving");
+    });
+  });
 });
