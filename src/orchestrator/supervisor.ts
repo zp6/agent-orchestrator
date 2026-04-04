@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import { createLLMClient } from "../client/llm-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore, Task } from "../state/store.js";
@@ -37,7 +38,49 @@ IMPORTANT PRIORITIES:
 - Do NOT follow up on tasks that are just internal tooling or testing infrastructure
 - If an agent is idle, dispatch product-focused work from their open issues, not more tech debt fixes
 
+CRITICAL — IDLE AGENT DISPATCH RULES (strictly enforced):
+- NEVER dispatch a vague "you are idle" or "check for work" message to an agent — these produce useless status reports that are immediately rejected
+- When dispatching to an idle agent, you MUST either:
+  (a) Reference a SPECIFIC open GitHub issue by number (e.g. "implement issue #42 from owner/repo"), OR
+  (b) Define a CONCRETE artifact the agent must produce (e.g. "create file X", "open a PR for Y", "run command Z and report results")
+- The open GitHub issues per agent are listed in the context under "## Open Issues". Pick one and dispatch it.
+- If an agent is idle and has no open issues, prefer action "none" over a vague dispatch — do not invent busywork
+- A dispatch message that will result in a pure status check or "system looks healthy" report is a quality failure and wastes a task slot
+
 Be specific and actionable. Only suggest actions that address real gaps. Return [] if everything is on track.`;
+
+/** Regex to detect issue references like #42 or owner/repo#42 */
+const ISSUE_REF_RE = /#\d+/;
+
+/** Concrete artifact keywords that indicate a real deliverable */
+const ARTIFACT_KEYWORDS = [
+  "create file",
+  "open a pr",
+  "open pr",
+  "push branch",
+  "push your branch",
+  "push the branch",
+  "push to ",
+  "write ",
+  "implement ",
+  "add ",
+  "fix ",
+  "update ",
+  "run command",
+  "produce ",
+  "generate ",
+];
+
+/**
+ * Returns true if a supervisor dispatch message contains a specific issue
+ * reference (#N) or a concrete artifact keyword — i.e. it is actionable.
+ */
+export function isConcreteDispatch(message: string): boolean {
+  if (!message) return false;
+  const lower = message.toLowerCase();
+  if (ISSUE_REF_RE.test(message)) return true;
+  return ARTIFACT_KEYWORDS.some((kw) => lower.includes(kw));
+}
 
 export class Supervisor {
   private log = createLogger("supervisor");
@@ -67,12 +110,45 @@ export class Supervisor {
         .join("");
 
       const decisions = this.parseDecisions(text);
-      this.log.info("Supervisor review complete", { decisions: decisions.length, actions: decisions.map((d) => d.action) });
-      return decisions;
+      const validated = this.filterVagueDispatches(decisions);
+
+      const dropped = decisions.length - validated.length;
+      if (dropped > 0) {
+        this.log.warn("Supervisor: dropped vague idle-agent dispatches", { dropped });
+      }
+
+      this.log.info("Supervisor review complete", { decisions: validated.length, actions: validated.map((d) => d.action) });
+      return validated;
     } catch (err) {
       this.log.error("Supervisor review failed", { error: err instanceof Error ? err.message : String(err) });
       return [];
     }
+  }
+
+  /**
+   * Filter out dispatch/follow-up decisions that target idle agents but don't
+   * include a specific issue reference or concrete artifact. These produce
+   * status-report responses that score near 0 in verification.
+   */
+  private filterVagueDispatches(decisions: SupervisorDecision[]): SupervisorDecision[] {
+    return decisions.filter((d) => {
+      if (d.action !== "dispatch" && d.action !== "follow-up") return true;
+      if (!d.agentName || !d.message) return true;
+
+      // Only enforce on agents that are idle (no active tasks)
+      const isIdle = !this.store.hasActiveTask(d.agentName);
+      if (!isIdle) return true;
+
+      const concrete = isConcreteDispatch(d.message);
+      if (!concrete) {
+        this.log.warn("Dropping vague idle-agent dispatch", {
+          agentName: d.agentName,
+          reason: d.reason,
+          message: d.message.slice(0, 120),
+        });
+      }
+      return concrete;
+    });
   }
 
   private buildContext(): string {
@@ -83,6 +159,12 @@ export class Supervisor {
       .map(([name, a]) => `- ${name}: ${a.description}${a.github ? ` (${a.github})` : ""}`)
       .join("\n");
     sections.push(`## Agents\n${agents}`);
+
+    // Open GitHub issues per agent (so the supervisor can pick specific ones to dispatch)
+    const openIssues = this.fetchOpenIssues();
+    if (openIssues.length > 0) {
+      sections.push(`## Open Issues\n${openIssues.join("\n")}`);
+    }
 
     // Recent tasks
     const recent = this.store.getRecentCompleted(10);
@@ -124,6 +206,33 @@ export class Supervisor {
     }
 
     return sections.join("\n\n");
+  }
+
+  /**
+   * Fetch up to 10 open GitHub issues per agent (agents with a github config).
+   * Returns formatted lines like: `- agent-name (owner/repo): #42 Issue title`
+   *
+   * Failures are silently ignored — the supervisor still works without this data.
+   */
+  private fetchOpenIssues(): string[] {
+    const lines: string[] = [];
+    for (const [name, agent] of Object.entries(this.config.agents)) {
+      if (!agent.github) continue;
+      try {
+        const raw = execSync(
+          `gh issue list --repo ${agent.github} --state open --json number,title -L 10`,
+          { encoding: "utf-8", timeout: 10000 },
+        ).trim();
+        if (!raw) continue;
+        const issues = JSON.parse(raw) as Array<{ number: number; title: string }>;
+        for (const issue of issues) {
+          lines.push(`- ${name} (${agent.github}): #${issue.number} ${issue.title}`);
+        }
+      } catch {
+        // gh not available or repo not accessible — skip silently
+      }
+    }
+    return lines;
   }
 
   private formatTask(t: Task): string {
