@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS } from "./daemon.js";
+import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING } from "./daemon.js";
 import { TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -404,5 +404,20 @@ describe("isPRAlreadyMerged", () => {
     expect(cmd).toContain("gh pr view 99");
     expect(cmd).toContain("--repo myorg/my-repo");
     expect(cmd).toContain("--json state");
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// PR_FEEDBACK_CEILING — constant value checks
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("PR_FEEDBACK_CEILING", () => {
+  it("is 3 (matches the issue spec of 3 feedback rounds before escalation)", () => {
+    expect(PR_FEEDBACK_CEILING).toBe(3);
+  });
+
+  it("is a positive integer", () => {
+    expect(PR_FEEDBACK_CEILING).toBeGreaterThan(0);
+    expect(Number.isInteger(PR_FEEDBACK_CEILING)).toBe(true);
   });
 });

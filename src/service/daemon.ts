@@ -27,6 +27,15 @@ const BACKLOG_TRIAGE_EVERY_N_CYCLES = 60; // ~5h at default interval
 const STALE_ISSUE_AGE_DAYS = 7;
 
 /**
+ * Maximum number of pr-feedback dispatch rounds before the daemon stops dispatching
+ * and automatically escalates the PR to a human reviewer.  This is the last-resort
+ * ceiling: the reviewer itself also escalates after 3 GitHub "Changes Requested"
+ * comments, but that check can fail if the gh API is unavailable.  The state-store
+ * counter here is the reliable backstop that prevents infinite feedback loops.
+ */
+export const PR_FEEDBACK_CEILING = 3;
+
+/**
  * Maximum number of automatic retries for tasks that time out (exit code 143 /
  * SIGTERM from container timeout).  Kept intentionally lower than MAX_RETRIES
  * so that hard timeouts don't exhaust the full retry budget.
@@ -509,13 +518,36 @@ export class Daemon {
             } else if (isPRAlreadyMerged(repo, prNumber)) {
               this.log.info("Skipping feedback dispatch: PR already merged", { repo, prNumber });
             } else {
-              this.log.info("Dispatching PR feedback to agent", { repo, prNumber, agentName });
-              this.dispatcher.dispatch(
-                `Your PR #${prNumber} on ${repo} was reviewed and needs changes:\n\n${result.comment}\n\nPlease fix the issues, commit, and push to the same branch.`,
-                { agentName, source: "pr-feedback", sourceRef: `${repo}#${prNumber}`, title: `[PR feedback] ${repo}#${prNumber}` },
-              ).catch((err) => {
-                this.log.error("Failed to dispatch PR feedback", { repo, prNumber, error: String(err) });
-              });
+              // Ceiling check: if we've already dispatched PR_FEEDBACK_CEILING rounds of
+              // feedback for this PR with no approval, escalate to human instead of looping.
+              // This is the reliable backstop — stored in our own state DB, independent of
+              // the GitHub API comment-counting the reviewer uses.
+              const feedbackRounds = this.store.countPrFeedbackRounds(repo, prNumber);
+              if (feedbackRounds >= PR_FEEDBACK_CEILING) {
+                this.log.warn("PR feedback ceiling reached, escalating to human", {
+                  repo,
+                  prNumber,
+                  agentName,
+                  feedbackRounds,
+                  ceiling: PR_FEEDBACK_CEILING,
+                });
+                console.log(`[${time}] PR #${prNumber} on ${repo}: feedback ceiling (${feedbackRounds}/${PR_FEEDBACK_CEILING}) — escalating to human`);
+                this.prReviewer.escalatePR(
+                  repo,
+                  prNumber,
+                  `This PR has received ${feedbackRounds} rounds of automated feedback with no approval. Escalating to human reviewer to break the loop.\n\n**Last reviewer feedback:** ${result.comment}`,
+                ).catch((err) => {
+                  this.log.error("Failed to escalate PR at feedback ceiling", { repo, prNumber, error: String(err) });
+                });
+              } else {
+                this.log.info("Dispatching PR feedback to agent", { repo, prNumber, agentName, feedbackRounds });
+                this.dispatcher.dispatch(
+                  `Your PR #${prNumber} on ${repo} was reviewed and needs changes:\n\n${result.comment}\n\nPlease fix the issues, commit, and push to the same branch.`,
+                  { agentName, source: "pr-feedback", sourceRef: `${repo}#${prNumber}`, title: `[PR feedback] ${repo}#${prNumber}` },
+                ).catch((err) => {
+                  this.log.error("Failed to dispatch PR feedback", { repo, prNumber, error: String(err) });
+                });
+              }
             }
           }
         }

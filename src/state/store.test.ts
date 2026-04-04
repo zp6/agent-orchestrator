@@ -974,6 +974,78 @@ describe("StateStore", () => {
     });
   });
 
+  describe("countPrFeedbackRounds", () => {
+    it("returns 0 when no pr-feedback tasks exist for that PR", () => {
+      expect(store.countPrFeedbackRounds("owner/repo", 99)).toBe(0);
+    });
+
+    it("returns 1 after one feedback task is dispatched", () => {
+      store.createTask({
+        title: "[PR feedback] owner/repo#42",
+        source: "pr-feedback",
+        source_ref: "owner/repo#42",
+        agent_name: "my-agent",
+      });
+      expect(store.countPrFeedbackRounds("owner/repo", 42)).toBe(1);
+    });
+
+    it("returns 3 after three rounds regardless of task status", () => {
+      for (let i = 1; i <= 3; i++) {
+        const task = store.createTask({
+          title: `[PR feedback] owner/repo#7 round ${i}`,
+          source: "pr-feedback",
+          source_ref: "owner/repo#7",
+          agent_name: "my-agent",
+        });
+        if (i < 3) store.updateTask(task.id, { status: "done" });
+        // Round 3 stays pending (in-flight)
+      }
+      expect(store.countPrFeedbackRounds("owner/repo", 7)).toBe(3);
+    });
+
+    it("counts in-flight (pending/dispatched) tasks toward the ceiling", () => {
+      // An in-flight task should count — we dispatched the round, it just hasn't completed yet.
+      const task = store.createTask({
+        title: "[PR feedback] owner/repo#50",
+        source: "pr-feedback",
+        source_ref: "owner/repo#50",
+        agent_name: "my-agent",
+      });
+      store.updateTask(task.id, { status: "dispatched" });
+      expect(store.countPrFeedbackRounds("owner/repo", 50)).toBe(1);
+    });
+
+    it("does not count feedback tasks for a different PR number", () => {
+      store.createTask({
+        title: "[PR feedback] owner/repo#100",
+        source: "pr-feedback",
+        source_ref: "owner/repo#100",
+        agent_name: "my-agent",
+      });
+      expect(store.countPrFeedbackRounds("owner/repo", 101)).toBe(0);
+    });
+
+    it("does not count non-pr-feedback tasks for the same source_ref", () => {
+      store.createTask({
+        title: "github task",
+        source: "github",
+        source_ref: "owner/repo#200",
+        agent_name: "my-agent",
+      });
+      expect(store.countPrFeedbackRounds("owner/repo", 200)).toBe(0);
+    });
+
+    it("accepts prNumber as a string", () => {
+      store.createTask({
+        title: "[PR feedback] owner/repo#300",
+        source: "pr-feedback",
+        source_ref: "owner/repo#300",
+        agent_name: "my-agent",
+      });
+      expect(store.countPrFeedbackRounds("owner/repo", "300")).toBe(1);
+    });
+  });
+
   describe("getTaskStatusCountsLastHours", () => {
     it("returns zero counts when no tasks exist", () => {
       const counts = store.getTaskStatusCountsLastHours(24);

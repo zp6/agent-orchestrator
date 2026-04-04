@@ -303,10 +303,27 @@ export class PRReviewer {
     }
   }
 
+  /**
+   * Expose escalation as a public method so the daemon's dispatch loop can trigger it
+   * directly when the feedback ceiling is hit (without going through the full review flow).
+   */
+  async escalatePR(repo: string, prNumber: number, reason: string): Promise<void> {
+    const result: PRReviewResult = {
+      decision: "escalate",
+      comment: reason,
+      reason,
+    };
+    this.log.info("Escalating PR via public escalatePR()", { repo, prNumber, reason });
+    await this.executeDecision(repo, prNumber, result);
+  }
+
   private countPriorReviews(repo: string, prNumber: number): number {
     try {
+      // Count specifically "Changes Requested" review comments — not approvals or escalations.
+      // Approvals cause the PR to be merged (no more reviews), so in practice we only want
+      // to count the change-request rounds that are keeping the feedback loop alive.
       const raw = execSync(
-        `gh api "repos/${repo}/issues/${prNumber}/comments?per_page=100" --jq '[.[] | select(.body | startswith("**[orchestrator] PR Review"))] | length'`,
+        `gh api "repos/${repo}/issues/${prNumber}/comments?per_page=100" --jq '[.[] | select(.body | contains("[orchestrator] PR Review — Changes Requested"))] | length'`,
         { encoding: "utf-8", timeout: 15000 },
       ).trim();
       return parseInt(raw, 10) || 0;

@@ -580,4 +580,133 @@ describe("PRReviewer", () => {
       expect(userMessage).not.toContain("TRUNCATED DIFF WARNING");
     });
   });
+
+  describe("review round ceiling (countPriorReviews)", () => {
+    it("escalates when 3 prior 'Changes Requested' comments exist (no LLM call)", async () => {
+      const { execSync: mockExecSync } = await import("node:child_process");
+      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+        if (cmd.includes("gh api") && cmd.includes("comments")) {
+          // Simulate 3 prior "Changes Requested" review comments
+          return "3\n";
+        }
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
+        if (cmd.includes("gh pr view")) return mockPRViewResponse;
+        if (cmd.includes("gh pr diff")) return mockDiffResponse;
+        if (cmd.includes("gh issue list")) return mockIssueListResponse;
+        if (cmd.includes("gh pr list")) return JSON.stringify([{ number: 9, title: "Test PR", body: "Closes #1" }]);
+        return "";
+      });
+
+      // PR has Closes #N in body so the body linter won't fire first
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Fix bug",
+        body: "Fixes the bug.\n\nCloses #1",
+        author: { login: "agent" },
+        headRefName: "issue-1-fix-bug",
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("escalate");
+      expect(result.comment).toContain("review cycles");
+      expect(result.reason).toContain("escalating");
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    it("does not escalate early when only 2 prior reviews exist", async () => {
+      const { execSync: mockExecSync } = await import("node:child_process");
+      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+        if (cmd.includes("gh api") && cmd.includes("comments")) {
+          return "2\n"; // Only 2 prior reviews — below ceiling
+        }
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
+        if (cmd.includes("gh pr view")) return mockPRViewResponse;
+        if (cmd.includes("gh pr diff")) return mockDiffResponse;
+        if (cmd.includes("gh issue list")) return mockIssueListResponse;
+        if (cmd.includes("gh pr list")) return JSON.stringify([{ number: 9, title: "Test PR", body: "Closes #1" }]);
+        return "";
+      });
+
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Fix bug",
+        body: "Closes #1",
+        author: { login: "agent" },
+        headRefName: "issue-1-fix-bug",
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ decision: "request-changes", comment: "Still needs work.", reason: "Bug remains" }) }],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      // Should proceed to LLM review (not pre-emptively escalate)
+      expect(mockCreate).toHaveBeenCalled();
+      expect(result.decision).toBe("request-changes");
+    });
+
+    it("fails open (proceeds to LLM review) when countPriorReviews gh API call throws", async () => {
+      const { execSync: mockExecSync } = await import("node:child_process");
+      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+        if (cmd.includes("gh api") && cmd.includes("comments")) {
+          throw new Error("gh: network error");
+        }
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
+        if (cmd.includes("gh pr view")) return mockPRViewResponse;
+        if (cmd.includes("gh pr diff")) return mockDiffResponse;
+        if (cmd.includes("gh issue list")) return mockIssueListResponse;
+        if (cmd.includes("gh pr list")) return JSON.stringify([{ number: 9, title: "Test PR", body: "Closes #1" }]);
+        return "";
+      });
+
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Fix bug",
+        body: "Closes #1",
+        author: { login: "agent" },
+        headRefName: "issue-1-fix-bug",
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Looks good now.", reason: "Clean" }) }],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      // countPriorReviews returns 0 on error (fail-open) → proceeds to LLM review
+      expect(mockCreate).toHaveBeenCalled();
+      expect(result.decision).toBe("approve");
+    });
+  });
+
+  describe("escalatePR (public method)", () => {
+    it("posts an escalation comment and adds rapartlu as reviewer", async () => {
+      const { execSync: mockExecSync } = await import("node:child_process");
+      const execSyncMock = vi.mocked(mockExecSync);
+
+      const reviewer = new PRReviewer(config);
+      await reviewer.escalatePR("owner/repo", 42, "3 feedback rounds with no approval — escalating to human.");
+
+      // Should have called gh pr edit --add-reviewer rapartlu
+      const addReviewerCall = execSyncMock.mock.calls.find(
+        (args) => typeof args[0] === "string" && args[0].includes("gh pr edit") && args[0].includes("--add-reviewer rapartlu"),
+      );
+      expect(addReviewerCall).toBeDefined();
+
+      // Should have posted an escalation comment
+      const commentCall = execSyncMock.mock.calls.find(
+        (args) => typeof args[0] === "string" && args[0].includes("gh pr comment") && args[0].includes("Orchestrator escalation"),
+      );
+      expect(commentCall).toBeDefined();
+    });
+  });
 });

@@ -443,6 +443,23 @@ export class StateStore {
   }
 
   /**
+   * Count the total number of pr-feedback tasks dispatched for a given repo + PR number,
+   * regardless of their current status.  Used to enforce the feedback ceiling: after
+   * PR_FEEDBACK_CEILING rounds the daemon stops dispatching and escalates to a human.
+   *
+   * Counts ALL statuses (pending, dispatched, in_progress, done, failed) so that even
+   * in-flight feedback tasks are included in the ceiling calculation — we want to count
+   * rounds dispatched, not rounds completed.
+   */
+  countPrFeedbackRounds(repo: string, prNumber: number | string): number {
+    const sourceRef = `${repo}#${prNumber}`;
+    const row = this.db
+      .prepare("SELECT COUNT(*) as cnt FROM tasks WHERE source = 'pr-feedback' AND source_ref = ?")
+      .get(sourceRef) as { cnt: number };
+    return row?.cnt ?? 0;
+  }
+
+  /**
    * Return the most-recently-created top-level task whose source and
    * source_ref match exactly. Used by the duplicate-guard to detect
    * in-flight or recently-completed tasks that survive daemon restarts.
