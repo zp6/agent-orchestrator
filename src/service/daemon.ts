@@ -217,13 +217,19 @@ export class Daemon {
 
         try {
           const result = await this.verifier.verifyAndRevise(task.id, maxRevisions);
-          const status = result.approved ? "approved" : "rejected";
-          console.log(
-            `[${time}] Verified ${task.id.slice(0, 8)} (${task.agent_name}): ${status} (${result.score.toFixed(1)})`,
-          );
+          if (result.notes === "Deferred: agent busy") {
+            console.log(
+              `[${time}] Deferred ${task.id.slice(0, 8)} (${task.agent_name}): agent busy, will retry next cycle`,
+            );
+          } else {
+            const status = result.approved ? "approved" : "rejected";
+            console.log(
+              `[${time}] Verified ${task.id.slice(0, 8)} (${task.agent_name}): ${status} (${result.score.toFixed(1)})`,
+            );
 
-          if (!result.approved && result.revision) {
-            console.log(`  Needs revision: ${result.revision.slice(0, 100)}`);
+            if (!result.approved && result.revision) {
+              console.log(`  Needs revision: ${result.revision.slice(0, 100)}`);
+            }
           }
         } catch (err) {
           console.error(`[${time}] Verify failed for ${task.id.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);

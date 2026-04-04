@@ -123,6 +123,36 @@ describe("StateStore", () => {
     });
   });
 
+  describe("hasActiveTask", () => {
+    it("returns false when agent has no tasks", () => {
+      expect(store.hasActiveTask("some-agent")).toBe(false);
+    });
+
+    it("returns true when agent has a dispatched task", () => {
+      const t = store.createTask({ title: "A", source: "manual", agent_name: "some-agent" });
+      store.updateTask(t.id, { status: "dispatched" });
+      expect(store.hasActiveTask("some-agent")).toBe(true);
+    });
+
+    it("returns true when agent has an in_progress task", () => {
+      const t = store.createTask({ title: "A", source: "manual", agent_name: "some-agent" });
+      store.updateTask(t.id, { status: "in_progress" });
+      expect(store.hasActiveTask("some-agent")).toBe(true);
+    });
+
+    it("returns false when agent only has done tasks", () => {
+      const t = store.createTask({ title: "A", source: "manual", agent_name: "some-agent" });
+      store.updateTask(t.id, { status: "done" });
+      expect(store.hasActiveTask("some-agent")).toBe(false);
+    });
+
+    it("does not count active tasks belonging to other agents", () => {
+      const t = store.createTask({ title: "A", source: "manual", agent_name: "other-agent" });
+      store.updateTask(t.id, { status: "in_progress" });
+      expect(store.hasActiveTask("some-agent")).toBe(false);
+    });
+  });
+
   describe("processed triggers", () => {
     it("tracks processed triggers", () => {
       const t = store.createTask({ title: "A", source: "github" });

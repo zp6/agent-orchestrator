@@ -84,6 +84,21 @@ export class Verifier {
   }
 
   async verifyAndRevise(taskId: string, maxRetries = 1): Promise<VerificationResult> {
+    // Check agent capacity BEFORE verifying — if the agent is already busy with active work,
+    // skip verification entirely and leave verification_status = NULL so the daemon retries
+    // next cycle. This prevents tasks from getting permanently stuck in "rejected" when the
+    // agent is busy at the moment of the capacity check.
+    const taskForCapacityCheck = this.store.getTask(taskId);
+    if (taskForCapacityCheck?.agent_name && this.store.hasActiveTask(taskForCapacityCheck.agent_name)) {
+      this.log.info("Deferring verification: agent busy, will retry next cycle", {
+        taskId,
+        agentName: taskForCapacityCheck.agent_name,
+      });
+      // Return a synthetic "deferred" result — caller treats it as not approved but won't
+      // permanently mark the task rejected (verification_status stays NULL).
+      return { approved: false, score: 0, notes: "Deferred: agent busy" };
+    }
+
     const result = await this.verify(taskId);
 
     if (result.approved || maxRetries <= 0 || !result.revision) {

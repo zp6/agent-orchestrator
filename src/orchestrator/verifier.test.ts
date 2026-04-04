@@ -108,6 +108,89 @@ describe("Verifier", () => {
     const verifier = new Verifier(config, store);
     await expect(verifier.verify(task.id)).rejects.toThrow("not done");
   });
+
+  describe("verifyAndRevise — capacity guard", () => {
+    it("defers verification when the agent already has an active (dispatched) task", async () => {
+      // Create the task to verify (done)
+      const done = store.createTask({
+        title: "Done task",
+        description: "Do something",
+        source: "manual",
+        agent_name: "busy-agent",
+      });
+      store.updateTask(done.id, { status: "done", result: "Result" });
+
+      // Create another task for the same agent that is still dispatched
+      const active = store.createTask({
+        title: "Active task",
+        source: "manual",
+        agent_name: "busy-agent",
+      });
+      store.updateTask(active.id, { status: "dispatched" });
+
+      const verifier = new Verifier(config, store);
+      const result = await verifier.verifyAndRevise(done.id);
+
+      // Should return deferred sentinel without running the LLM
+      expect(result.notes).toBe("Deferred: agent busy");
+      expect(result.approved).toBe(false);
+      expect(mockCreate).not.toHaveBeenCalled();
+
+      // verification_status must remain NULL so the daemon retries next cycle
+      const updated = store.getTask(done.id);
+      expect(updated?.verification_status).toBeNull();
+    });
+
+    it("defers verification when the agent already has an active (in_progress) task", async () => {
+      const done = store.createTask({
+        title: "Done task",
+        description: "Do something",
+        source: "manual",
+        agent_name: "busy-agent",
+      });
+      store.updateTask(done.id, { status: "done", result: "Result" });
+
+      const active = store.createTask({
+        title: "Active task",
+        source: "manual",
+        agent_name: "busy-agent",
+      });
+      store.updateTask(active.id, { status: "in_progress" });
+
+      const verifier = new Verifier(config, store);
+      const result = await verifier.verifyAndRevise(done.id);
+
+      expect(result.notes).toBe("Deferred: agent busy");
+      expect(mockCreate).not.toHaveBeenCalled();
+
+      const updated = store.getTask(done.id);
+      expect(updated?.verification_status).toBeNull();
+    });
+
+    it("proceeds with verification when the agent is idle (only done tasks)", async () => {
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ approved: true, score: 0.95, notes: "Great" }) }],
+      });
+
+      const done = store.createTask({
+        title: "Done task",
+        description: "Do something",
+        source: "manual",
+        agent_name: "idle-agent",
+      });
+      store.updateTask(done.id, { status: "done", result: "Result" });
+
+      const verifier = new Verifier(config, store);
+      const result = await verifier.verifyAndRevise(done.id);
+
+      expect(result.approved).toBe(true);
+      expect(result.score).toBe(0.95);
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+
+      const updated = store.getTask(done.id);
+      expect(updated?.verification_status).toBe("approved");
+    });
+  });
 });
 
 describe("Verifier.verifyAndRevise — retry mechanism", () => {

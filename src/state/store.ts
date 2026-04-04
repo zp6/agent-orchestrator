@@ -198,8 +198,9 @@ export class StateStore {
   }
 
   hasActiveTask(agentName: string): boolean {
-    const tasks = this.listTasks({ status: "dispatched", agent_name: agentName, limit: 1 });
-    return tasks.length > 0;
+    const dispatched = this.listTasks({ status: "dispatched", agent_name: agentName, limit: 1 });
+    const inProgress = this.listTasks({ status: "in_progress", agent_name: agentName, limit: 1 });
+    return dispatched.length > 0 || inProgress.length > 0;
   }
 
   listTasks(filters?: { status?: TaskStatus; agent_name?: string; limit?: number }): Task[] {
