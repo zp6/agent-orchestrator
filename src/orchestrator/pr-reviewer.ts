@@ -491,20 +491,43 @@ export class PRReviewer {
   }
 
   private parseResponse(text: string): PRReviewResult {
-    const cleaned = text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim();
-    try {
-      const parsed = JSON.parse(cleaned);
-      const decision = ["approve", "request-changes", "escalate"].includes(parsed.decision)
-        ? parsed.decision as PRReviewResult["decision"]
-        : "escalate";
-      return {
-        decision,
-        comment: String(parsed.comment ?? ""),
-        reason: String(parsed.reason ?? ""),
-      };
-    } catch {
-      return { decision: "escalate", comment: "Could not parse review — escalating to human.", reason: "Parse failure" };
+    // Try multiple extraction strategies to handle varied LLM output formats.
+    // 57% of reviews were failing to parse — Claude often wraps JSON in
+    // explanation text or adds trailing commentary.
+    const strategies = [
+      // 1. Strip code fences and parse directly
+      () => JSON.parse(text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim()),
+      // 2. Extract first JSON object containing "decision" from anywhere
+      () => {
+        const match = text.match(/\{[\s\S]*?"decision"[\s\S]*?\}/);
+        if (!match) throw new Error("No JSON object found");
+        return JSON.parse(match[0]);
+      },
+      // 3. Find JSON between code fences specifically
+      () => {
+        const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (!match) throw new Error("No code fence found");
+        return JSON.parse(match[1].trim());
+      },
+    ];
+
+    for (const strategy of strategies) {
+      try {
+        const parsed = strategy();
+        const decision = ["approve", "request-changes", "escalate"].includes(parsed.decision)
+          ? parsed.decision as PRReviewResult["decision"]
+          : "escalate";
+        return {
+          decision,
+          comment: String(parsed.comment ?? ""),
+          reason: String(parsed.reason ?? ""),
+        };
+      } catch {
+        continue;
+      }
     }
+
+    return { decision: "escalate", comment: "Could not parse review — escalating to human.", reason: "Parse failure" };
   }
 }
 
