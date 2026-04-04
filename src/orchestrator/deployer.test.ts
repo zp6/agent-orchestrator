@@ -15,6 +15,15 @@ vi.mock("../client/management-client.js", () => ({
   },
 }));
 
+// Default: ping succeeds (agent is healthy after deploy)
+const mockPing = vi.fn().mockResolvedValue(true);
+
+vi.mock("../client/agent-client.js", () => ({
+  AgentClient: class {
+    ping = mockPing;
+  },
+}));
+
 const mockExecSync = vi.fn().mockReturnValue("abc123\n");
 vi.mock("node:child_process", () => ({
   execSync: (...args: unknown[]) => mockExecSync(...args),
@@ -66,6 +75,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   // Default: execSync returns a git SHA for local agents and a remote SHA for repo agents
   mockExecSync.mockReturnValue("abc123\n");
+  // Default: ping succeeds
+  mockPing.mockResolvedValue(true);
 });
 
 describe("Deployer", () => {
@@ -81,6 +92,58 @@ describe("Deployer", () => {
     const result = await deployer.redeploy("nonexistent");
     expect(result.action).toBe("error");
     expect(result.detail).toContain("Unknown agent");
+  });
+
+  it("returns health-check-failed when agent does not respond after redeploy", async () => {
+    mockPing.mockResolvedValue(false);
+    vi.useFakeTimers();
+    const deployer = new Deployer(config);
+    const resultPromise = deployer.redeploy("agent-a");
+    // Advance through all health-check delays (1s + 3s + 10s = 14s)
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+    vi.useRealTimers();
+    expect(result.action).toBe("health-check-failed");
+    expect(result.detail).toMatch(/health check/i);
+  });
+
+  it("returns health-check-failed when agent does not respond after restart", async () => {
+    mockPing.mockResolvedValue(false);
+    vi.useFakeTimers();
+    const deployer = new Deployer(config);
+    const resultPromise = deployer.restartAgent("agent-a");
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+    vi.useRealTimers();
+    expect(result.action).toBe("health-check-failed");
+    expect(result.detail).toMatch(/health check/i);
+  });
+
+  it("healthCheck returns true when ping succeeds on first attempt", async () => {
+    mockPing.mockResolvedValue(true);
+    const deployer = new Deployer(config);
+    const ok = await deployer.healthCheck("agent-a", { maxRetries: 1, delaysMs: [0] });
+    expect(ok).toBe(true);
+    expect(mockPing).toHaveBeenCalledTimes(1);
+  });
+
+  it("healthCheck retries and returns true when a later attempt succeeds", async () => {
+    mockPing
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const deployer = new Deployer(config);
+    const ok = await deployer.healthCheck("agent-a", { maxRetries: 3, delaysMs: [0, 0, 0] });
+    expect(ok).toBe(true);
+    expect(mockPing).toHaveBeenCalledTimes(3);
+  });
+
+  it("healthCheck returns false when all attempts fail", async () => {
+    mockPing.mockResolvedValue(false);
+    const deployer = new Deployer(config);
+    const ok = await deployer.healthCheck("agent-a", { maxRetries: 2, delaysMs: [0, 0] });
+    expect(ok).toBe(false);
+    expect(mockPing).toHaveBeenCalledTimes(2);
   });
 
   it("detects stale agents without deploy marker", () => {

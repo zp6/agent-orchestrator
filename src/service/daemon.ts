@@ -299,6 +299,9 @@ export class Daemon {
       for (const r of results) {
         if (r.action === "redeployed") {
           console.log(`  ${r.agentName}: redeployed`);
+        } else if (r.action === "health-check-failed") {
+          console.error(`  ${r.agentName}: ⚠ deployed but health check failed — agent may be broken. ${r.detail}`);
+          this.log.warn("Agent health check failed after deploy", { agentName: r.agentName, detail: r.detail });
         } else if (r.action === "error") {
           console.error(`  ${r.agentName}: ${r.detail}`);
         }

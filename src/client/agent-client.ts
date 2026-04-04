@@ -13,6 +13,31 @@ export interface AgentResponse {
 export class AgentClient {
   constructor(private config: OrchestratorConfig) {}
 
+  /**
+   * Lightweight liveness check: does an HTTP request to the agent's base URL.
+   * Returns true if the agent proxy port is responding (any HTTP response),
+   * false if the port is unreachable (connection refused, timeout, etc.).
+   *
+   * Does NOT send a full Anthropic message — purely a connectivity test.
+   */
+  async ping(agentName: string, timeoutMs = 10_000): Promise<boolean> {
+    const baseUrl = getAgentBaseUrl(this.config, agentName);
+    if (!baseUrl) return false; // no docker port configured — can't verify
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      // Any HTTP response (even 404/405) means the proxy is up and accepting connections
+      await fetch(`${baseUrl}/`, { signal: controller.signal });
+      return true;
+    } catch {
+      // ECONNREFUSED, AbortError (timeout), etc.
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async send(
     agentName: string,
     message: string,

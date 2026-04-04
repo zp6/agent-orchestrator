@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { ManagementClient } from "../client/management-client.js";
+import { AgentClient } from "../client/agent-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { createLogger } from "../service/logger.js";
 
@@ -10,16 +11,49 @@ const REPO_SHA_DIR = resolve(homedir(), ".claude-orchestrator", "repo-deploy-sha
 
 export interface DeployResult {
   agentName: string;
-  action: "redeployed" | "up-to-date" | "error";
+  action: "redeployed" | "up-to-date" | "error" | "health-check-failed";
   detail?: string;
 }
 
+// Default delays (ms) between health-check attempts: 1s, 3s, 10s
+const HEALTH_CHECK_DELAYS_MS = [1_000, 3_000, 10_000];
+
 export class Deployer {
   private management: ManagementClient;
+  private agentClient: AgentClient;
   private log = createLogger("deployer");
 
   constructor(private config: OrchestratorConfig) {
     this.management = new ManagementClient(config.proxy);
+    this.agentClient = new AgentClient(config);
+  }
+
+  /**
+   * Verify an agent is responding after a deploy/restart.
+   * Retries with exponential backoff: waits `delays[i]` ms before each attempt.
+   * Returns true if the agent responds within the retry window, false otherwise.
+   */
+  async healthCheck(
+    agentName: string,
+    options?: { maxRetries?: number; delaysMs?: number[] },
+  ): Promise<boolean> {
+    const maxRetries = options?.maxRetries ?? HEALTH_CHECK_DELAYS_MS.length;
+    const delays = options?.delaysMs ?? HEALTH_CHECK_DELAYS_MS;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      // Wait before each attempt (gives container time to initialise on attempt 0)
+      const waitMs = delays[Math.min(attempt, delays.length - 1)];
+      await new Promise((res) => setTimeout(res, waitMs));
+
+      const alive = await this.agentClient.ping(agentName);
+      if (alive) {
+        this.log.info("Health check passed", { agentName, attempt: attempt + 1 });
+        return true;
+      }
+      this.log.warn("Health check attempt failed", { agentName, attempt: attempt + 1, maxRetries });
+    }
+
+    return false;
   }
 
   /**
@@ -46,6 +80,18 @@ export class Deployer {
       });
       this.markDeployed(agentName);
       this.log.info("Agent redeployed", { agentName });
+
+      // Verify the agent is actually responding after the rebuild
+      const healthy = await this.healthCheck(agentName);
+      if (!healthy) {
+        this.log.warn("Agent failed health check after redeploy — may be broken", { agentName });
+        return {
+          agentName,
+          action: "health-check-failed",
+          detail: "Container rebuild triggered but agent did not respond to health check",
+        };
+      }
+
       return { agentName, action: "redeployed", detail: "Container rebuild triggered" };
     } catch (err) {
       this.log.error("Redeploy failed", { agentName, error: err instanceof Error ? err.message : String(err) });
@@ -62,6 +108,18 @@ export class Deployer {
       await this.management.stopAgent(agentName);
       await this.management.startAgent(agentName);
       this.log.info("Agent restarted", { agentName });
+
+      // Verify the agent is actually responding after the restart
+      const healthy = await this.healthCheck(agentName);
+      if (!healthy) {
+        this.log.warn("Agent failed health check after restart — may be broken", { agentName });
+        return {
+          agentName,
+          action: "health-check-failed",
+          detail: "Container restarted but agent did not respond to health check",
+        };
+      }
+
       return { agentName, action: "redeployed", detail: "Container restarted (pull on start)" };
     } catch (err) {
       this.log.error("Restart failed", { agentName, error: err instanceof Error ? err.message : String(err) });
