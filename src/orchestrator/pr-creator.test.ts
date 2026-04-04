@@ -201,6 +201,9 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: gh api compare → ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateTestsPass: no localPath → skip (no mock needed)
+    // validateUnrelatedFiles: gh api compare → normal files
+    mockExecSync.mockReturnValueOnce("src/feature.ts\n");
     // gh pr create
     mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/10\n");
 
@@ -221,6 +224,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: gh api compare → ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateUnrelatedFiles: API fails → skip
+    mockExecSync.mockImplementationOnce(() => { throw new Error("API unavailable"); });
 
     const genericOrphan: OrphanBranch = { ...orphan, branch: "feature-branch" };
     const result = await createPRForBranch(genericOrphan);
@@ -241,6 +246,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: gh api compare → ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateUnrelatedFiles: normal files
+    mockExecSync.mockReturnValueOnce("src/feature.ts\n");
     // gh pr create
     mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/15\n");
 
@@ -269,6 +276,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: gh api compare → ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateUnrelatedFiles: normal files
+    mockExecSync.mockReturnValueOnce("src/feature.ts\n");
     // gh pr create
     mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/12\n");
 
@@ -286,6 +295,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: gh api compare → ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateUnrelatedFiles: normal files
+    mockExecSync.mockReturnValueOnce("src/feature.ts\n");
     // gh pr create
     mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/20\n");
 
@@ -306,12 +317,16 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts (first validation): ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateUnrelatedFiles (first validation): normal files
+    mockExecSync.mockReturnValueOnce("src/widget.ts\n");
     // validateBranchFreshness (second validation after auto-fix): 0 behind
     mockExecSync.mockReturnValueOnce("0\n");
     // validatePRExists (second validation): no PR
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts (second validation): ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateUnrelatedFiles (second validation): normal files
+    mockExecSync.mockReturnValueOnce("src/widget.ts\n");
     // gh pr create
     mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/30\n");
 
@@ -333,6 +348,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: no conflicts
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateUnrelatedFiles: normal files
+    mockExecSync.mockReturnValueOnce("src/feature.ts\n");
 
     const branchOrphan: OrphanBranch = { ...orphan, branch: "new-widget-feature" };
     const result = await createPRForBranch(branchOrphan);
@@ -349,6 +366,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: gh api compare → ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateUnrelatedFiles: normal files
+    mockExecSync.mockReturnValueOnce("src/feature.ts\n");
     // gh pr create
     mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/40\n");
 
@@ -377,6 +396,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: gh api compare → ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateUnrelatedFiles: normal files
+    mockExecSync.mockReturnValueOnce("src/feature.ts\n");
     // gh pr create
     mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/41\n");
 
@@ -415,6 +436,14 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: gh api compare → ahead
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateTestsPass: test -f package.json (localPath provided)
+    mockExecSync.mockReturnValueOnce("");
+    // validateTestsPass: npx tsc --noEmit
+    mockExecSync.mockReturnValueOnce("");
+    // validateTestsPass: npx vitest run
+    mockExecSync.mockReturnValueOnce("");
+    // validateUnrelatedFiles: gh api compare → normal files
+    mockExecSync.mockReturnValueOnce("src/feature.ts\n");
     // gh pr create
     mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/50\n");
 

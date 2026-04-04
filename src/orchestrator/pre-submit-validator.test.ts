@@ -4,8 +4,11 @@ import {
   validateBranchFreshness,
   validatePRExists,
   validateMergeConflicts,
+  validateTestsPass,
+  validateUnrelatedFiles,
   validatePreSubmit,
   formatValidationSummary,
+  ALWAYS_EXCLUDED_FILES,
 } from "./pre-submit-validator.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 
@@ -294,13 +297,16 @@ describe("validateMergeConflicts", () => {
 // ─── validatePreSubmit ───────────────────────────────────────────────────────
 
 describe("validatePreSubmit", () => {
-  it("returns valid when all four checks pass", async () => {
+  it("returns valid when all six checks pass", async () => {
     // validateBranchFreshness → 0 behind
     mockExecSync.mockReturnValueOnce("0\n");
     // validatePRExists → no existing PR
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts → ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateTestsPass → no localPath, skips (no mock needed)
+    // validateUnrelatedFiles → API returns normal files (no excluded)
+    mockExecSync.mockReturnValueOnce("src/foo.ts\nsrc/foo.test.ts\n");
 
     const result = await validatePreSubmit(
       "owner/repo",
@@ -316,6 +322,8 @@ describe("validatePreSubmit", () => {
     expect(result.checks.branchFresh.passed).toBe(true);
     expect(result.checks.prExists.passed).toBe(true);
     expect(result.checks.mergeConflicts.passed).toBe(true);
+    expect(result.checks.testsPass.passed).toBe(true);
+    expect(result.checks.unrelatedFiles.passed).toBe(true);
   });
 
   it("returns invalid when issue ref is missing", async () => {
@@ -327,6 +335,8 @@ describe("validatePreSubmit", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts → no conflicts
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateUnrelatedFiles → API fails, skip
+    mockExecSync.mockImplementationOnce(() => { throw new Error("API unavailable"); });
 
     const result = await validatePreSubmit(
       "owner/repo",
@@ -348,6 +358,8 @@ describe("validatePreSubmit", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts → no conflicts
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateUnrelatedFiles → API fails, skip
+    mockExecSync.mockImplementationOnce(() => { throw new Error("API unavailable"); });
 
     const result = await validatePreSubmit(
       "owner/repo",
@@ -371,6 +383,8 @@ describe("validatePreSubmit", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts → no conflicts
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateUnrelatedFiles → API fails, skip
+    mockExecSync.mockImplementationOnce(() => { throw new Error("API unavailable"); });
 
     const result = await validatePreSubmit(
       "owner/repo",
@@ -391,6 +405,8 @@ describe("validatePreSubmit", () => {
     mockExecSync.mockReturnValueOnce("99\n");
     // validateMergeConflicts → no conflicts
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateUnrelatedFiles → API fails, skip
+    mockExecSync.mockImplementationOnce(() => { throw new Error("API unavailable"); });
 
     const result = await validatePreSubmit(
       "owner/repo",
@@ -412,6 +428,8 @@ describe("validatePreSubmit", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts → conflicting
     mockExecSync.mockReturnValueOnce("conflicting\n");
+    // validateUnrelatedFiles → API fails, skip
+    mockExecSync.mockImplementationOnce(() => { throw new Error("API unavailable"); });
 
     const result = await validatePreSubmit(
       "owner/repo",
@@ -426,6 +444,29 @@ describe("validatePreSubmit", () => {
     expect(result.blockers.some((b) => b.toLowerCase().includes("conflict"))).toBe(true);
   });
 
+  it("returns invalid when branch contains excluded files", async () => {
+    // validateBranchFreshness → current
+    mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists → no existing PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts → no conflicts
+    mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateUnrelatedFiles → returns an excluded file
+    mockExecSync.mockReturnValueOnce("src/feature.ts\n.orchestrator-deploy-sha\n");
+
+    const result = await validatePreSubmit(
+      "owner/repo",
+      "issue-50-feat",
+      "Closes #50",
+      null,
+      minimalConfig,
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.checks.unrelatedFiles.passed).toBe(false);
+    expect(result.blockers.some((b) => b.includes(".orchestrator-deploy-sha"))).toBe(true);
+  });
+
   it("includes inferredIssueNumber when branch encodes an issue", async () => {
     // validateBranchFreshness → current
     mockExecSync.mockReturnValueOnce("0\n");
@@ -433,6 +474,8 @@ describe("validatePreSubmit", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts → no conflicts
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateUnrelatedFiles → API fails, skip
+    mockExecSync.mockImplementationOnce(() => { throw new Error("API unavailable"); });
 
     const result = await validatePreSubmit(
       "owner/repo",
@@ -447,61 +490,220 @@ describe("validatePreSubmit", () => {
   });
 });
 
+// ─── validateTestsPass ───────────────────────────────────────────────────────
+
+describe("validateTestsPass", () => {
+  it("passes (skip) when no local path is provided", () => {
+    const check = validateTestsPass(null);
+    expect(check.passed).toBe(true);
+    expect(check.detail).toMatch(/skipping/i);
+    expect(mockExecSync).not.toHaveBeenCalled();
+  });
+
+  it("passes (skip) when package.json does not exist in localPath", () => {
+    // test -f package.json fails
+    mockExecSync.mockImplementationOnce(() => { throw new Error("not found"); });
+
+    const check = validateTestsPass("/some/path");
+    expect(check.passed).toBe(true);
+    expect(check.detail).toMatch(/no package\.json/i);
+  });
+
+  it("passes when tsc and vitest both succeed", () => {
+    // test -f package.json
+    mockExecSync.mockReturnValueOnce("");
+    // npx tsc --noEmit
+    mockExecSync.mockReturnValueOnce("");
+    // npx vitest run
+    mockExecSync.mockReturnValueOnce("");
+
+    const check = validateTestsPass("/some/path");
+    expect(check.passed).toBe(true);
+    expect(check.detail).toMatch(/passed/i);
+  });
+
+  it("fails when tsc type-check fails", () => {
+    // test -f package.json
+    mockExecSync.mockReturnValueOnce("");
+    // npx tsc --noEmit fails
+    mockExecSync.mockImplementationOnce(() => {
+      throw new Error("src/foo.ts(10,3): error TS2322: Type 'number' is not assignable to type 'string'.");
+    });
+
+    const check = validateTestsPass("/some/path");
+    expect(check.passed).toBe(false);
+    expect(check.detail).toMatch(/type check failed/i);
+    expect(check.detail).toContain("TS2322");
+  });
+
+  it("fails when vitest run fails (tsc passes)", () => {
+    // test -f package.json
+    mockExecSync.mockReturnValueOnce("");
+    // npx tsc --noEmit passes
+    mockExecSync.mockReturnValueOnce("");
+    // npx vitest run fails
+    mockExecSync.mockImplementationOnce(() => {
+      throw new Error("FAIL src/foo.test.ts\n× expected 1 to equal 2");
+    });
+
+    const check = validateTestsPass("/some/path");
+    expect(check.passed).toBe(false);
+    expect(check.detail).toMatch(/tests failed/i);
+  });
+});
+
+// ─── validateUnrelatedFiles ──────────────────────────────────────────────────
+
+describe("validateUnrelatedFiles", () => {
+  it("passes when changed files contain no excluded entries (via API)", () => {
+    mockExecSync.mockReturnValueOnce("src/foo.ts\nsrc/foo.test.ts\n");
+
+    const check = validateUnrelatedFiles("owner/repo", "feature-branch", null);
+    expect(check.passed).toBe(true);
+    expect(check.detail).toContain("2 changed file(s)");
+  });
+
+  it("fails when API reports .orchestrator-deploy-sha in the diff", () => {
+    mockExecSync.mockReturnValueOnce("src/foo.ts\n.orchestrator-deploy-sha\n");
+
+    const check = validateUnrelatedFiles("owner/repo", "feature-branch", null);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain(".orchestrator-deploy-sha");
+    expect(check.detail).toMatch(/must not be committed/i);
+  });
+
+  it("fails when API reports a .env file in the diff", () => {
+    mockExecSync.mockReturnValueOnce("src/index.ts\n.env\n");
+
+    const check = validateUnrelatedFiles("owner/repo", "feature-branch", null);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain(".env");
+  });
+
+  it("detects excluded file nested in a subdirectory path", () => {
+    mockExecSync.mockReturnValueOnce("config/.env.local\n");
+
+    const check = validateUnrelatedFiles("owner/repo", "feature-branch", null);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain(".env.local");
+  });
+
+  it("falls back to local git diff when API fails", () => {
+    // GitHub API fails
+    mockExecSync.mockImplementationOnce(() => { throw new Error("API error"); });
+    // git fetch
+    mockExecSync.mockReturnValueOnce("");
+    // git diff --name-only origin/main → only normal files
+    mockExecSync.mockReturnValueOnce("src/bar.ts\n");
+
+    const check = validateUnrelatedFiles("owner/repo", "feature-branch", "/local/path");
+    expect(check.passed).toBe(true);
+    expect(check.detail).toContain("1 changed file(s)");
+  });
+
+  it("fails via local git diff when excluded file is detected", () => {
+    // GitHub API fails
+    mockExecSync.mockImplementationOnce(() => { throw new Error("API error"); });
+    // git fetch
+    mockExecSync.mockReturnValueOnce("");
+    // git diff --name-only origin/main → contains excluded file
+    mockExecSync.mockReturnValueOnce("src/bar.ts\n.orchestrator-deploy-sha\n");
+
+    const check = validateUnrelatedFiles("owner/repo", "feature-branch", "/local/path");
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain(".orchestrator-deploy-sha");
+  });
+
+  it("passes (skip) when no changed files can be determined", () => {
+    // API fails
+    mockExecSync.mockImplementationOnce(() => { throw new Error("API error"); });
+    // local git also fails
+    mockExecSync.mockImplementationOnce(() => { throw new Error("git error"); });
+
+    const check = validateUnrelatedFiles("owner/repo", "feature-branch", "/local/path");
+    expect(check.passed).toBe(true);
+    expect(check.detail).toMatch(/skipping/i);
+  });
+
+  it("passes (skip) when no repo and no local path available", () => {
+    const check = validateUnrelatedFiles("", "feature-branch", null);
+    expect(check.passed).toBe(true);
+    expect(check.detail).toMatch(/skipping/i);
+  });
+
+  it("ALWAYS_EXCLUDED_FILES includes the orchestrator deploy sha marker", () => {
+    expect(ALWAYS_EXCLUDED_FILES).toContain(".orchestrator-deploy-sha");
+  });
+
+  it("ALWAYS_EXCLUDED_FILES includes .env variants", () => {
+    expect(ALWAYS_EXCLUDED_FILES).toContain(".env");
+    expect(ALWAYS_EXCLUDED_FILES).toContain(".env.local");
+    expect(ALWAYS_EXCLUDED_FILES).toContain(".env.production");
+  });
+});
+
 // ─── formatValidationSummary ─────────────────────────────────────────────────
+
+/** Helper to build a minimal passing PreSubmitValidationResult for summary tests. */
+function makeResult(overrides: Partial<{
+  valid: boolean;
+  issueRef: { passed: boolean; detail: string };
+  branchFresh: { passed: boolean; detail: string };
+  prExists: { passed: boolean; detail: string };
+  mergeConflicts: { passed: boolean; detail: string };
+  testsPass: { passed: boolean; detail: string };
+  unrelatedFiles: { passed: boolean; detail: string };
+  blockers: string[];
+  warnings: string[];
+}> = {}) {
+  return {
+    valid: overrides.valid ?? true,
+    checks: {
+      issueRef: overrides.issueRef ?? { passed: true, detail: "Has Closes #1" },
+      branchFresh: overrides.branchFresh ?? { passed: true, detail: "Up to date" },
+      prExists: overrides.prExists ?? { passed: true, detail: "No duplicate PR" },
+      mergeConflicts: overrides.mergeConflicts ?? { passed: true, detail: "No merge conflicts" },
+      testsPass: overrides.testsPass ?? { passed: true, detail: "Tests passed" },
+      unrelatedFiles: overrides.unrelatedFiles ?? { passed: true, detail: "No unrelated files" },
+    },
+    blockers: overrides.blockers ?? [],
+    warnings: overrides.warnings ?? [],
+  };
+}
 
 describe("formatValidationSummary", () => {
   it("includes check icons for passing and failing checks", () => {
-    const result = {
+    const result = makeResult({
       valid: false,
-      checks: {
-        issueRef: { passed: false, detail: "Missing Closes #N" },
-        branchFresh: { passed: true, detail: "Up to date with main" },
-        prExists: { passed: true, detail: "No open PR exists" },
-        mergeConflicts: { passed: true, detail: "No merge conflicts" },
-      },
+      issueRef: { passed: false, detail: "Missing Closes #N" },
       blockers: ["Missing Closes #N"],
-      warnings: [],
-    };
+    });
 
     const summary = formatValidationSummary(result);
     expect(summary).toContain("❌");
     expect(summary).toContain("✅");
     expect(summary).toContain("Missing Closes #N");
-    expect(summary).toContain("Up to date with main");
+    expect(summary).toContain("Up to date");
   });
 
-  it("includes all four check lines in the summary", () => {
-    const result = {
-      valid: true,
-      checks: {
-        issueRef: { passed: true, detail: "Has Closes #10" },
-        branchFresh: { passed: true, detail: "Up to date" },
-        prExists: { passed: true, detail: "No duplicate PR" },
-        mergeConflicts: { passed: true, detail: "No conflicts" },
-      },
-      blockers: [],
-      warnings: [],
-    };
-
-    const summary = formatValidationSummary(result);
+  it("includes all six check lines in the summary", () => {
+    const summary = formatValidationSummary(makeResult());
     expect(summary).toContain("Issue reference");
     expect(summary).toContain("Branch freshness");
     expect(summary).toContain("No duplicate PR");
     expect(summary).toContain("Merge conflicts");
+    expect(summary).toContain("Tests pass");
+    expect(summary).toContain("No unrelated files");
   });
 
   it("includes blockers section when validation fails", () => {
-    const result = {
+    const result = makeResult({
       valid: false,
-      checks: {
-        issueRef: { passed: false, detail: "Missing ref" },
-        branchFresh: { passed: false, detail: "Branch is stale" },
-        prExists: { passed: true, detail: "No open PR exists" },
-        mergeConflicts: { passed: false, detail: "Has conflicts" },
-      },
+      issueRef: { passed: false, detail: "Missing ref" },
+      branchFresh: { passed: false, detail: "Branch is stale" },
+      mergeConflicts: { passed: false, detail: "Has conflicts" },
       blockers: ["Missing ref", "Branch is stale", "Has conflicts"],
-      warnings: [],
-    };
+    });
 
     const summary = formatValidationSummary(result);
     expect(summary).toContain("Action required");
@@ -511,38 +713,41 @@ describe("formatValidationSummary", () => {
   });
 
   it("does not include action required section when valid", () => {
-    const result = {
-      valid: true,
-      checks: {
-        issueRef: { passed: true, detail: "Has Closes #42" },
-        branchFresh: { passed: true, detail: "Up to date" },
-        prExists: { passed: true, detail: "No duplicate PR" },
-        mergeConflicts: { passed: true, detail: "No conflicts" },
-      },
-      blockers: [],
-      warnings: [],
-    };
-
-    const summary = formatValidationSummary(result);
+    const summary = formatValidationSummary(makeResult());
     expect(summary).not.toContain("Action required");
     expect(summary).toContain("✅");
   });
 
   it("includes warnings section when warnings are present", () => {
-    const result = {
-      valid: true,
-      checks: {
-        issueRef: { passed: true, detail: "Has ref" },
-        branchFresh: { passed: true, detail: "Up to date" },
-        prExists: { passed: true, detail: "No duplicate PR" },
-        mergeConflicts: { passed: true, detail: "No conflicts" },
-      },
-      blockers: [],
-      warnings: ["CI not yet run on this branch"],
-    };
+    const result = makeResult({ warnings: ["CI not yet run on this branch"] });
 
     const summary = formatValidationSummary(result);
     expect(summary).toContain("Warnings");
     expect(summary).toContain("CI not yet run");
+  });
+
+  it("shows failing tests check in summary when tests fail", () => {
+    const result = makeResult({
+      valid: false,
+      testsPass: { passed: false, detail: "Unit tests failed. Fix failing tests before submitting." },
+      blockers: ["Unit tests failed."],
+    });
+
+    const summary = formatValidationSummary(result);
+    expect(summary).toContain("Tests pass");
+    expect(summary).toContain("❌");
+    expect(summary).toContain("Unit tests failed");
+  });
+
+  it("shows failing unrelated files check in summary when excluded file found", () => {
+    const result = makeResult({
+      valid: false,
+      unrelatedFiles: { passed: false, detail: "Branch contains .orchestrator-deploy-sha" },
+      blockers: ["Branch contains .orchestrator-deploy-sha"],
+    });
+
+    const summary = formatValidationSummary(result);
+    expect(summary).toContain("No unrelated files");
+    expect(summary).toContain(".orchestrator-deploy-sha");
   });
 });

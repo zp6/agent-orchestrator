@@ -17,6 +17,8 @@ export interface PreSubmitValidationResult {
     branchFresh: PreSubmitCheck;
     prExists: PreSubmitCheck;
     mergeConflicts: PreSubmitCheck;
+    testsPass: PreSubmitCheck;
+    unrelatedFiles: PreSubmitCheck;
   };
   /** Hard failures that must be fixed before the PR can be submitted. */
   blockers: string[];
@@ -286,6 +288,156 @@ export function validateMergeConflicts(
 }
 
 /**
+ * Files that are auto-generated, deployment markers, or secrets that should
+ * never be committed as part of a feature branch PR. Any branch that touches
+ * these files will be flagged as having unrelated changes.
+ */
+export const ALWAYS_EXCLUDED_FILES: readonly string[] = [
+  ".orchestrator-deploy-sha",
+  ".env",
+  ".env.local",
+  ".env.production",
+  ".env.staging",
+];
+
+/**
+ * Check whether a branch contains obviously unrelated or problematic files.
+ * Uses the GitHub compare API to enumerate changed files when a repo slug is
+ * available, or falls back to a local `git diff --name-only origin/main`.
+ *
+ * Flags files that are auto-generated metadata (e.g. `.orchestrator-deploy-sha`)
+ * or secret-adjacent (`.env*`). These should never be committed as part of a
+ * feature branch PR.
+ *
+ * Fails-open: if neither check can run, the result is "passed" with a note.
+ */
+export function validateUnrelatedFiles(
+  repo: string,
+  branch: string,
+  localPath: string | null,
+): PreSubmitCheck {
+  let changedFiles: string[] = [];
+
+  // Try GitHub API first (works without a local checkout)
+  if (repo && branch) {
+    try {
+      const raw = execSync(
+        `gh api "repos/${repo}/compare/main...${branch}" --jq '[.files[].filename] | join("\\n")'`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+      if (raw) changedFiles = raw.split("\n").filter(Boolean);
+    } catch {
+      // Fall through to local check
+    }
+  }
+
+  // Fall back to local git diff
+  if (changedFiles.length === 0 && localPath) {
+    try {
+      execSync("git fetch origin", { cwd: localPath, encoding: "utf-8", timeout: 30000 });
+      const raw = execSync("git diff --name-only origin/main", {
+        cwd: localPath,
+        encoding: "utf-8",
+        timeout: 15000,
+      }).trim();
+      if (raw) changedFiles = raw.split("\n").filter(Boolean);
+    } catch {
+      // Can't determine changed files
+    }
+  }
+
+  if (changedFiles.length === 0) {
+    return {
+      passed: true,
+      detail: "Could not determine changed files — skipping unrelated files check.",
+    };
+  }
+
+  // Check for always-excluded files
+  const problematic = changedFiles.filter((f) =>
+    ALWAYS_EXCLUDED_FILES.some(
+      (excluded) => f === excluded || f.endsWith(`/${excluded}`),
+    ),
+  );
+
+  if (problematic.length > 0) {
+    return {
+      passed: false,
+      detail: `Branch contains files that must not be committed in a feature PR: ${problematic.join(", ")}. Remove these from the branch before submitting (use \`git rm --cached <file>\` or amend the offending commit).`,
+    };
+  }
+
+  return {
+    passed: true,
+    detail: `${changedFiles.length} changed file(s) look appropriate for a PR.`,
+  };
+}
+
+/**
+ * Check whether the TypeScript type-check and unit tests pass on the local
+ * repo checkout. Runs `npx tsc --noEmit` followed by `npx vitest run`.
+ *
+ * Skips gracefully (fail-open) when no local path is available or when the
+ * directory does not contain a `package.json`.
+ *
+ * Both commands are capped with a timeout to avoid blocking the daemon
+ * indefinitely on slow test suites.
+ */
+export function validateTestsPass(localPath: string | null): PreSubmitCheck {
+  if (!localPath) {
+    return {
+      passed: true,
+      detail: "No local path available — skipping test check.",
+    };
+  }
+
+  // Verify package.json exists so we know we're in a Node project
+  try {
+    execSync("test -f package.json", { cwd: localPath, encoding: "utf-8", timeout: 5000 });
+  } catch {
+    return {
+      passed: true,
+      detail: "No package.json found — skipping test check.",
+    };
+  }
+
+  // TypeScript type-check
+  try {
+    execSync("npx tsc --noEmit", {
+      cwd: localPath,
+      encoding: "utf-8",
+      timeout: 120000, // 2 min
+    });
+  } catch (err) {
+    const output = err instanceof Error ? err.message : String(err);
+    return {
+      passed: false,
+      detail: `TypeScript type check failed. Fix type errors before submitting.\n${output.slice(0, 600)}`,
+    };
+  }
+
+  // Unit tests
+  try {
+    execSync("npx vitest run", {
+      cwd: localPath,
+      encoding: "utf-8",
+      timeout: 180000, // 3 min
+    });
+  } catch (err) {
+    const output = err instanceof Error ? err.message : String(err);
+    return {
+      passed: false,
+      detail: `Unit tests failed. Fix failing tests before submitting.\n${output.slice(0, 600)}`,
+    };
+  }
+
+  return {
+    passed: true,
+    detail: "TypeScript type check and unit tests passed.",
+  };
+}
+
+/**
  * Run all pre-submit checks for a PR about to be created.
  *
  * Checks performed:
@@ -293,6 +445,8 @@ export function validateMergeConflicts(
  * 2. **branchFresh** — branch is not behind origin/main
  * 3. **prExists** — no open PR already exists for this branch (duplicate guard)
  * 4. **mergeConflicts** — branch has no merge conflicts with main
+ * 5. **testsPass** — TypeScript type check and unit tests pass locally
+ * 6. **unrelatedFiles** — branch contains no auto-generated/secrets files
  *
  * Returns a `PreSubmitValidationResult` with `valid: true` only when all
  * blocking checks pass. Non-blocking observations are reported as `warnings`.
@@ -340,6 +494,20 @@ export async function validatePreSubmit(
     blockers.push(mergeConflictsCheck.detail);
   }
 
+  // --- Check 5: Tests pass locally ---
+  const testsPassCheck = validateTestsPass(localPath);
+
+  if (!testsPassCheck.passed) {
+    blockers.push(testsPassCheck.detail);
+  }
+
+  // --- Check 6: No unrelated/excluded files in the branch ---
+  const unrelatedFilesCheck = validateUnrelatedFiles(repo, branch, localPath);
+
+  if (!unrelatedFilesCheck.passed) {
+    blockers.push(unrelatedFilesCheck.detail);
+  }
+
   const valid = blockers.length === 0;
 
   log.info("Pre-submit validation complete", {
@@ -358,6 +526,8 @@ export async function validatePreSubmit(
       branchFresh: branchFreshCheck,
       prExists: prExistsCheck,
       mergeConflicts: mergeConflictsCheck,
+      testsPass: testsPassCheck,
+      unrelatedFiles: unrelatedFilesCheck,
     },
     blockers,
     warnings,
@@ -378,6 +548,8 @@ export function formatValidationSummary(result: PreSubmitValidationResult): stri
   lines.push(`${checkIcon(result.checks.branchFresh.passed)} **Branch freshness**: ${result.checks.branchFresh.detail}`);
   lines.push(`${checkIcon(result.checks.prExists.passed)} **No duplicate PR**: ${result.checks.prExists.detail}`);
   lines.push(`${checkIcon(result.checks.mergeConflicts.passed)} **Merge conflicts**: ${result.checks.mergeConflicts.detail}`);
+  lines.push(`${checkIcon(result.checks.testsPass.passed)} **Tests pass**: ${result.checks.testsPass.detail}`);
+  lines.push(`${checkIcon(result.checks.unrelatedFiles.passed)} **No unrelated files**: ${result.checks.unrelatedFiles.detail}`);
 
   if (result.warnings.length > 0) {
     lines.push("", "**Warnings:**");
