@@ -77,6 +77,8 @@ export class Deployer {
         port: agent.docker?.port ?? 3460,
         permissions: agent.docker?.permissions ?? "auto",
         session: agent.docker?.session ?? "fresh",
+        sshKey: this.config.proxy.ssh_key,
+        ghToken: this.config.proxy.gh_token,
       });
       this.markDeployed(agentName);
       this.log.info("Agent redeployed", { agentName });
