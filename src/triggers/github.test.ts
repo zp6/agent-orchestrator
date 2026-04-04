@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { fetchOpenIssues, findExistingPRsForIssue } from "./github.js";
+import { fetchOpenIssues, findExistingPRsForIssue, isIssueOpen } from "./github.js";
 
 vi.mock("node:child_process", () => ({
   execSync: vi.fn(),
@@ -7,6 +7,37 @@ vi.mock("node:child_process", () => ({
 
 import { execSync } from "node:child_process";
 const mockExecSync = vi.mocked(execSync);
+
+describe("isIssueOpen", () => {
+  it("returns true when issue state is OPEN", () => {
+    const mockExec = vi.fn().mockReturnValue("OPEN\n");
+    expect(isIssueOpen("owner/repo", 42, mockExec)).toBe(true);
+  });
+
+  it("returns false when issue state is CLOSED", () => {
+    const mockExec = vi.fn().mockReturnValue("CLOSED\n");
+    expect(isIssueOpen("owner/repo", 42, mockExec)).toBe(false);
+  });
+
+  it("is case-insensitive (handles lowercase 'open')", () => {
+    const mockExec = vi.fn().mockReturnValue("open");
+    expect(isIssueOpen("owner/repo", 42, mockExec)).toBe(true);
+  });
+
+  it("returns true on gh CLI failure (fail-open)", () => {
+    const mockExec = vi.fn().mockImplementation(() => { throw new Error("gh: not found"); });
+    expect(isIssueOpen("owner/repo", 42, mockExec)).toBe(true);
+  });
+
+  it("calls gh with the correct repo and issue number", () => {
+    const mockExec = vi.fn().mockReturnValue("OPEN");
+    isIssueOpen("rapartlu/my-agent", 99, mockExec);
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining("gh issue view 99 --repo rapartlu/my-agent"),
+      expect.any(Object),
+    );
+  });
+});
 
 describe("fetchOpenIssues", () => {
   it("parses GitHub issues from gh CLI output", () => {

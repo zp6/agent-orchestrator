@@ -86,6 +86,36 @@ export function findExistingPRsForIssue(repo: string, issueNumber: number): Link
   }
 }
 
+/**
+ * Check whether a GitHub issue is still open before dispatching.
+ *
+ * Fetches the issue state via `gh issue view`. Returns true if the issue is
+ * open, false if it is closed or any other non-open state.
+ *
+ * Fails open: returns true on any error so a transient gh CLI failure does
+ * not silently drop real work.
+ *
+ * @param execFn - optional override for unit tests (avoids ESM module patching)
+ */
+export function isIssueOpen(
+  repo: string,
+  issueNumber: number,
+  execFn: (cmd: string, opts: { encoding: "utf-8"; timeout: number }) => string = (cmd, opts) =>
+    execSync(cmd, opts),
+): boolean {
+  try {
+    const raw = execFn(
+      `gh issue view ${issueNumber} --repo ${repo} --json state -q .state`,
+      { encoding: "utf-8", timeout: 15000 },
+    );
+    const state = raw.trim().toUpperCase();
+    return state === "OPEN";
+  } catch {
+    // Fail open: if we can't verify the state, allow the dispatch
+    return true;
+  }
+}
+
 export function fetchOpenIssues(repo: string): GitHubIssue[] {
   try {
     const output = execSync(

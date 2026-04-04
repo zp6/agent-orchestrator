@@ -7,15 +7,17 @@ import type { StateStore } from "../state/store.js";
 vi.mock("./github.js", () => ({
   fetchOpenIssues: vi.fn(),
   findExistingPRsForIssue: vi.fn().mockReturnValue([]),
+  isIssueOpen: vi.fn().mockReturnValue(true),
 }));
 
 vi.mock("./reporters.js", () => ({
   reportResult: vi.fn(),
 }));
 
-import { fetchOpenIssues, findExistingPRsForIssue } from "./github.js";
+import { fetchOpenIssues, findExistingPRsForIssue, isIssueOpen } from "./github.js";
 const mockFetchIssues = vi.mocked(fetchOpenIssues);
 const mockFindExistingPRs = vi.mocked(findExistingPRsForIssue);
+const mockIsIssueOpen = vi.mocked(isIssueOpen);
 
 const config: OrchestratorConfig = {
   proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 5000 },
@@ -70,6 +72,8 @@ describe("dispatchGitHubIssues", () => {
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
     } as unknown as Dispatcher;
+    // Default: issues are open (pre-dispatch validation passes)
+    mockIsIssueOpen.mockReturnValue(true);
   });
 
   it("dispatches new issues to owning agent", async () => {
@@ -128,6 +132,69 @@ describe("dispatchGitHubIssues", () => {
   });
 });
 
+describe("pre-dispatch issue state validation", () => {
+  let mockStore: StateStore;
+  let mockDispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStore = {
+      isProcessed: vi.fn().mockReturnValue(false),
+      markProcessed: vi.fn(),
+      getTask: vi.fn().mockReturnValue(null),
+      listTasks: vi.fn().mockReturnValue([]),
+      hasActiveTask: vi.fn().mockReturnValue(false),
+      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
+    } as unknown as StateStore;
+    mockDispatcher = {
+      dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
+    } as unknown as Dispatcher;
+    mockFindExistingPRs.mockReturnValue([]);
+    // Default: issues are open
+    mockIsIssueOpen.mockReturnValue(true);
+  });
+
+  it("skips dispatch when issue has been closed (race condition guard)", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Stale issue", body: "Already done", url: "https://...", labels: [] },
+    ]);
+    // Issue was fetched as open but has since been closed
+    mockIsIssueOpen.mockReturnValue(false);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+    // Should mark processed so it isn't re-checked every cycle
+    expect(mockStore.markProcessed).toHaveBeenCalledWith("github", "owner/my-repo#42", expect.stringContaining("closed-issue-42"));
+  });
+
+  it("proceeds with dispatch when issue is confirmed open", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Live issue", body: "Needs work", url: "https://...", labels: [] },
+    ]);
+    mockIsIssueOpen.mockReturnValue(true);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalled();
+  });
+
+  it("proceeds with dispatch when isIssueOpen fails (fail-open)", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Issue", body: "Needs work", url: "https://...", labels: [] },
+    ]);
+    // isIssueOpen returns true on error (fail-open) — dispatch should proceed
+    mockIsIssueOpen.mockReturnValue(true);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+  });
+});
+
 describe("duplicate PR detection before dispatch", () => {
   let mockStore: StateStore;
   let mockDispatcher: Dispatcher;
@@ -145,8 +212,9 @@ describe("duplicate PR detection before dispatch", () => {
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
     } as unknown as Dispatcher;
-    // Default: no existing PRs
+    // Default: no existing PRs, issues are open
     mockFindExistingPRs.mockReturnValue([]);
+    mockIsIssueOpen.mockReturnValue(true);
   });
 
   it("dispatches normally when no existing PRs are found", async () => {
@@ -273,6 +341,8 @@ describe("idle agent pickup (post-completion dispatch)", () => {
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
     } as unknown as Dispatcher;
+    // Default: issues are open
+    mockIsIssueOpen.mockReturnValue(true);
   });
 
   it("skips agent while a task is in-flight (first call in cycle)", async () => {

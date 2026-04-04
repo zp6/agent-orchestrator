@@ -1,4 +1,4 @@
-import { fetchOpenIssues, findExistingPRsForIssue, type GitHubIssue } from "./github.js";
+import { fetchOpenIssues, findExistingPRsForIssue, isIssueOpen, type GitHubIssue } from "./github.js";
 import { reportResult } from "./reporters.js";
 import { checkDuplicate } from "./duplicate-guard.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
@@ -93,6 +93,16 @@ export async function dispatchGitHubIssues(
         if (dupCheck.isDuplicate) {
           log.info("Skipping duplicate GitHub issue", { sourceRef, reason: dupCheck.reason });
         }
+        result.skipped++;
+        continue;
+      }
+
+      // Pre-dispatch issue state validation: skip if the issue has been closed
+      // between the fetchOpenIssues call and now (race condition / API caching lag).
+      // Mark processed so the issue is not re-checked every daemon cycle.
+      if (!isIssueOpen(agent.github, issue.number)) {
+        log.info("Skipping dispatch: issue already closed", { sourceRef });
+        store.markProcessed("github", sourceRef, `closed-issue-${issue.number}`);
         result.skipped++;
         continue;
       }
