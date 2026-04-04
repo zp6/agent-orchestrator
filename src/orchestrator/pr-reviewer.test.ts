@@ -139,6 +139,88 @@ describe("PRReviewer", () => {
     expect(result.reason).toContain("Parse failure");
   });
 
+  describe("JSON parse fallback strategies", () => {
+    it("parses JSON wrapped in explanation text (strategy 2: regex extract)", async () => {
+      // Claude sometimes adds explanation before or after the JSON object
+      const wrappedResponse = `Based on my review of the changes, here is my assessment:\n\n{"decision":"approve","comment":"Looks good to me.","reason":"Clean and correct implementation"}\n\nThe PR implements the feature correctly.`;
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: wrappedResponse }],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("approve");
+      expect(result.comment).toBe("Looks good to me.");
+    });
+
+    it("parses JSON wrapped in markdown code fences (strategy 3: code fence extract)", async () => {
+      // Claude sometimes wraps JSON in ```json ... ``` blocks despite being told not to
+      const fencedResponse = "Here is my review:\n\n```json\n{\"decision\":\"request-changes\",\"comment\":\"Missing error handling.\",\"reason\":\"Incomplete implementation\"}\n```";
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: fencedResponse }],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("request-changes");
+      expect(result.comment).toBe("Missing error handling.");
+    });
+
+    it("parses JSON with trailing commentary after closing brace (strategy 2: regex extract)", async () => {
+      // Claude sometimes adds a note after the JSON object
+      const responseWithTrailing = `{"decision":"escalate","comment":"Needs human eyes on the auth changes.","reason":"Security-sensitive change"}\n\nNote: please pay special attention to the token validation logic.`;
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: responseWithTrailing }],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("escalate");
+      expect(result.comment).toBe("Needs human eyes on the auth changes.");
+    });
+
+    it("parses JSON inside plain code fences without language tag (strategy 3)", async () => {
+      const plainFencedResponse = "Review:\n\n```\n{\"decision\":\"approve\",\"comment\":\"All good.\",\"reason\":\"Works correctly\"}\n```";
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: plainFencedResponse }],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("approve");
+      expect(result.comment).toBe("All good.");
+    });
+
+    it("defaults to escalate when no strategy can extract valid JSON", async () => {
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "This PR looks fine to me, I approve it." }],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("escalate");
+      expect(result.reason).toBe("Parse failure");
+    });
+
+    it("defaults decision to escalate when parsed JSON has an unrecognised decision value", async () => {
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ decision: "maybe", comment: "Not sure.", reason: "Ambiguous" }) }],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      // Unknown decision value → safe fallback to escalate
+      expect(result.decision).toBe("escalate");
+      expect(result.comment).toBe("Not sure.");
+    });
+  });
+
   it("reviews all open PRs on a repo", async () => {
     mockCreate
       .mockResolvedValueOnce({
