@@ -34,6 +34,11 @@ CRITICAL — PR and Issue hygiene:
 - Do NOT create issues for features that already exist. Check merged PRs first: \`gh pr list --repo ${githubRepo} --state merged -L 20\`
 
 CRITICAL — Pre-PR submission checklist (run ALL four steps BEFORE \`gh pr create\`):
+The fastest way is to run the orchestrator's pre-flight command, which runs all four checks at once:
+   \`\`\`
+   orch preflight --repo ${githubRepo} --branch <your-branch> --body "Your PR body draft here"
+   \`\`\`
+   If \`orch\` is not available, run the four checks manually:
 1. **Duplicate PR check**: verify no open PR already exists for your branch.
    \`\`\`
    gh pr list --repo ${githubRepo} --state open --json number,headRefName

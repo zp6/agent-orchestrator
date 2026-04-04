@@ -109,6 +109,12 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("Closes #N");
   });
 
+  it("includes orch preflight as the fastest pre-flight check method", () => {
+    const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("orch preflight");
+    expect(prompt).toContain("--repo owner/repo");
+  });
+
   it("includes duplicate PR check instruction", () => {
     const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
     expect(prompt).toMatch(/duplicate pr/i);
@@ -176,6 +182,13 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("git rebase origin/main"); // rebase check
     expect(prompt).toContain("git diff --check");  // merge conflict check
     expect(prompt).toContain("Closes #N");         // issue ref check
+  });
+
+  it("includes orch preflight as the recommended pre-flight command", () => {
+    const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("orch preflight");
+    expect(prompt).toContain("--repo owner/repo");
+    expect(prompt).toContain("--branch");
   });
 
   it("includes backlog triage and roadmap instructions", () => {
