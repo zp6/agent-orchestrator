@@ -21,6 +21,7 @@ let mockPRViewResponse = JSON.stringify({
 });
 
 let mockDiffResponse = "+added line\n-removed line";
+let mockPRStateResponse = "OPEN";
 
 // Controls what gh issue list returns in the body-linter fuzzy-match path.
 // Default is an empty list so the linter can't infer an issue from fuzzy matching.
@@ -28,6 +29,9 @@ let mockIssueListResponse = "[]";
 
 vi.mock("node:child_process", () => ({
   execSync: vi.fn().mockImplementation((cmd: string) => {
+    if (cmd.includes("gh pr view") && cmd.includes("-q .state")) {
+      return mockPRStateResponse;
+    }
     if (cmd.includes("gh pr view")) {
       return mockPRViewResponse;
     }
@@ -73,6 +77,7 @@ beforeEach(() => {
   });
   mockDiffResponse = "+added line\n-removed line";
   mockIssueListResponse = "[]";
+  mockPRStateResponse = "OPEN";
 });
 
 describe("PRReviewer", () => {
@@ -397,6 +402,36 @@ describe("PRReviewer", () => {
       expect(result.comment).toContain("gh issue list");
       expect(result.comment).toContain("gh pr edit");
       expect(mockCreate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("isPROpen", () => {
+    it("returns true when PR state is OPEN", () => {
+      mockPRStateResponse = "OPEN";
+      const reviewer = new PRReviewer(config);
+      expect(reviewer.isPROpen("owner/repo", 9)).toBe(true);
+    });
+
+    it("returns false when PR state is MERGED", () => {
+      mockPRStateResponse = "MERGED";
+      const reviewer = new PRReviewer(config);
+      expect(reviewer.isPROpen("owner/repo", 9)).toBe(false);
+    });
+
+    it("returns false when PR state is CLOSED", () => {
+      mockPRStateResponse = "CLOSED";
+      const reviewer = new PRReviewer(config);
+      expect(reviewer.isPROpen("owner/repo", 9)).toBe(false);
+    });
+
+    it("returns false (fail-safe) when execSync throws", async () => {
+      const { execSync: mockExecSync } = await import("node:child_process");
+      vi.mocked(mockExecSync).mockImplementationOnce(() => {
+        throw new Error("gh: PR not found");
+      });
+
+      const reviewer = new PRReviewer(config);
+      expect(reviewer.isPROpen("owner/repo", 99)).toBe(false);
     });
   });
 

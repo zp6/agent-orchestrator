@@ -348,7 +348,11 @@ export class Daemon {
 
           // Dispatch feedback to agent when changes are requested (skip if agent busy or duplicate)
           if (result.decision === "request-changes") {
-            if (this.store.hasActiveTask(agentName)) {
+            // Guard: the PR may have been merged between the open-PR fetch and now (race condition).
+            // Check state before dispatching to avoid wasted cycles on already-merged PRs.
+            if (!this.prReviewer.isPROpen(repo, prNumber)) {
+              this.log.info("Skipped PR feedback dispatch: PR no longer open (no-op)", { agentName, repo, prNumber });
+            } else if (this.store.hasActiveTask(agentName)) {
               this.log.info("Skipping PR feedback dispatch: agent busy", { agentName, repo, prNumber });
             } else if (this.store.hasActivePrFeedbackTask(repo, prNumber)) {
               this.log.info("Skipping PR feedback dispatch: feedback already in-flight", { agentName, repo, prNumber });

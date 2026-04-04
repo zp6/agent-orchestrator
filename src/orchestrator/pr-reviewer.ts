@@ -325,6 +325,20 @@ export class PRReviewer {
     }
   }
 
+  isPROpen(repo: string, prNumber: number): boolean {
+    try {
+      const state = execSync(
+        `gh pr view ${prNumber} --repo ${repo} --json state -q .state`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+      return state === "OPEN";
+    } catch {
+      // Fail-safe: if we can't verify the state, don't dispatch
+      this.log.warn("Could not verify PR state, skipping feedback dispatch", { repo, prNumber });
+      return false;
+    }
+  }
+
   private fetchPRInfo(repo: string, prNumber: number): PRInfo {
     const prJson = execSync(
       `gh pr view ${prNumber} --repo ${repo} --json number,title,body,author,headRefName,changedFiles,mergeable`,
