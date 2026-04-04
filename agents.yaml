@@ -12,6 +12,7 @@ verification:
   enabled: true
   sources: ["github", "linear"]
   min_score: 0.7
+  max_revisions: 1  # revision cycles before giving up (0 = verify-only)
 
 agents:
   claude-agent-orchestrator:

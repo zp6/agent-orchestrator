@@ -208,21 +208,21 @@ export class Daemon {
       const unverified = this.store.getUnverified(3); // verify up to 3 per cycle
       if (unverified.length === 0) return;
 
-      const minScore = this.config.verification.min_score ?? 0.7;
       const sources = this.config.verification.sources;
+      const maxRevisions = this.config.verification.max_revisions ?? 1;
 
       for (const task of unverified) {
         // Only verify tasks from configured sources
         if (sources && !sources.includes(task.source)) continue;
 
         try {
-          const result = await this.verifier.verify(task.id);
+          const result = await this.verifier.verifyAndRevise(task.id, maxRevisions);
           const status = result.approved ? "approved" : "rejected";
           console.log(
             `[${time}] Verified ${task.id.slice(0, 8)} (${task.agent_name}): ${status} (${result.score.toFixed(1)})`,
           );
 
-          if (!result.approved && result.score < minScore && result.revision) {
+          if (!result.approved && result.revision) {
             console.log(`  Needs revision: ${result.revision.slice(0, 100)}`);
           }
         } catch (err) {

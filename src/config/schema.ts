@@ -42,6 +42,12 @@ export interface VerificationConfig {
   enabled: boolean;
   sources?: string[];
   min_score?: number;
+  /**
+   * Maximum number of revision cycles to attempt for rejected tasks.
+   * Set to 0 to disable re-dispatch entirely (verify-only mode).
+   * Defaults to 1 when omitted.
+   */
+  max_revisions?: number;
 }
 
 export interface ProxyConfig {
