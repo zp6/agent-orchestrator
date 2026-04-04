@@ -973,4 +973,94 @@ describe("StateStore", () => {
       expect(statuses).toContain("failed");
     });
   });
+
+  describe("getTaskStatusCountsLastHours", () => {
+    it("returns zero counts when no tasks exist", () => {
+      const counts = store.getTaskStatusCountsLastHours(24);
+      expect(counts.done).toBe(0);
+      expect(counts.failed).toBe(0);
+      expect(counts.pending).toBe(0);
+      expect(counts.in_progress).toBe(0);
+    });
+
+    it("counts tasks by status within the time window", () => {
+      const t1 = store.createTask({ title: "Task A", source: "manual", agent_name: "alpha" });
+      store.updateTask(t1.id, { status: "done" });
+      const t2 = store.createTask({ title: "Task B", source: "manual", agent_name: "alpha" });
+      store.updateTask(t2.id, { status: "failed" });
+      store.createTask({ title: "Task C", source: "manual", agent_name: "beta" });
+
+      const counts = store.getTaskStatusCountsLastHours(24);
+      expect(counts.done).toBe(1);
+      expect(counts.failed).toBe(1);
+      expect(counts.pending).toBe(1);
+    });
+
+    it("excludes sub-tasks (tasks with parent_task_id)", () => {
+      const parent = store.createTask({ title: "Parent", source: "manual", agent_name: "alpha" });
+      store.createSubTask({
+        title: "Child",
+        description: "sub",
+        source: "manual",
+        agent_name: "alpha",
+        parent_task_id: parent.id,
+        step_id: "step-1",
+      });
+
+      const counts = store.getTaskStatusCountsLastHours(24);
+      // Only the parent should be counted (child has parent_task_id)
+      expect(counts.pending).toBe(1);
+    });
+  });
+
+  describe("getAgentsWithRecentFailures", () => {
+    it("returns empty array when no failures exist", () => {
+      const result = store.getAgentsWithRecentFailures(24, 1);
+      expect(result).toEqual([]);
+    });
+
+    it("returns agents with more failures than the threshold", () => {
+      // alpha has 2 failures — above threshold of 1 (HAVING COUNT(*) > 1)
+      const t1 = store.createTask({ title: "Fail 1", source: "manual", agent_name: "alpha" });
+      store.updateTask(t1.id, { status: "failed" });
+      const t2 = store.createTask({ title: "Fail 2", source: "manual", agent_name: "alpha" });
+      store.updateTask(t2.id, { status: "failed" });
+      // beta has 1 failure — not above threshold (HAVING COUNT(*) > 1 means > 1, so 1 is excluded)
+      const t3 = store.createTask({ title: "Fail 3", source: "manual", agent_name: "beta" });
+      store.updateTask(t3.id, { status: "failed" });
+
+      const result = store.getAgentsWithRecentFailures(24, 1);
+      expect(result.length).toBe(1);
+      expect(result[0].agent_name).toBe("alpha");
+      expect(result[0].failed).toBe(2);
+    });
+
+    it("excludes sub-tasks from failure counts", () => {
+      const parent = store.createTask({ title: "Parent", source: "manual", agent_name: "gamma" });
+      store.updateTask(parent.id, { status: "failed" });
+      // Two child failures — should not be counted (have parent_task_id)
+      const child1 = store.createSubTask({
+        title: "Child 1",
+        description: "sub 1",
+        source: "manual",
+        agent_name: "gamma",
+        parent_task_id: parent.id,
+        step_id: "step-1",
+      });
+      store.updateTask(child1.id, { status: "failed" });
+      const child2 = store.createSubTask({
+        title: "Child 2",
+        description: "sub 2",
+        source: "manual",
+        agent_name: "gamma",
+        parent_task_id: parent.id,
+        step_id: "step-2",
+      });
+      store.updateTask(child2.id, { status: "failed" });
+
+      // Only the parent counts — 1 failure for gamma, not above threshold of 1
+      const result = store.getAgentsWithRecentFailures(24, 1);
+      expect(result).toEqual([]);
+    });
+  });
 });

@@ -13,6 +13,7 @@ import { registerDashboardCommand } from "./commands/dashboard.js";
 import { registerCreateCommand } from "./commands/create.js";
 import { registerPRsCommand } from "./commands/prs.js";
 import { registerResearchCommand } from "./commands/research.js";
+import { registerHealthCommand } from "./commands/health.js";
 
 const program = new Command();
 
@@ -35,5 +36,6 @@ registerDashboardCommand(program);
 registerCreateCommand(program);
 registerPRsCommand(program);
 registerResearchCommand(program);
+registerHealthCommand(program);
 
 program.parse();

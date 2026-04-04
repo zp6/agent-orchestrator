@@ -955,6 +955,51 @@ export class StateStore {
     this.db.prepare("UPDATE tasks SET reported = 1 WHERE id = ?").run(taskId);
   }
 
+  /**
+   * Count top-level tasks by status created within the last N hours.
+   */
+  getTaskStatusCountsLastHours(hours = 24): Record<string, number> {
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    const rows = this.db
+      .prepare(
+        `SELECT status, COUNT(*) as count
+         FROM tasks
+         WHERE created_at >= ? AND parent_task_id IS NULL
+         GROUP BY status`,
+      )
+      .all(since) as Array<{ status: string; count: number }>;
+
+    const counts: Record<string, number> = {
+      pending: 0,
+      planning: 0,
+      dispatched: 0,
+      in_progress: 0,
+      done: 0,
+      failed: 0,
+    };
+    for (const row of rows) {
+      if (row.status in counts) counts[row.status] = row.count;
+    }
+    return counts;
+  }
+
+  /**
+   * Return agents with more than `threshold` failed top-level tasks in the last N hours.
+   */
+  getAgentsWithRecentFailures(hours = 24, threshold = 1): Array<{ agent_name: string; failed: number }> {
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    return this.db
+      .prepare(
+        `SELECT agent_name, COUNT(*) as failed
+         FROM tasks
+         WHERE status = 'failed' AND created_at >= ? AND parent_task_id IS NULL AND agent_name IS NOT NULL
+         GROUP BY agent_name
+         HAVING COUNT(*) > ?
+         ORDER BY failed DESC`,
+      )
+      .all(since, threshold) as Array<{ agent_name: string; failed: number }>;
+  }
+
   close(): void {
     this.db.close();
   }
