@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { StateStore, type Task, type SystemMetrics } from "../../state/store.js";
+import { loadConfig } from "../../config/schema.js";
 
 const STATUS_COLORS: Record<string, (s: string) => string> = {
   pending: chalk.yellow,
@@ -56,7 +57,12 @@ function formatPercent(rate: number | null): string {
   return color(`${pct}%`);
 }
 
-function printMetrics(metrics: SystemMetrics): void {
+interface ImprovementStats {
+  minScore: number;
+  qualifyingCount: number;
+}
+
+function printMetrics(metrics: SystemMetrics, improvement?: ImprovementStats): void {
   console.log(chalk.bold("System Metrics\n"));
 
   // --- Task summary ---
@@ -94,6 +100,25 @@ function printMetrics(metrics: SystemMetrics): void {
       console.log(`  ${agent} ${total} ${done} ${failed} ${dur} ${pass} ${score}`);
     }
   }
+
+  // --- Improvement detection ---
+  if (improvement !== undefined) {
+    const { minScore, qualifyingCount } = improvement;
+    const countColor = qualifyingCount >= 5 ? chalk.green : qualifyingCount > 0 ? chalk.yellow : chalk.red;
+
+    console.log(chalk.bold("\nImprovement Detection"));
+    console.log(`  Quality threshold: score ≥ ${chalk.cyan(minScore.toFixed(2))}`);
+    console.log(`  Qualifying tasks:  ${countColor(String(qualifyingCount))} (of last 20 verified)`);
+
+    if (qualifyingCount < 5) {
+      console.log(
+        chalk.yellow(`  ⚠ Improvement detection inactive`) +
+          chalk.dim(` — need ≥5 qualifying tasks, have ${qualifyingCount}`),
+      );
+    } else {
+      console.log(chalk.dim(`  ✓ Improvement detection active`));
+    }
+  }
 }
 
 export function registerStatusCommand(program: Command): void {
@@ -110,7 +135,21 @@ export function registerStatusCommand(program: Command): void {
       const store = new StateStore();
 
       if (opts?.metrics) {
-        printMetrics(store.getMetrics());
+        const metrics = store.getMetrics();
+
+        // Compute improvement detection stats from config + store
+        let improvementStats: ImprovementStats | undefined;
+        try {
+          const configPath = program.opts().config as string | undefined;
+          const config = loadConfig(configPath);
+          const minScore = config.verification?.min_score ?? 0.7;
+          const qualified = store.getRecentVerified(20, minScore);
+          improvementStats = { minScore, qualifyingCount: qualified.length };
+        } catch {
+          // Config unavailable — skip the section
+        }
+
+        printMetrics(metrics, improvementStats);
         store.close();
         return;
       }

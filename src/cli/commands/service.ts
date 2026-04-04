@@ -5,6 +5,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { loadConfig } from "../../config/schema.js";
 import { isRunning, readPid, removePid } from "../../service/pid.js";
+import { StateStore } from "../../state/store.js";
 
 export function registerServiceCommand(program: Command): void {
   const serviceCmd = program
@@ -135,6 +136,33 @@ export function registerServiceCommand(program: Command): void {
         }
         if (!github.length && !linear.length && !slack.length) {
           console.log(chalk.dim("\nNo trigger sources configured."));
+        }
+
+        // --- Improvement detection stats ---
+        const minScore = config.verification?.min_score ?? 0.7;
+        try {
+          const store = new StateStore();
+          const qualified = store.getRecentVerified(20, minScore);
+          store.close();
+
+          const count = qualified.length;
+          const threshold = minScore.toFixed(2);
+          const countColor = count >= 5 ? chalk.green : count > 0 ? chalk.yellow : chalk.red;
+
+          console.log(chalk.bold("\nImprovement Detection"));
+          console.log(`  Quality threshold: score ≥ ${chalk.cyan(threshold)}`);
+          console.log(`  Qualifying tasks:  ${countColor(String(count))} (of last 20 verified)`);
+
+          if (count < 5) {
+            console.log(
+              chalk.yellow(`  ⚠ Improvement detection inactive`) +
+                chalk.dim(` — need ≥5 qualifying tasks, have ${count}`),
+            );
+          } else {
+            console.log(chalk.dim(`  ✓ Improvement detection active`));
+          }
+        } catch {
+          // State DB not available (first run, etc.)
         }
       } catch {
         // Config not available
