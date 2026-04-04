@@ -11,6 +11,23 @@ export interface OrphanBranch {
 }
 
 /**
+ * Extract issue number from a branch name.
+ * Matches patterns like: issue-105-description, issue-105, fix-issue-105, 105-description
+ * Returns the issue number as a string, or null if not found.
+ */
+export function extractIssueNumberFromBranch(branch: string): string | null {
+  // Most common: issue-N or issue-N-description
+  const issuePrefix = branch.match(/(?:^|[-_])issue[-_](\d+)/i);
+  if (issuePrefix) return issuePrefix[1];
+
+  // Branch starts with a number: 105-description
+  const leadingNumber = branch.match(/^(\d+)[-_]/);
+  if (leadingNumber) return leadingNumber[1];
+
+  return null;
+}
+
+/**
  * Find branches that have been pushed, have commits ahead of main,
  * and don't have open PRs. Creates PRs for them.
  */
@@ -63,12 +80,22 @@ export function findOrphanBranches(config: OrchestratorConfig): OrphanBranch[] {
 
 export function createPRForBranch(orphan: OrphanBranch): string | null {
   try {
+    const issueNumber = extractIssueNumberFromBranch(orphan.branch);
+    const body = issueNumber
+      ? `Auto-created by orchestrator for orphan branch.\n\nCloses #${issueNumber}`
+      : "Auto-created by orchestrator for orphan branch.";
+
     const url = execSync(
-      `gh pr create --repo ${orphan.repo} --head ${orphan.branch} --title "[${orphan.agentName}] ${orphan.branch}" --body "Auto-created by orchestrator for orphan branch."`,
+      `gh pr create --repo ${orphan.repo} --head ${orphan.branch} --title "[${orphan.agentName}] ${orphan.branch}" --body ${shellEscape(body)}`,
       { encoding: "utf-8", timeout: 30000 },
     ).trim();
 
-    log.info("Created PR for orphan branch", { repo: orphan.repo, branch: orphan.branch, url });
+    log.info("Created PR for orphan branch", {
+      repo: orphan.repo,
+      branch: orphan.branch,
+      url,
+      issueNumber: issueNumber ?? "not detected",
+    });
     return url;
   } catch (err) {
     log.error("Failed to create PR for orphan branch", {
@@ -78,4 +105,8 @@ export function createPRForBranch(orphan: OrphanBranch): string | null {
     });
     return null;
   }
+}
+
+function shellEscape(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
 }

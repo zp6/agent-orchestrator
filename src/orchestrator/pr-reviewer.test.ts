@@ -164,7 +164,39 @@ describe("PRReviewer", () => {
   });
 
   describe("PR body linter", () => {
-    it("short-circuits agent PR without Closes #N to request-changes", async () => {
+    it("auto-patches PR body when issue number is inferrable from branch name", async () => {
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Add feature",
+        body: "Some description without issue ref",
+        author: { login: "agent" },
+        headRefName: "issue-42-add-feature",
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Good", reason: "Clean" }) }],
+      });
+
+      const { execSync: mockExecSync } = await import("node:child_process");
+      const execSyncMock = vi.mocked(mockExecSync);
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      // Should proceed to LLM review after patching (not request-changes)
+      expect(result.decision).toBe("approve");
+      expect(mockCreate).toHaveBeenCalled();
+
+      // Should have called gh pr edit to patch the body
+      const patchCall = execSyncMock.mock.calls.find(
+        (args) => typeof args[0] === "string" && args[0].includes("gh pr edit") && args[0].includes("--body"),
+      );
+      expect(patchCall).toBeDefined();
+      expect(patchCall![0]).toContain("Closes #42");
+    });
+
+    it("requests changes when issue number cannot be inferred from branch name", async () => {
       mockPRViewResponse = JSON.stringify({
         number: 9,
         title: "[agent-a] Add feature",

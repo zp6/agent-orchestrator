@@ -3,6 +3,7 @@ import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { Deployer } from "./deployer.js";
+import { extractIssueNumberFromBranch } from "./pr-creator.js";
 
 export interface PRInfo {
   number: number;
@@ -69,14 +70,39 @@ export class PRReviewer {
 
     // PR body linter: agent PRs must include "Closes #N"
     if (this.isAgentPR(pr) && !this.hasIssueRef(pr)) {
-      const result: PRReviewResult = {
-        decision: "request-changes",
-        comment: 'PR body must include "Closes #N" (where N is the issue number) so the issue auto-closes on merge. Please update the PR body and push again.',
-        reason: "PR body missing issue reference (Closes #N)",
-      };
-      this.log.info("PR body linter: missing issue ref", { repo, prNumber, title: pr.title });
-      await this.executeDecision(repo, prNumber, result);
-      return result;
+      // Try to auto-patch the PR body by inferring the issue number from the branch name,
+      // rather than wasting a full review cycle dispatching feedback to the agent.
+      const inferredIssue = extractIssueNumberFromBranch(pr.branch);
+      if (inferredIssue) {
+        const patched = await this.patchPRBodyWithIssueRef(repo, prNumber, pr.body, inferredIssue);
+        if (patched) {
+          // Successfully patched — refresh body and continue to LLM review
+          pr.body = pr.body.trim()
+            ? `${pr.body.trim()}\n\nCloses #${inferredIssue}`
+            : `Closes #${inferredIssue}`;
+          this.log.info("PR body auto-patched with issue ref", { repo, prNumber, inferredIssue });
+        } else {
+          // Patch failed — fall back to requesting changes from the agent
+          const result: PRReviewResult = {
+            decision: "request-changes",
+            comment: `PR body must include "Closes #${inferredIssue}" so the issue auto-closes on merge. Please update the PR body with \`gh pr edit ${prNumber} --body "...Closes #${inferredIssue}"\`.`,
+            reason: "PR body missing issue reference (Closes #N) — auto-patch failed",
+          };
+          this.log.info("PR body linter: auto-patch failed, requesting changes", { repo, prNumber, inferredIssue });
+          await this.executeDecision(repo, prNumber, result);
+          return result;
+        }
+      } else {
+        // Can't infer issue number — ask the agent to add it
+        const result: PRReviewResult = {
+          decision: "request-changes",
+          comment: 'PR body must include "Closes #N" (where N is the issue number) so the issue auto-closes on merge. Please update the PR body and push again.',
+          reason: "PR body missing issue reference (Closes #N)",
+        };
+        this.log.info("PR body linter: missing issue ref, cannot infer from branch", { repo, prNumber, branch: pr.branch });
+        await this.executeDecision(repo, prNumber, result);
+        return result;
+      }
     }
 
     // Escalate after too many review rounds instead of endlessly requesting changes
@@ -245,6 +271,26 @@ export class PRReviewer {
 
   private hasIssueRef(pr: PRInfo): boolean {
     return /(?:closes|fixes|resolves)\s+#\d+/i.test(pr.body);
+  }
+
+  /**
+   * Auto-patch a PR body to include "Closes #N" using gh pr edit.
+   * Returns true if the patch succeeded, false otherwise.
+   */
+  private async patchPRBodyWithIssueRef(repo: string, prNumber: number, currentBody: string, issueNumber: string): Promise<boolean> {
+    try {
+      const newBody = currentBody.trim()
+        ? `${currentBody.trim()}\n\nCloses #${issueNumber}`
+        : `Closes #${issueNumber}`;
+      execSync(
+        `gh pr edit ${prNumber} --repo ${repo} --body ${shellEscape(newBody)}`,
+        { encoding: "utf-8", timeout: 30000 },
+      );
+      return true;
+    } catch (err) {
+      this.log.error("Failed to auto-patch PR body with issue ref", { repo, prNumber, issueNumber, error: String(err) });
+      return false;
+    }
   }
 
   private async restartAgentsForRepo(repo: string): Promise<void> {
