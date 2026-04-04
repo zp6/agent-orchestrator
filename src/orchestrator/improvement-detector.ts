@@ -47,12 +47,14 @@ export class ImprovementDetector {
   constructor(private config: OrchestratorConfig) {}
 
   async analyze(recentTasks: Task[]): Promise<DetectedImprovement[]> {
-    if (recentTasks.length === 0) return [];
+    // Filter out research tasks — they don't produce code artifacts
+    const implTasks = recentTasks.filter((t) => t.task_type !== "research");
+    if (implTasks.length === 0) return [];
 
     const client = createLLMClient(this.config
     );
 
-    const taskSummaries = recentTasks.map((t) => ({
+    const taskSummaries = implTasks.map((t) => ({
       id: t.id.slice(0, 8),
       agent: t.agent_name,
       title: t.title,
@@ -63,7 +65,7 @@ export class ImprovementDetector {
       result_preview: t.result?.slice(0, 200),
     }));
 
-    const prompt = `Analyze these ${recentTasks.length} recent tasks and identify cross-cutting improvements:\n\n${JSON.stringify(taskSummaries, null, 2)}`;
+    const prompt = `Analyze these ${implTasks.length} recent tasks and identify cross-cutting improvements:\n\n${JSON.stringify(taskSummaries, null, 2)}`;
 
     try {
       const response = await client.messages.create({
@@ -78,7 +80,7 @@ export class ImprovementDetector {
         .map((b) => "text" in b ? b.text : "")
         .join("");
 
-      return this.parseResponse(text, recentTasks);
+      return this.parseResponse(text, implTasks);
     } catch {
       return [];
     }

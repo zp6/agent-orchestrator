@@ -6,6 +6,7 @@ import { ulid } from "ulid";
 
 export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed";
 export type TaskSource = "github" | "linear" | "slack" | "manual";
+export type TaskType = "implementation" | "research";
 
 export type VerificationStatus = "pending" | "approved" | "rejected" | null;
 
@@ -22,6 +23,7 @@ export interface Task {
   parent_task_id: string | null;
   step_id: string | null;
   plan: string | null;
+  task_type: TaskType;
   verification_status: VerificationStatus;
   quality_score: number | null;
   verification_notes: string | null;
@@ -133,6 +135,7 @@ export class StateStore {
     this.runPhase2Migration();
     this.runPhase5Migration();
     this.runPhase6Migration();
+    this.runResearchMigration();
   }
 
   private runPhase2Migration(): void {
@@ -176,20 +179,32 @@ export class StateStore {
     `);
   }
 
+  private runResearchMigration(): void {
+    const columns = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+    const colNames = new Set(columns.map((c) => c.name));
+
+    if (!colNames.has("task_type")) {
+      this.db.exec(`
+        ALTER TABLE tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'implementation';
+      `);
+    }
+  }
+
   createTask(params: {
     title: string;
     description?: string;
     source: TaskSource;
     source_ref?: string;
     agent_name?: string;
+    task_type?: TaskType;
   }): Task {
     const now = new Date().toISOString();
     const id = ulid();
     const stmt = this.db.prepare(`
-      INSERT INTO tasks (id, title, description, source, source_ref, status, agent_name, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+      INSERT INTO tasks (id, title, description, source, source_ref, status, agent_name, task_type, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
     `);
-    stmt.run(id, params.title, params.description ?? null, params.source, params.source_ref ?? null, params.agent_name ?? null, now, now);
+    stmt.run(id, params.title, params.description ?? null, params.source, params.source_ref ?? null, params.agent_name ?? null, params.task_type ?? "implementation", now, now);
     return this.getTask(id)!;
   }
 
@@ -203,7 +218,7 @@ export class StateStore {
     return dispatched.length > 0 || inProgress.length > 0;
   }
 
-  listTasks(filters?: { status?: TaskStatus; agent_name?: string; limit?: number }): Task[] {
+  listTasks(filters?: { status?: TaskStatus; agent_name?: string; task_type?: TaskType; limit?: number }): Task[] {
     let sql = "SELECT * FROM tasks WHERE 1=1";
     const params: unknown[] = [];
 
@@ -214,6 +229,10 @@ export class StateStore {
     if (filters?.agent_name) {
       sql += " AND agent_name = ?";
       params.push(filters.agent_name);
+    }
+    if (filters?.task_type) {
+      sql += " AND task_type = ?";
+      params.push(filters.task_type);
     }
 
     sql += " ORDER BY created_at DESC";

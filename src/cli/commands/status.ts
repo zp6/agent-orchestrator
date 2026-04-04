@@ -17,7 +17,8 @@ function formatTask(task: Task, verbose = false): string {
   const agent = task.agent_name ? chalk.cyan(task.agent_name) : chalk.dim("unassigned");
   const time = chalk.dim(new Date(task.created_at).toLocaleString());
 
-  let output = `${chalk.dim(task.id.slice(0, 8))} ${status} ${agent.padEnd(30)} ${task.title}`;
+  const typeTag = task.task_type === "research" ? chalk.magenta("[research] ") : "";
+  let output = `${chalk.dim(task.id.slice(0, 8))} ${status} ${agent.padEnd(30)} ${typeTag}${task.title}`;
 
   if (verbose) {
     output += `\n  ${chalk.dim("Created:")} ${time}`;
@@ -102,9 +103,10 @@ export function registerStatusCommand(program: Command): void {
     .argument("[task-id]", "Specific task ID (prefix match supported)")
     .option("-a, --agent <name>", "Filter by agent")
     .option("-s, --state <status>", "Filter by status")
+    .option("-T, --type <type>", "Filter by task type (implementation, research)")
     .option("-n, --limit <n>", "Number of tasks to show", "20")
     .option("-m, --metrics", "Show aggregated system metrics")
-    .action((taskId?: string, opts?: { agent?: string; state?: string; limit?: string; metrics?: boolean }) => {
+    .action((taskId?: string, opts?: { agent?: string; state?: string; type?: string; limit?: string; metrics?: boolean }) => {
       const store = new StateStore();
 
       if (opts?.metrics) {
@@ -150,6 +152,7 @@ export function registerStatusCommand(program: Command): void {
         const tasks = store.listTasks({
           status: opts?.state as Task["status"] | undefined,
           agent_name: opts?.agent,
+          task_type: opts?.type as Task["task_type"] | undefined,
           limit: parseInt(opts?.limit ?? "20"),
         });
 

@@ -26,6 +26,30 @@ Scoring guide:
 - 0.5-0.69: Acceptable — partially addresses the task
 - Below 0.5: Needs revision — incomplete or incorrect`;
 
+const RESEARCH_SYSTEM_PROMPT = `You are a quality reviewer for research and feasibility analysis produced by an AI agent. Given a research question and the agent's analysis, assess the quality of the research.
+
+Respond with ONLY a JSON object (no markdown, no code fences):
+{
+  "approved": true/false,
+  "score": 0.0-1.0,
+  "notes": "Brief assessment of research quality",
+  "revision": "If not approved, specific guidance for improvement (omit if approved)"
+}
+
+Evaluate research quality on:
+- **Thoroughness**: Did the agent investigate the question fully, or leave obvious gaps?
+- **Evidence**: Are claims backed by concrete examples, code references, or data?
+- **Alternatives**: Were multiple approaches considered and compared?
+- **Honesty**: Does the analysis acknowledge uncertainty, risks, and limitations?
+- **Structure**: Is the response well-organized and easy to act on?
+- **Actionability**: Could a decision-maker use this analysis to make an informed choice?
+
+Scoring guide:
+- 0.9-1.0: Excellent — comprehensive analysis with evidence, alternatives, and clear recommendation
+- 0.7-0.89: Good — solid analysis with minor gaps in coverage or evidence
+- 0.5-0.69: Acceptable — addresses the question but lacks depth or alternatives
+- Below 0.5: Needs revision — superficial, missing key considerations, or not actionable`;
+
 export class Verifier {
   private log = createLogger("verifier");
 
@@ -48,13 +72,16 @@ export class Verifier {
     const client = createLLMClient(this.config
     );
 
-    const prompt = `## Task\n${task.description ?? task.title}\n\n## Agent Response (${task.agent_name})\n${task.result ?? "(no result)"}`;
+    const isResearch = task.task_type === "research";
+    const prompt = isResearch
+      ? `## Research Question\n${task.description ?? task.title}\n\n## Agent Analysis (${task.agent_name})\n${task.result ?? "(no result)"}`
+      : `## Task\n${task.description ?? task.title}\n\n## Agent Response (${task.agent_name})\n${task.result ?? "(no result)"}`;
 
     try {
       const response = await client.messages.create({
         model: "claude-sonnet-4-6",
         max_tokens: 1024,
-        system: SYSTEM_PROMPT,
+        system: isResearch ? RESEARCH_SYSTEM_PROMPT : SYSTEM_PROMPT,
         messages: [{ role: "user", content: prompt }],
       });
 

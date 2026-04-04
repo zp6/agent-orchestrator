@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { AgentClient, buildAgentSystemPrompt } from "./agent-client.js";
+import { AgentClient, buildAgentIdentityPrompt, buildAgentSystemPrompt, buildResearchPrompt } from "./agent-client.js";
 import { createServer, type Server } from "node:http";
 import type { OrchestratorConfig } from "../config/schema.js";
 
@@ -130,5 +130,73 @@ describe("buildAgentSystemPrompt", () => {
     const prompt = buildAgentSystemPrompt("anon-agent", "");
     expect(prompt).toContain(`"anon-agent"`);
     expect(prompt).not.toContain("Your GitHub repo is .");
+  });
+});
+
+describe("buildAgentSystemPrompt", () => {
+  it("includes agent name and repo", () => {
+    const prompt = buildAgentSystemPrompt("cheese-hater", "rapartlu/cheese-hater");
+    expect(prompt).toContain('"cheese-hater"');
+    expect(prompt).toContain("rapartlu/cheese-hater");
+  });
+
+  it("includes PR and issue hygiene instructions", () => {
+    const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("Closes #N");
+    expect(prompt).toContain("gh issue list --repo owner/repo --state open");
+  });
+
+  it("includes backlog triage and roadmap instructions", () => {
+    const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("Backlog triage and roadmap");
+    expect(prompt).toContain("ROADMAP.md");
+  });
+
+  it("includes self-improvement instructions", () => {
+    const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("Product features");
+    expect(prompt).toContain("User experience");
+  });
+
+  it("handles missing github repo", () => {
+    const prompt = buildAgentSystemPrompt("local-agent", "");
+    expect(prompt).toContain('"local-agent"');
+    expect(prompt).not.toContain("Your GitHub repo is .");
+  });
+
+  it("is identical to buildAgentIdentityPrompt (alias)", () => {
+    const prompt1 = buildAgentSystemPrompt("test-agent", "owner/repo");
+    const prompt2 = buildAgentIdentityPrompt("test-agent", "owner/repo");
+    expect(prompt1).toBe(prompt2);
+  });
+});
+
+describe("buildResearchPrompt", () => {
+  it("includes agent name and research mode", () => {
+    const prompt = buildResearchPrompt("cheese-hater", "rapartlu/cheese-hater");
+    expect(prompt).toContain('"cheese-hater"');
+    expect(prompt).toContain("RESEARCH MODE");
+  });
+
+  it("includes research structure guidance", () => {
+    const prompt = buildResearchPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("Summary");
+    expect(prompt).toContain("Analysis");
+    expect(prompt).toContain("Alternatives");
+    expect(prompt).toContain("Risks");
+    expect(prompt).toContain("Recommendation");
+  });
+
+  it("forbids code changes and PR creation", () => {
+    const prompt = buildResearchPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("Do NOT create branches, PRs, issues");
+    expect(prompt).toContain("Do NOT suggest self-improvement issues");
+  });
+
+  it("does NOT include implementation instructions", () => {
+    const prompt = buildResearchPrompt("test-agent", "owner/repo");
+    expect(prompt).not.toContain("Closes #N");
+    expect(prompt).not.toContain("ROADMAP.md");
+    expect(prompt).not.toContain("gh pr create");
   });
 });

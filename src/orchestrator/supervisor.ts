@@ -127,9 +127,10 @@ export class Supervisor {
   }
 
   private formatTask(t: Task): string {
+    const typeTag = t.task_type === "research" ? " [research]" : "";
     const verified = t.verification_status ? ` [${t.verification_status}${t.quality_score ? ` ${t.quality_score.toFixed(1)}` : ""}]` : " [unverified]";
     const result = t.result ? `\n  Result: ${t.result.slice(0, 150)}` : "";
-    return `- ${t.id.slice(0, 8)} (${t.agent_name}) ${t.status}${verified}: ${t.title}${result}`;
+    return `- ${t.id.slice(0, 8)} (${t.agent_name}) ${t.status}${typeTag}${verified}: ${t.title}${result}`;
   }
 
   private parseDecisions(text: string): SupervisorDecision[] {

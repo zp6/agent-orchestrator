@@ -153,6 +153,31 @@ describe("StateStore", () => {
     });
   });
 
+  describe("task_type", () => {
+    it("defaults to implementation", () => {
+      const task = store.createTask({ title: "Build it", source: "manual" });
+      expect(task.task_type).toBe("implementation");
+    });
+
+    it("creates a research task", () => {
+      const task = store.createTask({ title: "Investigate X", source: "manual", task_type: "research" });
+      expect(task.task_type).toBe("research");
+    });
+
+    it("filters by task_type", () => {
+      store.createTask({ title: "Build A", source: "manual", task_type: "implementation" });
+      store.createTask({ title: "Research B", source: "manual", task_type: "research" });
+      store.createTask({ title: "Build C", source: "manual" });
+
+      const research = store.listTasks({ task_type: "research" });
+      expect(research.length).toBe(1);
+      expect(research[0].title).toBe("Research B");
+
+      const impl = store.listTasks({ task_type: "implementation" });
+      expect(impl.length).toBe(2);
+    });
+  });
+
   describe("processed triggers", () => {
     it("tracks processed triggers", () => {
       const t = store.createTask({ title: "A", source: "github" });

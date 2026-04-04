@@ -3,7 +3,7 @@ import { Router } from "./router.js";
 import { LLMRouter } from "./llm-router.js";
 import { Planner, type Plan } from "./planner.js";
 import { PlanExecutor, type ExecutionResult } from "./executor.js";
-import { StateStore, type Task, type TaskSource } from "../state/store.js";
+import { StateStore, type Task, type TaskSource, type TaskType } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { ulid } from "ulid";
 import { createLogger } from "../service/logger.js";
@@ -45,6 +45,7 @@ export class Dispatcher {
       source?: TaskSource;
       sourceRef?: string;
       title?: string;
+      taskType?: TaskType;
     },
   ): Promise<DispatchResult> {
     // Resolve agent
@@ -72,12 +73,14 @@ export class Dispatcher {
 
     // Create task
     const conversationId = ulid();
+    const taskType = options?.taskType ?? "implementation";
     const task = this.store.createTask({
       title: options?.title ?? message.slice(0, 100),
       description: message,
       source: options?.source ?? "manual",
       source_ref: options?.sourceRef,
       agent_name: agentName,
+      task_type: taskType,
     });
 
     // Update to dispatched
@@ -99,6 +102,7 @@ export class Dispatcher {
       // Send to agent
       const response = await this.client.send(agentName, message, {
         conversationId,
+        taskType,
       });
 
       // Log the response
