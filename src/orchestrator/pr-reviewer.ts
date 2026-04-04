@@ -159,15 +159,17 @@ export class PRReviewer {
       }
     }
 
-    // Escalate after too many review rounds instead of endlessly requesting changes
+    // Escalate after too many review rounds instead of endlessly requesting changes.
+    // The ceiling is configurable via agents.yaml: pr_review.feedback_ceiling (default: 3).
+    const reviewCeiling = this.config.pr_review?.feedback_ceiling ?? 3;
     const priorReviews = this.countPriorReviews(repo, prNumber);
-    if (priorReviews >= 3) {
+    if (priorReviews >= reviewCeiling) {
       const result: PRReviewResult = {
         decision: "escalate",
-        comment: `This PR has been through ${priorReviews} review cycles. Escalating to human reviewer rather than continuing to request changes.`,
-        reason: `${priorReviews} review cycles — escalating to break the loop`,
+        comment: `This PR has gone through ${priorReviews} revision rounds without merging — escalating to human review.`,
+        reason: `${priorReviews} revision rounds without merging — escalating to break the loop`,
       };
-      this.log.info("PR review cycle cap reached, escalating", { repo, prNumber, priorReviews });
+      this.log.info("PR review cycle cap reached, escalating", { repo, prNumber, priorReviews, reviewCeiling });
       await this.executeDecision(repo, prNumber, result);
       return result;
     }

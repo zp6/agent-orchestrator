@@ -612,9 +612,38 @@ describe("PRReviewer", () => {
       const result = await reviewer.reviewPR("owner/repo", 9);
 
       expect(result.decision).toBe("escalate");
-      expect(result.comment).toContain("review cycles");
+      expect(result.comment).toContain("revision rounds without merging");
       expect(result.reason).toContain("escalating");
       expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    it("escalation comment follows the expected wording", async () => {
+      const { execSync: mockExecSync } = await import("node:child_process");
+      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+        if (cmd.includes("gh api") && cmd.includes("comments")) return "3\n";
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
+        if (cmd.includes("gh pr view")) return mockPRViewResponse;
+        if (cmd.includes("gh pr diff")) return mockDiffResponse;
+        if (cmd.includes("gh issue list")) return mockIssueListResponse;
+        if (cmd.includes("gh pr list")) return JSON.stringify([{ number: 9, title: "Test PR", body: "Closes #1" }]);
+        return "";
+      });
+
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Fix bug",
+        body: "Fixes the bug.\n\nCloses #1",
+        author: { login: "agent" },
+        headRefName: "issue-1-fix-bug",
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      // Matches the issue acceptance criteria wording
+      expect(result.comment).toBe("This PR has gone through 3 revision rounds without merging — escalating to human review.");
     });
 
     it("does not escalate early when only 2 prior reviews exist", async () => {
@@ -650,6 +679,74 @@ describe("PRReviewer", () => {
       // Should proceed to LLM review (not pre-emptively escalate)
       expect(mockCreate).toHaveBeenCalled();
       expect(result.decision).toBe("request-changes");
+    });
+
+    it("respects a custom feedback_ceiling from config (escalates at 2 when configured to 2)", async () => {
+      const { execSync: mockExecSync } = await import("node:child_process");
+      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+        if (cmd.includes("gh api") && cmd.includes("comments")) return "2\n"; // 2 prior reviews
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
+        if (cmd.includes("gh pr view")) return mockPRViewResponse;
+        if (cmd.includes("gh pr diff")) return mockDiffResponse;
+        if (cmd.includes("gh issue list")) return mockIssueListResponse;
+        if (cmd.includes("gh pr list")) return JSON.stringify([{ number: 9, title: "Test PR", body: "Closes #1" }]);
+        return "";
+      });
+
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Fix bug",
+        body: "Closes #1",
+        author: { login: "agent" },
+        headRefName: "issue-1-fix-bug",
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+
+      // Config with a lower threshold
+      const strictConfig = { ...config, pr_review: { feedback_ceiling: 2 } };
+      const reviewer = new PRReviewer(strictConfig);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      // 2 reviews >= ceiling of 2 → escalate without LLM
+      expect(result.decision).toBe("escalate");
+      expect(result.comment).toContain("2 revision rounds");
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    it("respects a custom feedback_ceiling from config (does NOT escalate at 2 when ceiling is 5)", async () => {
+      const { execSync: mockExecSync } = await import("node:child_process");
+      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+        if (cmd.includes("gh api") && cmd.includes("comments")) return "2\n"; // only 2 prior reviews
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
+        if (cmd.includes("gh pr view")) return mockPRViewResponse;
+        if (cmd.includes("gh pr diff")) return mockDiffResponse;
+        if (cmd.includes("gh issue list")) return mockIssueListResponse;
+        if (cmd.includes("gh pr list")) return JSON.stringify([{ number: 9, title: "Test PR", body: "Closes #1" }]);
+        return "";
+      });
+
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Fix bug",
+        body: "Closes #1",
+        author: { login: "agent" },
+        headRefName: "issue-1-fix-bug",
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Good now.", reason: "Clean" }) }],
+      });
+
+      // Lenient config — 5 rounds allowed
+      const lenientConfig = { ...config, pr_review: { feedback_ceiling: 5 } };
+      const reviewer = new PRReviewer(lenientConfig);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      // 2 reviews < ceiling of 5 → proceeds to LLM review
+      expect(mockCreate).toHaveBeenCalled();
+      expect(result.decision).toBe("approve");
     });
 
     it("fails open (proceeds to LLM review) when countPriorReviews gh API call throws", async () => {

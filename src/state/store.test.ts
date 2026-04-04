@@ -1095,6 +1095,82 @@ describe("StateStore", () => {
     });
   });
 
+  describe("markPrFeedbackTasksEscalated", () => {
+    it("transitions in-flight pr-feedback tasks to escalated and returns the count", () => {
+      const t1 = store.createTask({
+        title: "[PR feedback] owner/repo#77",
+        source: "pr-feedback",
+        source_ref: "owner/repo#77",
+        agent_name: "my-agent",
+      });
+      store.updateTask(t1.id, { status: "dispatched" });
+      const t2 = store.createTask({
+        title: "[PR feedback] owner/repo#77 round 2",
+        source: "pr-feedback",
+        source_ref: "owner/repo#77",
+        agent_name: "my-agent",
+      });
+      // t2 stays pending
+
+      const changed = store.markPrFeedbackTasksEscalated("owner/repo", 77);
+      expect(changed).toBe(2);
+
+      const updated1 = store.getTask(t1.id);
+      const updated2 = store.getTask(t2.id);
+      expect(updated1?.status).toBe("escalated");
+      expect(updated2?.status).toBe("escalated");
+    });
+
+    it("does not touch already-completed tasks (done / failed)", () => {
+      const done = store.createTask({
+        title: "[PR feedback] owner/repo#88 done",
+        source: "pr-feedback",
+        source_ref: "owner/repo#88",
+        agent_name: "my-agent",
+      });
+      store.updateTask(done.id, { status: "done" });
+
+      const failed = store.createTask({
+        title: "[PR feedback] owner/repo#88 failed",
+        source: "pr-feedback",
+        source_ref: "owner/repo#88",
+        agent_name: "my-agent",
+      });
+      store.updateTask(failed.id, { status: "failed" });
+
+      const pending = store.createTask({
+        title: "[PR feedback] owner/repo#88 pending",
+        source: "pr-feedback",
+        source_ref: "owner/repo#88",
+        agent_name: "my-agent",
+      });
+
+      const changed = store.markPrFeedbackTasksEscalated("owner/repo", 88);
+      // Only the pending task should be transitioned
+      expect(changed).toBe(1);
+      expect(store.getTask(done.id)?.status).toBe("done");
+      expect(store.getTask(failed.id)?.status).toBe("failed");
+      expect(store.getTask(pending.id)?.status).toBe("escalated");
+    });
+
+    it("returns 0 when no in-flight tasks exist for that PR", () => {
+      const changed = store.markPrFeedbackTasksEscalated("owner/repo", 999);
+      expect(changed).toBe(0);
+    });
+
+    it("does not affect tasks for a different PR on the same repo", () => {
+      const other = store.createTask({
+        title: "[PR feedback] owner/repo#55",
+        source: "pr-feedback",
+        source_ref: "owner/repo#55",
+        agent_name: "my-agent",
+      });
+
+      store.markPrFeedbackTasksEscalated("owner/repo", 56); // different PR
+      expect(store.getTask(other.id)?.status).toBe("pending");
+    });
+  });
+
   describe("getTaskStatusCountsLastHours", () => {
     it("returns zero counts when no tasks exist", () => {
       const counts = store.getTaskStatusCountsLastHours(24);

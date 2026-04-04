@@ -10,6 +10,7 @@ const STATUS_COLORS: Record<string, (s: string) => string> = {
   in_progress: chalk.cyan,
   done: chalk.green,
   failed: chalk.red,
+  escalated: chalk.red,
 };
 
 /**

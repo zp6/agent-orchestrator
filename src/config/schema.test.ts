@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { loadConfig, getAgentDir } from "./schema.js";
+import { loadConfig, getAgentDir, type PRReviewConfig, type OrchestratorConfig } from "./schema.js";
 import { resolve } from "node:path";
 
 describe("loadConfig", () => {
@@ -48,6 +48,26 @@ describe("loadConfig", () => {
     const ports = Object.values(config.agents).map((a) => a.docker?.port);
     const uniquePorts = new Set(ports);
     expect(uniquePorts.size).toBe(ports.length);
+  });
+});
+
+describe("PRReviewConfig", () => {
+  it("feedback_ceiling is optional and defaults to undefined when not set", () => {
+    const prReview: PRReviewConfig = {};
+    expect(prReview.feedback_ceiling).toBeUndefined();
+  });
+
+  it("feedback_ceiling can be set to a custom value", () => {
+    const prReview: PRReviewConfig = { feedback_ceiling: 5 };
+    expect(prReview.feedback_ceiling).toBe(5);
+  });
+
+  it("OrchestratorConfig accepts pr_review field", () => {
+    const configPath = resolve(import.meta.dirname, "..", "..", "agents.yaml");
+    const config = loadConfig(configPath);
+    // pr_review is optional — agents.yaml may not define it
+    const withPrReview: OrchestratorConfig = { ...config, pr_review: { feedback_ceiling: 2 } };
+    expect(withPrReview.pr_review?.feedback_ceiling).toBe(2);
   });
 });
 

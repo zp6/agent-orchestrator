@@ -71,11 +71,22 @@ export interface ProxyConfig {
   gh_token?: string;
 }
 
+export interface PRReviewConfig {
+  /**
+   * Maximum number of pr-feedback dispatch rounds before the daemon stops
+   * redispatching to the agent and automatically escalates the PR to a human
+   * reviewer.  Applies both to the daemon's dispatch ceiling and to the
+   * reviewer's GitHub-comment counting.  Defaults to 3 when omitted.
+   */
+  feedback_ceiling?: number;
+}
+
 export interface OrchestratorConfig {
   proxy: ProxyConfig;
   base_dir: string;
   orchestrator_dir: string;
   verification?: VerificationConfig;
+  pr_review?: PRReviewConfig;
   agents: Record<string, AgentConfig>;
 }
 

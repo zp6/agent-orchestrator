@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { ulid } from "ulid";
 
-export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed";
+export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed" | "escalated";
 export type TaskSource = "github" | "linear" | "slack" | "manual" | "pr-feedback";
 export type TaskType = "implementation" | "research";
 
@@ -528,6 +528,28 @@ export class StateStore {
       .prepare("SELECT COUNT(*) as cnt FROM tasks WHERE source = 'pr-feedback' AND source_ref = ?")
       .get(sourceRef) as { cnt: number };
     return row?.cnt ?? 0;
+  }
+
+  /**
+   * Mark all active pr-feedback tasks for a given repo + PR number as 'escalated'.
+   * Called when the feedback ceiling is hit so that `orch status` shows a clear
+   * 'escalated' status instead of leaving tasks in 'pending' or 'dispatched'.
+   *
+   * Only transitions tasks that are still in-flight (pending, dispatched,
+   * in_progress) — tasks that have already finished (done, failed) are left
+   * untouched to preserve the historical record.
+   */
+  markPrFeedbackTasksEscalated(repo: string, prNumber: number | string): number {
+    const sourceRef = `${repo}#${prNumber}`;
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE tasks SET status = 'escalated', updated_at = ?
+         WHERE source = 'pr-feedback' AND source_ref = ?
+         AND status IN ('pending', 'dispatched', 'in_progress')`,
+      )
+      .run(now, sourceRef);
+    return result.changes;
   }
 
   /**
