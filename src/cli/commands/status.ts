@@ -12,6 +12,20 @@ const STATUS_COLORS: Record<string, (s: string) => string> = {
   failed: chalk.red,
 };
 
+/**
+ * Format the source label for a task.  PR-feedback tasks get a prominent
+ * "PR feedback for owner/repo#N" label; other sources fall back to the raw
+ * source string with optional source_ref.
+ *
+ * Exported for testing.
+ */
+export function formatSourceLabel(task: Task): string {
+  if (task.source === "pr-feedback" && task.source_ref) {
+    return `PR feedback for ${chalk.cyan(task.source_ref)}`;
+  }
+  return `${task.source}${task.source_ref ? ` (${task.source_ref})` : ""}`;
+}
+
 function formatTask(task: Task, verbose = false): string {
   const colorFn = STATUS_COLORS[task.status] ?? chalk.white;
   const status = colorFn(task.status.padEnd(12));
@@ -19,11 +33,19 @@ function formatTask(task: Task, verbose = false): string {
   const time = chalk.dim(new Date(task.created_at).toLocaleString());
 
   const typeTag = task.task_type === "research" ? chalk.magenta("[research] ") : "";
-  let output = `${chalk.dim(task.id.slice(0, 8))} ${status} ${agent.padEnd(30)} ${typeTag}${task.title}`;
+
+  // For pr-feedback tasks in the list view, show the PR ref instead of the raw title
+  // so operators can immediately see which PR triggered the feedback cycle.
+  const displayTitle =
+    task.source === "pr-feedback" && task.source_ref
+      ? `${chalk.magenta("[pr-feedback]")} ${chalk.cyan(task.source_ref)} — ${task.title}`
+      : `${typeTag}${task.title}`;
+
+  let output = `${chalk.dim(task.id.slice(0, 8))} ${status} ${agent.padEnd(30)} ${displayTitle}`;
 
   if (verbose) {
     output += `\n  ${chalk.dim("Created:")} ${time}`;
-    output += `\n  ${chalk.dim("Source:")}  ${task.source}${task.source_ref ? ` (${task.source_ref})` : ""}`;
+    output += `\n  ${chalk.dim("Source:")}  ${formatSourceLabel(task)}`;
     if (task.result) {
       const preview = task.result.length > 200 ? task.result.slice(0, 200) + "..." : task.result;
       output += `\n  ${chalk.dim("Result:")}  ${preview}`;
@@ -39,6 +61,58 @@ function formatTask(task: Task, verbose = false): string {
   }
 
   return output;
+}
+
+/**
+ * Print the full feedback-cycle history for a pr-feedback task.
+ * Groups all pr-feedback tasks sharing the same source_ref, showing
+ * cycle number, status, quality score, and verification outcome.
+ */
+function printPrFeedbackHistory(store: StateStore, sourceRef: string): void {
+  const history = store.getPrFeedbackHistory(sourceRef);
+  if (history.length === 0) return;
+
+  console.log(chalk.bold(`\nPR Feedback History — ${chalk.cyan(sourceRef)}`));
+  console.log(chalk.dim(`  ${history.length} feedback cycle(s) fired for this PR\n`));
+
+  const header = `  ${"#".padEnd(3)} ${"Task ID".padEnd(10)} ${"Status".padEnd(12)} ${"Agent".padEnd(28)} ${"Score".padStart(6)} ${"Verified".padEnd(10)} ${"Date"}`;
+  console.log(chalk.dim(header));
+  console.log(chalk.dim("  " + "─".repeat(85)));
+
+  for (let i = 0; i < history.length; i++) {
+    const t = history[i];
+    const cycle = chalk.dim(`#${String(i + 1).padEnd(2)}`);
+    const id = chalk.dim(t.id.slice(0, 8).padEnd(10));
+    const colorFn = STATUS_COLORS[t.status] ?? chalk.white;
+    const status = colorFn(t.status.padEnd(12));
+    const agent = (t.agent_name ?? "—").slice(0, 26).padEnd(28);
+    const score = t.quality_score !== null
+      ? (t.quality_score >= 0.7 ? chalk.green : chalk.red)(t.quality_score.toFixed(2).padStart(6))
+      : chalk.dim("  —   ");
+    const verified = t.verification_status
+      ? (t.verification_status === "approved"
+          ? chalk.green(t.verification_status.padEnd(10))
+          : t.verification_status === "rejected"
+            ? chalk.red(t.verification_status.padEnd(10))
+            : chalk.yellow(t.verification_status.padEnd(10)))
+      : chalk.dim("pending   ");
+    const date = chalk.dim(new Date(t.created_at).toLocaleString());
+    console.log(`  ${cycle} ${id} ${status} ${agent} ${score} ${verified} ${date}`);
+  }
+
+  // Summary line
+  const scores = history.filter((t) => t.quality_score !== null).map((t) => t.quality_score as number);
+  if (scores.length > 1) {
+    const first = scores[0];
+    const last = scores[scores.length - 1];
+    const delta = last - first;
+    const deltaStr = delta > 0
+      ? chalk.green(`↑ +${delta.toFixed(2)}`)
+      : delta < 0
+        ? chalk.red(`↓ ${delta.toFixed(2)}`)
+        : chalk.dim("→ no change");
+    console.log(chalk.dim("\n  Score trend across cycles: ") + deltaStr);
+  }
 }
 
 function formatDuration(ms: number | null): string {
@@ -370,6 +444,11 @@ export function registerStatusCommand(program: Command): void {
           process.exit(1);
         }
         console.log(formatTask(match, true));
+
+        // For pr-feedback tasks, show the full feedback-cycle history for that PR
+        if (match.source === "pr-feedback" && match.source_ref) {
+          printPrFeedbackHistory(store, match.source_ref);
+        }
 
         // Show sub-tasks if this is a parent task
         const subTasks = store.getSubTasks(match.id);

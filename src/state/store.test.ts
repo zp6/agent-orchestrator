@@ -890,4 +890,87 @@ describe("StateStore", () => {
       expect(store.hasActivePrFeedbackTask("owner/repo", "20")).toBe(true);
     });
   });
+
+  describe("getPrFeedbackHistory", () => {
+    it("returns empty array when no pr-feedback tasks exist for source_ref", () => {
+      const history = store.getPrFeedbackHistory("owner/repo#99");
+      expect(history).toEqual([]);
+    });
+
+    it("returns all pr-feedback tasks for a given source_ref in chronological order", () => {
+      // Create two feedback tasks for the same PR
+      const t1 = store.createTask({
+        title: "[PR feedback] owner/repo#7 cycle 1",
+        source: "pr-feedback",
+        source_ref: "owner/repo#7",
+        agent_name: "my-agent",
+      });
+      const t2 = store.createTask({
+        title: "[PR feedback] owner/repo#7 cycle 2",
+        source: "pr-feedback",
+        source_ref: "owner/repo#7",
+        agent_name: "my-agent",
+      });
+
+      const history = store.getPrFeedbackHistory("owner/repo#7");
+      expect(history.length).toBe(2);
+      // Chronological (oldest first)
+      expect(history[0].id).toBe(t1.id);
+      expect(history[1].id).toBe(t2.id);
+    });
+
+    it("does not include tasks with a different source_ref", () => {
+      store.createTask({
+        title: "[PR feedback] owner/repo#8",
+        source: "pr-feedback",
+        source_ref: "owner/repo#8",
+        agent_name: "my-agent",
+      });
+      store.createTask({
+        title: "[PR feedback] owner/repo#9",
+        source: "pr-feedback",
+        source_ref: "owner/repo#9",
+        agent_name: "my-agent",
+      });
+
+      const history = store.getPrFeedbackHistory("owner/repo#8");
+      expect(history.length).toBe(1);
+      expect(history[0].source_ref).toBe("owner/repo#8");
+    });
+
+    it("does not include non-pr-feedback tasks with a matching source_ref", () => {
+      store.createTask({
+        title: "github task",
+        source: "github",
+        source_ref: "owner/repo#10",
+        agent_name: "my-agent",
+      });
+
+      const history = store.getPrFeedbackHistory("owner/repo#10");
+      expect(history).toEqual([]);
+    });
+
+    it("includes tasks in all statuses (pending, done, failed)", () => {
+      const t1 = store.createTask({
+        title: "[PR feedback] owner/repo#11 cycle 1",
+        source: "pr-feedback",
+        source_ref: "owner/repo#11",
+        agent_name: "my-agent",
+      });
+      store.updateTask(t1.id, { status: "done" });
+      const t2 = store.createTask({
+        title: "[PR feedback] owner/repo#11 cycle 2",
+        source: "pr-feedback",
+        source_ref: "owner/repo#11",
+        agent_name: "my-agent",
+      });
+      store.updateTask(t2.id, { status: "failed" });
+
+      const history = store.getPrFeedbackHistory("owner/repo#11");
+      expect(history.length).toBe(2);
+      const statuses = history.map((t) => t.status);
+      expect(statuses).toContain("done");
+      expect(statuses).toContain("failed");
+    });
+  });
 });

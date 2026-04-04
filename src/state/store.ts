@@ -395,6 +395,19 @@ export class StateStore {
   }
 
   /**
+   * Return all pr-feedback tasks for a given source_ref (e.g. "owner/repo#42"),
+   * ordered chronologically (oldest first).  Used by `orch status` to show the
+   * full feedback-cycle history for a PR.
+   */
+  getPrFeedbackHistory(sourceRef: string): Task[] {
+    return this.db
+      .prepare(
+        "SELECT * FROM tasks WHERE source = 'pr-feedback' AND source_ref = ? ORDER BY created_at ASC",
+      )
+      .all(sourceRef) as Task[];
+  }
+
+  /**
    * Return the most-recently-created top-level task whose source and
    * source_ref match exactly. Used by the duplicate-guard to detect
    * in-flight or recently-completed tasks that survive daemon restarts.
