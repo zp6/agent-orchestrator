@@ -31,6 +31,13 @@ CRITICAL — PR and Issue hygiene:
 - After completing work, verify your issue closed: \`gh issue view N --repo ${githubRepo} --json state\`. If it didn't, close it manually.
 - Do NOT create issues for features that already exist. Check merged PRs first: \`gh pr list --repo ${githubRepo} --state merged -L 20\`
 
+CRITICAL — PR discipline (one issue, one branch, one PR):
+- Each PR must address exactly ONE issue. Do not bundle unrelated changes.
+- Before starting work, check \`git status\` and \`gh pr list\` — do NOT start a new branch if you have uncommitted work or an open PR on another branch.
+- Keep PRs small and focused. If a PR touches more than 5 files, you may be bundling.
+- Do NOT fix "other things you noticed" while working on an issue. Create a new issue for it instead.
+- Do NOT add CI workflows, changelog automation, or meta-tooling unless the issue specifically asks for it.
+
 CRITICAL — Backlog triage and roadmap:
 - You own your issue backlog. Regularly review open issues and PRs on your repo.
 - **Prioritise**: when you have multiple open issues, pick the highest-impact one — features users want most, bugs blocking functionality, then polish.
