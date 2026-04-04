@@ -220,6 +220,54 @@ export interface SystemMetrics {
   per_agent_score_trends: Record<string, ScoreTrend>;
   per_agent: AgentMetrics[];
   cycles: CycleMetrics;
+  /** PR review metrics (cycle time and rejection rate) */
+  pr_metrics: PRMetrics;
+}
+
+/**
+ * A single PR review decision recorded by the orchestrator.
+ */
+export interface PRReviewRecord {
+  id: number;
+  repo: string;
+  pr_number: number;
+  decision: "approve" | "request-changes" | "escalate";
+  created_at: string;
+}
+
+/**
+ * Aggregated PR review metrics — cycle time and rejection rate.
+ */
+export interface PRMetrics {
+  /** Total review decisions recorded */
+  total_reviews: number;
+  /** PRs that were approved (and merged) */
+  approved: number;
+  /** Review rounds that requested changes */
+  request_changes: number;
+  /** PRs escalated to human reviewer */
+  escalated: number;
+  /**
+   * Rejection rate = request-changes / (approved + request-changes).
+   * null when no approve/request-changes decisions have been recorded yet.
+   */
+  rejection_rate: number | null;
+  /**
+   * Average time (ms) from first review decision on a PR to its approval.
+   * Only counts PRs that were eventually approved.
+   * null when no approved PRs have been recorded.
+   */
+  avg_cycle_time_ms: number | null;
+  /** Per-repo breakdown */
+  per_repo: Array<{
+    repo: string;
+    total_reviews: number;
+    approved: number;
+    request_changes: number;
+    escalated: number;
+    rejection_rate: number | null;
+    avg_cycle_time_ms: number | null;
+  }>;
 }
 
 const MIGRATIONS = `
@@ -284,6 +332,7 @@ export class StateStore {
     this.runResearchMigration();
     this.runRetryMigration();
     this.runSupervisorMemoryMigration();
+    this.runPRReviewsMigration();
   }
 
   private runPhase2Migration(): void {
@@ -876,6 +925,8 @@ export class StateStore {
       per_agent_score_trends[agentName] = this.getAgentScoreTrend(agentName);
     }
 
+    const pr_metrics = this.getPRMetrics();
+
     return {
       total_tasks: global.total_tasks,
       done_tasks: global.done_tasks,
@@ -892,6 +943,7 @@ export class StateStore {
         avg_duration_ms: cycleRow.avg_duration_ms,
         last_cycle_at: cycleRow.last_cycle_at,
       },
+      pr_metrics,
     };
   }
 
@@ -1241,6 +1293,131 @@ export class StateStore {
       per_agent: rows,
       total_waiting,
       total_exhausted,
+    };
+  }
+
+  // ── PR review metrics ────────────────────────────────────────────────────
+
+  private runPRReviewsMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pr_reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        pr_number INTEGER NOT NULL,
+        decision TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_pr_reviews_repo_pr ON pr_reviews(repo, pr_number);
+      CREATE INDEX IF NOT EXISTS idx_pr_reviews_created ON pr_reviews(created_at);
+    `);
+  }
+
+  /**
+   * Record a PR review decision made by the orchestrator.
+   * Called by PRReviewer.executeDecision() after posting the review comment.
+   */
+  recordPRReview(repo: string, prNumber: number, decision: "approve" | "request-changes" | "escalate"): void {
+    this.db
+      .prepare(
+        "INSERT INTO pr_reviews (repo, pr_number, decision, created_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(repo, prNumber, decision, new Date().toISOString());
+  }
+
+  /**
+   * Compute aggregated PR metrics: cycle time and rejection rate.
+   *
+   * Cycle time = time from first review decision on a PR to its approval.
+   * Rejection rate = request-changes rounds / (approved + request-changes rounds).
+   */
+  getPRMetrics(): PRMetrics {
+    // Global totals
+    const globalRow = this.db.prepare(`
+      SELECT
+        COUNT(*) AS total_reviews,
+        COALESCE(SUM(CASE WHEN decision = 'approve'          THEN 1 ELSE 0 END), 0) AS approved,
+        COALESCE(SUM(CASE WHEN decision = 'request-changes'  THEN 1 ELSE 0 END), 0) AS request_changes,
+        COALESCE(SUM(CASE WHEN decision = 'escalate'         THEN 1 ELSE 0 END), 0) AS escalated
+      FROM pr_reviews
+    `).get() as { total_reviews: number; approved: number; request_changes: number; escalated: number };
+
+    const rejection_rate =
+      globalRow.approved + globalRow.request_changes > 0
+        ? globalRow.request_changes / (globalRow.approved + globalRow.request_changes)
+        : null;
+
+    // Average cycle time: for each PR that was eventually approved, compute
+    // time from its first review record to its approval record.
+    const cycleRows = this.db.prepare(`
+      SELECT
+        r.repo,
+        r.pr_number,
+        MIN(all_r.created_at) AS first_review_at,
+        r.created_at          AS approved_at
+      FROM pr_reviews r
+      JOIN pr_reviews all_r ON all_r.repo = r.repo AND all_r.pr_number = r.pr_number
+      WHERE r.decision = 'approve'
+      GROUP BY r.repo, r.pr_number, r.created_at
+    `).all() as Array<{ repo: string; pr_number: number; first_review_at: string; approved_at: string }>;
+
+    const cycleTimes = cycleRows
+      .map((row) => new Date(row.approved_at).getTime() - new Date(row.first_review_at).getTime())
+      .filter((ms) => ms >= 0);
+
+    const avg_cycle_time_ms =
+      cycleTimes.length > 0
+        ? cycleTimes.reduce((a, b) => a + b, 0) / cycleTimes.length
+        : null;
+
+    // Per-repo breakdown
+    const repoRows = this.db.prepare(`
+      SELECT
+        repo,
+        COUNT(*) AS total_reviews,
+        COALESCE(SUM(CASE WHEN decision = 'approve'         THEN 1 ELSE 0 END), 0) AS approved,
+        COALESCE(SUM(CASE WHEN decision = 'request-changes' THEN 1 ELSE 0 END), 0) AS request_changes,
+        COALESCE(SUM(CASE WHEN decision = 'escalate'        THEN 1 ELSE 0 END), 0) AS escalated
+      FROM pr_reviews
+      GROUP BY repo
+      ORDER BY total_reviews DESC
+    `).all() as Array<{ repo: string; total_reviews: number; approved: number; request_changes: number; escalated: number }>;
+
+    // Per-repo cycle times
+    const repoCycleMap = new Map<string, number[]>();
+    for (const row of cycleRows) {
+      const ms = new Date(row.approved_at).getTime() - new Date(row.first_review_at).getTime();
+      if (ms >= 0) {
+        const list = repoCycleMap.get(row.repo) ?? [];
+        list.push(ms);
+        repoCycleMap.set(row.repo, list);
+      }
+    }
+
+    const per_repo = repoRows.map((r) => {
+      const times = repoCycleMap.get(r.repo) ?? [];
+      return {
+        repo: r.repo,
+        total_reviews: r.total_reviews,
+        approved: r.approved,
+        request_changes: r.request_changes,
+        escalated: r.escalated,
+        rejection_rate:
+          r.approved + r.request_changes > 0
+            ? r.request_changes / (r.approved + r.request_changes)
+            : null,
+        avg_cycle_time_ms:
+          times.length > 0 ? times.reduce((a, b) => a + b, 0) / times.length : null,
+      };
+    });
+
+    return {
+      total_reviews: globalRow.total_reviews,
+      approved: globalRow.approved,
+      request_changes: globalRow.request_changes,
+      escalated: globalRow.escalated,
+      rejection_rate,
+      avg_cycle_time_ms,
+      per_repo,
     };
   }
 

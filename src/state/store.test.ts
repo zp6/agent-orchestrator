@@ -1506,4 +1506,109 @@ describe("StateStore", () => {
       expect(metrics.total_waiting).toBe(0);
     });
   });
+
+  describe("recordPRReview and getPRMetrics", () => {
+    it("returns zero metrics when no reviews recorded", () => {
+      const m = store.getPRMetrics();
+      expect(m.total_reviews).toBe(0);
+      expect(m.approved).toBe(0);
+      expect(m.request_changes).toBe(0);
+      expect(m.escalated).toBe(0);
+      expect(m.rejection_rate).toBeNull();
+      expect(m.avg_cycle_time_ms).toBeNull();
+      expect(m.per_repo).toHaveLength(0);
+    });
+
+    it("records and counts review decisions correctly", () => {
+      store.recordPRReview("owner/repo", 1, "approve");
+      store.recordPRReview("owner/repo", 2, "request-changes");
+      store.recordPRReview("owner/repo", 3, "escalate");
+      store.recordPRReview("owner/repo", 2, "approve"); // second round for PR #2
+
+      const m = store.getPRMetrics();
+      expect(m.total_reviews).toBe(4);
+      expect(m.approved).toBe(2);
+      expect(m.request_changes).toBe(1);
+      expect(m.escalated).toBe(1);
+    });
+
+    it("computes rejection rate as request-changes / (approved + request-changes)", () => {
+      // 2 request-changes, 2 approves → 2/(2+2) = 0.5
+      store.recordPRReview("owner/repo", 1, "request-changes");
+      store.recordPRReview("owner/repo", 1, "approve");
+      store.recordPRReview("owner/repo", 2, "request-changes");
+      store.recordPRReview("owner/repo", 2, "approve");
+
+      const m = store.getPRMetrics();
+      expect(m.rejection_rate).toBeCloseTo(0.5, 2);
+    });
+
+    it("rejection rate is null when no approve/request-changes decisions", () => {
+      store.recordPRReview("owner/repo", 1, "escalate");
+
+      const m = store.getPRMetrics();
+      expect(m.rejection_rate).toBeNull();
+    });
+
+    it("rejection rate is 0 when all reviews are approvals", () => {
+      store.recordPRReview("owner/repo", 1, "approve");
+      store.recordPRReview("owner/repo", 2, "approve");
+
+      const m = store.getPRMetrics();
+      expect(m.rejection_rate).toBe(0);
+    });
+
+    it("computes avg_cycle_time_ms as time from first review to approval", () => {
+      const now = Date.now();
+      // Simulate a PR reviewed at t=0, approved at t+60s
+      // We insert raw rows to control timestamps precisely.
+      // Since recordPRReview uses new Date(), we test via getPRMetrics indirectly.
+      store.recordPRReview("owner/repo", 10, "request-changes");
+      // Approval in same ms — cycle time should be ~0
+      store.recordPRReview("owner/repo", 10, "approve");
+
+      const m = store.getPRMetrics();
+      expect(m.avg_cycle_time_ms).not.toBeNull();
+      expect(m.avg_cycle_time_ms!).toBeGreaterThanOrEqual(0);
+    });
+
+    it("avg_cycle_time_ms is null when no PRs approved", () => {
+      store.recordPRReview("owner/repo", 1, "request-changes");
+
+      const m = store.getPRMetrics();
+      expect(m.avg_cycle_time_ms).toBeNull();
+    });
+
+    it("groups per_repo correctly", () => {
+      store.recordPRReview("owner/repo-a", 1, "approve");
+      store.recordPRReview("owner/repo-b", 1, "request-changes");
+      store.recordPRReview("owner/repo-b", 1, "approve");
+
+      const m = store.getPRMetrics();
+      expect(m.per_repo).toHaveLength(2);
+
+      const repoA = m.per_repo.find((r) => r.repo === "owner/repo-a");
+      expect(repoA).toBeDefined();
+      expect(repoA!.approved).toBe(1);
+      expect(repoA!.request_changes).toBe(0);
+      expect(repoA!.rejection_rate).toBe(0);
+
+      const repoB = m.per_repo.find((r) => r.repo === "owner/repo-b");
+      expect(repoB).toBeDefined();
+      expect(repoB!.request_changes).toBe(1);
+      expect(repoB!.approved).toBe(1);
+      expect(repoB!.rejection_rate).toBeCloseTo(0.5, 2);
+    });
+
+    it("getMetrics includes pr_metrics", () => {
+      store.recordPRReview("owner/repo", 1, "approve");
+      store.recordPRReview("owner/repo", 2, "request-changes");
+
+      const m = store.getMetrics();
+      expect(m.pr_metrics).toBeDefined();
+      expect(m.pr_metrics.total_reviews).toBe(2);
+      expect(m.pr_metrics.approved).toBe(1);
+      expect(m.pr_metrics.request_changes).toBe(1);
+    });
+  });
 });

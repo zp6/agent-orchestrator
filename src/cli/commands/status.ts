@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { StateStore, type Task, type SystemMetrics, type ScoreDistribution, type ScoreTrend, type MetricsTrend } from "../../state/store.js";
+import { StateStore, type Task, type SystemMetrics, type ScoreDistribution, type ScoreTrend, type MetricsTrend, type PRMetrics } from "../../state/store.js";
 import { loadConfig } from "../../config/schema.js";
 
 const STATUS_COLORS: Record<string, (s: string) => string> = {
@@ -179,6 +179,61 @@ interface ImprovementStats {
   qualifyingCount: number;
 }
 
+/**
+ * Format a duration in milliseconds as a human-readable string suitable for
+ * PR cycle time display (hours/minutes rather than seconds for longer durations).
+ */
+function formatCycleTime(ms: number | null): string {
+  if (ms === null) return chalk.dim("—");
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
+  const hours = ms / 3_600_000;
+  if (hours < 24) return `${hours.toFixed(1)}h`;
+  const days = hours / 24;
+  return `${days.toFixed(1)}d`;
+}
+
+/**
+ * Render the PR Metrics section (cycle time + rejection rate).
+ */
+function printPRMetrics(pr: PRMetrics): void {
+  console.log(chalk.bold("\nPR Review Metrics"));
+
+  if (pr.total_reviews === 0) {
+    console.log(chalk.dim("  No PR reviews recorded yet"));
+    return;
+  }
+
+  const rejPct = pr.rejection_rate !== null ? Math.round(pr.rejection_rate * 100) : null;
+  const rejColor = rejPct === null ? chalk.dim : rejPct <= 20 ? chalk.green : rejPct <= 50 ? chalk.yellow : chalk.red;
+
+  console.log(`  Total reviews:   ${pr.total_reviews}`);
+  console.log(`  Approved:        ${chalk.green(String(pr.approved))}`);
+  console.log(`  Changes reqd:    ${pr.request_changes > 0 ? chalk.yellow(String(pr.request_changes)) : chalk.dim("0")}`);
+  console.log(`  Escalated:       ${pr.escalated > 0 ? chalk.red(String(pr.escalated)) : chalk.dim("0")}`);
+  console.log(`  Rejection rate:  ${rejPct !== null ? rejColor(`${rejPct}%`) : chalk.dim("—")}`);
+  console.log(`  Avg cycle time:  ${formatCycleTime(pr.avg_cycle_time_ms)}`);
+
+  if (pr.per_repo.length > 1) {
+    console.log(chalk.bold("\n  Per-Repo PR Metrics"));
+    const header = `  ${"Repo".padEnd(36)} ${"Reviews".padStart(8)} ${"Apprvd".padStart(7)} ${"Changes".padStart(8)} ${"Escalate".padStart(9)} ${"Reject%".padStart(8)} ${"Cycle Time".padStart(11)}`;
+    console.log(chalk.dim(header));
+    console.log(chalk.dim("  " + "─".repeat(90)));
+    for (const r of pr.per_repo) {
+      const repo = chalk.cyan(r.repo.slice(0, 34).padEnd(36));
+      const reviews = String(r.total_reviews).padStart(8);
+      const approved = chalk.green(String(r.approved).padStart(7));
+      const changes = (r.request_changes > 0 ? chalk.yellow(String(r.request_changes)) : chalk.dim("0")).padStart(8);
+      const escalated = (r.escalated > 0 ? chalk.red(String(r.escalated)) : chalk.dim("0")).padStart(9);
+      const rejectPct = r.rejection_rate !== null ? Math.round(r.rejection_rate * 100) : null;
+      const rejectColor = rejectPct === null ? chalk.dim : rejectPct <= 20 ? chalk.green : rejectPct <= 50 ? chalk.yellow : chalk.red;
+      const reject = rejectPct !== null ? rejectColor(`${rejectPct}%`).padStart(8) : chalk.dim("—").padStart(8);
+      const cycle = formatCycleTime(r.avg_cycle_time_ms).padStart(11);
+      console.log(`  ${repo} ${reviews} ${approved} ${changes} ${escalated} ${reject} ${cycle}`);
+    }
+  }
+}
+
 function printMetrics(metrics: SystemMetrics, improvement?: ImprovementStats): void {
   console.log(chalk.bold("System Metrics\n"));
 
@@ -250,6 +305,9 @@ function printMetrics(metrics: SystemMetrics, improvement?: ImprovementStats): v
       console.log(`  ${name}  ${exc}  ${good}  ${fair}  ${poor}  ${unscored}  ${trend}`);
     }
   }
+
+  // --- PR review metrics ---
+  printPRMetrics(metrics.pr_metrics);
 
   // --- Improvement detection ---
   if (improvement !== undefined) {

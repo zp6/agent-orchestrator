@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { OrchestratorConfig } from "../config/schema.js";
+import { StateStore } from "../state/store.js";
 import { Deployer } from "./deployer.js";
 import { extractIssueNumberFromBranch, findMatchingIssueNumber } from "./pr-creator.js";
 
@@ -48,9 +49,11 @@ Respond with ONLY a JSON object (no markdown, no code fences):
 export class PRReviewer {
   private log = createLogger("pr-reviewer");
   private deployer: Deployer;
+  private store: StateStore;
 
-  constructor(private config: OrchestratorConfig) {
+  constructor(private config: OrchestratorConfig, store?: StateStore) {
     this.deployer = new Deployer(config);
+    this.store = store ?? new StateStore();
   }
 
   async reviewPR(repo: string, prNumber: number): Promise<PRReviewResult> {
@@ -252,6 +255,7 @@ export class PRReviewer {
             { encoding: "utf-8", timeout: 30000 },
           );
           this.log.info("PR approved and merged", { repo, prNumber });
+          this.store.recordPRReview(repo, prNumber, "approve");
           // Restart repo-based agent containers so they pull latest main
           await this.restartAgentsForRepo(repo);
         } catch (err) {
@@ -266,6 +270,7 @@ export class PRReviewer {
             { encoding: "utf-8", timeout: 30000 },
           );
           this.log.info("PR changes requested", { repo, prNumber });
+          this.store.recordPRReview(repo, prNumber, "request-changes");
         } catch (err) {
           this.log.error("Failed to request changes on PR", { repo, prNumber, error: String(err) });
         }
@@ -296,6 +301,7 @@ export class PRReviewer {
             { encoding: "utf-8", timeout: 30000 },
           );
           this.log.info("PR escalated to human", { repo, prNumber, reason: result.reason });
+          this.store.recordPRReview(repo, prNumber, "escalate");
         } catch (err) {
           this.log.error("Failed to escalate PR", { repo, prNumber, error: String(err) });
         }

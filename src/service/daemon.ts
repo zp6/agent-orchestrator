@@ -72,7 +72,7 @@ export class Daemon {
     this.issueCreator = new IssueCreator(this.config);
     this.deployer = new Deployer(this.config);
     this.supervisor = new Supervisor(this.config, this.store);
-    this.prReviewer = new PRReviewer(this.config);
+    this.prReviewer = new PRReviewer(this.config, this.store);
     this.pollInterval = pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   }
 
