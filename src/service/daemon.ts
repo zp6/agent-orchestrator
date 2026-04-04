@@ -10,6 +10,7 @@ import { PRReviewer } from "../orchestrator/pr-reviewer.js";
 import { findOrphanBranches, createPRForBranch } from "../orchestrator/pr-creator.js";
 import {
   dispatchGitHubIssues,
+  dispatchIdleAgentBacklog,
   dispatchLinearChecks,
   dispatchSlackChecks,
   type TriggerResult,
@@ -334,28 +335,34 @@ export class Daemon {
   }
 
   /**
-   * Post-completion idle pickup: dispatch the next GitHub issue to any agent that
-   * is currently idle (no active task). Called immediately after verifyCompleted so
-   * that agents which just finished their work receive their next assignment within
-   * the same poll cycle rather than waiting up to one full poll interval.
+   * Post-completion idle pickup: dispatch the highest-priority open GitHub issue
+   * to any agent that is currently idle (no active task). Called immediately after
+   * verifyCompleted so that agents which just finished their work receive their next
+   * assignment within the same poll cycle rather than waiting up to one full poll
+   * interval.
    *
-   * The duplicate-guard in dispatchGitHubIssues ensures nothing is double-dispatched —
-   * issues already dispatched earlier in this cycle (or recently completed) are skipped.
+   * Uses the dedicated `dispatchIdleAgentBacklog` function which explicitly checks
+   * idle status and sorts issues by priority (oldest issue first) rather than the
+   * general `dispatchGitHubIssues` used in the regular trigger step.
    */
   private async pickupIdleAgents(time: string, registeredAgents: Set<string>): Promise<void> {
     try {
-      const result = await dispatchGitHubIssues(
+      const result = await dispatchIdleAgentBacklog(
         this.config,
         this.store,
         this.dispatcher,
-        1,
         registeredAgents,
       );
       if (result.dispatched > 0) {
-        this.log.info("Idle agent pickup: dispatched next issue to idle agents", {
+        this.log.info("Idle agent pickup: dispatched highest-priority issue to idle agent(s)", {
           dispatched: result.dispatched,
         });
         console.log(`[${time}] Idle pickup: ${result.dispatched} dispatched for idle agent(s)`);
+      }
+      if (result.errors.length > 0) {
+        for (const err of result.errors) {
+          console.error(`[${time}] Idle pickup error: ${err}`);
+        }
       }
     } catch (err) {
       console.error(

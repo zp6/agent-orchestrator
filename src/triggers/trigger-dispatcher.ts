@@ -159,6 +159,128 @@ export async function dispatchGitHubIssues(
 }
 
 /**
+ * Idle-agent backlog dispatch: immediately dispatch the highest-priority open
+ * GitHub issue to any agent that currently has no active task.
+ *
+ * This is called after `verifyCompleted` each cycle so agents that just
+ * finished their work receive their next assignment within the same poll
+ * cycle, rather than waiting up to one full poll interval for the regular
+ * trigger dispatch to run again.
+ *
+ * Priority order: issues are sorted ascending by issue number (lowest number =
+ * oldest = highest priority). Only issues not already in `processed_triggers`
+ * or `inFlightDispatches` are considered.
+ *
+ * Agents without a `github` field, or with an active task, are skipped.
+ * Already-processed issues are skipped via the same duplicate-guard used
+ * by `dispatchGitHubIssues`.
+ */
+export async function dispatchIdleAgentBacklog(
+  config: OrchestratorConfig,
+  store: StateStore,
+  dispatcher: Dispatcher,
+  registeredAgents?: Set<string>,
+): Promise<TriggerResult> {
+  const result: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
+
+  for (const [agentName, agent] of Object.entries(config.agents)) {
+    if (!agent.github) continue;
+    if (registeredAgents && !registeredAgents.has(agentName)) continue;
+
+    // Only dispatch to genuinely idle agents — skip anyone with an active task
+    if (store.hasActiveTask(agentName)) {
+      log.info("Idle pickup: skipping busy agent", { agentName });
+      continue;
+    }
+
+    let issues: GitHubIssue[];
+    try {
+      issues = fetchOpenIssues(agent.github);
+    } catch (err) {
+      result.errors.push(`${agent.github}: ${err instanceof Error ? err.message : String(err)}`);
+      continue;
+    }
+
+    // Sort by issue number ascending so the oldest (highest-priority) issue is first
+    const sorted = [...issues].sort((a, b) => a.number - b.number);
+
+    let dispatched = false;
+    for (const issue of sorted) {
+      if (dispatched) break;
+
+      const sourceRef = `${issue.repo}#${issue.number}`;
+
+      const dupCheck = checkDuplicate(store, "github", sourceRef);
+      if (inFlightDispatches.has(sourceRef) || dupCheck.isDuplicate) {
+        if (dupCheck.isDuplicate) {
+          log.info("Idle pickup: skipping duplicate issue", { sourceRef, reason: dupCheck.reason });
+        }
+        result.skipped++;
+        continue;
+      }
+
+      // Pre-dispatch issue state validation: skip closed issues
+      if (!isIssueOpen(agent.github, issue.number)) {
+        log.info("Idle pickup: skipping closed issue", { sourceRef });
+        store.markProcessed("github", sourceRef, `closed-issue-${issue.number}`);
+        result.skipped++;
+        continue;
+      }
+
+      // Check for existing PRs that already address this issue
+      const existingPRs = findExistingPRsForIssue(agent.github, issue.number);
+      const mergedPR = existingPRs.find((pr) => pr.state === "merged");
+      const openPR = existingPRs.find((pr) => pr.state === "open");
+
+      if (mergedPR) {
+        log.info("Idle pickup: skipping issue with merged PR", {
+          sourceRef,
+          prNumber: mergedPR.number,
+        });
+        store.markProcessed("github", sourceRef, `merged-pr-${mergedPR.number}`);
+        result.skipped++;
+        continue;
+      }
+
+      let message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}`;
+
+      if (openPR) {
+        log.info("Idle pickup: existing open PR found — injecting PR context", {
+          sourceRef,
+          prNumber: openPR.number,
+          isDraft: openPR.isDraft,
+        });
+        message += `\n\n⚠️ This issue already has an open PR: #${openPR.number} (${openPR.url})${openPR.isDraft ? " [DRAFT]" : ""}. Do NOT create a new branch or open another PR. Instead, review the existing PR, make any needed fixes, and push to its branch.`;
+        message += `\n\n---\nWhen done: commit your changes and push to the existing PR branch. Do NOT run \`gh pr create\`.`;
+      } else {
+        message += `\n\n---\nWhen done: create a branch, commit, push, and open a PR with \`gh pr create --title "[${agentName}] <title>" --body "Closes #${issue.number}"\`. The "Closes #${issue.number}" is required so the issue auto-closes on merge.`;
+      }
+
+      inFlightDispatches.add(sourceRef);
+
+      fireAndForget(dispatcher, store, config, message, {
+        agentName,
+        source: "github",
+        sourceRef,
+        title: `[${issue.repo}#${issue.number}] ${issue.title}`,
+      });
+
+      log.info("Idle pickup: dispatched highest-priority issue to idle agent", {
+        agentName,
+        sourceRef,
+        issueNumber: issue.number,
+        issueTitle: issue.title,
+      });
+
+      result.dispatched++;
+      dispatched = true;
+    }
+  }
+
+  return result;
+}
+
+/**
  * Linear: ask each agent to check its own Linear issues and work on them.
  */
 export async function dispatchLinearChecks(

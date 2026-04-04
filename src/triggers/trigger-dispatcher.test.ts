@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { dispatchGitHubIssues, dispatchLinearChecks, dispatchSlackChecks } from "./trigger-dispatcher.js";
+import { dispatchGitHubIssues, dispatchIdleAgentBacklog, dispatchLinearChecks, dispatchSlackChecks } from "./trigger-dispatcher.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { StateStore } from "../state/store.js";
@@ -509,5 +509,188 @@ describe("dispatchSlackChecks", () => {
     const result = await dispatchSlackChecks(config, mockStore, mockDispatcher);
     expect(result.dispatched).toBe(0);
     expect(result.skipped).toBe(1);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// dispatchIdleAgentBacklog — idle-agent backlog dispatch (#247)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("dispatchIdleAgentBacklog", () => {
+  let mockStore: StateStore;
+  let mockDispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStore = {
+      isProcessed: vi.fn().mockReturnValue(false),
+      markProcessed: vi.fn(),
+      getTask: vi.fn().mockReturnValue(null),
+      listTasks: vi.fn().mockReturnValue([]),
+      hasActiveTask: vi.fn().mockReturnValue(false),
+      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
+    } as unknown as StateStore;
+    mockDispatcher = {
+      dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
+    } as unknown as Dispatcher;
+    mockIsIssueOpen.mockReturnValue(true);
+    mockFindExistingPRs.mockReturnValue([]);
+  });
+
+  it("dispatches highest-priority issue (lowest issue number first) to an idle agent", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 10, title: "Newer task", body: "", url: "https://...", labels: [] },
+      { repo: "owner/my-repo", number: 2, title: "Oldest task", body: "Fix it", url: "https://...", labels: [] },
+      { repo: "owner/my-repo", number: 5, title: "Middle task", body: "", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(
+      expect.stringContaining("Oldest task"),
+      expect.objectContaining({ agentName: "my-agent", source: "github", sourceRef: "owner/my-repo#2" }),
+    );
+  });
+
+  it("skips busy agents (agents with active tasks)", async () => {
+    (mockStore.hasActiveTask as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Pending task", body: "", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(mockFetchIssues).not.toHaveBeenCalled();
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("skips already-processed issues (not re-dispatched)", async () => {
+    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: "task-done",
+      status: "done",
+      verification_status: null,
+      updated_at: new Date().toISOString(),
+    });
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Already done", body: "", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("skips agents without a github config", async () => {
+    // Only my-agent has github; linear-agent, slack-agent, no-triggers do not
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Task", body: "", url: "https://...", labels: [] },
+    ]);
+
+    await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    // fetchOpenIssues should only be called once (for my-agent)
+    expect(mockFetchIssues).toHaveBeenCalledTimes(1);
+    expect(mockFetchIssues).toHaveBeenCalledWith("owner/my-repo");
+  });
+
+  it("dispatches only one issue per idle agent per call", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "First", body: "", url: "https://...", labels: [] },
+      { repo: "owner/my-repo", number: 2, title: "Second", body: "", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledTimes(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(
+      expect.stringContaining("First"),
+      expect.anything(),
+    );
+  });
+
+  it("skips agents filtered out by registeredAgents set", async () => {
+    const registeredAgents = new Set<string>(["other-agent"]);
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Task", body: "", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher, registeredAgents);
+
+    expect(result.dispatched).toBe(0);
+    expect(mockFetchIssues).not.toHaveBeenCalled();
+  });
+
+  it("collects errors and continues to next agent", async () => {
+    mockFetchIssues.mockImplementation(() => { throw new Error("API unavailable"); });
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("API unavailable");
+    expect(result.dispatched).toBe(0);
+  });
+
+  it("skips issues with a merged PR (no double-dispatch)", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Already fixed", body: "", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 5, title: "Fix", url: "url", state: "merged", isDraft: false },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockStore.markProcessed).toHaveBeenCalledWith(
+      "github", "owner/my-repo#1", expect.stringContaining("merged-pr-5"),
+    );
+  });
+
+  it("skips issues that have been closed before dispatch (race condition guard)", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Closed issue", body: "", url: "https://...", labels: [] },
+    ]);
+    mockIsIssueOpen.mockReturnValue(false);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+    expect(mockStore.markProcessed).toHaveBeenCalledWith(
+      "github", "owner/my-repo#1", expect.stringContaining("closed-issue-1"),
+    );
+  });
+
+  it("injects open-PR context into message when an open PR already exists", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 3, title: "PR in progress", body: "Do work", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 7, title: "WIP", url: "https://github.com/owner/my-repo/pull/7", state: "open", isDraft: false },
+    ]);
+
+    await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    const dispatchedMessage = (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(dispatchedMessage).toContain("#7");
+    expect(dispatchedMessage).toContain("Do NOT create a new branch");
+    expect(dispatchedMessage).not.toContain("create a branch, commit, push, and open a PR");
+  });
+
+  it("returns zero dispatched when no open issues exist", async () => {
+    mockFetchIssues.mockReturnValue([]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(0);
+    expect(result.errors).toHaveLength(0);
   });
 });
