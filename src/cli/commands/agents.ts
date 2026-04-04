@@ -22,31 +22,44 @@ function colorStatus(status: string): string {
 
 export type HealthStatus = "alive" | "unreachable" | "no-port";
 
+export interface AgentHealth {
+  status: HealthStatus;
+  latencyMs: number | null;
+}
+
 /**
- * Concurrently pings all agents and returns their liveness status.
+ * Concurrently pings all agents and returns their liveness status + latency.
  * Uses a short timeout (default 3s) so the command stays snappy even when agents are down.
  */
 export async function pingAllAgents(
   config: OrchestratorConfig,
   agentNames: string[],
   timeoutMs = 3000,
-): Promise<Map<string, HealthStatus>> {
+): Promise<Map<string, AgentHealth>> {
   const client = new AgentClient(config);
   const results = await Promise.all(
-    agentNames.map(async (name): Promise<[string, HealthStatus]> => {
+    agentNames.map(async (name): Promise<[string, AgentHealth]> => {
       const hasPort = !!config.agents[name]?.docker?.port;
-      if (!hasPort) return [name, "no-port"];
-      const alive = await client.ping(name, timeoutMs);
-      return [name, alive ? "alive" : "unreachable"];
+      if (!hasPort) return [name, { status: "no-port", latencyMs: null }];
+      const { alive, latencyMs } = await client.pingWithLatency(name, timeoutMs);
+      return [name, { status: alive ? "alive" : "unreachable", latencyMs }];
     }),
   );
   return new Map(results);
 }
 
-function formatHealth(health: HealthStatus): string {
-  switch (health) {
-    case "alive":
-      return chalk.green("✓ alive");
+function formatLatency(latencyMs: number): string {
+  if (latencyMs < 500) return chalk.green(`${latencyMs}ms`);
+  if (latencyMs < 2000) return chalk.yellow(`${latencyMs}ms`);
+  return chalk.red(`${latencyMs}ms`);
+}
+
+function formatHealth(health: AgentHealth): string {
+  switch (health.status) {
+    case "alive": {
+      const latency = health.latencyMs !== null ? `  ${formatLatency(health.latencyMs)}` : "";
+      return chalk.green("✓ alive") + latency;
+    }
     case "unreachable":
       return chalk.red("✗ unreachable");
     case "no-port":
@@ -96,7 +109,7 @@ export function registerAgentsCommand(program: Command): void {
         }
         const live = liveStatus?.get(name);
         const status = live?.status ?? "offline";
-        const health = healthMap.get(name) ?? "no-port";
+        const health = healthMap.get(name) ?? { status: "no-port" as HealthStatus, latencyMs: null };
 
         console.log(chalk.bold(name) + "  " + colorStatus(status));
         console.log(`  ${chalk.dim("Directory:")}    ${config.base_dir}/${agent.dir}`);
@@ -129,7 +142,7 @@ export function registerAgentsCommand(program: Command): void {
         for (const [agentName, agent] of Object.entries(config.agents)) {
           const live = liveStatus?.get(agentName);
           const status = live ? colorStatus(live.status) : chalk.dim("--");
-          const health = healthMap.get(agentName) ?? "no-port";
+          const health = healthMap.get(agentName) ?? { status: "no-port" as HealthStatus, latencyMs: null };
           console.log(
             `  ${chalk.cyan(agentName.padEnd(maxLen + 2))} ${status.padEnd(20)} ${formatHealth(health).padEnd(24)} ${agent.description}`,
           );

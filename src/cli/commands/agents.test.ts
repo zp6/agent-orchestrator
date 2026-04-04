@@ -48,23 +48,30 @@ function makeConfig(agents: Record<string, { port?: number }>): OrchestratorConf
 }
 
 describe("pingAllAgents", () => {
-  it("returns alive for a responding agent", async () => {
+  it("returns alive with latency for a responding agent", async () => {
     const config = makeConfig({ "live-agent": { port: livePort } });
     const result = await pingAllAgents(config, ["live-agent"], 3000);
-    expect(result.get("live-agent")).toBe("alive");
+    const health = result.get("live-agent");
+    expect(health?.status).toBe("alive");
+    expect(typeof health?.latencyMs).toBe("number");
+    expect(health!.latencyMs!).toBeGreaterThanOrEqual(0);
   });
 
-  it("returns unreachable for a non-responding port", async () => {
+  it("returns unreachable with null latency for a non-responding port", async () => {
     // Port 1 is always refused
     const config = makeConfig({ "dead-agent": { port: 1 } });
     const result = await pingAllAgents(config, ["dead-agent"], 3000);
-    expect(result.get("dead-agent")).toBe("unreachable");
+    const health = result.get("dead-agent");
+    expect(health?.status).toBe("unreachable");
+    expect(health?.latencyMs).toBeNull();
   });
 
   it("returns no-port when agent has no docker port configured", async () => {
     const config = makeConfig({ "no-port-agent": {} });
     const result = await pingAllAgents(config, ["no-port-agent"], 3000);
-    expect(result.get("no-port-agent")).toBe("no-port");
+    const health = result.get("no-port-agent");
+    expect(health?.status).toBe("no-port");
+    expect(health?.latencyMs).toBeNull();
   });
 
   it("handles multiple agents concurrently with mixed results", async () => {
@@ -78,9 +85,12 @@ describe("pingAllAgents", () => {
       ["live-agent", "dead-agent", "no-port-agent"],
       3000,
     );
-    expect(result.get("live-agent")).toBe("alive");
-    expect(result.get("dead-agent")).toBe("unreachable");
-    expect(result.get("no-port-agent")).toBe("no-port");
+    expect(result.get("live-agent")?.status).toBe("alive");
+    expect(result.get("live-agent")?.latencyMs).not.toBeNull();
+    expect(result.get("dead-agent")?.status).toBe("unreachable");
+    expect(result.get("dead-agent")?.latencyMs).toBeNull();
+    expect(result.get("no-port-agent")?.status).toBe("no-port");
+    expect(result.get("no-port-agent")?.latencyMs).toBeNull();
   });
 
   it("returns an empty map for an empty agent list", async () => {

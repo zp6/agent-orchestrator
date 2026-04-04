@@ -117,6 +117,28 @@ export class AgentClient {
     }
   }
 
+  /**
+   * Like `ping`, but also measures and returns response latency in milliseconds.
+   * Returns `{ alive: true, latencyMs: N }` on success,
+   * or `{ alive: false, latencyMs: null }` if unreachable or no port configured.
+   */
+  async pingWithLatency(agentName: string, timeoutMs = 10_000): Promise<{ alive: boolean; latencyMs: number | null }> {
+    const baseUrl = getAgentBaseUrl(this.config, agentName);
+    if (!baseUrl) return { alive: false, latencyMs: null };
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const start = Date.now();
+    try {
+      await fetch(`${baseUrl}/`, { signal: controller.signal });
+      return { alive: true, latencyMs: Date.now() - start };
+    } catch {
+      return { alive: false, latencyMs: null };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async send(
     agentName: string,
     message: string,
