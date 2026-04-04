@@ -425,4 +425,83 @@ describe("StateStore", () => {
       expect(m.verification_pass_rate).toBeCloseTo(2 / 3, 2);
     });
   });
+
+  describe("getScoreDistributionByAgent", () => {
+    it("returns empty record when no verified tasks exist", () => {
+      const result = store.getScoreDistributionByAgent();
+      expect(Object.keys(result)).toHaveLength(0);
+    });
+
+    it("buckets scores per agent correctly", () => {
+      const make = (agent: string, score: number | null, status: "approved" | "rejected" = "approved") => {
+        const t = store.createTask({ title: `t-${agent}-${score}`, source: "manual", agent_name: agent });
+        store.updateTask(t.id, { status: "done", verification_status: status, quality_score: score });
+      };
+
+      // alpha: 1 excellent, 1 good
+      make("alpha", 0.95);
+      make("alpha", 0.75);
+      // beta: 1 fair, 1 poor, 1 unscored
+      make("beta", 0.60);
+      make("beta", 0.30, "rejected");
+      make("beta", null);
+
+      const result = store.getScoreDistributionByAgent();
+
+      expect(result["alpha"]).toBeDefined();
+      expect(result["alpha"].excellent).toBe(1);
+      expect(result["alpha"].good).toBe(1);
+      expect(result["alpha"].fair).toBe(0);
+      expect(result["alpha"].poor).toBe(0);
+      expect(result["alpha"].unscored).toBe(0);
+      expect(result["alpha"].total).toBe(2);
+
+      expect(result["beta"]).toBeDefined();
+      expect(result["beta"].excellent).toBe(0);
+      expect(result["beta"].good).toBe(0);
+      expect(result["beta"].fair).toBe(1);
+      expect(result["beta"].poor).toBe(1);
+      expect(result["beta"].unscored).toBe(1);
+      expect(result["beta"].total).toBe(3);
+    });
+
+    it("excludes sub-tasks from per-agent distribution", () => {
+      const parent = store.createTask({ title: "Parent", source: "manual", agent_name: "alpha" });
+      const child = store.createSubTask({
+        parent_task_id: parent.id,
+        step_id: "s1",
+        title: "Child",
+        description: "sub",
+        source: "manual",
+        agent_name: "alpha",
+      });
+      store.updateTask(parent.id, { status: "done", verification_status: "approved", quality_score: 0.92 });
+      store.updateTask(child.id, { status: "done", verification_status: "approved", quality_score: 0.92 });
+
+      const result = store.getScoreDistributionByAgent();
+      expect(result["alpha"].total).toBe(1); // only parent
+      expect(result["alpha"].excellent).toBe(1);
+    });
+
+    it("excludes agents with no verified tasks from result", () => {
+      // task exists but no verification_status
+      const t = store.createTask({ title: "No verify", source: "manual", agent_name: "gamma" });
+      store.updateTask(t.id, { status: "done" });
+
+      const result = store.getScoreDistributionByAgent();
+      expect(result["gamma"]).toBeUndefined();
+    });
+
+    it("getMetrics includes per_agent_score_distribution", () => {
+      const t1 = store.createTask({ title: "T1", source: "manual", agent_name: "alpha" });
+      const t2 = store.createTask({ title: "T2", source: "manual", agent_name: "beta" });
+      store.updateTask(t1.id, { status: "done", verification_status: "approved", quality_score: 0.95 });
+      store.updateTask(t2.id, { status: "done", verification_status: "rejected", quality_score: 0.40 });
+
+      const m = store.getMetrics();
+      expect(m.per_agent_score_distribution).toBeDefined();
+      expect(m.per_agent_score_distribution["alpha"].excellent).toBe(1);
+      expect(m.per_agent_score_distribution["beta"].poor).toBe(1);
+    });
+  });
 });

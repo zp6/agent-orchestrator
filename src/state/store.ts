@@ -97,6 +97,8 @@ export interface SystemMetrics {
   avg_quality_score: number | null;
   /** Distribution of quality scores across verified tasks */
   score_distribution: ScoreDistribution;
+  /** Per-agent quality score distributions (keyed by agent_name) */
+  per_agent_score_distribution: Record<string, ScoreDistribution>;
   per_agent: AgentMetrics[];
   cycles: CycleMetrics;
 }
@@ -452,6 +454,32 @@ export class StateStore {
     return row;
   }
 
+  /**
+   * Compute quality score distributions grouped by agent, over all verified top-level tasks.
+   * Returns a record mapping agent_name → ScoreDistribution.
+   */
+  getScoreDistributionByAgent(): Record<string, ScoreDistribution> {
+    const rows = this.db.prepare(`
+      SELECT
+        agent_name,
+        COALESCE(SUM(CASE WHEN quality_score >= 0.90 THEN 1 ELSE 0 END), 0) AS excellent,
+        COALESCE(SUM(CASE WHEN quality_score >= 0.70 AND quality_score < 0.90 THEN 1 ELSE 0 END), 0) AS good,
+        COALESCE(SUM(CASE WHEN quality_score >= 0.50 AND quality_score < 0.70 THEN 1 ELSE 0 END), 0) AS fair,
+        COALESCE(SUM(CASE WHEN quality_score IS NOT NULL AND quality_score < 0.50 THEN 1 ELSE 0 END), 0) AS poor,
+        COALESCE(SUM(CASE WHEN quality_score IS NULL THEN 1 ELSE 0 END), 0) AS unscored,
+        COUNT(*) AS total
+      FROM tasks
+      WHERE agent_name IS NOT NULL AND parent_task_id IS NULL AND verification_status IS NOT NULL
+      GROUP BY agent_name
+    `).all() as Array<{ agent_name: string } & ScoreDistribution>;
+
+    const result: Record<string, ScoreDistribution> = {};
+    for (const { agent_name, ...dist } of rows) {
+      result[agent_name] = dist;
+    }
+    return result;
+  }
+
   getAgentStats(): Array<{ agent_name: string; total: number; done: number; failed: number; avg_score: number | null }> {
     return this.db.prepare(`
       SELECT agent_name,
@@ -575,6 +603,7 @@ export class StateStore {
     };
 
     const score_distribution = this.getScoreDistribution();
+    const per_agent_score_distribution = this.getScoreDistributionByAgent();
 
     return {
       total_tasks: global.total_tasks,
@@ -584,6 +613,7 @@ export class StateStore {
       verification_pass_rate: verify.verification_pass_rate,
       avg_quality_score: verify.avg_quality_score,
       score_distribution,
+      per_agent_score_distribution,
       per_agent,
       cycles: {
         total_cycles: cycleRow.total_cycles,

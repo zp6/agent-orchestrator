@@ -132,6 +132,32 @@ function printMetrics(metrics: SystemMetrics, improvement?: ImprovementStats): v
     }
   }
 
+  // --- Per-agent score distribution ---
+  const distEntries = Object.entries(metrics.per_agent_score_distribution);
+  if (distEntries.length > 0) {
+    console.log(chalk.bold("\nPer-Agent Score Distribution"));
+    const COL = { agent: 24, exc: 5, good: 5, fair: 5, poor: 5, unscored: 8 };
+    const hdr = [
+      "  " + "Agent".padEnd(COL.agent),
+      chalk.green("Exc".padStart(COL.exc)),
+      chalk.cyan("Good".padStart(COL.good)),
+      chalk.yellow("Fair".padStart(COL.fair)),
+      chalk.red("Poor".padStart(COL.poor)),
+      chalk.dim("Unscrd".padStart(COL.unscored)),
+    ].join("  ");
+    console.log(chalk.dim(hdr));
+    console.log(chalk.dim("  " + "─".repeat(COL.agent + (COL.exc + COL.good + COL.fair + COL.poor + COL.unscored) + 10)));
+    for (const [agentName, dist] of distEntries) {
+      const name = chalk.cyan(agentName.slice(0, COL.agent).padEnd(COL.agent));
+      const exc = (dist.excellent > 0 ? chalk.green(String(dist.excellent)) : chalk.dim("0")).padStart(COL.exc + 2);
+      const good = (dist.good > 0 ? chalk.cyan(String(dist.good)) : chalk.dim("0")).padStart(COL.good + 2);
+      const fair = (dist.fair > 0 ? chalk.yellow(String(dist.fair)) : chalk.dim("0")).padStart(COL.fair + 2);
+      const poor = (dist.poor > 0 ? chalk.red(String(dist.poor)) : chalk.dim("0")).padStart(COL.poor + 2);
+      const unscored = (dist.unscored > 0 ? chalk.dim(String(dist.unscored)) : chalk.dim("0")).padStart(COL.unscored + 2);
+      console.log(`  ${name}  ${exc}  ${good}  ${fair}  ${poor}  ${unscored}`);
+    }
+  }
+
   // --- Improvement detection ---
   if (improvement !== undefined) {
     const { minScore, qualifyingCount } = improvement;
