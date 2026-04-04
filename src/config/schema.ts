@@ -40,6 +40,13 @@ export interface AgentConfig {
 
 export interface VerificationConfig {
   enabled: boolean;
+  /**
+   * Explicit allowlist of trigger sources to verify (e.g. ["github", "linear"]).
+   * When absent or empty, ALL sources are verified — including "manual" tasks from
+   * supervisor dispatches and PR feedback loops.
+   * "manual" tasks are always included even when a sources list is configured,
+   * so the quality feedback loop covers the full task population.
+   */
   sources?: string[];
   min_score?: number;
   /**
@@ -48,6 +55,12 @@ export interface VerificationConfig {
    * Defaults to 1 when omitted.
    */
   max_revisions?: number;
+  /**
+   * How many unverified tasks to process per daemon cycle.
+   * Increase if task volume is high and many tasks remain unverified.
+   * Defaults to 10.
+   */
+  verify_per_cycle?: number;
 }
 
 export interface ProxyConfig {

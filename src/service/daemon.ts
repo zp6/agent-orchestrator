@@ -205,23 +205,35 @@ export class Daemon {
     if (!this.config.verification?.enabled) return;
 
     try {
-      const unverified = this.store.getUnverified(3); // verify up to 3 per cycle
+      const verifyPerCycle = this.config.verification.verify_per_cycle ?? 10;
+      const unverified = this.store.getUnverified(verifyPerCycle);
       if (unverified.length === 0) return;
 
-      const sources = this.config.verification.sources;
+      // `sources` is an explicit opt-in allowlist. When absent, all sources are eligible.
+      // "manual" tasks (supervisor dispatches, PR feedback) are always included so the
+      // quality feedback loop covers the full task population, not just trigger-sourced work.
+      const sourcesFilter = this.config.verification.sources;
       const maxRevisions = this.config.verification.max_revisions ?? 1;
 
+      let verified = 0;
+      let deferred = 0;
+      let skipped = 0;
+
       for (const task of unverified) {
-        // Only verify tasks from configured sources
-        if (sources && !sources.includes(task.source)) continue;
+        if (!shouldVerifyTask(task.source, sourcesFilter)) {
+          skipped++;
+          continue;
+        }
 
         try {
           const result = await this.verifier.verifyAndRevise(task.id, maxRevisions);
           if (result.notes === "Deferred: agent busy") {
+            deferred++;
             console.log(
               `[${time}] Deferred ${task.id.slice(0, 8)} (${task.agent_name}): agent busy, will retry next cycle`,
             );
           } else {
+            verified++;
             const status = result.approved ? "approved" : "rejected";
             console.log(
               `[${time}] Verified ${task.id.slice(0, 8)} (${task.agent_name}): ${status} (${result.score.toFixed(1)})`,
@@ -232,8 +244,21 @@ export class Daemon {
             }
           }
         } catch (err) {
-          console.error(`[${time}] Verify failed for ${task.id.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
+          const message = err instanceof Error ? err.message : String(err);
+          // Log connection errors distinctly so they don't silently drop tasks
+          const isConnectionError = /ECONNREFUSED|ENOTFOUND|fetch failed|network/i.test(message);
+          if (isConnectionError) {
+            console.warn(`[${time}] Verify skipped ${task.id.slice(0, 8)} (connection error, will retry): ${message}`);
+            this.log.warn("Verify connection error — task left unverified for retry", { taskId: task.id, error: message });
+          } else {
+            console.error(`[${time}] Verify failed for ${task.id.slice(0, 8)}: ${message}`);
+            this.log.error("Verify failed", { taskId: task.id, error: message });
+          }
         }
+      }
+
+      if (verified + deferred + skipped > 0) {
+        this.log.info("Verification cycle complete", { verified, deferred, skipped, total: unverified.length });
       }
     } catch (err) {
       console.error(`[${time}] Verification step failed: ${err instanceof Error ? err.message : err}`);
@@ -502,6 +527,22 @@ export class Daemon {
       }, 500);
     });
   }
+}
+
+/**
+ * Decide whether a task with the given source should be verified in this cycle.
+ *
+ * Rules (in order):
+ * 1. No filter configured (absent or empty) → verify everything.
+ * 2. Source is "manual" → always verify; supervisor/PR-feedback dispatches must
+ *    never be silently excluded or the quality loop breaks.
+ * 3. Source is in the allowlist → verify.
+ * 4. Otherwise → skip.
+ */
+export function shouldVerifyTask(taskSource: string, sourcesFilter?: string[]): boolean {
+  if (!sourcesFilter || sourcesFilter.length === 0) return true;
+  if (taskSource === "manual") return true;
+  return sourcesFilter.includes(taskSource);
 }
 
 /** Extract issue numbers from PR body patterns like "Closes #42", "Fixes #7", "Resolves #100" */
