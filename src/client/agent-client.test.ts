@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { AgentClient, buildAgentIdentityPrompt } from "./agent-client.js";
+import { AgentClient, buildAgentSystemPrompt } from "./agent-client.js";
 import { createServer, type Server } from "node:http";
 import type { OrchestratorConfig } from "../config/schema.js";
 
@@ -77,50 +77,58 @@ describe("AgentClient.ping", () => {
   });
 });
 
-describe("buildAgentIdentityPrompt", () => {
+describe("buildAgentSystemPrompt", () => {
   const agentName = "my-agent";
   const githubRepo = "owner/my-agent";
 
   it("includes the agent name", () => {
-    const prompt = buildAgentIdentityPrompt(agentName, githubRepo);
+    const prompt = buildAgentSystemPrompt(agentName, githubRepo);
     expect(prompt).toContain(`"${agentName}"`);
   });
 
   it("includes the github repo", () => {
-    const prompt = buildAgentIdentityPrompt(agentName, githubRepo);
+    const prompt = buildAgentSystemPrompt(agentName, githubRepo);
     expect(prompt).toContain(githubRepo);
   });
 
+  it("includes PR and issue hygiene instructions (Closes #N)", () => {
+    const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("Closes #N");
+    expect(prompt).toContain("gh issue list --repo owner/repo --state open");
+  });
+
   it("includes backlog triage instructions (close duplicates)", () => {
-    const prompt = buildAgentIdentityPrompt(agentName, githubRepo);
+    const prompt = buildAgentSystemPrompt(agentName, githubRepo);
     expect(prompt.toLowerCase()).toContain("duplicate");
   });
 
   it("includes backlog triage instructions (close stale issues)", () => {
-    const prompt = buildAgentIdentityPrompt(agentName, githubRepo);
+    const prompt = buildAgentSystemPrompt(agentName, githubRepo);
     expect(prompt.toLowerCase()).toContain("stale");
   });
 
   it("includes ROADMAP.md maintenance instruction", () => {
-    const prompt = buildAgentIdentityPrompt(agentName, githubRepo);
+    const prompt = buildAgentSystemPrompt(agentName, githubRepo);
     expect(prompt).toContain("ROADMAP.md");
   });
 
-  it("includes PR/issue hygiene instructions (Closes #N)", () => {
-    const prompt = buildAgentIdentityPrompt(agentName, githubRepo);
-    expect(prompt).toContain("Closes #N");
+  it("includes backlog triage and roadmap section header", () => {
+    const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("Backlog triage and roadmap");
+    expect(prompt).toContain("Close stale/duplicate issues");
+    expect(prompt).toContain("housekeeping");
   });
 
-  it("includes git workflow instructions", () => {
-    const prompt = buildAgentIdentityPrompt(agentName, githubRepo);
-    expect(prompt).toContain("git checkout main");
-    expect(prompt).toContain("Never commit directly to main");
+  it("includes self-improvement instructions", () => {
+    const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("Product features");
+    expect(prompt).toContain("User experience");
+    expect(prompt).toContain("Content depth");
   });
 
   it("works with an empty github repo", () => {
-    const prompt = buildAgentIdentityPrompt("anon-agent", "");
+    const prompt = buildAgentSystemPrompt("anon-agent", "");
     expect(prompt).toContain(`"anon-agent"`);
-    // Should not crash or include misleading repo references
     expect(prompt).not.toContain("Your GitHub repo is .");
   });
 });

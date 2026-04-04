@@ -101,10 +101,11 @@ export class Daemon {
     this.cycleCount++;
 
     const cycleId = this.store.recordCycleStart();
+    let registeredAgents: Set<string> = new Set();
 
     try {
       // Fetch which agents are actually deployed on the proxy
-      const registeredAgents = await this.deployer.getRegisteredAgents();
+      registeredAgents = await this.deployer.getRegisteredAgents();
 
       // 1. Check for stale dispatched tasks (stuck or crashed agents)
       this.checkStaleTasks(time);
@@ -151,6 +152,7 @@ export class Daemon {
       this.log.info("Cycle complete", { cycle: this.cycleCount, durationMs });
       console.log(`[${time}] Cycle #${this.cycleCount} complete (${durationMs}ms)`);
     }
+
   }
 
   private checkStaleTasks(time: string): void {
