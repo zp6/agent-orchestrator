@@ -13,7 +13,7 @@ const PREFERRED_LLM_AGENT = "claude-agent-orchestrator";
 
 /**
  * Get an Anthropic client for orchestrator LLM calls.
- * Prefers the dedicated orchestrator-llm container to avoid blocking on
+ * Prefers the dedicated claude-agent-orchestrator container to avoid blocking on
  * busy agent containers. Falls back to the first available agent with
  * a Docker port + API key.
  */

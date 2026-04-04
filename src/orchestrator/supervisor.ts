@@ -24,7 +24,7 @@ Respond with ONLY a JSON array of decisions (no markdown, no code fences):
 [
   {
     "action": "follow-up",
-    "agentName": "cheese-hater",
+    "agentName": "claude-proxy",
     "message": "Your previous task on issue #2 is done but the branch wasn't pushed. Please push branch issue-2-expand-claude-md to origin.",
     "reason": "Branch created but not pushed to remote"
   }

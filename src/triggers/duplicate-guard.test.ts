@@ -22,7 +22,7 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     source: "github",
     source_ref: "owner/repo#1",
     status: "done",
-    agent_name: "hermitcraft-agent",
+    agent_name: "claude-agent-orchestrator",
     conversation_id: null,
     result: null,
     parent_task_id: null,

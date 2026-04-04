@@ -25,8 +25,7 @@ AVOID suggesting:
 - Generic "add error handling" or "improve documentation" unless tied to a specific user-facing gap
 
 Each agent has a specific product identity:
-- hermitcraft-agent: Hermitcraft knowledge base — should suggest new content areas, interactive features, or ways to make the knowledge more accessible
-- cheese-hater: Cheese-hating personality agent — should suggest entertaining features, API endpoints, or creative content
+- claude-agent-orchestrator: The orchestrator control plane — should suggest improvements to autonomous oversight, routing accuracy, PR review quality, or supervisor intelligence
 - claude-proxy: Developer tool for running Claude Code — should suggest UX improvements, dashboards, or developer productivity features
 
 Respond with ONLY a JSON array (no markdown, no code fences):
