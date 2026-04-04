@@ -17,6 +17,7 @@ export interface PRListItem {
   headRefName: string;
   body: string;
   statusCheckRollup: StatusCheck[] | null;
+  reviewRequests: Array<{ login: string }> | null;
 }
 
 export interface PRRow {
@@ -39,6 +40,11 @@ export interface PRRow {
    *   conflict > ci-failing > changes-requested > needs-review > stale > ready
    */
   mergeReady: "ready" | "conflict" | "ci-failing" | "changes-requested" | "needs-review" | "stale";
+  /**
+   * True when the PR has been escalated to a human reviewer (rapartlu is a
+   * requested reviewer), meaning it is waiting on a human rather than an agent.
+   */
+  escalated: boolean;
 }
 
 export function rollupCIStatus(checks: StatusCheck[] | null | undefined): PRRow["ciStatus"] {
@@ -114,6 +120,9 @@ export function toPRRow(item: PRListItem, repo: string, now: Date = new Date(), 
   }
 
   const ciStatus = rollupCIStatus(item.statusCheckRollup);
+  const escalated = Array.isArray(item.reviewRequests)
+    ? item.reviewRequests.some((r) => r.login === "rapartlu")
+    : false;
   const partial = {
     repo,
     agent: agentName,
@@ -125,6 +134,7 @@ export function toPRRow(item: PRListItem, repo: string, now: Date = new Date(), 
     mergeable,
     ciStatus,
     linkedIssue: extractLinkedIssue(item.body ?? ""),
+    escalated,
   };
   return { ...partial, mergeReady: computeMergeReady(partial) };
 }
@@ -144,7 +154,7 @@ export class PRLister {
           "--state",
           "open",
           "--json",
-          "number,title,createdAt,updatedAt,mergeable,reviewDecision,headRefName,body,statusCheckRollup",
+          "number,title,createdAt,updatedAt,mergeable,reviewDecision,headRefName,body,statusCheckRollup,reviewRequests",
         ],
         { encoding: "utf-8", timeout: 30000 },
       );
@@ -176,6 +186,13 @@ export class PRLister {
       repo?: string;
       /** Filter by agent name (e.g. "cheese-hater") */
       agent?: string;
+      /**
+       * Show only PRs that require immediate attention:
+       *   - changes-requested (agent must fix)
+       *   - merge conflict / needs rebase
+       *   - escalated to human (rapartlu is a requested reviewer)
+       */
+      needsAction?: boolean;
     } = {},
   ): {
     rows: PRRow[];
@@ -223,11 +240,21 @@ export class PRLister {
     if (opts.ciFailed) {
       filtered = filtered.filter((r) => r.ciStatus === "failing");
     }
+    if (opts.needsAction) {
+      filtered = filtered.filter(
+        (r) =>
+          r.mergeReady === "changes-requested" ||
+          r.mergeable === "conflict" ||
+          r.escalated,
+      );
+    }
 
-    // Sort: conflicts first, then by staleness descending
+    // Sort: conflicts first, then escalated, then by staleness descending
     filtered.sort((a, b) => {
       if (a.mergeable === "conflict" && b.mergeable !== "conflict") return -1;
       if (b.mergeable === "conflict" && a.mergeable !== "conflict") return 1;
+      if (a.escalated && !b.escalated) return -1;
+      if (!a.escalated && b.escalated) return 1;
       return b.staleDays - a.staleDays;
     });
 

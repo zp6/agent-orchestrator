@@ -95,6 +95,12 @@ function formatStale(staleDays: number, width = 0): string {
   return chalk.dim(padded);
 }
 
+function formatEscalated(escalated: boolean, width = 0): string {
+  const label = escalated ? "⚑ human" : "";
+  const padded = label.padEnd(width);
+  return escalated ? chalk.magenta(padded) : chalk.dim("·".padEnd(width));
+}
+
 function printTable(rows: PRRow[]): void {
   if (rows.length === 0) {
     console.log(chalk.dim("No open PRs found."));
@@ -106,6 +112,8 @@ function printTable(rows: PRRow[]): void {
   const titleWidth = Math.min(50, Math.max(5, ...rows.map((r) => r.title.length)));
   // READY column: longest label is "✗ conflict" (10 chars) or "✗ changes" (9 chars)
   const readyWidth = 10;
+  // ESCALATED column: "⚑ human" (7 chars visible)
+  const escalatedWidth = 7;
 
   const header =
     chalk.bold("AGENT".padEnd(agentWidth)) +
@@ -126,10 +134,12 @@ function printTable(rows: PRRow[]): void {
     "  " +
     chalk.bold("CONFLICT".padEnd(9)) +
     "  " +
+    chalk.bold("ESCALATED".padEnd(escalatedWidth)) +
+    "  " +
     chalk.bold("ISSUE");
 
   console.log(header);
-  console.log(chalk.dim("─".repeat(agentWidth + titleWidth + readyWidth + 82)));
+  console.log(chalk.dim("─".repeat(agentWidth + titleWidth + readyWidth + escalatedWidth + 94)));
 
   for (const row of rows) {
     const agentLabel = row.agent || row.repo;
@@ -155,6 +165,8 @@ function printTable(rows: PRRow[]): void {
       "  " +
       formatConflict(row.mergeable, 9) +
       "  " +
+      formatEscalated(row.escalated, escalatedWidth) +
+      "  " +
       chalk.dim(row.linkedIssue);
 
     console.log(line);
@@ -173,6 +185,10 @@ export function registerPRsCommand(program: Command): void {
     .option("--repo <repo>", "Limit to a specific repo (owner/repo)")
     .option("--agent <name>", "Limit to a specific agent by name (e.g. cheese-hater)")
     .option("--blocked", "Show only PRs that are not ready to merge")
+    .option(
+      "--needs-action",
+      "Show only PRs requiring immediate attention: changes-requested, merge conflict, or escalated to human",
+    )
     .action(
       (opts: {
         stale?: boolean;
@@ -183,6 +199,7 @@ export function registerPRsCommand(program: Command): void {
         repo?: string;
         agent?: string;
         blocked?: boolean;
+        needsAction?: boolean;
       }) => {
         const config = loadConfig(program.opts().config);
         const lister = new PRLister(config);
@@ -198,12 +215,28 @@ export function registerPRsCommand(program: Command): void {
           const conflictCount = rows.filter((r) => r.mergeable === "conflict").length;
           const staleCount = rows.filter((r) => r.staleDays >= 3).length;
           const ciFailCount = rows.filter((r) => r.ciStatus === "failing").length;
+          const escalatedCount = rows.filter((r) => r.escalated).length;
+          const changesRequestedCount = rows.filter((r) => r.mergeReady === "changes-requested").length;
           const parts: string[] = [`${rows.length} open PR(s)`];
           if (readyCount > 0) parts.push(chalk.green(`${readyCount} ready`));
           if (conflictCount > 0) parts.push(chalk.red(`${conflictCount} conflict(s)`));
           if (ciFailCount > 0) parts.push(chalk.red(`${ciFailCount} CI failing`));
+          if (changesRequestedCount > 0) parts.push(chalk.red(`${changesRequestedCount} changes-requested`));
+          if (escalatedCount > 0) parts.push(chalk.magenta(`${escalatedCount} escalated`));
           if (staleCount > 0) parts.push(chalk.yellow(`${staleCount} stale (≥3d since push)`));
           console.log(chalk.dim("\n" + parts.join(" · ")));
+        }
+
+        // Hint when --needs-action would narrow the list further
+        if (!opts.needsAction && !opts.blocked) {
+          const actionCount = rows.filter(
+            (r) => r.mergeReady === "changes-requested" || r.mergeable === "conflict" || r.escalated,
+          ).length;
+          if (actionCount > 0) {
+            console.log(
+              chalk.dim(`\nTip: run with --needs-action to see only the ${actionCount} PR(s) requiring immediate attention.`),
+            );
+          }
         }
 
         // Exit non-zero if any conflict PRs exist (across full set, not just filtered view)

@@ -55,6 +55,7 @@ const makePR = (overrides: Partial<PRListItem> = {}): PRListItem => ({
   headRefName: "fix-something",
   body: "Closes #42",
   statusCheckRollup: null,
+  reviewRequests: null,
   ...overrides,
 });
 
@@ -644,6 +645,7 @@ const makePartialRow = (
   mergeable: "yes",
   ciStatus: "passing",
   linkedIssue: "#1",
+  escalated: false,
   ...overrides,
 });
 
@@ -744,5 +746,214 @@ describe("toPRRow — agent field", () => {
     });
     const row = toPRRow(item, "owner/repo", now);
     expect(row.mergeReady).toBe("conflict");
+  });
+});
+
+describe("toPRRow — escalated field", () => {
+  const now = new Date("2024-01-10T12:00:00Z");
+  const base = { createdAt: "2024-01-08T12:00:00Z", updatedAt: "2024-01-08T12:00:00Z" };
+
+  it("sets escalated=true when rapartlu is a requested reviewer", () => {
+    const item = makePR({
+      ...base,
+      reviewRequests: [{ login: "rapartlu" }],
+    });
+    const row = toPRRow(item, "owner/repo", now);
+    expect(row.escalated).toBe(true);
+  });
+
+  it("sets escalated=false when reviewRequests is null", () => {
+    const item = makePR({ ...base, reviewRequests: null });
+    const row = toPRRow(item, "owner/repo", now);
+    expect(row.escalated).toBe(false);
+  });
+
+  it("sets escalated=false when reviewRequests is empty", () => {
+    const item = makePR({ ...base, reviewRequests: [] });
+    const row = toPRRow(item, "owner/repo", now);
+    expect(row.escalated).toBe(false);
+  });
+
+  it("sets escalated=false when rapartlu is not in reviewRequests", () => {
+    const item = makePR({
+      ...base,
+      reviewRequests: [{ login: "someoneelse" }],
+    });
+    const row = toPRRow(item, "owner/repo", now);
+    expect(row.escalated).toBe(false);
+  });
+
+  it("sets escalated=true when rapartlu is among multiple reviewers", () => {
+    const item = makePR({
+      ...base,
+      reviewRequests: [{ login: "alice" }, { login: "rapartlu" }, { login: "bob" }],
+    });
+    const row = toPRRow(item, "owner/repo", now);
+    expect(row.escalated).toBe(true);
+  });
+});
+
+describe("PRLister — --needs-action filter", () => {
+  beforeEach(() => {
+    mockExecFileSync.mockReset();
+  });
+
+  it("filters to changes-requested PRs", () => {
+    const changesReq = makePR({ number: 1, title: "Needs fixes", reviewDecision: "CHANGES_REQUESTED" });
+    const approved = makePR({ number: 2, title: "Approved PR", reviewDecision: "APPROVED" });
+
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo.includes("repo-a")) return JSON.stringify([changesReq, approved]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const { rows } = lister.listAll({ needsAction: true });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].number).toBe(1);
+    expect(rows[0].reviewStatus).toBe("changes-requested");
+  });
+
+  it("filters to conflicting PRs", () => {
+    const conflicting = makePR({ number: 1, title: "Has conflict", mergeable: "CONFLICTING" });
+    const clean = makePR({ number: 2, title: "Clean PR", mergeable: "MERGEABLE" });
+
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo.includes("repo-a")) return JSON.stringify([conflicting, clean]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const { rows } = lister.listAll({ needsAction: true });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].number).toBe(1);
+    expect(rows[0].mergeable).toBe("conflict");
+  });
+
+  it("filters to escalated PRs (rapartlu as requested reviewer)", () => {
+    const escalated = makePR({
+      number: 1,
+      title: "Escalated to human",
+      reviewRequests: [{ login: "rapartlu" }],
+    });
+    const normal = makePR({ number: 2, title: "Normal PR", reviewRequests: null });
+
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo.includes("repo-a")) return JSON.stringify([escalated, normal]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const { rows } = lister.listAll({ needsAction: true });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].number).toBe(1);
+    expect(rows[0].escalated).toBe(true);
+  });
+
+  it("returns empty when no PRs require action", () => {
+    const ready = makePR({
+      number: 1,
+      title: "Ready PR",
+      reviewDecision: "APPROVED",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ name: "ci", status: "COMPLETED", conclusion: "SUCCESS" }],
+      reviewRequests: null,
+    });
+
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo.includes("repo-a")) return JSON.stringify([ready]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const { rows } = lister.listAll({ needsAction: true });
+
+    expect(rows).toHaveLength(0);
+  });
+
+  it("returns all three action types when present", () => {
+    const changesReq = makePR({ number: 1, title: "Needs fixes", reviewDecision: "CHANGES_REQUESTED", reviewRequests: null });
+    const conflicting = makePR({ number: 2, title: "Has conflict", mergeable: "CONFLICTING", reviewRequests: null });
+    const escalated = makePR({ number: 3, title: "Escalated", reviewRequests: [{ login: "rapartlu" }] });
+    const ready = makePR({ number: 4, title: "Ready", reviewDecision: "APPROVED", reviewRequests: null });
+
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo.includes("repo-a")) return JSON.stringify([changesReq, conflicting, escalated, ready]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const { rows } = lister.listAll({ needsAction: true });
+
+    expect(rows).toHaveLength(3);
+    const numbers = rows.map((r) => r.number);
+    expect(numbers).toContain(1);
+    expect(numbers).toContain(2);
+    expect(numbers).toContain(3);
+    expect(numbers).not.toContain(4);
+  });
+
+  it("sorts: conflicts first, then escalated, then changes-requested", () => {
+    const now = Date.now();
+    const changesReq = makePR({
+      number: 1,
+      title: "Changes req",
+      reviewDecision: "CHANGES_REQUESTED",
+      reviewRequests: null,
+      createdAt: new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString(),
+      updatedAt: new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const conflicting = makePR({
+      number: 2,
+      title: "Conflict",
+      mergeable: "CONFLICTING",
+      reviewRequests: null,
+      createdAt: new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString(),
+    });
+    const escalated = makePR({
+      number: 3,
+      title: "Escalated",
+      reviewRequests: [{ login: "rapartlu" }],
+      createdAt: new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString(),
+      updatedAt: new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo.includes("repo-a")) return JSON.stringify([changesReq, escalated, conflicting]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const { rows } = lister.listAll({ needsAction: true });
+
+    expect(rows[0].number).toBe(2); // conflict first
+    expect(rows[1].number).toBe(3); // then escalated
+    expect(rows[2].number).toBe(1); // then changes-requested
+  });
+});
+
+describe("PRLister — reviewRequests fetched from gh CLI", () => {
+  beforeEach(() => {
+    mockExecFileSync.mockReset();
+  });
+
+  it("includes reviewRequests in the gh pr list --json fields", () => {
+    mockExecFileSync.mockReturnValue("[]");
+    const lister = new PRLister(config);
+    lister.listAll({ repo: "owner/repo-a" });
+
+    const args = mockExecFileSync.mock.calls[0][1] as string[];
+    const jsonFields = args[args.indexOf("--json") + 1] ?? "";
+    expect(jsonFields).toContain("reviewRequests");
   });
 });
