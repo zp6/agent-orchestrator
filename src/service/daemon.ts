@@ -352,6 +352,8 @@ export class Daemon {
               this.log.info("Skipping PR feedback dispatch: agent busy", { agentName, repo, prNumber });
             } else if (this.store.hasActivePrFeedbackTask(repo, prNumber)) {
               this.log.info("Skipping PR feedback dispatch: feedback already in-flight", { agentName, repo, prNumber });
+            } else if (isPRAlreadyMerged(repo, prNumber)) {
+              this.log.info("Skipping feedback dispatch: PR already merged", { repo, prNumber });
             } else {
               this.log.info("Dispatching PR feedback to agent", { repo, prNumber, agentName });
               this.dispatcher.dispatch(
@@ -685,6 +687,31 @@ export function buildRoadmapBootstrapMessage(agentName: string, githubRepo: stri
 5. **Commit and open a PR** — commit the file on a new branch (e.g. \`bootstrap-roadmap\`) and open a PR. Include "Closes #" only if there is an open issue tracking this work; otherwise omit it.
 
 Be concise — the roadmap should fit on one screen. After you open the PR, briefly summarise what you added.`;
+}
+
+/**
+ * Check whether a PR has already been merged or closed so we don't dispatch
+ * feedback for work that no longer needs to be done.
+ *
+ * Fails open (returns `false`) on any exec error so that valid in-flight PRs
+ * are never silently dropped.
+ *
+ * @param execFn - optional override for unit tests (avoids ESM module patching)
+ */
+export function isPRAlreadyMerged(
+  repo: string,
+  prNumber: number,
+  execFn: (cmd: string) => string = (cmd) => execSync(cmd, { encoding: "utf8" }),
+): boolean {
+  try {
+    const raw = execFn(`gh pr view ${prNumber} --repo ${repo} --json state`);
+    const parsed = JSON.parse(raw) as { state?: string };
+    const state = (parsed.state ?? "").trim().toUpperCase();
+    return state === "MERGED" || state === "CLOSED";
+  } catch {
+    // Fail open: if we can't determine state, allow the dispatch
+    return false;
+  }
 }
 
 /** Extract issue numbers from PR body patterns like "Closes #42", "Fixes #7", "Resolves #100" */

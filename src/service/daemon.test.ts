@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { extractClosedIssueNumbers, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage } from "./daemon.js";
+import { extractClosedIssueNumbers, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged } from "./daemon.js";
 
 describe("extractClosedIssueNumbers", () => {
   it("extracts Closes #N", () => {
@@ -248,5 +248,44 @@ describe("shouldVerifyTask", () => {
     it("verifies pr-feedback tasks when filter is empty array", () => {
       expect(shouldVerifyTask("pr-feedback", [])).toBe(true);
     });
+  });
+});
+
+describe("isPRAlreadyMerged", () => {
+  it("returns false for OPEN state", () => {
+    const execFn = vi.fn().mockReturnValue(JSON.stringify({ state: "OPEN" }));
+    expect(isPRAlreadyMerged("owner/repo", 42, execFn)).toBe(false);
+  });
+
+  it("returns true for MERGED state", () => {
+    const execFn = vi.fn().mockReturnValue(JSON.stringify({ state: "MERGED" }));
+    expect(isPRAlreadyMerged("owner/repo", 42, execFn)).toBe(true);
+  });
+
+  it("returns true for CLOSED state", () => {
+    const execFn = vi.fn().mockReturnValue(JSON.stringify({ state: "CLOSED" }));
+    expect(isPRAlreadyMerged("owner/repo", 42, execFn)).toBe(true);
+  });
+
+  it("fails open (returns false) on exec error", () => {
+    const execFn = vi.fn().mockImplementation(() => {
+      throw new Error("gh: command failed");
+    });
+    expect(isPRAlreadyMerged("owner/repo", 42, execFn)).toBe(false);
+  });
+
+  it("normalises state casing and whitespace", () => {
+    const execFn = vi.fn().mockReturnValue(JSON.stringify({ state: "  merged  " }));
+    expect(isPRAlreadyMerged("owner/repo", 42, execFn)).toBe(true);
+  });
+
+  it("constructs the correct gh pr view command", () => {
+    const execFn = vi.fn().mockReturnValue(JSON.stringify({ state: "OPEN" }));
+    isPRAlreadyMerged("myorg/my-repo", 99, execFn);
+    expect(execFn).toHaveBeenCalledOnce();
+    const cmd = execFn.mock.calls[0][0] as string;
+    expect(cmd).toContain("gh pr view 99");
+    expect(cmd).toContain("--repo myorg/my-repo");
+    expect(cmd).toContain("--json state");
   });
 });
