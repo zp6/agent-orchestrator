@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { PRLister, toPRRow, extractLinkedIssue, formatAge, rollupCIStatus } from "./pr-lister.js";
+import {
+  PRLister,
+  toPRRow,
+  extractLinkedIssue,
+  formatAge,
+  formatStaleDays,
+  rollupCIStatus,
+} from "./pr-lister.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { PRListItem, StatusCheck } from "./pr-lister.js";
 
@@ -41,7 +48,7 @@ const makePR = (overrides: Partial<PRListItem> = {}): PRListItem => ({
   number: 1,
   title: "Fix something",
   createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), // 2 days ago
-  updatedAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(), // 1 day ago
+  updatedAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), // 2 days ago
   mergeable: "MERGEABLE",
   reviewDecision: null,
   headRefName: "fix-something",
@@ -83,6 +90,32 @@ describe("formatAge", () => {
 
   it("formats multiple days", () => {
     expect(formatAge(7)).toBe("7d");
+  });
+});
+
+describe("formatStaleDays", () => {
+  it("formats < 1 day", () => {
+    expect(formatStaleDays(0)).toBe("< 1d");
+  });
+
+  it("formats exactly 1 day", () => {
+    expect(formatStaleDays(1)).toBe("1d");
+  });
+
+  it("formats moderate staleness", () => {
+    expect(formatStaleDays(5)).toBe("5d");
+  });
+
+  it("prefixes > for staleness beyond 7 days", () => {
+    expect(formatStaleDays(10)).toBe(">10d");
+  });
+
+  it("prefixes > for exactly 8 days", () => {
+    expect(formatStaleDays(8)).toBe(">8d");
+  });
+
+  it("does not prefix > for exactly 7 days", () => {
+    expect(formatStaleDays(7)).toBe("7d");
   });
 });
 
@@ -138,67 +171,78 @@ describe("toPRRow", () => {
   const now = new Date("2024-01-10T12:00:00Z");
 
   it("maps MERGEABLE → 'yes'", () => {
-    const item = makePR({ mergeable: "MERGEABLE", createdAt: "2024-01-08T12:00:00Z" });
+    const item = makePR({ mergeable: "MERGEABLE", createdAt: "2024-01-08T12:00:00Z", updatedAt: "2024-01-08T12:00:00Z" });
     const row = toPRRow(item, "owner/repo", now);
     expect(row.mergeable).toBe("yes");
   });
 
   it("maps CONFLICTING → 'conflict'", () => {
-    const item = makePR({ mergeable: "CONFLICTING", createdAt: "2024-01-08T12:00:00Z" });
+    const item = makePR({ mergeable: "CONFLICTING", createdAt: "2024-01-08T12:00:00Z", updatedAt: "2024-01-08T12:00:00Z" });
     const row = toPRRow(item, "owner/repo", now);
     expect(row.mergeable).toBe("conflict");
   });
 
   it("maps UNKNOWN → 'unknown'", () => {
-    const item = makePR({ mergeable: "UNKNOWN", createdAt: "2024-01-08T12:00:00Z" });
+    const item = makePR({ mergeable: "UNKNOWN", createdAt: "2024-01-08T12:00:00Z", updatedAt: "2024-01-08T12:00:00Z" });
     const row = toPRRow(item, "owner/repo", now);
     expect(row.mergeable).toBe("unknown");
   });
 
   it("maps APPROVED review decision", () => {
-    const item = makePR({ reviewDecision: "APPROVED", createdAt: "2024-01-08T12:00:00Z" });
+    const item = makePR({ reviewDecision: "APPROVED", createdAt: "2024-01-08T12:00:00Z", updatedAt: "2024-01-08T12:00:00Z" });
     const row = toPRRow(item, "owner/repo", now);
     expect(row.reviewStatus).toBe("approved");
   });
 
   it("maps CHANGES_REQUESTED review decision", () => {
-    const item = makePR({ reviewDecision: "CHANGES_REQUESTED", createdAt: "2024-01-08T12:00:00Z" });
+    const item = makePR({ reviewDecision: "CHANGES_REQUESTED", createdAt: "2024-01-08T12:00:00Z", updatedAt: "2024-01-08T12:00:00Z" });
     const row = toPRRow(item, "owner/repo", now);
     expect(row.reviewStatus).toBe("changes-requested");
   });
 
   it("maps null/empty review decision → 'pending'", () => {
-    const item = makePR({ reviewDecision: null, createdAt: "2024-01-08T12:00:00Z" });
+    const item = makePR({ reviewDecision: null, createdAt: "2024-01-08T12:00:00Z", updatedAt: "2024-01-08T12:00:00Z" });
     const row = toPRRow(item, "owner/repo", now);
     expect(row.reviewStatus).toBe("pending");
   });
 
-  it("computes age correctly", () => {
-    const item = makePR({ createdAt: "2024-01-07T12:00:00Z" }); // 3 days before now
+  it("computes ageDays from createdAt correctly", () => {
+    const item = makePR({ createdAt: "2024-01-07T12:00:00Z", updatedAt: "2024-01-09T12:00:00Z" });
     const row = toPRRow(item, "owner/repo", now);
     expect(row.ageDays).toBe(3);
   });
 
-  it("extracts linked issue from body", () => {
-    const item = makePR({ body: "This PR closes #99", createdAt: "2024-01-09T12:00:00Z" });
+  it("computes staleDays from updatedAt correctly", () => {
+    const item = makePR({ createdAt: "2024-01-01T12:00:00Z", updatedAt: "2024-01-09T12:00:00Z" });
     const row = toPRRow(item, "owner/repo", now);
-    expect(row.linkedIssue).toBe("#99");
+    expect(row.staleDays).toBe(1);
   });
 
-  it("computes lastPushDays from updatedAt", () => {
-    const item = makePR({
-      createdAt: "2024-01-05T12:00:00Z", // 5 days ago
-      updatedAt: "2024-01-08T12:00:00Z", // 2 days ago
-    });
+  it("staleDays is 0 when updatedAt is today", () => {
+    const item = makePR({ createdAt: "2024-01-01T12:00:00Z", updatedAt: "2024-01-10T06:00:00Z" });
     const row = toPRRow(item, "owner/repo", now);
-    expect(row.ageDays).toBe(5);
-    expect(row.lastPushDays).toBe(2);
+    expect(row.staleDays).toBe(0);
+  });
+
+  it("staleDays matches ageDays when updatedAt equals createdAt", () => {
+    const item = makePR({ createdAt: "2024-01-07T12:00:00Z", updatedAt: "2024-01-07T12:00:00Z" });
+    const row = toPRRow(item, "owner/repo", now);
+    expect(row.ageDays).toBe(3);
+    expect(row.staleDays).toBe(3);
   });
 
   it("falls back to createdAt when updatedAt is missing", () => {
-    const item = makePR({ createdAt: "2024-01-07T12:00:00Z", updatedAt: "" });
+    const item = makePR({ createdAt: "2024-01-08T12:00:00Z" });
+    // @ts-expect-error — intentionally omitting updatedAt to test fallback
+    delete item.updatedAt;
     const row = toPRRow(item, "owner/repo", now);
-    expect(row.lastPushDays).toBe(3);
+    expect(row.staleDays).toBe(2);
+  });
+
+  it("extracts linked issue from body", () => {
+    const item = makePR({ body: "This PR closes #99", createdAt: "2024-01-09T12:00:00Z", updatedAt: "2024-01-09T12:00:00Z" });
+    const row = toPRRow(item, "owner/repo", now);
+    expect(row.linkedIssue).toBe("#99");
   });
 
   it("maps passing CI checks to ciStatus 'passing'", () => {
@@ -252,6 +296,16 @@ describe("PRLister", () => {
     expect(rows.map((r) => r.repo)).toContain("owner/repo-b");
   });
 
+  it("fetches updatedAt field from gh pr list", () => {
+    mockExecFileSync.mockReturnValue("[]");
+    const lister = new PRLister(config);
+    lister.listAll({ repo: "owner/repo-a" });
+
+    const args = mockExecFileSync.mock.calls[0][1] as string[];
+    const jsonFields = args[args.indexOf("--json") + 1] ?? "";
+    expect(jsonFields).toContain("updatedAt");
+  });
+
   it("skips agents without github field", () => {
     mockExecFileSync.mockReturnValue("[]");
     const lister = new PRLister(config);
@@ -291,9 +345,22 @@ describe("PRLister", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("filters stale PRs (≥3 days) with --stale flag", () => {
-    const old = makePR({ number: 1, title: "Old PR", createdAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString() });
-    const fresh = makePR({ number: 2, title: "Fresh PR", createdAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString() });
+  it("filters stale PRs (staleDays ≥3) with --stale flag", () => {
+    const now = Date.now();
+    // old push: 5 days ago
+    const old = makePR({
+      number: 1,
+      title: "Old PR",
+      createdAt: new Date(now - 10 * 24 * 60 * 60 * 1000).toISOString(),
+      updatedAt: new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    // fresh push: 1 day ago
+    const fresh = makePR({
+      number: 2,
+      title: "Fresh PR",
+      createdAt: new Date(now - 3 * 24 * 60 * 60 * 1000).toISOString(),
+      updatedAt: new Date(now - 1 * 24 * 60 * 60 * 1000).toISOString(),
+    });
 
     mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
       const repo = args[args.indexOf("--repo") + 1] ?? "";
@@ -303,6 +370,40 @@ describe("PRLister", () => {
 
     const lister = new PRLister(config);
     const { rows } = lister.listAll({ stale: true });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].number).toBe(1);
+  });
+
+  it("filters by --stale-days N (staleDays ≥N)", () => {
+    const now = Date.now();
+    const veryOld = makePR({
+      number: 1,
+      title: "Very old PR",
+      createdAt: new Date(now - 20 * 24 * 60 * 60 * 1000).toISOString(),
+      updatedAt: new Date(now - 10 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const moderatelyOld = makePR({
+      number: 2,
+      title: "Moderately old PR",
+      createdAt: new Date(now - 10 * 24 * 60 * 60 * 1000).toISOString(),
+      updatedAt: new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const fresh = makePR({
+      number: 3,
+      title: "Fresh PR",
+      createdAt: new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString(),
+      updatedAt: new Date(now - 1 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo.includes("repo-a")) return JSON.stringify([veryOld, moderatelyOld, fresh]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const { rows } = lister.listAll({ staleDays: 7 });
 
     expect(rows).toHaveLength(1);
     expect(rows[0].number).toBe(1);
@@ -320,6 +421,23 @@ describe("PRLister", () => {
 
     const lister = new PRLister(config);
     const { rows } = lister.listAll({ conflicts: true });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].mergeable).toBe("conflict");
+  });
+
+  it("filters conflict PRs with --conflict flag (singular alias)", () => {
+    const conflicting = makePR({ number: 5, title: "Conflict PR", mergeable: "CONFLICTING" });
+    const clean = makePR({ number: 6, title: "Clean PR", mergeable: "MERGEABLE" });
+
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo.includes("repo-a")) return JSON.stringify([conflicting, clean]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const { rows } = lister.listAll({ conflict: true });
 
     expect(rows).toHaveLength(1);
     expect(rows[0].mergeable).toBe("conflict");
@@ -357,8 +475,19 @@ describe("PRLister", () => {
   });
 
   it("sorts conflicts before non-conflicts", () => {
-    const clean = makePR({ number: 1, mergeable: "MERGEABLE", createdAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString() });
-    const conflicting = makePR({ number: 2, mergeable: "CONFLICTING", createdAt: new Date(Date.now() - 0).toISOString() });
+    const now = Date.now();
+    const clean = makePR({
+      number: 1,
+      mergeable: "MERGEABLE",
+      createdAt: new Date(now - 1 * 24 * 60 * 60 * 1000).toISOString(),
+      updatedAt: new Date(now - 1 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const conflicting = makePR({
+      number: 2,
+      mergeable: "CONFLICTING",
+      createdAt: new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString(),
+    });
 
     mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
       const repo = args[args.indexOf("--repo") + 1] ?? "";
@@ -371,6 +500,35 @@ describe("PRLister", () => {
 
     expect(rows[0].mergeable).toBe("conflict");
     expect(rows[1].mergeable).toBe("yes");
+  });
+
+  it("sorts by staleDays descending within same conflict bucket", () => {
+    const now = Date.now();
+    const fresh = makePR({
+      number: 1,
+      mergeable: "MERGEABLE",
+      createdAt: new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString(),
+      updatedAt: new Date(now - 1 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const stale = makePR({
+      number: 2,
+      mergeable: "MERGEABLE",
+      createdAt: new Date(now - 10 * 24 * 60 * 60 * 1000).toISOString(),
+      updatedAt: new Date(now - 8 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo.includes("repo-a")) return JSON.stringify([fresh, stale]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const { rows } = lister.listAll();
+
+    // stale (8d since push) should come before fresh (1d since push)
+    expect(rows[0].number).toBe(2);
+    expect(rows[1].number).toBe(1);
   });
 
   it("limits to a specific repo when --repo is provided", () => {

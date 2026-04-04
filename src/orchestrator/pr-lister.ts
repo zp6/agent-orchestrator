@@ -24,7 +24,7 @@ export interface PRRow {
   number: number;
   title: string;
   ageDays: number;
-  lastPushDays: number;
+  staleDays: number;
   reviewStatus: "approved" | "changes-requested" | "pending";
   mergeable: "yes" | "no" | "conflict" | "unknown";
   ciStatus: "passing" | "failing" | "pending" | "none";
@@ -57,12 +57,20 @@ export function formatAge(days: number): string {
   return `${days}d`;
 }
 
+export function formatStaleDays(days: number): string {
+  if (days < 1) return "< 1d";
+  if (days === 1) return "1d";
+  if (days > 7) return `>${days}d`;
+  return `${days}d`;
+}
+
 export function toPRRow(item: PRListItem, repo: string, now: Date = new Date()): PRRow {
   const createdAt = new Date(item.createdAt);
   const ageDays = Math.floor((now.getTime() - createdAt.getTime()) / (1000 * 60 * 60 * 24));
 
+  // staleDays: days since last push/update (updatedAt), falls back to createdAt
   const updatedAt = item.updatedAt ? new Date(item.updatedAt) : createdAt;
-  const lastPushDays = Math.floor((now.getTime() - updatedAt.getTime()) / (1000 * 60 * 60 * 24));
+  const staleDays = Math.floor((now.getTime() - updatedAt.getTime()) / (1000 * 60 * 60 * 24));
 
   let reviewStatus: PRRow["reviewStatus"];
   if (item.reviewDecision === "APPROVED") {
@@ -87,7 +95,7 @@ export function toPRRow(item: PRListItem, repo: string, now: Date = new Date()):
     number: item.number,
     title: item.title,
     ageDays,
-    lastPushDays,
+    staleDays,
     reviewStatus,
     mergeable,
     ciStatus: rollupCIStatus(item.statusCheckRollup),
@@ -120,7 +128,16 @@ export class PRLister {
     }
   }
 
-  listAll(opts: { stale?: boolean; conflicts?: boolean; ciFailed?: boolean; repo?: string } = {}): {
+  listAll(
+    opts: {
+      stale?: boolean;
+      staleDays?: number;
+      conflicts?: boolean;
+      conflict?: boolean;
+      ciFailed?: boolean;
+      repo?: string;
+    } = {},
+  ): {
     rows: PRRow[];
     hasConflicts: boolean;
   } {
@@ -144,20 +161,23 @@ export class PRLister {
 
     let filtered = allRows;
     if (opts.stale) {
-      filtered = filtered.filter((r) => r.ageDays >= 3);
+      filtered = filtered.filter((r) => r.staleDays >= 3);
     }
-    if (opts.conflicts) {
+    if (opts.staleDays !== undefined) {
+      filtered = filtered.filter((r) => r.staleDays >= opts.staleDays!);
+    }
+    if (opts.conflicts || opts.conflict) {
       filtered = filtered.filter((r) => r.mergeable === "conflict");
     }
     if (opts.ciFailed) {
       filtered = filtered.filter((r) => r.ciStatus === "failing");
     }
 
-    // Sort: conflicts first, then by age descending
+    // Sort: conflicts first, then by staleness descending
     filtered.sort((a, b) => {
       if (a.mergeable === "conflict" && b.mergeable !== "conflict") return -1;
       if (b.mergeable === "conflict" && a.mergeable !== "conflict") return 1;
-      return b.ageDays - a.ageDays;
+      return b.staleDays - a.staleDays;
     });
 
     return { rows: filtered, hasConflicts };
