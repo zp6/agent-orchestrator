@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { ManagementClient } from "../client/management-client.js";
+import { ManagementClient, type ProxyAgentConfig } from "../client/management-client.js";
 import { AgentClient } from "../client/agent-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { createLogger } from "../service/logger.js";
@@ -96,8 +96,15 @@ export class Deployer {
 
       return { agentName, action: "redeployed", detail: "Container rebuild triggered" };
     } catch (err) {
-      this.log.error("Redeploy failed", { agentName, error: err instanceof Error ? err.message : String(err) });
-      return { agentName, action: "error", detail: err instanceof Error ? err.message : String(err) };
+      const msg = err instanceof Error ? err.message : String(err);
+      // If the management API doesn't know about this agent, re-register and retry once
+      if (msg.includes("not found") || msg.includes("404")) {
+        this.log.info("Agent not found on proxy, re-registering", { agentName });
+        const registered = await this.ensureRegistered(agentName);
+        if (registered) return this.redeploy(agentName);
+      }
+      this.log.error("Redeploy failed", { agentName, error: msg });
+      return { agentName, action: "error", detail: msg };
     }
   }
 
@@ -124,8 +131,14 @@ export class Deployer {
 
       return { agentName, action: "redeployed", detail: "Container restarted (pull on start)" };
     } catch (err) {
-      this.log.error("Restart failed", { agentName, error: err instanceof Error ? err.message : String(err) });
-      return { agentName, action: "error", detail: err instanceof Error ? err.message : String(err) };
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("not found") || msg.includes("404")) {
+        this.log.info("Agent not found on proxy, re-registering", { agentName });
+        const registered = await this.ensureRegistered(agentName);
+        if (registered) return this.restartAgent(agentName);
+      }
+      this.log.error("Restart failed", { agentName, error: msg });
+      return { agentName, action: "error", detail: msg };
     }
   }
 
@@ -274,6 +287,33 @@ export class Deployer {
     }
 
     return stale;
+  }
+
+  /**
+   * Re-register an agent with the proxy management API.
+   * Called when the proxy has lost its in-memory agent state (e.g. after restart).
+   */
+  private async ensureRegistered(agentName: string): Promise<boolean> {
+    const agent = this.config.agents[agentName];
+    if (!agent) return false;
+    try {
+      const proxyConfig: ProxyAgentConfig = {
+        name: agentName,
+        project: resolve(this.config.base_dir, agent.dir),
+        port: agent.docker?.port ?? 3460,
+        permissions: agent.docker?.permissions ?? "auto",
+        session: agent.docker?.session ?? "fresh",
+        sshKey: this.config.proxy.ssh_key,
+        ghToken: this.config.proxy.gh_token,
+        apiKey: agent.docker?.api_key ?? "",
+      };
+      await this.management.createAgent(proxyConfig);
+      this.log.info("Agent re-registered with proxy", { agentName });
+      return true;
+    } catch (err) {
+      this.log.error("Failed to re-register agent", { agentName, error: err instanceof Error ? err.message : String(err) });
+      return false;
+    }
   }
 
   /**
