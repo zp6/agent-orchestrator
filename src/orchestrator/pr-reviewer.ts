@@ -3,7 +3,7 @@ import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { Deployer } from "./deployer.js";
-import { extractIssueNumberFromBranch } from "./pr-creator.js";
+import { extractIssueNumberFromBranch, findMatchingIssueNumber } from "./pr-creator.js";
 
 export interface PRInfo {
   number: number;
@@ -79,7 +79,8 @@ export class PRReviewer {
       });
       // Try to auto-patch the PR body by inferring the issue number from the branch name,
       // rather than wasting a full review cycle dispatching feedback to the agent.
-      const inferredIssue = extractIssueNumberFromBranch(pr.branch);
+      // Uses all 3 tiers: direct branch parse → fuzzy title match → LLM disambiguation.
+      const inferredIssue = await findMatchingIssueNumber(repo, pr.branch, this.config);
       if (inferredIssue) {
         const patched = await this.patchPRBodyWithIssueRef(repo, prNumber, pr.body, inferredIssue);
         if (patched) {
@@ -100,13 +101,13 @@ export class PRReviewer {
           return result;
         }
       } else {
-        // Can't infer issue number from branch — give the agent actionable steps
+        // Can't infer issue number from branch even after fuzzy + LLM matching — give the agent actionable steps
         const result: PRReviewResult = {
           decision: "request-changes",
-          comment: `PR body is missing a "Closes #N" reference and the branch name \`${pr.branch}\` does not encode an issue number.\n\nFind the relevant issue:\n\`\`\`\ngh issue list --repo ${repo} --state open\n\`\`\`\n\nThen add the reference to the PR body:\n\`\`\`\ngh pr edit ${prNumber} --repo ${repo} --body "$(gh pr view ${prNumber} --repo ${repo} --json body -q .body)\n\nCloses #N"\n\`\`\`\n\nReplace \`N\` with the actual issue number before running.`,
-          reason: "PR body missing issue reference (Closes #N) — branch name gives no issue number",
+          comment: `PR body is missing a "Closes #N" reference and no matching open issue could be found for branch \`${pr.branch}\`.\n\nFind the relevant issue:\n\`\`\`\ngh issue list --repo ${repo} --state open\n\`\`\`\n\nThen add the reference to the PR body:\n\`\`\`\ngh pr edit ${prNumber} --repo ${repo} --body "$(gh pr view ${prNumber} --repo ${repo} --json body -q .body)\n\nCloses #N"\n\`\`\`\n\nReplace \`N\` with the actual issue number before running.`,
+          reason: "PR body missing issue reference (Closes #N) — could not infer from branch name, fuzzy match, or LLM",
         };
-        this.log.warn("PR body linter: missing issue ref, cannot infer from branch", {
+        this.log.warn("PR body linter: missing issue ref, cannot infer from branch (all 3 tiers failed)", {
           repo,
           prNumber,
           branch: pr.branch,

@@ -22,6 +22,10 @@ let mockPRViewResponse = JSON.stringify({
 
 let mockDiffResponse = "+added line\n-removed line";
 
+// Controls what gh issue list returns in the body-linter fuzzy-match path.
+// Default is an empty list so the linter can't infer an issue from fuzzy matching.
+let mockIssueListResponse = "[]";
+
 vi.mock("node:child_process", () => ({
   execSync: vi.fn().mockImplementation((cmd: string) => {
     if (cmd.includes("gh pr view")) {
@@ -29,6 +33,9 @@ vi.mock("node:child_process", () => ({
     }
     if (cmd.includes("gh pr diff")) {
       return mockDiffResponse;
+    }
+    if (cmd.includes("gh issue list")) {
+      return mockIssueListResponse;
     }
     if (cmd.includes("gh pr list")) {
       return JSON.stringify([
@@ -65,6 +72,7 @@ beforeEach(() => {
     mergeable: "MERGEABLE",
   });
   mockDiffResponse = "+added line\n-removed line";
+  mockIssueListResponse = "[]";
 });
 
 describe("PRReviewer", () => {
@@ -304,6 +312,69 @@ describe("PRReviewer", () => {
       // No agent title prefix AND no issue-N branch → treated as non-agent PR → approved by LLM
       expect(result.decision).toBe("approve");
       expect(mockCreate).toHaveBeenCalled();
+    });
+
+    it("auto-patches PR body via fuzzy match when branch name has no issue number but matches an open issue title", async () => {
+      // Branch "add-streaming-support" has no issue number embedded, but fuzzy matching
+      // should match open issue #57 "Add streaming support to API".
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Add streaming support",
+        body: "Implements streaming.",
+        author: { login: "agent" },
+        headRefName: "add-streaming-support",   // No issue-N prefix
+        changedFiles: 3,
+        mergeable: "MERGEABLE",
+      });
+      // Make gh issue list return a matching issue for fuzzy resolution
+      mockIssueListResponse = JSON.stringify([
+        { number: 57, title: "Add streaming support to API" },
+        { number: 99, title: "Fix unrelated caching bug" },
+      ]);
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Good", reason: "Clean" }) }],
+      });
+
+      const { execSync: mockExecSync } = await import("node:child_process");
+      const execSyncMock = vi.mocked(mockExecSync);
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      // Fuzzy match should find issue #57 → auto-patch → proceed to LLM review
+      expect(result.decision).toBe("approve");
+      expect(mockCreate).toHaveBeenCalled();
+
+      // Should have called gh pr edit to patch the body with Closes #57
+      const patchCall = execSyncMock.mock.calls.find(
+        (args) => typeof args[0] === "string" && args[0].includes("gh pr edit") && args[0].includes("--body"),
+      );
+      expect(patchCall).toBeDefined();
+      expect(patchCall![0]).toContain("Closes #57");
+    });
+
+    it("requests changes only after all 3 tiers fail — branch parse, fuzzy, and empty issue list", async () => {
+      // Branch "feature-branch" has no issue number and "feature" is a stop word,
+      // so fuzzy matching against an empty issue list also returns null.
+      // All 3 tiers fail → request-changes with actionable steps.
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Add feature",
+        body: "Some description without issue ref",
+        author: { login: "agent" },
+        headRefName: "feature-branch",
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+      // mockIssueListResponse defaults to "[]" — no issues to fuzzy match against
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("request-changes");
+      expect(result.comment).toContain("Closes #N");
+      expect(result.reason).toContain("could not infer from branch name, fuzzy match, or LLM");
+      expect(mockCreate).not.toHaveBeenCalled();
     });
 
     it("feedback message includes actionable gh commands when issue number cannot be inferred", async () => {
