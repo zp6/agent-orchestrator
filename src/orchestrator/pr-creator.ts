@@ -1,8 +1,10 @@
 import { execSync } from "node:child_process";
+import { join } from "node:path";
 import { createLogger } from "../service/logger.js";
 import { createLLMClient } from "../client/llm-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
-import { validatePreSubmit } from "./pre-submit-validator.js";
+import { validatePreSubmit, formatValidationSummary } from "./pre-submit-validator.js";
+import type { StateStore } from "../state/store.js";
 
 const log = createLogger("pr-creator");
 
@@ -229,25 +231,76 @@ export function findOrphanBranches(config: OrchestratorConfig): OrphanBranch[] {
   return orphans;
 }
 
+/**
+ * Resolve the local filesystem checkout path for an orphan branch's agent.
+ * Returns null if config is unavailable or the agent has no configured dir.
+ */
+function getLocalPathForAgent(orphan: OrphanBranch, config?: OrchestratorConfig): string | null {
+  if (!config?.base_dir) return null;
+  const agent = config.agents[orphan.agentName];
+  if (!agent?.dir) return null;
+  return join(config.base_dir, agent.dir);
+}
+
 export async function createPRForBranch(
   orphan: OrphanBranch,
   config?: OrchestratorConfig,
+  store?: StateStore,
 ): Promise<string | null> {
   try {
     const issueNumber = await findMatchingIssueNumber(orphan.repo, orphan.branch, config);
-    const body = issueNumber
+    let body = issueNumber
       ? `Auto-created by orchestrator for orphan branch.\n\nCloses #${issueNumber}`
       : "Auto-created by orchestrator for orphan branch.";
 
-    // Pre-submit validation: ensure issue ref and branch freshness before posting.
-    // We pass null for localPath here since orphan PR creation is remote-only.
-    const validation = await validatePreSubmit(
+    // Resolve local path so validatePreSubmit can use local git fallbacks for
+    // conflict and freshness detection when the GitHub API is unavailable.
+    const localPath = getLocalPathForAgent(orphan, config);
+
+    // Pre-submit validation: ensure issue ref, branch freshness, no conflicts, and no duplicate PR.
+    let validation = await validatePreSubmit(
       orphan.repo,
       orphan.branch,
       body,
-      null,
+      localPath,
       config,
     );
+
+    // Auto-fix: if the only blocker is a missing issue ref AND we can infer the issue
+    // number from the branch name, patch the body with "Closes #N" and re-validate.
+    // This avoids dropping branches that could be auto-linked.
+    if (
+      !validation.valid &&
+      validation.inferredIssueNumber &&
+      !validation.checks.issueRef.passed &&
+      validation.blockers.length === 1
+    ) {
+      const patchedBody = `Auto-created by orchestrator for orphan branch.\n\nCloses #${validation.inferredIssueNumber}`;
+      log.info("Auto-fixing missing issue ref in orphan PR body", {
+        repo: orphan.repo,
+        branch: orphan.branch,
+        issueNumber: validation.inferredIssueNumber,
+      });
+      body = patchedBody;
+      validation = await validatePreSubmit(orphan.repo, orphan.branch, body, localPath, config);
+    }
+
+    // Log validation results to task_logs so the audit trail is visible in
+    // `orch status` output for the associated task.
+    if (store) {
+      const resolvedIssue = issueNumber ?? validation.inferredIssueNumber;
+      const task = resolvedIssue
+        ? store.findTaskByIssueRef(orphan.repo, resolvedIssue)
+        : undefined;
+      if (task) {
+        store.addLog({
+          task_id: task.id,
+          direction: "system",
+          agent_name: orphan.agentName,
+          content: `[pre-submit] ${formatValidationSummary(validation)}`,
+        });
+      }
+    }
 
     if (!validation.valid) {
       log.warn("Pre-submit validation failed for orphan branch PR — skipping PR creation", {

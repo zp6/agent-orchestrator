@@ -608,6 +608,19 @@ export class StateStore {
     ).all(limit) as TaskLog[];
   }
 
+  /**
+   * Find the most recent task for a given GitHub issue, matched by source_ref
+   * which is stored as "{repo}#{issueNumber}" for GitHub-sourced tasks.
+   * Returns undefined when no matching task exists.
+   */
+  findTaskByIssueRef(repo: string, issueNumber: string): Task | undefined {
+    return this.db
+      .prepare(
+        "SELECT * FROM tasks WHERE source = 'github' AND source_ref = ? ORDER BY created_at DESC LIMIT 1",
+      )
+      .get(`${repo}#${issueNumber}`) as Task | undefined;
+  }
+
   getRecentCompleted(limit = 20): Task[] {
     return this.db.prepare(
       "SELECT * FROM tasks WHERE status = 'done' AND parent_task_id IS NULL ORDER BY created_at DESC LIMIT ?",

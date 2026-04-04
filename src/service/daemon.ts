@@ -486,8 +486,8 @@ export class Daemon {
       const orphans = findOrphanBranches(this.config);
       for (const orphan of orphans) {
         console.log(`[${time}] Orphan branch: ${orphan.repo}/${orphan.branch} — creating PR`);
-        // Pass config so issue resolution can use fuzzy matching + LLM disambiguation
-        await createPRForBranch(orphan, this.config);
+        // Pass config (for issue resolution + local path detection) and store (for task_logs)
+        await createPRForBranch(orphan, this.config, this.store);
       }
     } catch (err) {
       console.error(`[${time}] Orphan branch check failed: ${err instanceof Error ? err.message : err}`);

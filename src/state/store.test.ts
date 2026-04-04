@@ -123,6 +123,55 @@ describe("StateStore", () => {
     });
   });
 
+  describe("findTaskByIssueRef", () => {
+    it("finds a task by repo and issue number", () => {
+      const t = store.createTask({
+        title: "Fix bug",
+        source: "github",
+        source_ref: "owner/repo#42",
+      });
+
+      const found = store.findTaskByIssueRef("owner/repo", "42");
+      expect(found).toBeDefined();
+      expect(found!.id).toBe(t.id);
+    });
+
+    it("returns undefined when no matching task exists", () => {
+      const found = store.findTaskByIssueRef("owner/repo", "999");
+      expect(found).toBeUndefined();
+    });
+
+    it("returns undefined for non-github tasks with matching source_ref pattern", () => {
+      store.createTask({
+        title: "Manual task",
+        source: "manual",
+        source_ref: "owner/repo#77",
+      });
+
+      const found = store.findTaskByIssueRef("owner/repo", "77");
+      // source is 'manual', not 'github' — should not be found
+      expect(found).toBeUndefined();
+    });
+
+    it("returns a task when multiple tasks match the same issue ref", () => {
+      store.createTask({
+        title: "First task",
+        source: "github",
+        source_ref: "owner/repo#10",
+      });
+      store.createTask({
+        title: "Second task",
+        source: "github",
+        source_ref: "owner/repo#10",
+      });
+
+      const found = store.findTaskByIssueRef("owner/repo", "10");
+      // Both tasks match — we only care that one is returned
+      expect(found).toBeDefined();
+      expect(found!.source_ref).toBe("owner/repo#10");
+    });
+  });
+
   describe("hasActiveTask", () => {
     it("returns false when agent has no tasks", () => {
       expect(store.hasActiveTask("some-agent")).toBe(false);

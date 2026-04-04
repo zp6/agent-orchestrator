@@ -294,4 +294,136 @@ describe("createPRForBranch", () => {
 
     expect(findPrCreateCall()).toContain("Closes #134");
   });
+
+  it("auto-fixes body with Closes #N when initial lookup fails but validateIssueRef infers the issue", async () => {
+    // findMatchingIssueNumber (before validation): gh issue list → empty → null
+    mockExecSync.mockReturnValueOnce("[]");
+    // validateIssueRef internally calls findMatchingIssueNumber: gh issue list → issue 55
+    mockExecSync.mockReturnValueOnce(JSON.stringify([{ number: 55, title: "Add new widget feature" }]));
+    // validateBranchFreshness (first validation): 0 behind
+    mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists (first validation): no PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts (first validation): ahead (no conflicts)
+    mockExecSync.mockReturnValueOnce("ahead\n");
+    // validateBranchFreshness (second validation after auto-fix): 0 behind
+    mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists (second validation): no PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts (second validation): ahead (no conflicts)
+    mockExecSync.mockReturnValueOnce("ahead\n");
+    // gh pr create
+    mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/30\n");
+
+    const branchOrphan: OrphanBranch = { ...orphan, branch: "new-widget-feature" };
+    const url = await createPRForBranch(branchOrphan);
+
+    expect(url).toBe("https://github.com/owner/repo/pull/30");
+    expect(findPrCreateCall()).toContain("Closes #55");
+  });
+
+  it("does not auto-fix when multiple blockers are present (not just missing issue ref)", async () => {
+    // findMatchingIssueNumber: empty → null
+    mockExecSync.mockReturnValueOnce("[]");
+    // validateIssueRef → findMatchingIssueNumber: returns issue 55
+    mockExecSync.mockReturnValueOnce(JSON.stringify([{ number: 55, title: "Add new widget feature" }]));
+    // validateBranchFreshness: 3 commits behind (second blocker)
+    mockExecSync.mockReturnValueOnce("3\n");
+    // validatePRExists: no PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts: no conflicts
+    mockExecSync.mockReturnValueOnce("ahead\n");
+
+    const branchOrphan: OrphanBranch = { ...orphan, branch: "new-widget-feature" };
+    const result = await createPRForBranch(branchOrphan);
+
+    // Two blockers (issue ref + stale branch) → no auto-fix, PR skipped
+    expect(result).toBeNull();
+    expect(findPrCreateCall()).toBeUndefined();
+  });
+
+  it("logs validation result to task_logs when store has a matching task", async () => {
+    // validateBranchFreshness: gh api compare → 0 behind
+    mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists: gh pr list → no existing PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts: gh api compare → ahead (no conflicts)
+    mockExecSync.mockReturnValueOnce("ahead\n");
+    // gh pr create
+    mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/40\n");
+
+    const mockStore = {
+      findTaskByIssueRef: vi.fn().mockReturnValue({ id: "task-123" }),
+      addLog: vi.fn(),
+    };
+
+    await createPRForBranch(orphan, undefined, mockStore as never);
+
+    expect(mockStore.findTaskByIssueRef).toHaveBeenCalledWith("owner/repo", "105");
+    expect(mockStore.addLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        task_id: "task-123",
+        direction: "system",
+        agent_name: "agent-a",
+        content: expect.stringContaining("pre-submit"),
+      }),
+    );
+  });
+
+  it("skips task_logs logging when store has no matching task", async () => {
+    // validateBranchFreshness: gh api compare → 0 behind
+    mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists: gh pr list → no existing PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts: gh api compare → ahead (no conflicts)
+    mockExecSync.mockReturnValueOnce("ahead\n");
+    // gh pr create
+    mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/41\n");
+
+    const mockStore = {
+      findTaskByIssueRef: vi.fn().mockReturnValue(undefined),
+      addLog: vi.fn(),
+    };
+
+    const url = await createPRForBranch(orphan, undefined, mockStore as never);
+
+    // PR should still be created even without a matching task
+    expect(url).toBe("https://github.com/owner/repo/pull/41");
+    expect(mockStore.addLog).not.toHaveBeenCalled();
+  });
+
+  it("uses local path from config for validation when agent dir is configured", async () => {
+    const configWithDir = {
+      agents: {
+        "agent-a": {
+          dir: "my-repo",
+          github: "owner/repo",
+        },
+      },
+      base_dir: "/tmp/repos",
+      orchestrator_dir: "/tmp/orch",
+      proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 30000 },
+    } as never;
+
+    // validateBranchFreshness: gh api compare → API fails, falls back to local git
+    mockExecSync.mockImplementationOnce(() => { throw new Error("API error"); });
+    // git fetch (local fallback for freshness)
+    mockExecSync.mockReturnValueOnce("");
+    // git rev-list (local: 0 behind)
+    mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists: no existing PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts: gh api compare → ahead
+    mockExecSync.mockReturnValueOnce("ahead\n");
+    // gh pr create
+    mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/50\n");
+
+    const url = await createPRForBranch(orphan, configWithDir);
+
+    expect(url).toBe("https://github.com/owner/repo/pull/50");
+    // Verify that git fetch was called (proves localPath was used as fallback)
+    const gitFetchCall = (mockExecSync.mock.calls as Array<[string, unknown]>)
+      .find(([cmd]) => typeof cmd === "string" && cmd.includes("git fetch"));
+    expect(gitFetchCall).toBeDefined();
+  });
 });
