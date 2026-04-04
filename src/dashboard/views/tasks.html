@@ -81,7 +81,7 @@
       if (agent) params.set('agent', agent);
       params.set('limit', '50');
 
-      const res = await fetch('/api/tasks?' + params);
+      const res = await fetch('/api/tasks?' + params, { credentials: 'same-origin' });
       allTasks = await res.json();
       renderTasks();
     }
@@ -113,7 +113,7 @@
     }
 
     async function showDetail(id) {
-      const res = await fetch('/api/tasks/' + id);
+      const res = await fetch('/api/tasks/' + id, { credentials: 'same-origin' });
       const data = await res.json();
       const panel = document.getElementById('detail-panel');
       panel.style.display = 'block';
@@ -174,7 +174,7 @@
     }
 
     // Load agents for filter
-    fetch('/api/agents').then(r => r.json()).then(agents => {
+    fetch('/api/agents', { credentials: 'same-origin' }).then(r => r.json()).then(agents => {
       const sel = document.getElementById('filter-agent');
       agents.forEach(a => {
         const opt = document.createElement('option');

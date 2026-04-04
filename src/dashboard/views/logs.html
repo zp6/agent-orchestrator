@@ -70,7 +70,7 @@
     }
 
     async function load() {
-      const res = await fetch('/api/logs');
+      const res = await fetch('/api/logs', { credentials: 'same-origin' });
       allLines = await res.json();
       render();
     }

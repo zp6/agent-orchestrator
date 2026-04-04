@@ -94,7 +94,7 @@
   <script>
     async function refresh() {
       try {
-        const res = await fetch('/api/dashboard');
+        const res = await fetch('/api/dashboard', { credentials: 'same-origin' });
         const data = await res.json();
 
         // Stats

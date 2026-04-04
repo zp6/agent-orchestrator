@@ -50,7 +50,7 @@
     const filterAgent = document.getElementById('filter-agent');
 
     async function load() {
-      const res = await fetch('/api/activity?limit=100');
+      const res = await fetch('/api/activity?limit=100', { credentials: 'same-origin' });
       allActivity = await res.json();
 
       // Populate agent filter

@@ -33,7 +33,7 @@
 
   <script>
     async function load() {
-      const res = await fetch('/api/agents');
+      const res = await fetch('/api/agents', { credentials: 'same-origin' });
       const agents = await res.json();
       const grid = document.getElementById('agent-grid');
 
