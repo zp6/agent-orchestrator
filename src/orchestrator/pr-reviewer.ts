@@ -60,9 +60,14 @@ export class PRReviewer {
     const pr = this.fetchPRInfo(repo, prNumber);
     this.log.info("Reviewing PR", { repo, prNumber, title: pr.title, filesChanged: pr.files_changed, mergeable: pr.mergeable });
 
-    // Short-circuit: if PR has merge conflicts, attempt auto-rebase before giving up
+    // Pre-review rebase: attempt to keep the branch current with origin/main before evaluating
+    // code quality. This covers two scenarios:
+    //   1. CONFLICTING — the branch has actual merge conflicts; rebase or escalate.
+    //   2. MERGEABLE/UNKNOWN — the branch may be stale (behind main); proactively rebase so
+    //      reviews reflect the current codebase. Best-effort: always continue to review.
+    const localPath = this.findLocalRepoPath(repo);
+
     if (pr.mergeable === "CONFLICTING") {
-      const localPath = this.findLocalRepoPath(repo);
       if (localPath) {
         this.log.info("PR has merge conflicts, attempting auto-rebase", {
           repo,
@@ -107,6 +112,17 @@ export class PRReviewer {
         await this.executeDecision(repo, prNumber, result);
         return result;
       }
+    } else if (localPath) {
+      // Proactive rebase for stale branches (behind main but not yet CONFLICTING).
+      // This prevents slow accumulation of lag that eventually causes conflicts.
+      // Always continue to review regardless of outcome — this is best-effort.
+      const rebaseOutcome = this.tryAutoRebase(localPath, pr.branch);
+      this.log.info("Proactive pre-review rebase", {
+        repo,
+        prNumber,
+        branch: pr.branch,
+        outcome: rebaseOutcome,
+      });
     }
 
     // PR body linter: agent PRs must include "Closes #N"
@@ -434,9 +450,12 @@ export class PRReviewer {
   /**
    * Attempt to rebase the given branch onto origin/main in a local repo directory.
    * Saves and restores the current branch regardless of outcome.
-   * Returns 'success' if the rebase + push succeeded, 'failed' otherwise.
+   * Returns:
+   *   'up-to-date' — branch was already current with origin/main, nothing to do
+   *   'success'    — rebase completed and changes were pushed
+   *   'failed'     — rebase had conflicts or another git error prevented completion
    */
-  private tryAutoRebase(localPath: string, branch: string): "success" | "failed" {
+  private tryAutoRebase(localPath: string, branch: string): "success" | "up-to-date" | "failed" {
     let currentBranch = "main";
     try {
       currentBranch =
@@ -450,7 +469,15 @@ export class PRReviewer {
       execSync(`git checkout ${branch}`, { cwd: localPath, encoding: "utf-8", timeout: 15000 });
 
       try {
-        execSync("git rebase origin/main", { cwd: localPath, encoding: "utf-8", timeout: 60000 });
+        const rebaseOutput = execSync("git rebase origin/main", {
+          cwd: localPath,
+          encoding: "utf-8",
+          timeout: 60000,
+        });
+        // Git prints "Current branch <name> is up to date." when nothing to rebase.
+        if (rebaseOutput.includes("is up to date")) {
+          return "up-to-date";
+        }
         execSync(`git push --force-with-lease origin ${branch}`, {
           cwd: localPath,
           encoding: "utf-8",

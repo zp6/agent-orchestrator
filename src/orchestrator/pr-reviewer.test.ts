@@ -352,6 +352,185 @@ describe("PRReviewer", () => {
       expect(result.reason).toContain("no local repo");
       expect(mockCreate).not.toHaveBeenCalled();
     });
+
+    it("proactively rebases MERGEABLE branch that is behind main, then continues to LLM review", async () => {
+      // PR is MERGEABLE (not CONFLICTING) but the branch is behind main.
+      // Auto-rebase should run, succeed, and review should proceed normally.
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Add feature",
+        body: "Implements feature.\n\nCloses #5",
+        author: { login: "agent" },
+        headRefName: "issue-5-add-feature",
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({
+          decision: "approve",
+          comment: "Clean implementation.",
+          reason: "Correct and well-structured",
+        })}],
+      });
+
+      const { execSync: mockExecSync } = await import("node:child_process");
+      const execSyncMock = vi.mocked(mockExecSync);
+      // Mock git rebase to return a rebase-happened output (not "up to date")
+      execSyncMock.mockImplementation((cmd: string) => {
+        if (cmd.includes("git rebase origin/main")) return "Successfully rebased and updated refs/heads/issue-5-add-feature.\n";
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
+        if (cmd.includes("gh pr view")) return mockPRViewResponse;
+        if (cmd.includes("gh pr diff")) return mockDiffResponse;
+        if (cmd.includes("gh issue list")) return mockIssueListResponse;
+        if (cmd.includes("gh api") && cmd.includes("comments")) return "0\n";
+        if (cmd.includes("gh pr list")) return JSON.stringify([{ number: 9, title: "[agent-a] Add feature", body: "Closes #5" }]);
+        return "";
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      // Proactive rebase succeeded → LLM review ran → approved
+      expect(result.decision).toBe("approve");
+      expect(mockCreate).toHaveBeenCalled();
+
+      // Verify git rebase was called (proactive path)
+      const rebaseCall = execSyncMock.mock.calls.find(
+        (args) => typeof args[0] === "string" && args[0].includes("git rebase origin/main"),
+      );
+      expect(rebaseCall).toBeDefined();
+    });
+
+    it("skips proactive rebase when no local repo path is found, and still reviews normally", async () => {
+      // PR on a repo not in config — no local path → skip proactive rebase, go straight to review
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "External PR",
+        body: "Some changes.\n\nCloses #1",
+        author: { login: "human" },
+        headRefName: "feature-branch",
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({
+          decision: "approve",
+          comment: "Looks fine.",
+          reason: "Clean",
+        })}],
+      });
+
+      const { execSync: mockExecSync } = await import("node:child_process");
+      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
+        if (cmd.includes("gh pr view")) return mockPRViewResponse;
+        if (cmd.includes("gh pr diff")) return mockDiffResponse;
+        if (cmd.includes("gh issue list")) return mockIssueListResponse;
+        if (cmd.includes("gh api") && cmd.includes("comments")) return "0\n";
+        if (cmd.includes("gh pr list")) return JSON.stringify([]);
+        return "";
+      });
+
+      const reviewer = new PRReviewer(config);
+      // "unknown/external" has no local path in config
+      const result = await reviewer.reviewPR("unknown/external", 9);
+
+      expect(result.decision).toBe("approve");
+      expect(mockCreate).toHaveBeenCalled();
+
+      // git rebase should NOT have been called (no local path)
+      const rebaseCall = vi.mocked(mockExecSync).mock.calls.find(
+        (args) => typeof args[0] === "string" && args[0].includes("git rebase"),
+      );
+      expect(rebaseCall).toBeUndefined();
+    });
+
+    it("continues to review even when proactive rebase fails on a MERGEABLE PR", async () => {
+      // PR is MERGEABLE but proactive rebase fails (e.g., network error on git fetch).
+      // Review should still proceed — proactive rebase is best-effort only.
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Fix bug",
+        body: "Fixes bug.\n\nCloses #7",
+        author: { login: "agent" },
+        headRefName: "issue-7-fix-bug",
+        changedFiles: 1,
+        mergeable: "MERGEABLE",
+      });
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({
+          decision: "approve",
+          comment: "Bug is fixed.",
+          reason: "Correct fix",
+        })}],
+      });
+
+      const { execSync: mockExecSync } = await import("node:child_process");
+      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+        if (cmd.includes("git fetch origin")) throw new Error("network error");
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
+        if (cmd.includes("gh pr view")) return mockPRViewResponse;
+        if (cmd.includes("gh pr diff")) return mockDiffResponse;
+        if (cmd.includes("gh issue list")) return mockIssueListResponse;
+        if (cmd.includes("gh api") && cmd.includes("comments")) return "0\n";
+        if (cmd.includes("gh pr list")) return JSON.stringify([{ number: 9, title: "[agent-a] Fix bug", body: "Closes #7" }]);
+        return "";
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      // Proactive rebase failed but review should still proceed (best-effort)
+      expect(result.decision).toBe("approve");
+      expect(mockCreate).toHaveBeenCalled();
+    });
+
+    it("tryAutoRebase returns up-to-date when branch is already current with main", async () => {
+      // Verify that "up to date" output from git rebase is classified as up-to-date (not success)
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Add feature",
+        body: "Feature.\n\nCloses #3",
+        author: { login: "agent" },
+        headRefName: "issue-3-add-feature",
+        changedFiles: 1,
+        mergeable: "MERGEABLE",
+      });
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({
+          decision: "approve",
+          comment: "Looks good.",
+          reason: "Clean",
+        })}],
+      });
+
+      const { execSync: mockExecSync } = await import("node:child_process");
+      const execSyncMock = vi.mocked(mockExecSync);
+      execSyncMock.mockImplementation((cmd: string) => {
+        // Simulate git rebase reporting branch is already up to date
+        if (cmd.includes("git rebase origin/main")) return "Current branch issue-3-add-feature is up to date.\n";
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
+        if (cmd.includes("gh pr view")) return mockPRViewResponse;
+        if (cmd.includes("gh pr diff")) return mockDiffResponse;
+        if (cmd.includes("gh issue list")) return mockIssueListResponse;
+        if (cmd.includes("gh api") && cmd.includes("comments")) return "0\n";
+        if (cmd.includes("gh pr list")) return JSON.stringify([{ number: 9, title: "[agent-a] Add feature", body: "Closes #3" }]);
+        return "";
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      // Up-to-date → no push needed → review proceeds
+      expect(result.decision).toBe("approve");
+      expect(mockCreate).toHaveBeenCalled();
+
+      // git push should NOT have been called (nothing to push when up-to-date)
+      const pushCall = execSyncMock.mock.calls.find(
+        (args) => typeof args[0] === "string" && args[0].includes("git push"),
+      );
+      expect(pushCall).toBeUndefined();
+    });
   });
 
   describe("PR body linter", () => {
