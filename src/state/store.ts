@@ -118,6 +118,28 @@ export interface ScoreTrend {
 }
 
 /** Per-agent productivity metrics for a rolling time window */
+/** Per-agent retry statistics for a given time window. */
+export interface AgentRetryMetrics {
+  agent_name: string;
+  /** Number of distinct tasks that were retried at least once in the window. */
+  retried_tasks: number;
+  /** Sum of all retry attempts across those tasks. */
+  total_retries: number;
+  /** Tasks whose retry budget was exhausted (failed permanently after max retries). */
+  exhausted_budget: number;
+  /** Tasks currently waiting in backoff before their next retry attempt. */
+  waiting_retry: number;
+}
+
+/** System-wide retry health snapshot. */
+export interface RetryMetrics {
+  per_agent: AgentRetryMetrics[];
+  /** Total tasks currently waiting for a retry across all agents. */
+  total_waiting: number;
+  /** Total tasks that exhausted their retry budget in the window. */
+  total_exhausted: number;
+}
+
 export interface WindowedAgentMetrics {
   agent_name: string;
   /** Total top-level tasks in the window */
@@ -1163,6 +1185,63 @@ export class StateStore {
         "SELECT * FROM supervisor_decisions ORDER BY created_at DESC LIMIT ?",
       )
       .all(limit) as SupervisorDecisionRecord[];
+  }
+
+  /**
+   * Return retry health metrics for the last `hours` hours.
+   *
+   * "Retried" tasks are those whose `retry_count > 0` and which were last
+   * updated within the window (i.e. they timed out and a retry was scheduled
+   * or executed during the window).
+   *
+   * "Exhausted" tasks are those that timed out and ran out of retry budget
+   * (`retry_count > 0`, `next_retry_at IS NULL`, `status = 'failed'`).
+   *
+   * "Waiting" tasks are those currently parked in backoff
+   * (`next_retry_at > now`, `status = 'failed'`).
+   */
+  getRetryMetrics(hours = 24): RetryMetrics {
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    const now = new Date().toISOString();
+
+    // Per-agent breakdown for tasks touched (retried) within the window.
+    const rows = this.db.prepare(`
+      SELECT
+        agent_name,
+        COUNT(*) AS retried_tasks,
+        SUM(retry_count) AS total_retries,
+        COALESCE(SUM(CASE WHEN status = 'failed' AND next_retry_at IS NULL THEN 1 ELSE 0 END), 0) AS exhausted_budget,
+        COALESCE(SUM(CASE WHEN next_retry_at IS NOT NULL AND next_retry_at > ? THEN 1 ELSE 0 END), 0) AS waiting_retry
+      FROM tasks
+      WHERE updated_at >= ?
+        AND parent_task_id IS NULL
+        AND retry_count > 0
+        AND agent_name IS NOT NULL
+      GROUP BY agent_name
+      ORDER BY total_retries DESC
+    `).all(now, since) as Array<{
+      agent_name: string;
+      retried_tasks: number;
+      total_retries: number;
+      exhausted_budget: number;
+      waiting_retry: number;
+    }>;
+
+    // System-wide count of tasks currently parked in backoff (may include
+    // tasks whose first timeout happened before the window).
+    const waitingRow = this.db.prepare(`
+      SELECT COUNT(*) AS cnt FROM tasks
+      WHERE status = 'failed' AND next_retry_at IS NOT NULL AND next_retry_at > ?
+    `).get(now) as { cnt: number };
+
+    const total_waiting = waitingRow.cnt;
+    const total_exhausted = rows.reduce((sum, r) => sum + r.exhausted_budget, 0);
+
+    return {
+      per_agent: rows,
+      total_waiting,
+      total_exhausted,
+    };
   }
 
   close(): void {

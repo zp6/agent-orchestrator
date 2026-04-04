@@ -1377,4 +1377,133 @@ describe("StateStore", () => {
       expect(["improving", "stable", "declining", "insufficient_data"]).toContain(row.trend);
     });
   });
+
+  describe("getRetryMetrics", () => {
+    it("returns zeros when no tasks have been retried", () => {
+      const metrics = store.getRetryMetrics(24);
+      expect(metrics.per_agent).toHaveLength(0);
+      expect(metrics.total_waiting).toBe(0);
+      expect(metrics.total_exhausted).toBe(0);
+    });
+
+    it("counts a retried (waiting) task correctly", () => {
+      const futureRetryAt = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+      const task = store.createTask({ title: "Timed out task", source: "manual", agent_name: "alpha" });
+      store.updateTask(task.id, {
+        status: "failed",
+        retry_count: 1,
+        next_retry_at: futureRetryAt,
+      });
+
+      const metrics = store.getRetryMetrics(24);
+      expect(metrics.total_waiting).toBe(1);
+      expect(metrics.total_exhausted).toBe(0);
+
+      const agentRow = metrics.per_agent.find((a) => a.agent_name === "alpha");
+      expect(agentRow).toBeDefined();
+      expect(agentRow!.retried_tasks).toBe(1);
+      expect(agentRow!.total_retries).toBe(1);
+      expect(agentRow!.waiting_retry).toBe(1);
+      expect(agentRow!.exhausted_budget).toBe(0);
+    });
+
+    it("counts exhausted budget tasks correctly", () => {
+      const task = store.createTask({ title: "Exhausted task", source: "manual", agent_name: "beta" });
+      store.updateTask(task.id, {
+        status: "failed",
+        retry_count: 2,
+        next_retry_at: null,
+      });
+
+      const metrics = store.getRetryMetrics(24);
+      expect(metrics.total_exhausted).toBe(1);
+
+      const agentRow = metrics.per_agent.find((a) => a.agent_name === "beta");
+      expect(agentRow).toBeDefined();
+      expect(agentRow!.exhausted_budget).toBe(1);
+      expect(agentRow!.waiting_retry).toBe(0);
+    });
+
+    it("aggregates multiple tasks per agent", () => {
+      const futureRetryAt = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+
+      // 2 exhausted tasks
+      for (let i = 0; i < 2; i++) {
+        const t = store.createTask({ title: `Exhausted ${i}`, source: "manual", agent_name: "gamma" });
+        store.updateTask(t.id, { status: "failed", retry_count: 2, next_retry_at: null });
+      }
+      // 1 waiting task
+      const waiting = store.createTask({ title: "Waiting", source: "manual", agent_name: "gamma" });
+      store.updateTask(waiting.id, { status: "failed", retry_count: 1, next_retry_at: futureRetryAt });
+
+      const metrics = store.getRetryMetrics(24);
+      const agentRow = metrics.per_agent.find((a) => a.agent_name === "gamma");
+      expect(agentRow).toBeDefined();
+      expect(agentRow!.retried_tasks).toBe(3);
+      expect(agentRow!.total_retries).toBe(5); // 2+2+1
+      expect(agentRow!.exhausted_budget).toBe(2);
+      expect(agentRow!.waiting_retry).toBe(1);
+      expect(metrics.total_waiting).toBe(1);
+      expect(metrics.total_exhausted).toBe(2);
+    });
+
+    it("separates metrics by agent", () => {
+      const futureRetryAt = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+      const t1 = store.createTask({ title: "Agent-A task", source: "manual", agent_name: "agent-a" });
+      store.updateTask(t1.id, { status: "failed", retry_count: 1, next_retry_at: futureRetryAt });
+      const t2 = store.createTask({ title: "Agent-B task", source: "manual", agent_name: "agent-b" });
+      store.updateTask(t2.id, { status: "failed", retry_count: 2, next_retry_at: null });
+
+      const metrics = store.getRetryMetrics(24);
+      const aRow = metrics.per_agent.find((a) => a.agent_name === "agent-a");
+      const bRow = metrics.per_agent.find((a) => a.agent_name === "agent-b");
+      expect(aRow!.waiting_retry).toBe(1);
+      expect(aRow!.exhausted_budget).toBe(0);
+      expect(bRow!.waiting_retry).toBe(0);
+      expect(bRow!.exhausted_budget).toBe(1);
+      expect(metrics.total_waiting).toBe(1);
+      expect(metrics.total_exhausted).toBe(1);
+    });
+
+    it("does not count tasks with retry_count = 0", () => {
+      const t = store.createTask({ title: "Never retried", source: "manual", agent_name: "delta" });
+      store.updateTask(t.id, { status: "failed", retry_count: 0, next_retry_at: null });
+
+      const metrics = store.getRetryMetrics(24);
+      const agentRow = metrics.per_agent.find((a) => a.agent_name === "delta");
+      expect(agentRow).toBeUndefined();
+    });
+
+    it("does not count sub-tasks (parent_task_id is set)", () => {
+      const parent = store.createTask({ title: "Parent", source: "manual", agent_name: "epsilon" });
+      const child = store.createSubTask({
+        parent_task_id: parent.id,
+        step_id: "step-1",
+        title: "Child",
+        description: "child task",
+        source: "manual",
+        agent_name: "epsilon",
+      });
+      store.updateTask(child.id, { status: "failed", retry_count: 2, next_retry_at: null });
+
+      const metrics = store.getRetryMetrics(24);
+      const agentRow = metrics.per_agent.find((a) => a.agent_name === "epsilon");
+      expect(agentRow).toBeUndefined(); // sub-tasks excluded
+    });
+
+    it("does not count already-elapsed retry tasks as 'waiting'", () => {
+      const pastRetryAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+      const t = store.createTask({ title: "Overdue retry", source: "manual", agent_name: "zeta" });
+      store.updateTask(t.id, { status: "failed", retry_count: 1, next_retry_at: pastRetryAt });
+
+      const metrics = store.getRetryMetrics(24);
+      // Task still appears in per_agent (it has retry_count > 0 and was updated in window)
+      const agentRow = metrics.per_agent.find((a) => a.agent_name === "zeta");
+      expect(agentRow).toBeDefined();
+      // But next_retry_at is in the past so it's not "waiting"
+      expect(agentRow!.waiting_retry).toBe(0);
+      // And total_waiting uses a separate query with next_retry_at > now
+      expect(metrics.total_waiting).toBe(0);
+    });
+  });
 });
