@@ -1,7 +1,8 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { StateStore, type Task, type SystemMetrics, type ScoreDistribution, type ScoreTrend, type MetricsTrend, type PRMetrics } from "../../state/store.js";
+import { StateStore, type Task, type SystemMetrics, type ScoreDistribution, type ScoreTrend, type MetricsTrend, type PRMetrics, type RetryMetrics } from "../../state/store.js";
 import { loadConfig } from "../../config/schema.js";
+import { MAX_RETRIES } from "../../orchestrator/dispatcher.js";
 
 const STATUS_COLORS: Record<string, (s: string) => string> = {
   pending: chalk.yellow,
@@ -27,6 +28,40 @@ export function formatSourceLabel(task: Task): string {
   return `${task.source}${task.source_ref ? ` (${task.source_ref})` : ""}`;
 }
 
+/**
+ * Format retry state for a task as a human-readable string, or empty string
+ * if the task has never been retried and has no pending retry.
+ *
+ * Examples:
+ *   "retry 1/3 — next attempt in 47s"   (task in backoff)
+ *   "retry 2/3 — next attempt imminently" (backoff window has passed but not yet picked up)
+ *   "retry 1/3 (active)"                 (retry attempt currently in-flight)
+ *
+ * Exported for testing.
+ */
+export function formatRetryState(task: Task): string {
+  if (task.retry_count === 0 && task.next_retry_at === null) return "";
+
+  // Task is in backoff: failed and waiting for the next retry attempt.
+  if (task.status === "failed" && task.next_retry_at !== null) {
+    const secsUntil = Math.round((new Date(task.next_retry_at).getTime() - Date.now()) / 1000);
+    const timeStr = secsUntil > 0 ? `in ${secsUntil}s` : "imminently";
+    return `retry ${task.retry_count}/${MAX_RETRIES} — next attempt ${timeStr}`;
+  }
+
+  // Task is being retried right now (dispatched/in_progress with retry_count > 0).
+  if (task.retry_count > 0 && (task.status === "dispatched" || task.status === "in_progress")) {
+    return `retry ${task.retry_count}/${MAX_RETRIES} (active)`;
+  }
+
+  // retry_count > 0 but exhausted budget (permanently failed, no next_retry_at).
+  if (task.retry_count > 0 && task.status === "failed" && task.next_retry_at === null) {
+    return `${task.retry_count}/${MAX_RETRIES} retries exhausted`;
+  }
+
+  return "";
+}
+
 function formatTask(task: Task, verbose = false): string {
   const colorFn = STATUS_COLORS[task.status] ?? chalk.white;
   const status = colorFn(task.status.padEnd(12));
@@ -42,11 +77,17 @@ function formatTask(task: Task, verbose = false): string {
       ? `${chalk.magenta("[pr-feedback]")} ${chalk.cyan(task.source_ref)} — ${task.title}`
       : `${typeTag}${task.title}`;
 
-  let output = `${chalk.dim(task.id.slice(0, 8))} ${status} ${agent.padEnd(30)} ${displayTitle}`;
+  const retryState = formatRetryState(task);
+  const retryBadge = retryState ? chalk.yellow(` ⟳ ${retryState}`) : "";
+
+  let output = `${chalk.dim(task.id.slice(0, 8))} ${status} ${agent.padEnd(30)} ${displayTitle}${retryBadge}`;
 
   if (verbose) {
     output += `\n  ${chalk.dim("Created:")} ${time}`;
     output += `\n  ${chalk.dim("Source:")}  ${formatSourceLabel(task)}`;
+    if (retryState) {
+      output += `\n  ${chalk.dim("Retry:")}   ${chalk.yellow(retryState)}`;
+    }
     if (task.result) {
       const preview = task.result.length > 200 ? task.result.slice(0, 200) + "..." : task.result;
       output += `\n  ${chalk.dim("Result:")}  ${preview}`;
@@ -195,6 +236,38 @@ function formatCycleTime(ms: number | null): string {
 }
 
 /**
+ * Render the Retry Health section: tasks in backoff, exhausted budgets, per-agent breakdown.
+ */
+function printRetryMetrics(retry: RetryMetrics): void {
+  console.log(chalk.bold("\nRetry Health"));
+
+  if (retry.total_waiting === 0 && retry.total_exhausted === 0 && retry.per_agent.length === 0) {
+    console.log(chalk.dim("  No retries recorded in the last 24 hours"));
+    return;
+  }
+
+  const waitingColor = retry.total_waiting > 0 ? chalk.yellow : chalk.dim;
+  const exhaustedColor = retry.total_exhausted > 0 ? chalk.red : chalk.dim;
+  console.log(`  Currently in backoff: ${waitingColor(String(retry.total_waiting))}`);
+  console.log(`  Exhausted budget:     ${exhaustedColor(String(retry.total_exhausted))} (last 24h)`);
+
+  if (retry.per_agent.length > 0) {
+    console.log(chalk.bold("\n  Per-Agent Retry Stats (last 24h)"));
+    const header = `  ${"Agent".padEnd(28)} ${"Retried".padStart(8)} ${"Attempts".padStart(9)} ${"Exhausted".padStart(10)} ${"Waiting".padStart(8)}`;
+    console.log(chalk.dim(header));
+    console.log(chalk.dim("  " + "─".repeat(68)));
+    for (const a of retry.per_agent) {
+      const agent = chalk.cyan(a.agent_name.slice(0, 26).padEnd(28));
+      const retried = String(a.retried_tasks).padStart(8);
+      const attempts = String(a.total_retries).padStart(9);
+      const exhausted = (a.exhausted_budget > 0 ? chalk.red(String(a.exhausted_budget)) : chalk.dim("0")).padStart(10);
+      const waiting = (a.waiting_retry > 0 ? chalk.yellow(String(a.waiting_retry)) : chalk.dim("0")).padStart(8);
+      console.log(`  ${agent} ${retried} ${attempts} ${exhausted} ${waiting}`);
+    }
+  }
+}
+
+/**
  * Render the PR Metrics section (cycle time + rejection rate).
  */
 function printPRMetrics(pr: PRMetrics): void {
@@ -235,7 +308,7 @@ function printPRMetrics(pr: PRMetrics): void {
   }
 }
 
-function printMetrics(metrics: SystemMetrics, improvement?: ImprovementStats): void {
+function printMetrics(metrics: SystemMetrics, improvement?: ImprovementStats, retry?: RetryMetrics): void {
   console.log(chalk.bold("System Metrics\n"));
 
   // --- Task summary ---
@@ -309,6 +382,11 @@ function printMetrics(metrics: SystemMetrics, improvement?: ImprovementStats): v
 
   // --- PR review metrics ---
   printPRMetrics(metrics.pr_metrics);
+
+  // --- Retry health ---
+  if (retry !== undefined) {
+    printRetryMetrics(retry);
+  }
 
   // --- Improvement detection ---
   if (improvement !== undefined) {
@@ -489,7 +567,8 @@ export function registerStatusCommand(program: Command): void {
           // Config unavailable — skip the section
         }
 
-        printMetrics(metrics, improvementStats);
+        const retryMetrics = store.getRetryMetrics();
+        printMetrics(metrics, improvementStats, retryMetrics);
         store.close();
         return;
       }

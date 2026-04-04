@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { formatSourceLabel } from "./status.js";
+import { formatSourceLabel, formatRetryState } from "./status.js";
 import type { Task } from "../../state/store.js";
+import { MAX_RETRIES } from "../../orchestrator/dispatcher.js";
 
 /** Minimal Task stub — only the fields used by formatSourceLabel. */
 function makeTask(overrides: Partial<Task>): Task {
@@ -28,6 +29,75 @@ function makeTask(overrides: Partial<Task>): Task {
     ...overrides,
   } as Task;
 }
+
+describe("formatRetryState", () => {
+  it("returns empty string for a fresh task with no retries", () => {
+    const task = makeTask({ retry_count: 0, next_retry_at: null, status: "done" });
+    expect(formatRetryState(task)).toBe("");
+  });
+
+  it("returns empty string for a dispatched task with no retries", () => {
+    const task = makeTask({ retry_count: 0, next_retry_at: null, status: "dispatched" });
+    expect(formatRetryState(task)).toBe("");
+  });
+
+  it("shows backoff info when task is failed and waiting for retry", () => {
+    const futureTime = new Date(Date.now() + 47_000).toISOString();
+    const task = makeTask({
+      status: "failed",
+      retry_count: 1,
+      next_retry_at: futureTime,
+    });
+    const result = formatRetryState(task);
+    expect(result).toContain(`retry 1/${MAX_RETRIES}`);
+    expect(result).toContain("next attempt");
+    expect(result).toMatch(/in \d+s/);
+  });
+
+  it("shows 'imminently' when the backoff window has passed but task not yet picked up", () => {
+    const pastTime = new Date(Date.now() - 5_000).toISOString();
+    const task = makeTask({
+      status: "failed",
+      retry_count: 1,
+      next_retry_at: pastTime,
+    });
+    const result = formatRetryState(task);
+    expect(result).toContain("imminently");
+  });
+
+  it("shows active retry when task is dispatched with retry_count > 0", () => {
+    const task = makeTask({
+      status: "dispatched",
+      retry_count: 1,
+      next_retry_at: null,
+    });
+    const result = formatRetryState(task);
+    expect(result).toContain(`retry 1/${MAX_RETRIES}`);
+    expect(result).toContain("active");
+  });
+
+  it("shows active retry when task is in_progress with retry_count > 0", () => {
+    const task = makeTask({
+      status: "in_progress",
+      retry_count: 2,
+      next_retry_at: null,
+    });
+    const result = formatRetryState(task);
+    expect(result).toContain(`retry 2/${MAX_RETRIES}`);
+    expect(result).toContain("active");
+  });
+
+  it("shows exhausted when task permanently failed after max retries", () => {
+    const task = makeTask({
+      status: "failed",
+      retry_count: MAX_RETRIES,
+      next_retry_at: null,
+    });
+    const result = formatRetryState(task);
+    expect(result).toContain(`${MAX_RETRIES}/${MAX_RETRIES}`);
+    expect(result).toContain("exhausted");
+  });
+});
 
 describe("formatSourceLabel", () => {
   it("returns plain source name for a manual task without source_ref", () => {
