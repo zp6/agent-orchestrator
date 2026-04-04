@@ -174,6 +174,17 @@ export function registerServiceCommand(program: Command): void {
             console.log(chalk.dim(`  ✓ All done tasks have been verified`));
           }
 
+          // --- Idle-fill dispatch stats ---
+          const idleFillDispatches = store.getStat("idle_fill_dispatches");
+          console.log(chalk.bold("\nIdle-Fill Dispatch"));
+          const idleFillColor = idleFillDispatches > 0 ? chalk.green : chalk.dim;
+          console.log(`  Idle-fill dispatches: ${idleFillColor(String(idleFillDispatches))}`);
+          if (idleFillDispatches > 0) {
+            console.log(chalk.dim(`  ✓ Idle agents received work without waiting for the supervisor`));
+          } else {
+            console.log(chalk.dim(`  No idle-fill dispatches yet (agents may not have gone idle between cycles)`));
+          }
+
           // --- Improvement detection stats ---
           const count = qualified.length;
           const threshold = minScore.toFixed(2);

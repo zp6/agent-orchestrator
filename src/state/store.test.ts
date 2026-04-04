@@ -1736,4 +1736,28 @@ describe("StateStore", () => {
       expect(m.pr_metrics.request_changes).toBe(1);
     });
   });
+
+  describe("daemon stats (incrementStat / getStat)", () => {
+    it("returns 0 for an unknown key", () => {
+      expect(store.getStat("idle_fill_dispatches")).toBe(0);
+    });
+
+    it("increments a counter from zero", () => {
+      store.incrementStat("idle_fill_dispatches");
+      expect(store.getStat("idle_fill_dispatches")).toBe(1);
+    });
+
+    it("accumulates multiple increments", () => {
+      store.incrementStat("idle_fill_dispatches", 3);
+      store.incrementStat("idle_fill_dispatches", 2);
+      expect(store.getStat("idle_fill_dispatches")).toBe(5);
+    });
+
+    it("tracks independent keys separately", () => {
+      store.incrementStat("idle_fill_dispatches", 4);
+      store.incrementStat("other_counter", 7);
+      expect(store.getStat("idle_fill_dispatches")).toBe(4);
+      expect(store.getStat("other_counter")).toBe(7);
+    });
+  });
 });

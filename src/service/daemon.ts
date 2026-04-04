@@ -361,6 +361,7 @@ export class Daemon {
           dispatched: result.dispatched,
         });
         console.log(`[${time}] Idle pickup: ${result.dispatched} dispatched for idle agent(s)`);
+        this.store.incrementStat("idle_fill_dispatches", result.dispatched);
       }
       if (result.errors.length > 0) {
         for (const err of result.errors) {

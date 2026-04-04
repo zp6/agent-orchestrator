@@ -333,6 +333,7 @@ export class StateStore {
     this.runRetryMigration();
     this.runSupervisorMemoryMigration();
     this.runPRReviewsMigration();
+    this.runDaemonStatsMigration();
   }
 
   private runPhase2Migration(): void {
@@ -1454,6 +1455,41 @@ export class StateStore {
       avg_cycle_time_ms,
       per_repo,
     };
+  }
+
+  // ── Daemon stats (persistent counters) ──────────────────────────────────
+
+  private runDaemonStatsMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS daemon_stats (
+        key TEXT PRIMARY KEY,
+        value_int INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
+    `);
+  }
+
+  /**
+   * Atomically increment a named integer counter.
+   * Creates the counter at zero if it doesn't exist yet.
+   */
+  incrementStat(key: string, delta = 1): void {
+    this.db
+      .prepare(
+        `INSERT INTO daemon_stats (key, value_int, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value_int = value_int + excluded.value_int, updated_at = excluded.updated_at`,
+      )
+      .run(key, delta, new Date().toISOString());
+  }
+
+  /**
+   * Read the current value of a named counter (returns 0 if not set yet).
+   */
+  getStat(key: string): number {
+    const row = this.db
+      .prepare("SELECT value_int FROM daemon_stats WHERE key = ?")
+      .get(key) as { value_int: number } | undefined;
+    return row?.value_int ?? 0;
   }
 
   close(): void {
