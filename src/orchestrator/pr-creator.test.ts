@@ -187,72 +187,91 @@ describe("createPRForBranch", () => {
     agentName: "agent-a",
   };
 
+  /** Find the `gh pr create` call among all mockExecSync calls. */
+  function findPrCreateCall(): string | undefined {
+    return (mockExecSync.mock.calls as string[][])
+      .map((args) => args[0])
+      .find((cmd) => cmd?.includes("gh pr create"));
+  }
+
   it("includes Closes #N in PR body when issue number is inferrable from branch", async () => {
-    mockExecSync.mockReturnValue("https://github.com/owner/repo/pull/10\n");
+    // validateBranchFreshness: gh api compare → 0 behind
+    mockExecSync.mockReturnValueOnce("0\n");
+    // gh pr create
+    mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/10\n");
 
     const url = await createPRForBranch(orphan);
 
     expect(url).toBe("https://github.com/owner/repo/pull/10");
-    const callCmd = mockExecSync.mock.calls[0][0] as string;
-    expect(callCmd).toContain("Closes #105");
+    expect(findPrCreateCall()).toContain("Closes #105");
   });
 
-  it("uses generic body when issue number is not inferrable and no issues match", async () => {
-    // First call: gh issue list → empty
+  it("returns null and skips PR creation when no issue ref can be matched", async () => {
+    // findMatchingIssueNumber (Tier 2): gh issue list → empty
     mockExecSync.mockReturnValueOnce("[]");
-    // Second call: gh pr create
-    mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/11\n");
+    // validateIssueRef re-runs findMatchingIssueNumber: gh issue list → empty
+    mockExecSync.mockReturnValueOnce("[]");
+    // validateBranchFreshness: gh api compare → 0 behind
+    mockExecSync.mockReturnValueOnce("0\n");
 
     const genericOrphan: OrphanBranch = { ...orphan, branch: "feature-branch" };
-    await createPRForBranch(genericOrphan);
+    const result = await createPRForBranch(genericOrphan);
 
-    const prCreateCall = mockExecSync.mock.calls[1][0] as string;
-    expect(prCreateCall).not.toContain("Closes #");
-    expect(prCreateCall).toContain("Auto-created by orchestrator");
+    // Pre-submit validator blocks the PR — no gh pr create should be called
+    expect(result).toBeNull();
+    expect(findPrCreateCall()).toBeUndefined();
   });
 
   it("includes Closes #N when fuzzy matching finds an issue", async () => {
-    // First call: gh issue list → returns a matching issue
+    // findMatchingIssueNumber (Tier 2): gh issue list → returns a matching issue
     mockExecSync.mockReturnValueOnce(
       JSON.stringify([{ number: 77, title: "Auto-link orphan branch PRs" }]),
     );
-    // Second call: gh pr create
+    // validateBranchFreshness: gh api compare → 0 behind
+    mockExecSync.mockReturnValueOnce("0\n");
+    // gh pr create
     mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/15\n");
 
     const fuzzyOrphan: OrphanBranch = { ...orphan, branch: "auto-link-orphan-prs" };
     await createPRForBranch(fuzzyOrphan);
 
-    const prCreateCall = mockExecSync.mock.calls[1][0] as string;
-    expect(prCreateCall).toContain("Closes #77");
+    expect(findPrCreateCall()).toContain("Closes #77");
   });
 
-  it("returns null when gh pr create fails", async () => {
-    mockExecSync.mockReturnValueOnce("[]"); // gh issue list
+  it("returns null when no issue can be matched (pre-submit blocks PR)", async () => {
+    // findMatchingIssueNumber: gh issue list → empty
+    mockExecSync.mockReturnValueOnce("[]");
+    // validateIssueRef re-runs findMatchingIssueNumber: gh issue list → throws
     mockExecSync.mockImplementationOnce(() => {
       throw new Error("gh: not found");
-    }); // gh pr create
+    });
 
     const result = await createPRForBranch({ ...orphan, branch: "feature-branch" });
     expect(result).toBeNull();
   });
 
   it("includes the agent name and branch in the PR title", async () => {
-    mockExecSync.mockReturnValue("https://github.com/owner/repo/pull/12\n");
+    // validateBranchFreshness: gh api compare → 0 behind
+    mockExecSync.mockReturnValueOnce("0\n");
+    // gh pr create
+    mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/12\n");
 
     await createPRForBranch(orphan);
 
-    const callCmd = mockExecSync.mock.calls[0][0] as string;
-    expect(callCmd).toContain("[agent-a]");
-    expect(callCmd).toContain("issue-105-add-feature");
+    const prCreateCmd = findPrCreateCall();
+    expect(prCreateCmd).toContain("[agent-a]");
+    expect(prCreateCmd).toContain("issue-105-add-feature");
   });
 
   it("handles fix/issue-N branch format correctly", async () => {
-    mockExecSync.mockReturnValue("https://github.com/owner/repo/pull/20\n");
+    // validateBranchFreshness: gh api compare → 0 behind
+    mockExecSync.mockReturnValueOnce("0\n");
+    // gh pr create
+    mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/20\n");
 
     const slashOrphan: OrphanBranch = { ...orphan, branch: "fix/issue-134-auto-link" };
     await createPRForBranch(slashOrphan);
 
-    const callCmd = mockExecSync.mock.calls[0][0] as string;
-    expect(callCmd).toContain("Closes #134");
+    expect(findPrCreateCall()).toContain("Closes #134");
   });
 });

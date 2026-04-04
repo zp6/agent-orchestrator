@@ -2,6 +2,7 @@ import { execSync } from "node:child_process";
 import { createLogger } from "../service/logger.js";
 import { createLLMClient } from "../client/llm-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
+import { validatePreSubmit } from "./pre-submit-validator.js";
 
 const log = createLogger("pr-creator");
 
@@ -237,6 +238,27 @@ export async function createPRForBranch(
     const body = issueNumber
       ? `Auto-created by orchestrator for orphan branch.\n\nCloses #${issueNumber}`
       : "Auto-created by orchestrator for orphan branch.";
+
+    // Pre-submit validation: ensure issue ref and branch freshness before posting.
+    // We pass null for localPath here since orphan PR creation is remote-only.
+    const validation = await validatePreSubmit(
+      orphan.repo,
+      orphan.branch,
+      body,
+      null,
+      config,
+    );
+
+    if (!validation.valid) {
+      log.warn("Pre-submit validation failed for orphan branch PR — skipping PR creation", {
+        repo: orphan.repo,
+        branch: orphan.branch,
+        blockers: validation.blockers,
+      });
+      // Return null to signal that the PR was not created; the daemon will retry
+      // on the next cycle once the branch has been fixed/rebased.
+      return null;
+    }
 
     const url = execSync(
       `gh pr create --repo ${orphan.repo} --head ${orphan.branch} --title "[${orphan.agentName}] ${orphan.branch}" --body ${shellEscape(body)}`,

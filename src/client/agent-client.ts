@@ -33,6 +33,18 @@ CRITICAL — PR and Issue hygiene:
 - After completing work, verify your issue closed: \`gh issue view N --repo ${githubRepo} --json state\`. If it didn't, close it manually.
 - Do NOT create issues for features that already exist. Check merged PRs first: \`gh pr list --repo ${githubRepo} --state merged -L 20\`
 
+CRITICAL — Pre-PR submission checklist (run BEFORE \`gh pr create\`):
+1. **Rebase check**: ensure your branch is not behind main.
+   \`\`\`
+   git fetch origin
+   git rebase origin/main   # resolve any conflicts, then: git push --force-with-lease
+   \`\`\`
+2. **Issue ref check**: confirm your PR body draft contains "Closes #N".
+   - If you forgot the issue number: \`gh issue list --repo ${githubRepo} --state open\`
+3. **Only then**: run \`gh pr create\` with the body including "Closes #N".
+
+If any of these checks fail, fix them before submitting. PRs opened without "Closes #N" or on a stale branch will be rejected and require an extra revision cycle.
+
 CRITICAL — PR discipline (one issue, one branch, one PR):
 - Each PR must address exactly ONE issue. Do not bundle unrelated changes.
 - Before starting work, check \`git status\` and \`gh pr list\` — do NOT start a new branch if you have uncommitted work or an open PR on another branch.
