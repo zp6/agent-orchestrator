@@ -123,7 +123,7 @@ export class Daemon {
 
       // 4. Create PRs for orphan branches + review open PRs
       if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
-        this.createOrphanPRs(time);
+        await this.createOrphanPRs(time);
         await this.reviewPRs(time);
       }
 
@@ -319,12 +319,13 @@ export class Daemon {
     }
   }
 
-  private createOrphanPRs(time: string): void {
+  private async createOrphanPRs(time: string): Promise<void> {
     try {
       const orphans = findOrphanBranches(this.config);
       for (const orphan of orphans) {
         console.log(`[${time}] Orphan branch: ${orphan.repo}/${orphan.branch} — creating PR`);
-        createPRForBranch(orphan);
+        // Pass config so issue resolution can use fuzzy matching + LLM disambiguation
+        await createPRForBranch(orphan, this.config);
       }
     } catch (err) {
       console.error(`[${time}] Orphan branch check failed: ${err instanceof Error ? err.message : err}`);

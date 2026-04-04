@@ -1,5 +1,6 @@
 import { execSync } from "node:child_process";
 import { createLogger } from "../service/logger.js";
+import { createLLMClient } from "../client/llm-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 
 const log = createLogger("pr-creator");
@@ -12,12 +13,13 @@ export interface OrphanBranch {
 
 /**
  * Extract issue number from a branch name.
- * Matches patterns like: issue-105-description, issue-105, fix-issue-105, 105-description
+ * Matches patterns like: issue-105-description, issue-105, fix-issue-105, 105-description,
+ * fix/issue-134-description (slash separators)
  * Returns the issue number as a string, or null if not found.
  */
 export function extractIssueNumberFromBranch(branch: string): string | null {
-  // Most common: issue-N or issue-N-description
-  const issuePrefix = branch.match(/(?:^|[-_])issue[-_](\d+)/i);
+  // Most common: issue-N or issue-N-description (also handles slash separators like fix/issue-N)
+  const issuePrefix = branch.match(/(?:^|[-_/])issue[-_](\d+)/i);
   if (issuePrefix) return issuePrefix[1];
 
   // Branch starts with a number: 105-description
@@ -25,6 +27,154 @@ export function extractIssueNumberFromBranch(branch: string): string | null {
   if (leadingNumber) return leadingNumber[1];
 
   return null;
+}
+
+/**
+ * Stop words stripped from branch names before fuzzy token matching.
+ * These are generic words that appear in branch names but don't meaningfully
+ * identify a specific issue.
+ */
+const BRANCH_STOP_WORDS = new Set([
+  "fix", "feature", "feat", "issue", "add", "update", "refactor", "chore",
+  "bug", "hotfix", "patch", "improve", "improvement", "enhancement", "docs",
+  "style", "test", "ci", "revert", "merge", "wip", "draft", "init",
+]);
+
+/**
+ * Fuzzy-match a branch name against a list of open issues by tokenizing the
+ * branch and scoring issues by how many tokens appear in their title.
+ *
+ * Returns candidate issues sorted by score (highest first), filtered to those
+ * that score above the minimum threshold.
+ */
+export function fuzzyMatchIssues(
+  branch: string,
+  issues: Array<{ number: number; title: string }>,
+): Array<{ number: number; title: string; score: number }> {
+  // Normalize branch: replace slashes/underscores with dashes, lowercase, split
+  const tokens = branch
+    .toLowerCase()
+    .replace(/[/_]/g, "-")
+    .split("-")
+    .filter((t) => t.length > 2 && !BRANCH_STOP_WORDS.has(t) && !/^\d+$/.test(t));
+
+  if (tokens.length === 0) return [];
+
+  // Require at least this many tokens to match for a candidate to qualify
+  const minScore = Math.max(1, Math.floor(tokens.length * 0.4));
+
+  return issues
+    .map((issue) => {
+      const titleLower = issue.title.toLowerCase();
+      const score = tokens.filter((t) => titleLower.includes(t)).length;
+      return { ...issue, score };
+    })
+    .filter((i) => i.score >= minScore)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+}
+
+/**
+ * Use an LLM to disambiguate between multiple fuzzy-matched issue candidates.
+ * Returns the issue number of the best match, or null if none fit.
+ */
+async function llmPickIssue(
+  branch: string,
+  candidates: Array<{ number: number; title: string; score: number }>,
+  config: OrchestratorConfig,
+): Promise<number | null> {
+  try {
+    const client = createLLMClient(config);
+    const issueList = candidates.map((c) => `#${c.number}: ${c.title}`).join("\n");
+
+    const response = await client.messages.create({
+      model: "claude-haiku-4-5",
+      max_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: `Which GitHub issue does the branch "${branch}" most likely implement? Pick exactly one from this list, or respond "none" if none fit.\n\n${issueList}\n\nRespond with ONLY the issue number (e.g. "42") or "none".`,
+        },
+      ],
+    });
+
+    const text = response.content
+      .filter((b) => b.type === "text")
+      .map((b) => ("text" in b ? b.text : ""))
+      .join("")
+      .trim();
+
+    if (text === "none") return null;
+    const num = parseInt(text, 10);
+    return isNaN(num) ? null : num;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Three-tier issue number resolution for a branch:
+ *
+ * 1. Parse issue number directly from branch name (e.g. issue-105-description → 105)
+ * 2. Fuzzy-match branch tokens against open issue titles
+ * 3. LLM disambiguation when multiple fuzzy candidates remain (requires config)
+ *
+ * Returns the resolved issue number as a string, or null if no match found.
+ */
+export async function findMatchingIssueNumber(
+  repo: string,
+  branch: string,
+  config?: OrchestratorConfig,
+): Promise<string | null> {
+  // Tier 1: deterministic parse from branch name (instant, free)
+  const fromBranch = extractIssueNumberFromBranch(branch);
+  if (fromBranch) return fromBranch;
+
+  // Tier 2: fuzzy token matching against open issues
+  let issues: Array<{ number: number; title: string }> = [];
+  try {
+    const raw = execSync(
+      `gh issue list --repo ${repo} --state open --json number,title -L 100`,
+      { encoding: "utf-8", timeout: 15000 },
+    ).trim();
+    if (raw) issues = JSON.parse(raw) as Array<{ number: number; title: string }>;
+  } catch {
+    return null; // can't reach repo — skip linking
+  }
+
+  if (issues.length === 0) return null;
+
+  const candidates = fuzzyMatchIssues(branch, issues);
+  if (candidates.length === 0) return null;
+
+  // Clear winner: only one candidate
+  if (candidates.length === 1) {
+    log.info("Fuzzy-matched issue from branch name", {
+      repo,
+      branch,
+      issueNumber: candidates[0].number,
+      score: candidates[0].score,
+    });
+    return String(candidates[0].number);
+  }
+
+  // Tier 3: LLM disambiguation when heuristics are ambiguous
+  if (config) {
+    const picked = await llmPickIssue(branch, candidates, config);
+    if (picked !== null) {
+      log.info("LLM-picked issue from branch name", { repo, branch, issueNumber: picked });
+      return String(picked);
+    }
+  }
+
+  // Fall back to highest-scoring fuzzy match
+  log.info("Using top fuzzy match for branch", {
+    repo,
+    branch,
+    issueNumber: candidates[0].number,
+    score: candidates[0].score,
+  });
+  return String(candidates[0].number);
 }
 
 /**
@@ -78,9 +228,12 @@ export function findOrphanBranches(config: OrchestratorConfig): OrphanBranch[] {
   return orphans;
 }
 
-export function createPRForBranch(orphan: OrphanBranch): string | null {
+export async function createPRForBranch(
+  orphan: OrphanBranch,
+  config?: OrchestratorConfig,
+): Promise<string | null> {
   try {
-    const issueNumber = extractIssueNumberFromBranch(orphan.branch);
+    const issueNumber = await findMatchingIssueNumber(orphan.repo, orphan.branch, config);
     const body = issueNumber
       ? `Auto-created by orchestrator for orphan branch.\n\nCloses #${issueNumber}`
       : "Auto-created by orchestrator for orphan branch.";
