@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process";
 import { createLLMClient } from "../client/llm-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
-import type { StateStore, Task } from "../state/store.js";
+import type { StateStore, Task, SupervisorDecisionRecord } from "../state/store.js";
 import { createLogger } from "../service/logger.js";
 
 export interface SupervisorDecision {
@@ -46,6 +46,11 @@ CRITICAL — IDLE AGENT DISPATCH RULES (strictly enforced):
 - The open GitHub issues per agent are listed in the context under "## Open Issues". Pick one and dispatch it.
 - If an agent is idle and has no open issues, prefer action "none" over a vague dispatch — do not invent busywork
 - A dispatch message that will result in a pure status check or "system looks healthy" report is a quality failure and wastes a task slot
+
+You have memory of your recent decisions in "## Recent Supervisor Decisions". Use this to:
+- Avoid repeating actions that have already been taken (especially failed ones)
+- Track whether your dispatches produced results
+- Identify patterns of repeated failures and escalate to issue creation instead
 
 Be specific and actionable. Only suggest actions that address real gaps. Return [] if everything is on track.`;
 
@@ -153,6 +158,19 @@ export class Supervisor {
 
   private buildContext(): string {
     const sections: string[] = [];
+
+    // Prior supervisor decisions (memory across cycles)
+    const priorDecisions = this.store.getRecentSupervisorDecisions(10);
+    if (priorDecisions.length > 0) {
+      const lines = priorDecisions
+        .map((d: SupervisorDecisionRecord) => {
+          const agentPart = d.agent_name ? ` → ${d.agent_name}` : "";
+          const taskPart = d.task_id ? ` [task:${d.task_id.slice(0, 8)}]` : "";
+          return `- [${d.created_at.slice(0, 16)}] ${d.action}${agentPart}: ${d.reason} (outcome: ${d.outcome}${taskPart})`;
+        })
+        .join("\n");
+      sections.push(`## Recent Supervisor Decisions\n${lines}`);
+    }
 
     // Agent registry
     const agents = Object.entries(this.config.agents)

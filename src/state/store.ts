@@ -66,6 +66,19 @@ export interface CycleMetrics {
   last_cycle_at: string | null;
 }
 
+export type SupervisorOutcome = "dispatched" | "skipped" | "failed" | "none" | "unhandled";
+
+export interface SupervisorDecisionRecord {
+  id: number;
+  action: string;
+  agent_name: string | null;
+  reason: string;
+  message: string | null;
+  outcome: SupervisorOutcome;
+  task_id: string | null;
+  created_at: string;
+}
+
 /**
  * Distribution of quality scores across verified tasks, bucketed by tier.
  * Counts are mutually exclusive and exhaustive over all verified top-level tasks.
@@ -227,6 +240,7 @@ export class StateStore {
     this.runPhase6Migration();
     this.runResearchMigration();
     this.runRetryMigration();
+    this.runSupervisorMemoryMigration();
   }
 
   private runPhase2Migration(): void {
@@ -998,6 +1012,64 @@ export class StateStore {
          ORDER BY failed DESC`,
       )
       .all(since, threshold) as Array<{ agent_name: string; failed: number }>;
+  }
+
+  // ── Supervisor memory ────────────────────────────────────────────────────
+
+  private runSupervisorMemoryMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS supervisor_decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        action TEXT NOT NULL,
+        agent_name TEXT,
+        reason TEXT NOT NULL,
+        message TEXT,
+        outcome TEXT NOT NULL,
+        task_id TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_supervisor_decisions_created ON supervisor_decisions(created_at);
+    `);
+  }
+
+  /**
+   * Persist a supervisor decision with its execution outcome.
+   * Called by the daemon after executing (or skipping) each supervisor decision.
+   */
+  addSupervisorDecision(params: {
+    action: string;
+    agent_name?: string;
+    reason: string;
+    message?: string;
+    outcome: SupervisorOutcome;
+    task_id?: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO supervisor_decisions (action, agent_name, reason, message, outcome, task_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        params.action,
+        params.agent_name ?? null,
+        params.reason,
+        params.message ?? null,
+        params.outcome,
+        params.task_id ?? null,
+        new Date().toISOString(),
+      );
+  }
+
+  /**
+   * Return the most recent supervisor decisions, newest first.
+   * Used by the supervisor to build context across cycles.
+   */
+  getRecentSupervisorDecisions(limit = 10): SupervisorDecisionRecord[] {
+    return this.db
+      .prepare(
+        "SELECT * FROM supervisor_decisions ORDER BY created_at DESC LIMIT ?",
+      )
+      .all(limit) as SupervisorDecisionRecord[];
   }
 
   close(): void {

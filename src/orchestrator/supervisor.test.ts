@@ -227,6 +227,87 @@ describe("Supervisor", () => {
     const prompt = mockCreate.mock.calls[0][0].messages[0].content;
     expect(prompt).not.toContain("## Open Issues");
   });
+
+  describe("supervisor memory across cycles", () => {
+    it("includes prior decisions in context when they exist", async () => {
+      store.addSupervisorDecision({
+        action: "dispatch",
+        agent_name: "agent-a",
+        reason: "Implementing issue #42",
+        message: "Please implement issue #42",
+        outcome: "dispatched",
+        task_id: "01ABC123",
+      });
+
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "[]" }],
+      });
+
+      const supervisor = new Supervisor(config, store);
+      await supervisor.review();
+
+      const prompt = mockCreate.mock.calls[0][0].messages[0].content;
+      expect(prompt).toContain("## Recent Supervisor Decisions");
+      expect(prompt).toContain("dispatch → agent-a");
+      expect(prompt).toContain("Implementing issue #42");
+      expect(prompt).toContain("outcome: dispatched");
+    });
+
+    it("omits prior decisions section when no decisions recorded", async () => {
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "[]" }],
+      });
+
+      const supervisor = new Supervisor(config, store);
+      await supervisor.review();
+
+      const prompt = mockCreate.mock.calls[0][0].messages[0].content;
+      expect(prompt).not.toContain("## Recent Supervisor Decisions");
+    });
+
+    it("includes task_id in decision context when available", async () => {
+      store.addSupervisorDecision({
+        action: "follow-up",
+        agent_name: "agent-b",
+        reason: "Branch not pushed",
+        message: "Push your branch",
+        outcome: "dispatched",
+        task_id: "01DEADBEEF",
+      });
+
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "[]" }],
+      });
+
+      const supervisor = new Supervisor(config, store);
+      await supervisor.review();
+
+      const prompt = mockCreate.mock.calls[0][0].messages[0].content;
+      expect(prompt).toContain("task:01DEADBE");
+    });
+
+    it("limits prior decisions to 10 in context", async () => {
+      for (let i = 0; i < 15; i++) {
+        store.addSupervisorDecision({
+          action: "none",
+          reason: `Decision ${i}`,
+          outcome: "none",
+        });
+      }
+
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "[]" }],
+      });
+
+      const supervisor = new Supervisor(config, store);
+      await supervisor.review();
+
+      const prompt = mockCreate.mock.calls[0][0].messages[0].content;
+      // Count occurrences of "outcome: none" — should be exactly 10
+      const matches = (prompt.match(/outcome: none/g) ?? []).length;
+      expect(matches).toBe(10);
+    });
+  });
 });
 
 describe("isConcreteDispatch", () => {

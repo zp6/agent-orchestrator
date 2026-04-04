@@ -19,7 +19,6 @@ import { createLogger } from "./logger.js";
 import { execSync } from "node:child_process";
 import { ManagementClient } from "../client/management-client.js";
 import { planSync, executeSync } from "../orchestrator/sync.js";
-import { MAX_RETRIES } from "../orchestrator/dispatcher.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
@@ -533,12 +532,28 @@ export class Daemon {
 
       console.log(`[${time}] Supervisor: ${decisions.length} decision(s)`);
       for (const d of decisions) {
-        if (d.action === "none") continue;
+        if (d.action === "none") {
+          this.store.addSupervisorDecision({
+            action: d.action,
+            agent_name: d.agentName,
+            reason: d.reason,
+            message: d.message,
+            outcome: "none",
+          });
+          continue;
+        }
 
         if ((d.action === "dispatch" || d.action === "follow-up") && d.agentName && d.message) {
           if (this.store.hasActiveTask(d.agentName)) {
             this.log.info("Skipping supervisor dispatch: agent busy", { agentName: d.agentName, reason: d.reason });
             console.log(`  ${d.action} → ${d.agentName} SKIPPED (agent busy): ${d.reason}`);
+            this.store.addSupervisorDecision({
+              action: d.action,
+              agent_name: d.agentName,
+              reason: d.reason,
+              message: d.message,
+              outcome: "skipped",
+            });
           } else {
             try {
               // Fire-and-forget: don't block the daemon cycle waiting for agent response
@@ -547,15 +562,49 @@ export class Daemon {
                 title: `[supervisor] ${d.reason.slice(0, 80)}`,
               }).then((result) => {
                 console.log(`  ${d.action} → ${d.agentName} (task ${result.taskId.slice(0, 8)}): ${d.reason}`);
+                this.store.addSupervisorDecision({
+                  action: d.action,
+                  agent_name: d.agentName,
+                  reason: d.reason,
+                  message: d.message,
+                  outcome: "dispatched",
+                  task_id: result.taskId,
+                });
               }).catch((err) => {
                 this.log.error("Supervisor dispatch failed", { agentName: d.agentName, error: String(err) });
+                this.store.addSupervisorDecision({
+                  action: d.action,
+                  agent_name: d.agentName,
+                  reason: d.reason,
+                  message: d.message,
+                  outcome: "failed",
+                });
               });
             } catch (err) {
               console.error(`  Failed ${d.action} → ${d.agentName}: ${err instanceof Error ? err.message : err}`);
+              this.store.addSupervisorDecision({
+                action: d.action,
+                agent_name: d.agentName,
+                reason: d.reason,
+                message: d.message,
+                outcome: "failed",
+              });
             }
           }
         } else {
-          console.log(`  ${d.action}${d.agentName ? ` → ${d.agentName}` : ""}: ${d.reason}`);
+          // This covers: verify/redeploy/create-issue actions (not yet executed by the daemon),
+          // and malformed dispatch/follow-up missing agentName or message.
+          // These were never dispatched — record them as "unhandled" so the supervisor's
+          // memory accurately reflects that no action was taken.
+          this.log.warn("Supervisor decision unhandled", { action: d.action, agentName: d.agentName, reason: d.reason });
+          console.log(`  [unhandled] ${d.action}${d.agentName ? ` → ${d.agentName}` : ""}: ${d.reason}`);
+          this.store.addSupervisorDecision({
+            action: d.action,
+            agent_name: d.agentName,
+            reason: d.reason,
+            message: d.message,
+            outcome: "unhandled",
+          });
         }
       }
     } catch (err) {

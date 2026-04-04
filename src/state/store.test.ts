@@ -1143,4 +1143,79 @@ describe("StateStore", () => {
       expect(due[0].id).toBe(older.id); // older timestamp comes first
     });
   });
+
+  describe("supervisor memory", () => {
+    it("stores and retrieves a supervisor decision", () => {
+      store.addSupervisorDecision({
+        action: "dispatch",
+        agent_name: "agent-a",
+        reason: "Agent is idle with open issue #42",
+        message: "Please implement issue #42",
+        outcome: "dispatched",
+        task_id: "01ABC123",
+      });
+
+      const decisions = store.getRecentSupervisorDecisions();
+      expect(decisions).toHaveLength(1);
+      expect(decisions[0].action).toBe("dispatch");
+      expect(decisions[0].agent_name).toBe("agent-a");
+      expect(decisions[0].reason).toBe("Agent is idle with open issue #42");
+      expect(decisions[0].outcome).toBe("dispatched");
+      expect(decisions[0].task_id).toBe("01ABC123");
+      expect(decisions[0].created_at).toBeTruthy();
+    });
+
+    it("stores decisions with optional fields as null", () => {
+      store.addSupervisorDecision({
+        action: "none",
+        reason: "All systems nominal",
+        outcome: "none",
+      });
+
+      const decisions = store.getRecentSupervisorDecisions();
+      expect(decisions).toHaveLength(1);
+      expect(decisions[0].agent_name).toBeNull();
+      expect(decisions[0].message).toBeNull();
+      expect(decisions[0].task_id).toBeNull();
+    });
+
+    it("returns decisions newest-first", () => {
+      store.addSupervisorDecision({ action: "dispatch", agent_name: "agent-a", reason: "First", outcome: "dispatched" });
+      store.addSupervisorDecision({ action: "follow-up", agent_name: "agent-b", reason: "Second", outcome: "skipped" });
+      store.addSupervisorDecision({ action: "none", reason: "Third", outcome: "none" });
+
+      const decisions = store.getRecentSupervisorDecisions();
+      expect(decisions[0].reason).toBe("Third");
+      expect(decisions[1].reason).toBe("Second");
+      expect(decisions[2].reason).toBe("First");
+    });
+
+    it("respects the limit parameter", () => {
+      for (let i = 0; i < 15; i++) {
+        store.addSupervisorDecision({ action: "none", reason: `Decision ${i}`, outcome: "none" });
+      }
+
+      const decisions = store.getRecentSupervisorDecisions(5);
+      expect(decisions).toHaveLength(5);
+    });
+
+    it("returns empty array when no decisions recorded", () => {
+      const decisions = store.getRecentSupervisorDecisions();
+      expect(decisions).toHaveLength(0);
+    });
+
+    it("stores unhandled outcome for unsupported action types", () => {
+      store.addSupervisorDecision({
+        action: "create-issue",
+        agent_name: "agent-a",
+        reason: "Repeated failures detected",
+        outcome: "unhandled",
+      });
+
+      const decisions = store.getRecentSupervisorDecisions(1);
+      expect(decisions[0].action).toBe("create-issue");
+      expect(decisions[0].outcome).toBe("unhandled");
+      expect(decisions[0].task_id).toBeNull();
+    });
+  });
 });

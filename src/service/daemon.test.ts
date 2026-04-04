@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry } from "./daemon.js";
+import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS } from "./daemon.js";
 import { TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
 
 // ────────────────────────────────────────────────────────────────────────────
