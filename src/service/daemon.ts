@@ -127,6 +127,12 @@ export class Daemon {
       // 2. Verify recently completed tasks
       await this.verifyCompleted(time);
 
+      // 2b. Idle-agent pickup: immediately dispatch the next GitHub issue to agents
+      //     that just became idle (completed their task this cycle). Without this,
+      //     agents sit idle until the next full poll cycle — previously the supervisor
+      //     filled this gap with manual "agent is idle" dispatches.
+      await this.pickupIdleAgents(time, registeredAgents);
+
       // 3. Periodically detect improvements and create issues
       if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
         await this.detectImprovements(time);
@@ -302,6 +308,37 @@ export class Daemon {
       }
     } catch (err) {
       console.error(`[${time}] Trigger dispatch failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  /**
+   * Post-completion idle pickup: dispatch the next GitHub issue to any agent that
+   * is currently idle (no active task). Called immediately after verifyCompleted so
+   * that agents which just finished their work receive their next assignment within
+   * the same poll cycle rather than waiting up to one full poll interval.
+   *
+   * The duplicate-guard in dispatchGitHubIssues ensures nothing is double-dispatched —
+   * issues already dispatched earlier in this cycle (or recently completed) are skipped.
+   */
+  private async pickupIdleAgents(time: string, registeredAgents: Set<string>): Promise<void> {
+    try {
+      const result = await dispatchGitHubIssues(
+        this.config,
+        this.store,
+        this.dispatcher,
+        1,
+        registeredAgents,
+      );
+      if (result.dispatched > 0) {
+        this.log.info("Idle agent pickup: dispatched next issue to idle agents", {
+          dispatched: result.dispatched,
+        });
+        console.log(`[${time}] Idle pickup: ${result.dispatched} dispatched for idle agent(s)`);
+      }
+    } catch (err) {
+      console.error(
+        `[${time}] Idle agent pickup failed: ${err instanceof Error ? err.message : err}`,
+      );
     }
   }
 

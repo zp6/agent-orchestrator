@@ -126,6 +126,106 @@ describe("dispatchGitHubIssues", () => {
   });
 });
 
+describe("idle agent pickup (post-completion dispatch)", () => {
+  let mockStore: StateStore;
+  let mockDispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStore = {
+      isProcessed: vi.fn().mockReturnValue(false),
+      markProcessed: vi.fn(),
+      getTask: vi.fn().mockReturnValue(null),
+      listTasks: vi.fn().mockReturnValue([]),
+      hasActiveTask: vi.fn().mockReturnValue(false),
+      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
+    } as unknown as StateStore;
+    mockDispatcher = {
+      dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
+    } as unknown as Dispatcher;
+  });
+
+  it("skips agent while a task is in-flight (first call in cycle)", async () => {
+    // Agent has an active task — first dispatchGitHubIssues call during dispatchTriggers skips it
+    (mockStore.hasActiveTask as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 2, title: "Next task", body: "Do it", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(mockFetchIssues).not.toHaveBeenCalled();
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("dispatches immediately after task completes (second call — idle pickup)", async () => {
+    // Same cycle: agent just finished its task, now idle
+    (mockStore.hasActiveTask as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    // New issue #2 is unprocessed (issue #1 already done)
+    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockImplementation(
+      (_source: string, ref: string) => {
+        if (ref === "owner/my-repo#1") {
+          // Prior issue — recently completed, within recency window; duplicate suppressed
+          return {
+            id: "task-old",
+            status: "done",
+            verification_status: null,
+            updated_at: new Date().toISOString(),
+          };
+        }
+        return undefined; // issue #2 is fresh
+      },
+    );
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Done task", body: "", url: "https://...", labels: [] },
+      { repo: "owner/my-repo", number: 2, title: "Next task", body: "Do it", url: "https://...", labels: [] },
+    ]);
+
+    // This simulates the pickupIdleAgents call that runs after verifyCompleted
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(
+      expect.stringContaining("Next task"),
+      expect.objectContaining({ agentName: "my-agent", source: "github", sourceRef: "owner/my-repo#2" }),
+    );
+  });
+
+  it("is a no-op when agent is still busy (already has a new active task)", async () => {
+    // Agent picked up work earlier in this cycle; second call should find it busy
+    (mockStore.hasActiveTask as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 3, title: "Another task", body: "", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op when all open issues are already processed (no new work)", async () => {
+    (mockStore.hasActiveTask as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    // Both open issues have recent completed tasks — duplicate suppressed
+    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: "task-recent",
+      status: "done",
+      verification_status: null,
+      updated_at: new Date().toISOString(),
+    });
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Done", body: "", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+});
+
 describe("dispatchLinearChecks", () => {
   let mockStore: StateStore;
   let mockDispatcher: Dispatcher;
