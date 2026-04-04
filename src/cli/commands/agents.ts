@@ -1,7 +1,8 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { loadConfig } from "../../config/schema.js";
+import { loadConfig, type OrchestratorConfig } from "../../config/schema.js";
 import { ManagementClient, type ProxyAgentStatus } from "../../client/management-client.js";
+import { AgentClient } from "../../client/agent-client.js";
 import { planSync, executeSync } from "../../orchestrator/sync.js";
 import { Deployer } from "../../orchestrator/deployer.js";
 
@@ -17,6 +18,40 @@ const STATUS_COLORS: Record<string, (s: string) => string> = {
 function colorStatus(status: string): string {
   const fn = STATUS_COLORS[status] ?? chalk.dim;
   return fn(status);
+}
+
+export type HealthStatus = "alive" | "unreachable" | "no-port";
+
+/**
+ * Concurrently pings all agents and returns their liveness status.
+ * Uses a short timeout (default 3s) so the command stays snappy even when agents are down.
+ */
+export async function pingAllAgents(
+  config: OrchestratorConfig,
+  agentNames: string[],
+  timeoutMs = 3000,
+): Promise<Map<string, HealthStatus>> {
+  const client = new AgentClient(config);
+  const results = await Promise.all(
+    agentNames.map(async (name): Promise<[string, HealthStatus]> => {
+      const hasPort = !!config.agents[name]?.docker?.port;
+      if (!hasPort) return [name, "no-port"];
+      const alive = await client.ping(name, timeoutMs);
+      return [name, alive ? "alive" : "unreachable"];
+    }),
+  );
+  return new Map(results);
+}
+
+function formatHealth(health: HealthStatus): string {
+  switch (health) {
+    case "alive":
+      return chalk.green("✓ alive");
+    case "unreachable":
+      return chalk.red("✗ unreachable");
+    case "no-port":
+      return chalk.dim("— (no port)");
+  }
 }
 
 async function fetchLiveStatus(
@@ -46,17 +81,22 @@ export function registerAgentsCommand(program: Command): void {
       const management = new ManagementClient(config.proxy);
       const liveStatus = await fetchLiveStatus(management);
 
+      const agentNames = Object.keys(config.agents);
+      // Ping all agents concurrently (3s timeout) so health is always fresh
+      const healthMap = await pingAllAgents(config, agentNames, 3000);
+
       if (name) {
         // Detail view
         if (name === "sync") return; // handled by subcommand
         const agent = config.agents[name];
         if (!agent) {
           console.error(chalk.red(`Unknown agent: ${name}`));
-          console.error(`Available: ${Object.keys(config.agents).join(", ")}`);
+          console.error(`Available: ${agentNames.join(", ")}`);
           process.exit(1);
         }
         const live = liveStatus?.get(name);
         const status = live?.status ?? "offline";
+        const health = healthMap.get(name) ?? "no-port";
 
         console.log(chalk.bold(name) + "  " + colorStatus(status));
         console.log(`  ${chalk.dim("Directory:")}    ${config.base_dir}/${agent.dir}`);
@@ -69,6 +109,7 @@ export function registerAgentsCommand(program: Command): void {
         if (agent.docker?.port) {
           console.log(`  ${chalk.dim("Port:")}         ${agent.docker.port}`);
         }
+        console.log(`  ${chalk.dim("Health:")}       ${formatHealth(health)}`);
         if (agent.docker?.permissions) {
           console.log(`  ${chalk.dim("Permissions:")}  ${agent.docker.permissions}`);
         }
@@ -84,16 +125,17 @@ export function registerAgentsCommand(program: Command): void {
         );
         console.log();
 
-        const maxLen = Math.max(...Object.keys(config.agents).map((n) => n.length));
+        const maxLen = Math.max(...agentNames.map((n) => n.length));
         for (const [agentName, agent] of Object.entries(config.agents)) {
           const live = liveStatus?.get(agentName);
           const status = live ? colorStatus(live.status) : chalk.dim("--");
+          const health = healthMap.get(agentName) ?? "no-port";
           console.log(
-            `  ${chalk.cyan(agentName.padEnd(maxLen + 2))} ${status.padEnd(20)} ${agent.description}`,
+            `  ${chalk.cyan(agentName.padEnd(maxLen + 2))} ${status.padEnd(20)} ${formatHealth(health).padEnd(24)} ${agent.description}`,
           );
         }
         console.log(
-          `\n${chalk.dim(`${Object.keys(config.agents).length} agents configured`)}`,
+          `\n${chalk.dim(`${agentNames.length} agents configured`)}`,
         );
       }
     });
