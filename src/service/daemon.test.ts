@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { extractClosedIssueNumbers, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry } from "./daemon.js";
+import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry } from "./daemon.js";
 import { TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -98,6 +98,42 @@ describe("extractClosedIssueNumbers", () => {
 
   it("handles refs inline with other text", () => {
     expect(extractClosedIssueNumbers("This PR closes #42 and fixes #43.")).toEqual([42, 43]);
+  });
+});
+
+describe("prBodyHasIssueRef", () => {
+  it("returns true for 'Closes #N'", () => {
+    expect(prBodyHasIssueRef("Closes #42")).toBe(true);
+  });
+
+  it("returns true for 'Fixes #N'", () => {
+    expect(prBodyHasIssueRef("Fixes #7")).toBe(true);
+  });
+
+  it("returns true for 'Resolves #N'", () => {
+    expect(prBodyHasIssueRef("Resolves #100")).toBe(true);
+  });
+
+  it("is case-insensitive", () => {
+    expect(prBodyHasIssueRef("closes #1")).toBe(true);
+    expect(prBodyHasIssueRef("FIXES #2")).toBe(true);
+    expect(prBodyHasIssueRef("RESOLVES #3")).toBe(true);
+  });
+
+  it("returns true when ref is embedded in longer body", () => {
+    expect(prBodyHasIssueRef("Implements the feature.\n\nCloses #184")).toBe(true);
+  });
+
+  it("returns false when no issue ref present", () => {
+    expect(prBodyHasIssueRef("No issue references here")).toBe(false);
+  });
+
+  it("returns false for empty string", () => {
+    expect(prBodyHasIssueRef("")).toBe(false);
+  });
+
+  it("returns false for bare hash without keyword", () => {
+    expect(prBodyHasIssueRef("See #42 for context")).toBe(false);
   });
 });
 

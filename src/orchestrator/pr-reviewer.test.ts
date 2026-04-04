@@ -43,8 +43,8 @@ vi.mock("node:child_process", () => ({
     }
     if (cmd.includes("gh pr list")) {
       return JSON.stringify([
-        { number: 9, title: "Test PR" },
-        { number: 10, title: "Another PR" },
+        { number: 9, title: "Test PR", body: "Description\n\nCloses #9" },
+        { number: 10, title: "Another PR", body: "Another description" },
       ]);
     }
     if (cmd.includes("gh pr review") || cmd.includes("gh pr edit") || cmd.includes("gh pr comment") || cmd.includes("gh pr merge")) {
@@ -152,6 +152,40 @@ describe("PRReviewer", () => {
     const results = await reviewer.reviewOpenPRs("owner/repo");
 
     expect(results).toHaveLength(2);
+  });
+
+  it("reviewOpenPRs includes prBody in each result entry", async () => {
+    mockCreate
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Good", reason: "Clean" }) }],
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Good", reason: "Clean" }) }],
+      });
+
+    const reviewer = new PRReviewer(config);
+    const results = await reviewer.reviewOpenPRs("owner/repo");
+
+    expect(results[0].prBody).toBe("Description\n\nCloses #9");
+    expect(results[1].prBody).toBe("Another description");
+  });
+
+  it("reviewOpenPRs returns empty prBody string when gh pr list returns no body field", async () => {
+    const { execSync } = await import("node:child_process");
+    vi.mocked(execSync).mockImplementationOnce((cmd: string) => {
+      if (cmd.includes("gh pr list")) {
+        return JSON.stringify([{ number: 9, title: "No body PR" }]);
+      }
+      return "";
+    });
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Good", reason: "Clean" }) }],
+    });
+
+    const reviewer = new PRReviewer(config);
+    const results = await reviewer.reviewOpenPRs("owner/repo");
+
+    expect(results[0].prBody).toBe("");
   });
 
   describe("merge conflict detection", () => {

@@ -222,14 +222,14 @@ export class PRReviewer {
     }
   }
 
-  async reviewOpenPRs(repo: string): Promise<Array<{ prNumber: number; result: PRReviewResult }>> {
-    const results: Array<{ prNumber: number; result: PRReviewResult }> = [];
+  async reviewOpenPRs(repo: string): Promise<Array<{ prNumber: number; result: PRReviewResult; prBody: string }>> {
+    const results: Array<{ prNumber: number; result: PRReviewResult; prBody: string }> = [];
 
     const prs = this.fetchOpenPRs(repo);
     for (const pr of prs) {
       try {
         const result = await this.reviewPR(repo, pr.number);
-        results.push({ prNumber: pr.number, result });
+        results.push({ prNumber: pr.number, result, prBody: pr.body });
       } catch {
         // Continue reviewing other PRs
       }
@@ -481,12 +481,13 @@ export class PRReviewer {
     };
   }
 
-  private fetchOpenPRs(repo: string): Array<{ number: number; title: string }> {
+  private fetchOpenPRs(repo: string): Array<{ number: number; title: string; body: string }> {
     const output = execSync(
-      `gh pr list --repo ${repo} --state open --json number,title`,
+      `gh pr list --repo ${repo} --state open --json number,title,body`,
       { encoding: "utf-8", timeout: 30000 },
     );
-    return JSON.parse(output);
+    const prs = JSON.parse(output) as Array<{ number: number; title: string; body?: string }>;
+    return prs.map((pr) => ({ ...pr, body: pr.body ?? "" }));
   }
 
   private parseResponse(text: string): PRReviewResult {

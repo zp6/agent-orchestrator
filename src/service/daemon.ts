@@ -439,7 +439,7 @@ export class Daemon {
     try {
       for (const [repo, agentName] of agentsByRepo) {
         const results = await this.prReviewer.reviewOpenPRs(repo);
-        for (const { prNumber, result } of results) {
+        for (const { prNumber, result, prBody } of results) {
           console.log(`[${time}] PR review: ${repo}#${prNumber} → ${result.decision} (${result.reason})`);
 
           // Dispatch feedback to agent when changes are requested (skip if agent busy or duplicate)
@@ -448,6 +448,10 @@ export class Daemon {
             // Check state before dispatching to avoid wasted cycles on already-merged PRs.
             if (!this.prReviewer.isPROpen(repo, prNumber)) {
               this.log.info("Skipped PR feedback dispatch: PR no longer open (no-op)", { agentName, repo, prNumber });
+            } else if (prBodyHasIssueRef(prBody) && /missing.*issue|issue.*reference|Closes #N/i.test(result.reason)) {
+              // The review flagged a missing Closes #N, but the PR body already has one —
+              // agent must have updated it between review cycles. No dispatch needed.
+              this.log.info("Skipping PR feedback dispatch: PR body already has issue ref", { agentName, repo, prNumber });
             } else if (this.store.hasActiveTask(agentName)) {
               this.log.info("Skipping PR feedback dispatch: agent busy", { agentName, repo, prNumber });
             } else if (this.store.hasActivePrFeedbackTask(repo, prNumber)) {
@@ -836,6 +840,11 @@ export function isPRAlreadyMerged(
     // Fail open: if we can't determine state, allow the dispatch
     return false;
   }
+}
+
+/** Returns true when a PR body already contains a Closes/Fixes/Resolves #N reference. */
+export function prBodyHasIssueRef(prBody: string): boolean {
+  return /(?:closes|fixes|resolves)\s+#\d+/i.test(prBody);
 }
 
 /** Extract issue numbers from PR body patterns like "Closes #42", "Fixes #7", "Resolves #100" */
