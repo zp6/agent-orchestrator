@@ -155,7 +155,35 @@ describe("PRReviewer", () => {
   });
 
   describe("merge conflict detection", () => {
-    it("short-circuits conflicting PRs without calling LLM", async () => {
+    it("auto-rebases conflicting PRs and proceeds to review when local repo is found", async () => {
+      // agent-a owns "owner/repo" → local path /projects/a exists in config
+      // Git commands succeed (mock returns "" for all git calls)
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "Test PR",
+        body: "Description\n\nCloses #1",
+        author: { login: "agent" },
+        headRefName: "feature-branch",
+        changedFiles: 2,
+        mergeable: "CONFLICTING",
+      });
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({
+          decision: "approve",
+          comment: "Looks good after rebase.",
+          reason: "Clean implementation",
+        })}],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      // Auto-rebase succeeded (git mock returns ""), so LLM review runs
+      expect(result.decision).toBe("approve");
+      expect(mockCreate).toHaveBeenCalled();
+    });
+
+    it("escalates conflicting PRs when auto-rebase fails", async () => {
       mockPRViewResponse = JSON.stringify({
         number: 9,
         title: "Test PR",
@@ -166,12 +194,46 @@ describe("PRReviewer", () => {
         mergeable: "CONFLICTING",
       });
 
+      const { execSync: mockExecSync } = await import("node:child_process");
+      // Make git rebase fail on the next call that includes "rebase origin/main"
+      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+        if (typeof cmd === "string" && cmd.includes("git rebase origin/main")) {
+          throw new Error("CONFLICT (content): Merge conflict in src/index.ts");
+        }
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
+        if (cmd.includes("gh pr view")) return mockPRViewResponse;
+        if (cmd.includes("gh pr diff")) return mockDiffResponse;
+        if (cmd.includes("gh issue list")) return mockIssueListResponse;
+        if (cmd.includes("gh pr list")) return JSON.stringify([{ number: 9, title: "Test PR" }]);
+        if (cmd.includes("gh pr review") || cmd.includes("gh pr edit") || cmd.includes("gh pr comment") || cmd.includes("gh pr merge")) return "";
+        return ""; // covers git fetch, checkout, push, rebase --abort, etc.
+      });
+
       const reviewer = new PRReviewer(config);
       const result = await reviewer.reviewPR("owner/repo", 9);
 
-      expect(result.decision).toBe("request-changes");
-      expect(result.comment).toContain("merge conflict");
-      expect(result.reason).toContain("Merge conflict");
+      expect(result.decision).toBe("escalate");
+      expect(result.reason).toContain("auto-rebase failed");
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    it("escalates conflicting PRs when no local repo is found for the given repo", async () => {
+      mockPRViewResponse = JSON.stringify({
+        number: 42,
+        title: "External PR",
+        body: "Description\n\nCloses #1",
+        author: { login: "agent" },
+        headRefName: "feature-branch",
+        changedFiles: 2,
+        mergeable: "CONFLICTING",
+      });
+
+      const reviewer = new PRReviewer(config);
+      // "unknown/repo" is not in config.agents and not the orchestrator repo
+      const result = await reviewer.reviewPR("unknown/repo", 42);
+
+      expect(result.decision).toBe("escalate");
+      expect(result.reason).toContain("no local repo");
       expect(mockCreate).not.toHaveBeenCalled();
     });
   });

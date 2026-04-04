@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process";
+import { resolve } from "node:path";
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { OrchestratorConfig } from "../config/schema.js";
@@ -56,16 +57,53 @@ export class PRReviewer {
     const pr = this.fetchPRInfo(repo, prNumber);
     this.log.info("Reviewing PR", { repo, prNumber, title: pr.title, filesChanged: pr.files_changed, mergeable: pr.mergeable });
 
-    // Short-circuit: skip review entirely if PR has merge conflicts
+    // Short-circuit: if PR has merge conflicts, attempt auto-rebase before giving up
     if (pr.mergeable === "CONFLICTING") {
-      const result: PRReviewResult = {
-        decision: "request-changes",
-        comment: `This PR has merge conflicts and cannot be merged. Please rebase onto main:\n\n\`\`\`\ngit fetch origin\ngit rebase origin/main\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``,
-        reason: "Merge conflict detected — skipping review",
-      };
-      this.log.info("PR has merge conflicts, skipping review", { repo, prNumber });
-      await this.executeDecision(repo, prNumber, result);
-      return result;
+      const localPath = this.findLocalRepoPath(repo);
+      if (localPath) {
+        this.log.info("PR has merge conflicts, attempting auto-rebase", {
+          repo,
+          prNumber,
+          branch: pr.branch,
+          localPath,
+        });
+        const rebaseOutcome = this.tryAutoRebase(localPath, pr.branch);
+        if (rebaseOutcome === "success") {
+          this.log.info("Auto-rebase succeeded — continuing with review", {
+            repo,
+            prNumber,
+            branch: pr.branch,
+          });
+          // Fall through to normal review — the branch is now rebased onto main
+        } else {
+          // Rebase failed — escalate instead of dispatching a rebase task to the agent
+          const result: PRReviewResult = {
+            decision: "escalate",
+            comment: `This PR has merge conflicts and auto-rebase onto \`origin/main\` failed (real conflicts need manual resolution).\n\n\`\`\`\ngit fetch origin\ngit rebase origin/main\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``,
+            reason: "Merge conflict — auto-rebase failed, escalating to human",
+          };
+          this.log.warn("Auto-rebase failed, escalating PR to human", {
+            repo,
+            prNumber,
+            branch: pr.branch,
+          });
+          await this.executeDecision(repo, prNumber, result);
+          return result;
+        }
+      } else {
+        // No local repo path found — escalate rather than dispatch a rebase task
+        const result: PRReviewResult = {
+          decision: "escalate",
+          comment: `This PR has merge conflicts. No local repository found for auto-rebase. Please rebase manually:\n\n\`\`\`\ngit fetch origin\ngit rebase origin/main\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``,
+          reason: "Merge conflict — no local repo for auto-rebase, escalating to human",
+        };
+        this.log.info("PR has merge conflicts and no local repo found, escalating", {
+          repo,
+          prNumber,
+        });
+        await this.executeDecision(repo, prNumber, result);
+        return result;
+      }
     }
 
     // PR body linter: agent PRs must include "Closes #N"
@@ -336,6 +374,85 @@ export class PRReviewer {
       // Fail-safe: if we can't verify the state, don't dispatch
       this.log.warn("Could not verify PR state, skipping feedback dispatch", { repo, prNumber });
       return false;
+    }
+  }
+
+  /**
+   * Find the local filesystem path for a GitHub repo slug (owner/repo).
+   * Checks agent configs first, then falls back to inspecting the orchestrator's
+   * own git remote. Returns null when no local path is known.
+   */
+  private findLocalRepoPath(repo: string): string | null {
+    // Match agent repos by their github field
+    for (const agent of Object.values(this.config.agents)) {
+      if (agent.github === repo) {
+        return resolve(this.config.base_dir, agent.dir);
+      }
+    }
+    // Check if the orchestrator's own repo matches
+    try {
+      const remote = execSync("git remote get-url origin", {
+        cwd: this.config.orchestrator_dir,
+        encoding: "utf-8",
+        timeout: 10000,
+      }).trim();
+      // remote may be "git@github.com:owner/repo.git" or "https://github.com/owner/repo"
+      if (remote.includes(repo)) {
+        return this.config.orchestrator_dir;
+      }
+    } catch {
+      // orchestrator_dir has no git remote — skip
+    }
+    return null;
+  }
+
+  /**
+   * Attempt to rebase the given branch onto origin/main in a local repo directory.
+   * Saves and restores the current branch regardless of outcome.
+   * Returns 'success' if the rebase + push succeeded, 'failed' otherwise.
+   */
+  private tryAutoRebase(localPath: string, branch: string): "success" | "failed" {
+    let currentBranch = "main";
+    try {
+      currentBranch =
+        execSync("git rev-parse --abbrev-ref HEAD", {
+          cwd: localPath,
+          encoding: "utf-8",
+          timeout: 10000,
+        }).trim() || "main";
+
+      execSync("git fetch origin", { cwd: localPath, encoding: "utf-8", timeout: 30000 });
+      execSync(`git checkout ${branch}`, { cwd: localPath, encoding: "utf-8", timeout: 15000 });
+
+      try {
+        execSync("git rebase origin/main", { cwd: localPath, encoding: "utf-8", timeout: 60000 });
+        execSync(`git push --force-with-lease origin ${branch}`, {
+          cwd: localPath,
+          encoding: "utf-8",
+          timeout: 30000,
+        });
+        return "success";
+      } catch {
+        try {
+          execSync("git rebase --abort", { cwd: localPath, encoding: "utf-8", timeout: 10000 });
+        } catch {
+          // Ignore abort failure
+        }
+        return "failed";
+      }
+    } catch {
+      return "failed";
+    } finally {
+      // Restore original branch (best-effort)
+      try {
+        execSync(`git checkout ${currentBranch}`, {
+          cwd: localPath,
+          encoding: "utf-8",
+          timeout: 10000,
+        });
+      } catch {
+        // Ignore restore failure
+      }
     }
   }
 
