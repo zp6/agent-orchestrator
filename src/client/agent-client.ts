@@ -33,17 +33,27 @@ CRITICAL — PR and Issue hygiene:
 - After completing work, verify your issue closed: \`gh issue view N --repo ${githubRepo} --json state\`. If it didn't, close it manually.
 - Do NOT create issues for features that already exist. Check merged PRs first: \`gh pr list --repo ${githubRepo} --state merged -L 20\`
 
-CRITICAL — Pre-PR submission checklist (run BEFORE \`gh pr create\`):
-1. **Rebase check**: ensure your branch is not behind main.
+CRITICAL — Pre-PR submission checklist (run ALL four steps BEFORE \`gh pr create\`):
+1. **Duplicate PR check**: verify no open PR already exists for your branch.
+   \`\`\`
+   gh pr list --repo ${githubRepo} --state open --json number,headRefName
+   \`\`\`
+   If one exists, push to that branch — do NOT create a second PR.
+2. **Rebase check**: ensure your branch is up to date with main to avoid conflicts.
    \`\`\`
    git fetch origin
    git rebase origin/main   # resolve any conflicts, then: git push --force-with-lease
    \`\`\`
-2. **Issue ref check**: confirm your PR body draft contains "Closes #N".
+3. **Merge conflict check**: confirm there are no remaining conflicts after rebasing.
+   \`\`\`
+   git diff --check   # should produce no output if clean
+   \`\`\`
+   If conflicts exist, resolve them, commit, and push before proceeding.
+4. **Issue ref check**: confirm your PR body draft contains "Closes #N".
    - If you forgot the issue number: \`gh issue list --repo ${githubRepo} --state open\`
-3. **Only then**: run \`gh pr create\` with the body including "Closes #N".
+5. **Only then**: run \`gh pr create\` with the body including "Closes #N".
 
-If any of these checks fail, fix them before submitting. PRs opened without "Closes #N" or on a stale branch will be rejected and require an extra revision cycle.
+If any of these checks fail, fix them before submitting. PRs opened without passing all checks will be rejected and require an extra revision cycle.
 
 CRITICAL — PR discipline (one issue, one branch, one PR):
 - Each PR must address exactly ONE issue. Do not bundle unrelated changes.

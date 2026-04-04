@@ -97,6 +97,30 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("gh issue list --repo owner/repo --state open");
   });
 
+  it("includes pre-PR checklist with all four validation steps", () => {
+    const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
+    // Step 1: duplicate PR check
+    expect(prompt).toContain("gh pr list");
+    // Step 2: rebase check
+    expect(prompt).toContain("git rebase origin/main");
+    // Step 3: merge conflict check
+    expect(prompt).toContain("git diff --check");
+    // Step 4: issue ref check
+    expect(prompt).toContain("Closes #N");
+  });
+
+  it("includes duplicate PR check instruction", () => {
+    const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
+    expect(prompt).toMatch(/duplicate pr/i);
+    expect(prompt).toContain("gh pr list");
+  });
+
+  it("includes merge conflict check instruction", () => {
+    const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
+    expect(prompt).toMatch(/merge conflict/i);
+    expect(prompt).toContain("git diff --check");
+  });
+
   it("includes backlog triage instructions (close duplicates)", () => {
     const prompt = buildAgentSystemPrompt(agentName, githubRepo);
     expect(prompt.toLowerCase()).toContain("duplicate");
@@ -144,6 +168,14 @@ describe("buildAgentSystemPrompt", () => {
     const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
     expect(prompt).toContain("Closes #N");
     expect(prompt).toContain("gh issue list --repo owner/repo --state open");
+  });
+
+  it("includes all four pre-PR checklist steps", () => {
+    const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("gh pr list");        // duplicate PR check
+    expect(prompt).toContain("git rebase origin/main"); // rebase check
+    expect(prompt).toContain("git diff --check");  // merge conflict check
+    expect(prompt).toContain("Closes #N");         // issue ref check
   });
 
   it("includes backlog triage and roadmap instructions", () => {

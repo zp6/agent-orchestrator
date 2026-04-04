@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   validateIssueRef,
   validateBranchFreshness,
+  validatePRExists,
+  validateMergeConflicts,
   validatePreSubmit,
   formatValidationSummary,
 } from "./pre-submit-validator.js";
@@ -181,12 +183,124 @@ describe("validateBranchFreshness", () => {
   });
 });
 
+// ─── validatePRExists ────────────────────────────────────────────────────────
+
+describe("validatePRExists", () => {
+  it("passes when no open PR exists for the branch", () => {
+    mockExecSync.mockReturnValueOnce(""); // empty → no PR found
+
+    const check = validatePRExists("owner/repo", "feature-branch");
+    expect(check.passed).toBe(true);
+    expect(check.detail).toMatch(/safe to create/i);
+  });
+
+  it("fails when an open PR already exists for the branch", () => {
+    mockExecSync.mockReturnValueOnce("42\n"); // PR #42 found
+
+    const check = validatePRExists("owner/repo", "feature-branch");
+    expect(check.passed).toBe(false);
+    expect(check.detail).toContain("42");
+    expect(check.detail).toMatch(/already exists/i);
+  });
+
+  it("passes (fail-open) when the gh CLI call fails", () => {
+    mockExecSync.mockImplementationOnce(() => { throw new Error("gh error"); });
+
+    const check = validatePRExists("owner/repo", "feature-branch");
+    expect(check.passed).toBe(true);
+    expect(check.detail).toMatch(/skipping/i);
+  });
+
+  it("passes (skip) when no repo or branch is provided", () => {
+    const check = validatePRExists("", "");
+    expect(check.passed).toBe(true);
+    expect(check.detail).toMatch(/skipping/i);
+  });
+});
+
+// ─── validateMergeConflicts ──────────────────────────────────────────────────
+
+describe("validateMergeConflicts", () => {
+  it("passes when GitHub API reports status 'ahead'", () => {
+    mockExecSync.mockReturnValueOnce("ahead\n");
+
+    const check = validateMergeConflicts("owner/repo", "feature-branch", null);
+    expect(check.passed).toBe(true);
+    expect(check.detail).toMatch(/no merge conflicts/i);
+  });
+
+  it("fails when GitHub API reports status 'conflicting'", () => {
+    mockExecSync.mockReturnValueOnce("conflicting\n");
+
+    const check = validateMergeConflicts("owner/repo", "feature-branch", null);
+    expect(check.passed).toBe(false);
+    expect(check.detail).toMatch(/merge conflicts/i);
+    expect(check.detail).toContain("rebase");
+  });
+
+  it("passes with a diverged note when status is 'diverged'", () => {
+    mockExecSync.mockReturnValueOnce("diverged\n");
+
+    const check = validateMergeConflicts("owner/repo", "feature-branch", null);
+    expect(check.passed).toBe(true);
+    expect(check.detail).toMatch(/diverged/i);
+  });
+
+  it("falls back to local merge check when API fails and no conflicts found", () => {
+    // API call fails
+    mockExecSync.mockImplementationOnce(() => { throw new Error("API error"); });
+    // git fetch succeeds
+    mockExecSync.mockReturnValueOnce("");
+    // git merge --no-commit --no-ff succeeds (no conflicts)
+    mockExecSync.mockReturnValueOnce("");
+    // git merge --abort
+    mockExecSync.mockReturnValueOnce("");
+
+    const check = validateMergeConflicts("owner/repo", "feature-branch", "/local/path");
+    expect(check.passed).toBe(true);
+    expect(check.detail).toMatch(/no merge conflicts/i);
+  });
+
+  it("fails via local check when merge detects conflicts", () => {
+    // API call fails
+    mockExecSync.mockImplementationOnce(() => { throw new Error("API error"); });
+    // git fetch succeeds
+    mockExecSync.mockReturnValueOnce("");
+    // git merge --no-commit --no-ff fails with CONFLICT message
+    mockExecSync.mockImplementationOnce(() => { throw new Error("CONFLICT (content): file.ts"); });
+    // git merge --abort
+    mockExecSync.mockReturnValueOnce("");
+
+    const check = validateMergeConflicts("owner/repo", "feature-branch", "/local/path");
+    expect(check.passed).toBe(false);
+    expect(check.detail).toMatch(/merge conflicts/i);
+  });
+
+  it("passes (fail-open) when both API and local checks fail", () => {
+    mockExecSync.mockImplementation(() => { throw new Error("fail"); });
+
+    const check = validateMergeConflicts("owner/repo", "feature-branch", "/local/path");
+    expect(check.passed).toBe(true);
+    expect(check.detail).toMatch(/skipping/i);
+  });
+
+  it("passes (skip) when no repo and no local path available", () => {
+    const check = validateMergeConflicts("", "feature-branch", null);
+    expect(check.passed).toBe(true);
+    expect(check.detail).toMatch(/skipping/i);
+  });
+});
+
 // ─── validatePreSubmit ───────────────────────────────────────────────────────
 
 describe("validatePreSubmit", () => {
-  it("returns valid when both checks pass", async () => {
-    // branchFreshness API call → 0 behind
+  it("returns valid when all four checks pass", async () => {
+    // validateBranchFreshness → 0 behind
     mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists → no existing PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts → ahead (no conflicts)
+    mockExecSync.mockReturnValueOnce("ahead\n");
 
     const result = await validatePreSubmit(
       "owner/repo",
@@ -200,6 +314,8 @@ describe("validatePreSubmit", () => {
     expect(result.blockers).toHaveLength(0);
     expect(result.checks.issueRef.passed).toBe(true);
     expect(result.checks.branchFresh.passed).toBe(true);
+    expect(result.checks.prExists.passed).toBe(true);
+    expect(result.checks.mergeConflicts.passed).toBe(true);
   });
 
   it("returns invalid when issue ref is missing", async () => {
@@ -207,6 +323,10 @@ describe("validatePreSubmit", () => {
     mockExecSync.mockReturnValueOnce("[]");
     // validateBranchFreshness → current
     mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists → no existing PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts → no conflicts
+    mockExecSync.mockReturnValueOnce("ahead\n");
 
     const result = await validatePreSubmit(
       "owner/repo",
@@ -222,8 +342,12 @@ describe("validatePreSubmit", () => {
   });
 
   it("returns invalid when branch is behind main", async () => {
-    // branchFreshness → 2 behind
+    // validateBranchFreshness → 2 behind
     mockExecSync.mockReturnValueOnce("2\n");
+    // validatePRExists → no existing PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts → no conflicts
+    mockExecSync.mockReturnValueOnce("ahead\n");
 
     const result = await validatePreSubmit(
       "owner/repo",
@@ -238,11 +362,15 @@ describe("validatePreSubmit", () => {
     expect(result.blockers.some((b) => b.includes("behind"))).toBe(true);
   });
 
-  it("returns invalid with multiple blockers when both checks fail", async () => {
+  it("returns invalid with multiple blockers when issue ref and branch freshness fail", async () => {
     // validateIssueRef → findMatchingIssueNumber → gh issue list (no match)
     mockExecSync.mockReturnValueOnce("[]");
     // validateBranchFreshness → gh api compare → 4 behind
     mockExecSync.mockReturnValueOnce("4\n");
+    // validatePRExists → no existing PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts → no conflicts
+    mockExecSync.mockReturnValueOnce("ahead\n");
 
     const result = await validatePreSubmit(
       "owner/repo",
@@ -256,9 +384,55 @@ describe("validatePreSubmit", () => {
     expect(result.blockers.length).toBe(2);
   });
 
-  it("includes inferredIssueNumber when branch encodes an issue", async () => {
-    // branchFreshness → current
+  it("returns invalid when a duplicate PR already exists for the branch", async () => {
+    // validateBranchFreshness → current
     mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists → PR #99 already exists
+    mockExecSync.mockReturnValueOnce("99\n");
+    // validateMergeConflicts → no conflicts
+    mockExecSync.mockReturnValueOnce("ahead\n");
+
+    const result = await validatePreSubmit(
+      "owner/repo",
+      "issue-30-feat",
+      "Closes #30",
+      null,
+      minimalConfig,
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.checks.prExists.passed).toBe(false);
+    expect(result.blockers.some((b) => b.includes("99"))).toBe(true);
+  });
+
+  it("returns invalid when branch has merge conflicts", async () => {
+    // validateBranchFreshness → current
+    mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists → no existing PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts → conflicting
+    mockExecSync.mockReturnValueOnce("conflicting\n");
+
+    const result = await validatePreSubmit(
+      "owner/repo",
+      "issue-40-feat",
+      "Closes #40",
+      null,
+      minimalConfig,
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.checks.mergeConflicts.passed).toBe(false);
+    expect(result.blockers.some((b) => b.toLowerCase().includes("conflict"))).toBe(true);
+  });
+
+  it("includes inferredIssueNumber when branch encodes an issue", async () => {
+    // validateBranchFreshness → current
+    mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists → no existing PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts → no conflicts
+    mockExecSync.mockReturnValueOnce("ahead\n");
 
     const result = await validatePreSubmit(
       "owner/repo",
@@ -282,6 +456,8 @@ describe("formatValidationSummary", () => {
       checks: {
         issueRef: { passed: false, detail: "Missing Closes #N" },
         branchFresh: { passed: true, detail: "Up to date with main" },
+        prExists: { passed: true, detail: "No open PR exists" },
+        mergeConflicts: { passed: true, detail: "No merge conflicts" },
       },
       blockers: ["Missing Closes #N"],
       warnings: [],
@@ -294,14 +470,36 @@ describe("formatValidationSummary", () => {
     expect(summary).toContain("Up to date with main");
   });
 
+  it("includes all four check lines in the summary", () => {
+    const result = {
+      valid: true,
+      checks: {
+        issueRef: { passed: true, detail: "Has Closes #10" },
+        branchFresh: { passed: true, detail: "Up to date" },
+        prExists: { passed: true, detail: "No duplicate PR" },
+        mergeConflicts: { passed: true, detail: "No conflicts" },
+      },
+      blockers: [],
+      warnings: [],
+    };
+
+    const summary = formatValidationSummary(result);
+    expect(summary).toContain("Issue reference");
+    expect(summary).toContain("Branch freshness");
+    expect(summary).toContain("No duplicate PR");
+    expect(summary).toContain("Merge conflicts");
+  });
+
   it("includes blockers section when validation fails", () => {
     const result = {
       valid: false,
       checks: {
         issueRef: { passed: false, detail: "Missing ref" },
         branchFresh: { passed: false, detail: "Branch is stale" },
+        prExists: { passed: true, detail: "No open PR exists" },
+        mergeConflicts: { passed: false, detail: "Has conflicts" },
       },
-      blockers: ["Missing ref", "Branch is stale"],
+      blockers: ["Missing ref", "Branch is stale", "Has conflicts"],
       warnings: [],
     };
 
@@ -309,6 +507,7 @@ describe("formatValidationSummary", () => {
     expect(summary).toContain("Action required");
     expect(summary).toContain("Missing ref");
     expect(summary).toContain("Branch is stale");
+    expect(summary).toContain("Has conflicts");
   });
 
   it("does not include action required section when valid", () => {
@@ -317,6 +516,8 @@ describe("formatValidationSummary", () => {
       checks: {
         issueRef: { passed: true, detail: "Has Closes #42" },
         branchFresh: { passed: true, detail: "Up to date" },
+        prExists: { passed: true, detail: "No duplicate PR" },
+        mergeConflicts: { passed: true, detail: "No conflicts" },
       },
       blockers: [],
       warnings: [],
@@ -333,6 +534,8 @@ describe("formatValidationSummary", () => {
       checks: {
         issueRef: { passed: true, detail: "Has ref" },
         branchFresh: { passed: true, detail: "Up to date" },
+        prExists: { passed: true, detail: "No duplicate PR" },
+        mergeConflicts: { passed: true, detail: "No conflicts" },
       },
       blockers: [],
       warnings: ["CI not yet run on this branch"],

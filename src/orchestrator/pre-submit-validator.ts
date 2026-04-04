@@ -15,6 +15,8 @@ export interface PreSubmitValidationResult {
   checks: {
     issueRef: PreSubmitCheck;
     branchFresh: PreSubmitCheck;
+    prExists: PreSubmitCheck;
+    mergeConflicts: PreSubmitCheck;
   };
   /** Hard failures that must be fixed before the PR can be submitted. */
   blockers: string[];
@@ -149,11 +151,148 @@ export function validateBranchFreshness(
 }
 
 /**
+ * Check whether an open PR already exists for the given branch on the repo.
+ * Returns a failing check if an open PR is found (duplicate PR guard).
+ */
+export function validatePRExists(repo: string, branch: string): PreSubmitCheck {
+  if (!repo || !branch) {
+    return {
+      passed: true,
+      detail: "No repo or branch provided — skipping duplicate PR check.",
+    };
+  }
+
+  try {
+    const raw = execSync(
+      `gh pr list --repo ${repo} --state open --json number,headRefName --jq '.[] | select(.headRefName == "${branch}") | .number'`,
+      { encoding: "utf-8", timeout: 15000 },
+    ).trim();
+
+    if (raw) {
+      const prNumber = raw.split("\n")[0].trim();
+      return {
+        passed: false,
+        detail: `An open PR (#${prNumber}) already exists for branch "${branch}" on ${repo}. Push to the existing branch instead of creating a new PR.`,
+      };
+    }
+
+    return {
+      passed: true,
+      detail: `No open PR exists for branch "${branch}" — safe to create.`,
+    };
+  } catch {
+    // If the check fails, fail-open (don't block PRs because of a lookup error)
+    return {
+      passed: true,
+      detail: "Could not check for existing PRs — skipping duplicate PR check.",
+    };
+  }
+}
+
+/**
+ * Check whether a branch has merge conflicts with origin/main.
+ * Uses the GitHub compare API (status field) when repo is provided,
+ * or falls back to a local `git merge --no-commit --no-ff` dry-run.
+ *
+ * Fails-open: if neither check can run, the result is "passed" to avoid
+ * blocking PRs solely due to an inability to verify.
+ */
+export function validateMergeConflicts(
+  repo: string,
+  branch: string,
+  localPath: string | null,
+): PreSubmitCheck {
+  // Try GitHub compare API first — "diverged" status may indicate conflicts;
+  // "conflicting" is the definitive signal when the API provides it.
+  if (repo) {
+    try {
+      const status = execSync(
+        `gh api "repos/${repo}/compare/main...${branch}" --jq '.status'`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+
+      if (status === "diverged") {
+        // "diverged" means both branches have moved; conflicts may exist.
+        // We treat this as a warning that the branch should be rebased but
+        // don't hard-fail here (validateBranchFreshness will catch staleness).
+        return {
+          passed: true,
+          detail: "Branch has diverged from main — ensure you have rebased to resolve any conflicts.",
+        };
+      }
+
+      if (status === "conflicting") {
+        return {
+          passed: false,
+          detail: `Branch "${branch}" has merge conflicts with main. Resolve conflicts before submitting: \`git fetch origin && git rebase origin/main\`.`,
+        };
+      }
+
+      return {
+        passed: true,
+        detail: "No merge conflicts detected with main.",
+      };
+    } catch {
+      // API call failed — fall through to local check
+    }
+  }
+
+  // Fall back to local dry-run merge
+  if (localPath) {
+    try {
+      execSync("git fetch origin", { cwd: localPath, encoding: "utf-8", timeout: 30000 });
+      // Attempt a no-commit, no-ff merge to detect conflicts without touching the working tree
+      try {
+        execSync("git merge origin/main --no-commit --no-ff", {
+          cwd: localPath,
+          encoding: "utf-8",
+          timeout: 30000,
+        });
+        // Clean up the merge state
+        execSync("git merge --abort", { cwd: localPath, encoding: "utf-8", timeout: 10000 });
+        return { passed: true, detail: "No merge conflicts detected with origin/main." };
+      } catch (mergeErr) {
+        // merge --no-commit exits non-zero on conflicts
+        try {
+          execSync("git merge --abort", { cwd: localPath, encoding: "utf-8", timeout: 10000 });
+        } catch {
+          // ignore abort errors
+        }
+        const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
+        if (msg.includes("CONFLICT") || msg.includes("conflict")) {
+          return {
+            passed: false,
+            detail: `Branch has merge conflicts with origin/main. Resolve conflicts before submitting: \`git rebase origin/main\`.`,
+          };
+        }
+        // Non-conflict merge error — fail-open
+        return {
+          passed: true,
+          detail: "Could not complete merge conflict check locally — skipping.",
+        };
+      }
+    } catch {
+      return {
+        passed: true,
+        detail: "Could not run local merge conflict check — skipping.",
+      };
+    }
+  }
+
+  return {
+    passed: true,
+    detail: "No local path available — skipping merge conflict check.",
+  };
+}
+
+/**
  * Run all pre-submit checks for a PR about to be created.
  *
  * Checks performed:
  * 1. **issueRef** — PR body contains "Closes #N" (or an issue can be inferred)
  * 2. **branchFresh** — branch is not behind origin/main
+ * 3. **prExists** — no open PR already exists for this branch (duplicate guard)
+ * 4. **mergeConflicts** — branch has no merge conflicts with main
  *
  * Returns a `PreSubmitValidationResult` with `valid: true` only when all
  * blocking checks pass. Non-blocking observations are reported as `warnings`.
@@ -187,6 +326,20 @@ export async function validatePreSubmit(
     blockers.push(branchFreshCheck.detail);
   }
 
+  // --- Check 3: No open PR already exists for this branch ---
+  const prExistsCheck = validatePRExists(repo, branch);
+
+  if (!prExistsCheck.passed) {
+    blockers.push(prExistsCheck.detail);
+  }
+
+  // --- Check 4: No merge conflicts with main ---
+  const mergeConflictsCheck = validateMergeConflicts(repo, branch, localPath);
+
+  if (!mergeConflictsCheck.passed) {
+    blockers.push(mergeConflictsCheck.detail);
+  }
+
   const valid = blockers.length === 0;
 
   log.info("Pre-submit validation complete", {
@@ -203,6 +356,8 @@ export async function validatePreSubmit(
     checks: {
       issueRef: issueRefCheck,
       branchFresh: branchFreshCheck,
+      prExists: prExistsCheck,
+      mergeConflicts: mergeConflictsCheck,
     },
     blockers,
     warnings,
@@ -221,6 +376,8 @@ export function formatValidationSummary(result: PreSubmitValidationResult): stri
 
   lines.push(`${checkIcon(result.checks.issueRef.passed)} **Issue reference**: ${result.checks.issueRef.detail}`);
   lines.push(`${checkIcon(result.checks.branchFresh.passed)} **Branch freshness**: ${result.checks.branchFresh.detail}`);
+  lines.push(`${checkIcon(result.checks.prExists.passed)} **No duplicate PR**: ${result.checks.prExists.detail}`);
+  lines.push(`${checkIcon(result.checks.mergeConflicts.passed)} **Merge conflicts**: ${result.checks.mergeConflicts.detail}`);
 
   if (result.warnings.length > 0) {
     lines.push("", "**Warnings:**");

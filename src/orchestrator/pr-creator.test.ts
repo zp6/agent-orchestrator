@@ -197,6 +197,10 @@ describe("createPRForBranch", () => {
   it("includes Closes #N in PR body when issue number is inferrable from branch", async () => {
     // validateBranchFreshness: gh api compare → 0 behind
     mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists: gh pr list → no existing PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts: gh api compare → ahead (no conflicts)
+    mockExecSync.mockReturnValueOnce("ahead\n");
     // gh pr create
     mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/10\n");
 
@@ -213,6 +217,10 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("[]");
     // validateBranchFreshness: gh api compare → 0 behind
     mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists: gh pr list → no existing PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts: gh api compare → ahead (no conflicts)
+    mockExecSync.mockReturnValueOnce("ahead\n");
 
     const genericOrphan: OrphanBranch = { ...orphan, branch: "feature-branch" };
     const result = await createPRForBranch(genericOrphan);
@@ -229,6 +237,10 @@ describe("createPRForBranch", () => {
     );
     // validateBranchFreshness: gh api compare → 0 behind
     mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists: gh pr list → no existing PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts: gh api compare → ahead (no conflicts)
+    mockExecSync.mockReturnValueOnce("ahead\n");
     // gh pr create
     mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/15\n");
 
@@ -253,6 +265,10 @@ describe("createPRForBranch", () => {
   it("includes the agent name and branch in the PR title", async () => {
     // validateBranchFreshness: gh api compare → 0 behind
     mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists: gh pr list → no existing PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts: gh api compare → ahead (no conflicts)
+    mockExecSync.mockReturnValueOnce("ahead\n");
     // gh pr create
     mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/12\n");
 
@@ -266,6 +282,10 @@ describe("createPRForBranch", () => {
   it("handles fix/issue-N branch format correctly", async () => {
     // validateBranchFreshness: gh api compare → 0 behind
     mockExecSync.mockReturnValueOnce("0\n");
+    // validatePRExists: gh pr list → no existing PR
+    mockExecSync.mockReturnValueOnce("");
+    // validateMergeConflicts: gh api compare → ahead (no conflicts)
+    mockExecSync.mockReturnValueOnce("ahead\n");
     // gh pr create
     mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/20\n");
 
