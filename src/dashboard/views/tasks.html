@@ -12,10 +12,12 @@
     .badge-done { background: #065f46; color: #6ee7b7; }
     .badge-failed { background: #7f1d1d; color: #fca5a5; }
     .badge-dispatched { background: #1e3a5f; color: #93c5fd; }
+    .badge-in_progress { background: #1e3a5f; color: #93c5fd; }
     .badge-planning { background: #581c87; color: #d8b4fe; }
     .badge-pending { background: #713f12; color: #fcd34d; }
     .badge-approved { background: #065f46; color: #6ee7b7; }
     .badge-rejected { background: #7f1d1d; color: #fca5a5; }
+    .badge-pending-verify { background: #713f12; color: #fcd34d; }
     nav a { color: #94a3b8; text-decoration: none; padding: 8px 16px; border-radius: 8px; }
     nav a:hover, nav a.active { color: #e2e8f0; background: #334155; }
     .detail-panel { background: #1e293b; border-radius: 12px; padding: 20px; margin-top: 16px; display: none; }
@@ -84,13 +86,24 @@
       renderTasks();
     }
 
+    function getTaskStatusBadge(t) {
+      if (t.status === 'done') {
+        const score = t.quality_score !== null ? ` (${t.quality_score.toFixed(1)})` : '';
+        if (t.verification_status === 'approved') return `<span class="badge badge-approved">✓ Approved${score}</span>`;
+        if (t.verification_status === 'rejected') return `<span class="badge badge-rejected">✗ Rejected${score}</span>`;
+        if (t.verification_status === 'pending') return `<span class="badge badge-pending-verify">⏳ Verifying</span>`;
+        return `<span class="badge badge-done">Done</span>`;
+      }
+      return `<span class="badge badge-${t.status}">${t.status}</span>`;
+    }
+
     function renderTasks() {
       const tbody = document.getElementById('task-list');
       tbody.innerHTML = allTasks.map(t => `
         <tr class="border-t border-gray-700 cursor-pointer hover:bg-gray-800" onclick="showDetail('${t.id}')">
           <td class="py-2 font-mono text-xs text-gray-500">${t.id.slice(0, 8)}</td>
-          <td><span class="badge badge-${t.status}">${t.status}</span></td>
-          <td>${t.verification_status ? `<span class="badge badge-${t.verification_status}">${t.verification_status}</span> ${t.quality_score ? t.quality_score.toFixed(1) : ''}` : '<span class="text-gray-600">-</span>'}</td>
+          <td>${getTaskStatusBadge(t)}</td>
+          <td>${t.verification_status ? `<span class="badge badge-${t.verification_status}">${t.verification_status}</span> ${t.quality_score !== null ? t.quality_score.toFixed(1) : ''}` : '<span class="text-gray-600">-</span>'}</td>
           <td class="text-blue-400">${t.agent_name || '-'}</td>
           <td class="text-gray-400">${t.source}${t.source_ref ? ' (' + t.source_ref + ')' : ''}</td>
           <td class="truncate max-w-sm">${t.title}</td>

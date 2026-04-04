@@ -12,9 +12,12 @@
     .badge-done { background: #065f46; color: #6ee7b7; }
     .badge-failed { background: #7f1d1d; color: #fca5a5; }
     .badge-dispatched { background: #1e3a5f; color: #93c5fd; }
+    .badge-in_progress { background: #1e3a5f; color: #93c5fd; }
     .badge-planning { background: #581c87; color: #d8b4fe; }
+    .badge-pending { background: #713f12; color: #fcd34d; }
     .badge-approved { background: #065f46; color: #6ee7b7; }
     .badge-rejected { background: #7f1d1d; color: #fca5a5; }
+    .badge-pending-verify { background: #713f12; color: #fcd34d; }
     .badge-running { background: #065f46; color: #6ee7b7; }
     .badge-stopped { background: #7f1d1d; color: #fca5a5; }
     nav a { color: #94a3b8; text-decoration: none; padding: 8px 16px; border-radius: 8px; }
@@ -137,16 +140,27 @@
 
         // Recent tasks
         const rt = document.getElementById('recent-tasks');
-        rt.innerHTML = data.recent.map(t => `
+        rt.innerHTML = data.recent.map(t => {
+          let statusBadge;
+          if (t.status === 'done') {
+            const score = t.quality_score !== null ? ` (${t.quality_score.toFixed(1)})` : '';
+            if (t.verification_status === 'approved') statusBadge = `<span class="badge badge-approved">✓ Approved${score}</span>`;
+            else if (t.verification_status === 'rejected') statusBadge = `<span class="badge badge-rejected">✗ Rejected${score}</span>`;
+            else if (t.verification_status === 'pending') statusBadge = `<span class="badge badge-pending-verify">⏳ Verifying</span>`;
+            else statusBadge = `<span class="badge badge-done">Done</span>`;
+          } else {
+            statusBadge = `<span class="badge badge-${t.status}">${t.status}</span>`;
+          }
+          return `
           <tr class="border-t border-gray-700">
             <td class="py-2 font-mono text-xs text-gray-500"><a href="/tasks?id=${t.id}" class="hover:text-white">${t.id.slice(0, 8)}</a></td>
-            <td><span class="badge badge-${t.status}">${t.status}</span></td>
+            <td>${statusBadge}</td>
             <td class="text-blue-400">${t.agent_name || '-'}</td>
             <td class="truncate max-w-xs">${t.title}</td>
-            <td>${t.verification_status ? `<span class="badge badge-${t.verification_status}">${t.verification_status}</span> ${t.quality_score ? t.quality_score.toFixed(1) : ''}` : '<span class="text-gray-600">-</span>'}</td>
+            <td>${t.verification_status ? `<span class="badge badge-${t.verification_status}">${t.verification_status}</span> ${t.quality_score !== null ? t.quality_score.toFixed(1) : ''}` : '<span class="text-gray-600">-</span>'}</td>
             <td class="text-gray-500 text-xs">${new Date(t.created_at).toLocaleTimeString()}</td>
           </tr>
-        `).join('');
+        `}).join('');
       } catch (err) {
         console.error('Refresh failed:', err);
       }
