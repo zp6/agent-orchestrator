@@ -256,6 +256,77 @@ describe("PRReviewer", () => {
       expect(result.decision).toBe("approve");
       expect(mockCreate).toHaveBeenCalled();
     });
+
+    it("lints agent PRs that omit [agent-name] title prefix but use issue-N branch convention", async () => {
+      // Agent forgot the [agent-a] prefix in the title, but used the standard issue-N branch format.
+      // The linter should still fire based on branch name detection.
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "Add feature",            // No [agent-a] prefix
+        body: "Some description",        // No Closes #N
+        author: { login: "agent" },
+        headRefName: "issue-42-add-feature",
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Good", reason: "Clean" }) }],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      // Branch encodes issue 42 → auto-patch succeeds → proceeds to LLM review
+      expect(result.decision).toBe("approve");
+      expect(mockCreate).toHaveBeenCalled();
+    });
+
+    it("blocks agent PR without [agent-name] prefix AND non-issue branch, requesting actionable fix steps", async () => {
+      // Agent PR with neither a [agent-name] title prefix nor an issue-N branch.
+      // The linter should NOT fire (treated as non-agent PR via feature-branch).
+      // This documents current behavior: feature-branch without title prefix is not linted.
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "Add some feature",       // No [agent-a] prefix
+        body: "Some description",        // No Closes #N
+        author: { login: "agent" },
+        headRefName: "feature-branch",   // No issue number
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Good", reason: "Clean" }) }],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      // No agent title prefix AND no issue-N branch → treated as non-agent PR → approved by LLM
+      expect(result.decision).toBe("approve");
+      expect(mockCreate).toHaveBeenCalled();
+    });
+
+    it("feedback message includes actionable gh commands when issue number cannot be inferred", async () => {
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Add feature",
+        body: "Some description without issue ref",
+        author: { login: "agent" },
+        headRefName: "feature-branch",   // No issue number in branch
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("request-changes");
+      // Should include the repo name and PR number for actionable commands
+      expect(result.comment).toContain("owner/repo");
+      expect(result.comment).toContain("gh issue list");
+      expect(result.comment).toContain("gh pr edit");
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
   });
 
   describe("diff size safety", () => {

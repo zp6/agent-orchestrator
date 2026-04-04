@@ -70,6 +70,13 @@ export class PRReviewer {
 
     // PR body linter: agent PRs must include "Closes #N"
     if (this.isAgentPR(pr) && !this.hasIssueRef(pr)) {
+      this.log.warn("PR body linter: missing Closes #N", {
+        repo,
+        prNumber,
+        title: pr.title,
+        branch: pr.branch,
+        hasAgentTitlePrefix: Object.keys(this.config.agents).some((name) => pr.title.includes(`[${name}]`)),
+      });
       // Try to auto-patch the PR body by inferring the issue number from the branch name,
       // rather than wasting a full review cycle dispatching feedback to the agent.
       const inferredIssue = extractIssueNumberFromBranch(pr.branch);
@@ -93,13 +100,18 @@ export class PRReviewer {
           return result;
         }
       } else {
-        // Can't infer issue number — ask the agent to add it
+        // Can't infer issue number from branch — give the agent actionable steps
         const result: PRReviewResult = {
           decision: "request-changes",
-          comment: 'PR body must include "Closes #N" (where N is the issue number) so the issue auto-closes on merge. Please update the PR body and push again.',
-          reason: "PR body missing issue reference (Closes #N)",
+          comment: `PR body is missing a "Closes #N" reference and the branch name \`${pr.branch}\` does not encode an issue number.\n\nFind the relevant issue:\n\`\`\`\ngh issue list --repo ${repo} --state open\n\`\`\`\n\nThen add the reference to the PR body:\n\`\`\`\ngh pr edit ${prNumber} --repo ${repo} --body "$(gh pr view ${prNumber} --repo ${repo} --json body -q .body)\n\nCloses #N"\n\`\`\`\n\nReplace \`N\` with the actual issue number before running.`,
+          reason: "PR body missing issue reference (Closes #N) — branch name gives no issue number",
         };
-        this.log.info("PR body linter: missing issue ref, cannot infer from branch", { repo, prNumber, branch: pr.branch });
+        this.log.warn("PR body linter: missing issue ref, cannot infer from branch", {
+          repo,
+          prNumber,
+          branch: pr.branch,
+          title: pr.title,
+        });
         await this.executeDecision(repo, prNumber, result);
         return result;
       }
@@ -265,8 +277,18 @@ export class PRReviewer {
   }
 
   private isAgentPR(pr: PRInfo): boolean {
+    // Match PRs where the title contains [agent-name]
     const agentNames = Object.keys(this.config.agents);
-    return agentNames.some((name) => pr.title.includes(`[${name}]`));
+    if (agentNames.some((name) => pr.title.includes(`[${name}]`))) return true;
+
+    // Also match PRs whose branch follows the issue-N-* naming convention.
+    // Agents are instructed to use this format, so a branch like "issue-42-add-feature"
+    // is almost certainly agent-created even if the title prefix was omitted.
+    // This catches the common failure mode where an agent forgets [agent-name] in the
+    // title and the Closes #N linter would otherwise silently be skipped.
+    if (extractIssueNumberFromBranch(pr.branch) !== null) return true;
+
+    return false;
   }
 
   private hasIssueRef(pr: PRInfo): boolean {
