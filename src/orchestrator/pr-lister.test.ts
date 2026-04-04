@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { PRLister, toPRRow, extractLinkedIssue, formatAge } from "./pr-lister.js";
+import { PRLister, toPRRow, extractLinkedIssue, formatAge, rollupCIStatus } from "./pr-lister.js";
 import type { OrchestratorConfig } from "../config/schema.js";
-import type { PRListItem } from "./pr-lister.js";
+import type { PRListItem, StatusCheck } from "./pr-lister.js";
 
 const mockExecFileSync = vi.fn();
 
@@ -41,10 +41,12 @@ const makePR = (overrides: Partial<PRListItem> = {}): PRListItem => ({
   number: 1,
   title: "Fix something",
   createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), // 2 days ago
+  updatedAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(), // 1 day ago
   mergeable: "MERGEABLE",
   reviewDecision: null,
   headRefName: "fix-something",
   body: "Closes #42",
+  statusCheckRollup: null,
   ...overrides,
 });
 
@@ -81,6 +83,54 @@ describe("formatAge", () => {
 
   it("formats multiple days", () => {
     expect(formatAge(7)).toBe("7d");
+  });
+});
+
+describe("rollupCIStatus", () => {
+  const check = (status: string, conclusion: string | null): StatusCheck => ({
+    name: "test",
+    status,
+    conclusion,
+  });
+
+  it("returns 'none' for null checks", () => {
+    expect(rollupCIStatus(null)).toBe("none");
+  });
+
+  it("returns 'none' for empty array", () => {
+    expect(rollupCIStatus([])).toBe("none");
+  });
+
+  it("returns 'failing' when any check has FAILURE conclusion", () => {
+    expect(rollupCIStatus([check("COMPLETED", "FAILURE")])).toBe("failing");
+  });
+
+  it("returns 'failing' when any check has TIMED_OUT conclusion", () => {
+    expect(rollupCIStatus([check("COMPLETED", "TIMED_OUT"), check("COMPLETED", "SUCCESS")])).toBe("failing");
+  });
+
+  it("returns 'failing' when any check has ACTION_REQUIRED conclusion", () => {
+    expect(rollupCIStatus([check("COMPLETED", "ACTION_REQUIRED")])).toBe("failing");
+  });
+
+  it("returns 'pending' when any check is in progress with no conclusion", () => {
+    expect(rollupCIStatus([check("IN_PROGRESS", null)])).toBe("pending");
+  });
+
+  it("returns 'pending' when any check is queued", () => {
+    expect(rollupCIStatus([check("QUEUED", null), check("COMPLETED", "SUCCESS")])).toBe("pending");
+  });
+
+  it("returns 'passing' when all checks succeeded", () => {
+    expect(
+      rollupCIStatus([check("COMPLETED", "SUCCESS"), check("COMPLETED", "SKIPPED")]),
+    ).toBe("passing");
+  });
+
+  it("'failing' takes priority over 'pending'", () => {
+    expect(
+      rollupCIStatus([check("IN_PROGRESS", null), check("COMPLETED", "FAILURE")]),
+    ).toBe("failing");
   });
 });
 
@@ -133,6 +183,46 @@ describe("toPRRow", () => {
     const item = makePR({ body: "This PR closes #99", createdAt: "2024-01-09T12:00:00Z" });
     const row = toPRRow(item, "owner/repo", now);
     expect(row.linkedIssue).toBe("#99");
+  });
+
+  it("computes lastPushDays from updatedAt", () => {
+    const item = makePR({
+      createdAt: "2024-01-05T12:00:00Z", // 5 days ago
+      updatedAt: "2024-01-08T12:00:00Z", // 2 days ago
+    });
+    const row = toPRRow(item, "owner/repo", now);
+    expect(row.ageDays).toBe(5);
+    expect(row.lastPushDays).toBe(2);
+  });
+
+  it("falls back to createdAt when updatedAt is missing", () => {
+    const item = makePR({ createdAt: "2024-01-07T12:00:00Z", updatedAt: "" });
+    const row = toPRRow(item, "owner/repo", now);
+    expect(row.lastPushDays).toBe(3);
+  });
+
+  it("maps passing CI checks to ciStatus 'passing'", () => {
+    const item = makePR({
+      createdAt: "2024-01-09T12:00:00Z",
+      statusCheckRollup: [{ name: "build", status: "COMPLETED", conclusion: "SUCCESS" }],
+    });
+    const row = toPRRow(item, "owner/repo", now);
+    expect(row.ciStatus).toBe("passing");
+  });
+
+  it("maps failing CI check to ciStatus 'failing'", () => {
+    const item = makePR({
+      createdAt: "2024-01-09T12:00:00Z",
+      statusCheckRollup: [{ name: "build", status: "COMPLETED", conclusion: "FAILURE" }],
+    });
+    const row = toPRRow(item, "owner/repo", now);
+    expect(row.ciStatus).toBe("failing");
+  });
+
+  it("maps null statusCheckRollup to ciStatus 'none'", () => {
+    const item = makePR({ createdAt: "2024-01-09T12:00:00Z", statusCheckRollup: null });
+    const row = toPRRow(item, "owner/repo", now);
+    expect(row.ciStatus).toBe("none");
   });
 });
 
@@ -292,6 +382,32 @@ describe("PRLister", () => {
     expect(mockExecFileSync.mock.calls).toHaveLength(1);
     const args = mockExecFileSync.mock.calls[0][1] as string[];
     expect(args[args.indexOf("--repo") + 1]).toBe("custom/repo");
+  });
+
+  it("filters CI-failed PRs with --ci-failed flag", () => {
+    const failing = makePR({
+      number: 5,
+      title: "Failing CI",
+      statusCheckRollup: [{ name: "build", status: "COMPLETED", conclusion: "FAILURE" }],
+    });
+    const passing = makePR({
+      number: 6,
+      title: "Passing CI",
+      statusCheckRollup: [{ name: "build", status: "COMPLETED", conclusion: "SUCCESS" }],
+    });
+
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo.includes("repo-a")) return JSON.stringify([failing, passing]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const { rows } = lister.listAll({ ciFailed: true });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].number).toBe(5);
+    expect(rows[0].ciStatus).toBe("failing");
   });
 
   it("returns empty rows when gh CLI fails", () => {

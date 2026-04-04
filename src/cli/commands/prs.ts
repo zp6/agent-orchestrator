@@ -41,6 +41,28 @@ function formatMergeable(mergeable: PRRow["mergeable"], width = 0): string {
   }
 }
 
+function formatCIStatus(ciStatus: PRRow["ciStatus"], width = 0): string {
+  const plain =
+    ciStatus === "passing"
+      ? "✓ pass"
+      : ciStatus === "failing"
+        ? "✗ fail"
+        : ciStatus === "pending"
+          ? "… pending"
+          : "—";
+  const padded = plain.padEnd(width);
+  switch (ciStatus) {
+    case "passing":
+      return chalk.green(padded);
+    case "failing":
+      return chalk.red(padded);
+    case "pending":
+      return chalk.yellow(padded);
+    case "none":
+      return chalk.dim(padded);
+  }
+}
+
 function printTable(rows: PRRow[]): void {
   if (rows.length === 0) {
     console.log(chalk.dim("No open PRs found."));
@@ -60,14 +82,18 @@ function printTable(rows: PRRow[]): void {
     "  " +
     chalk.bold("AGE".padEnd(6)) +
     "  " +
+    chalk.bold("PUSH".padEnd(6)) +
+    "  " +
     chalk.bold("REVIEW".padEnd(12)) +
+    "  " +
+    chalk.bold("CI".padEnd(10)) +
     "  " +
     chalk.bold("MERGE".padEnd(8)) +
     "  " +
     chalk.bold("ISSUE");
 
   console.log(header);
-  console.log(chalk.dim("─".repeat(repoWidth + titleWidth + 55)));
+  console.log(chalk.dim("─".repeat(repoWidth + titleWidth + 73)));
 
   for (const row of rows) {
     const title =
@@ -82,7 +108,11 @@ function printTable(rows: PRRow[]): void {
       "  " +
       formatAge(row.ageDays).padEnd(6) +
       "  " +
+      formatAge(row.lastPushDays).padEnd(6) +
+      "  " +
       formatReviewStatus(row.reviewStatus, 12) +
+      "  " +
+      formatCIStatus(row.ciStatus, 10) +
       "  " +
       formatMergeable(row.mergeable, 8) +
       "  " +
@@ -95,11 +125,12 @@ function printTable(rows: PRRow[]): void {
 export function registerPRsCommand(program: Command): void {
   program
     .command("prs")
-    .description("List all open PRs across agent repos with status")
+    .description("List all open PRs across agent repos with CI, review, and merge readiness")
     .option("--stale", "Show only PRs older than 3 days")
     .option("--conflicts", "Show only PRs with merge conflicts")
+    .option("--ci-failed", "Show only PRs with failing CI checks")
     .option("--repo <repo>", "Limit to a specific repo (owner/repo)")
-    .action((opts: { stale?: boolean; conflicts?: boolean; repo?: string }) => {
+    .action((opts: { stale?: boolean; conflicts?: boolean; ciFailed?: boolean; repo?: string }) => {
       const config = loadConfig(program.opts().config);
       const lister = new PRLister(config);
 
@@ -111,8 +142,10 @@ export function registerPRsCommand(program: Command): void {
       if (rows.length > 0) {
         const conflictCount = rows.filter((r) => r.mergeable === "conflict").length;
         const staleCount = rows.filter((r) => r.ageDays >= 3).length;
+        const ciFailCount = rows.filter((r) => r.ciStatus === "failing").length;
         const parts: string[] = [`${rows.length} open PR(s)`];
         if (conflictCount > 0) parts.push(chalk.red(`${conflictCount} conflict(s)`));
+        if (ciFailCount > 0) parts.push(chalk.red(`${ciFailCount} CI failing`));
         if (staleCount > 0) parts.push(chalk.yellow(`${staleCount} stale (≥3d)`));
         console.log(chalk.dim("\n" + parts.join(" · ")));
       }

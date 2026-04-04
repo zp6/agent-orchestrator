@@ -1,14 +1,22 @@
 import { execFileSync } from "node:child_process";
 import type { OrchestratorConfig } from "../config/schema.js";
 
+export interface StatusCheck {
+  name: string;
+  status: string;
+  conclusion: string | null;
+}
+
 export interface PRListItem {
   number: number;
   title: string;
   createdAt: string;
+  updatedAt: string;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
   reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | "" | null;
   headRefName: string;
   body: string;
+  statusCheckRollup: StatusCheck[] | null;
 }
 
 export interface PRRow {
@@ -16,9 +24,26 @@ export interface PRRow {
   number: number;
   title: string;
   ageDays: number;
+  lastPushDays: number;
   reviewStatus: "approved" | "changes-requested" | "pending";
   mergeable: "yes" | "no" | "conflict" | "unknown";
+  ciStatus: "passing" | "failing" | "pending" | "none";
   linkedIssue: string;
+}
+
+export function rollupCIStatus(checks: StatusCheck[] | null | undefined): PRRow["ciStatus"] {
+  if (!checks || checks.length === 0) return "none";
+  const FAILING = new Set(["FAILURE", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"]);
+  const IN_PROGRESS = new Set(["QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED"]);
+  let anyPending = false;
+  for (const check of checks) {
+    if (check.conclusion && FAILING.has(check.conclusion.toUpperCase())) return "failing";
+    if (!check.conclusion || IN_PROGRESS.has(check.status?.toUpperCase() ?? "")) {
+      anyPending = true;
+    }
+  }
+  if (anyPending) return "pending";
+  return "passing";
 }
 
 export function extractLinkedIssue(body: string): string {
@@ -35,6 +60,9 @@ export function formatAge(days: number): string {
 export function toPRRow(item: PRListItem, repo: string, now: Date = new Date()): PRRow {
   const createdAt = new Date(item.createdAt);
   const ageDays = Math.floor((now.getTime() - createdAt.getTime()) / (1000 * 60 * 60 * 24));
+
+  const updatedAt = item.updatedAt ? new Date(item.updatedAt) : createdAt;
+  const lastPushDays = Math.floor((now.getTime() - updatedAt.getTime()) / (1000 * 60 * 60 * 24));
 
   let reviewStatus: PRRow["reviewStatus"];
   if (item.reviewDecision === "APPROVED") {
@@ -59,8 +87,10 @@ export function toPRRow(item: PRListItem, repo: string, now: Date = new Date()):
     number: item.number,
     title: item.title,
     ageDays,
+    lastPushDays,
     reviewStatus,
     mergeable,
+    ciStatus: rollupCIStatus(item.statusCheckRollup),
     linkedIssue: extractLinkedIssue(item.body ?? ""),
   };
 }
@@ -80,7 +110,7 @@ export class PRLister {
           "--state",
           "open",
           "--json",
-          "number,title,createdAt,mergeable,reviewDecision,headRefName,body",
+          "number,title,createdAt,updatedAt,mergeable,reviewDecision,headRefName,body,statusCheckRollup",
         ],
         { encoding: "utf-8", timeout: 30000 },
       );
@@ -90,7 +120,7 @@ export class PRLister {
     }
   }
 
-  listAll(opts: { stale?: boolean; conflicts?: boolean; repo?: string } = {}): {
+  listAll(opts: { stale?: boolean; conflicts?: boolean; ciFailed?: boolean; repo?: string } = {}): {
     rows: PRRow[];
     hasConflicts: boolean;
   } {
@@ -118,6 +148,9 @@ export class PRLister {
     }
     if (opts.conflicts) {
       filtered = filtered.filter((r) => r.mergeable === "conflict");
+    }
+    if (opts.ciFailed) {
+      filtered = filtered.filter((r) => r.ciStatus === "failing");
     }
 
     // Sort: conflicts first, then by age descending
