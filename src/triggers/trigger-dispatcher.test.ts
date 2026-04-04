@@ -6,14 +6,16 @@ import type { StateStore } from "../state/store.js";
 
 vi.mock("./github.js", () => ({
   fetchOpenIssues: vi.fn(),
+  findExistingPRsForIssue: vi.fn().mockReturnValue([]),
 }));
 
 vi.mock("./reporters.js", () => ({
   reportResult: vi.fn(),
 }));
 
-import { fetchOpenIssues } from "./github.js";
+import { fetchOpenIssues, findExistingPRsForIssue } from "./github.js";
 const mockFetchIssues = vi.mocked(fetchOpenIssues);
+const mockFindExistingPRs = vi.mocked(findExistingPRsForIssue);
 
 const config: OrchestratorConfig = {
   proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 5000 },
@@ -123,6 +125,134 @@ describe("dispatchGitHubIssues", () => {
     const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher, 1);
     expect(result.dispatched).toBe(1);
     expect(result.skipped).toBe(0); // second issue not reached due to limit
+  });
+});
+
+describe("duplicate PR detection before dispatch", () => {
+  let mockStore: StateStore;
+  let mockDispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStore = {
+      isProcessed: vi.fn().mockReturnValue(false),
+      markProcessed: vi.fn(),
+      getTask: vi.fn().mockReturnValue(null),
+      listTasks: vi.fn().mockReturnValue([]),
+      hasActiveTask: vi.fn().mockReturnValue(false),
+      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
+    } as unknown as StateStore;
+    mockDispatcher = {
+      dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
+    } as unknown as Dispatcher;
+    // Default: no existing PRs
+    mockFindExistingPRs.mockReturnValue([]);
+  });
+
+  it("dispatches normally when no existing PRs are found", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+    expect(result.skipped).toBe(0);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(
+      expect.stringContaining("Bug"),
+      expect.objectContaining({ agentName: "my-agent" }),
+    );
+  });
+
+  it("skips dispatch when a merged PR already addresses the issue", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 10, title: "Fix bug", url: "https://github.com/owner/my-repo/pull/10", state: "merged", isDraft: false },
+    ]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+    // Bug 2: markProcessed must be called so the issue isn't re-polled every cycle
+    expect(mockStore.markProcessed).toHaveBeenCalledWith("github", "owner/my-repo#42", expect.stringContaining("merged-pr-10"));
+  });
+
+  it("dispatches with PR context injected when an open PR already exists", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 7, title: "WIP fix", url: "https://github.com/owner/my-repo/pull/7", state: "open", isDraft: false },
+    ]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+    const dispatchedMessage = (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(dispatchedMessage).toContain("#7");
+    expect(dispatchedMessage).toContain("https://github.com/owner/my-repo/pull/7");
+    expect(dispatchedMessage).toContain("Do NOT create a new branch");
+    // Bug 1: must NOT include the "create a branch ... gh pr create" workflow when an open PR exists
+    expect(dispatchedMessage).not.toContain("create a branch, commit, push, and open a PR");
+    // Must include push-only instructions instead
+    expect(dispatchedMessage).toContain("push to the existing PR branch");
+  });
+
+  it("marks draft PRs as [DRAFT] in injected context", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 8, title: "Draft fix", url: "https://github.com/owner/my-repo/pull/8", state: "open", isDraft: true },
+    ]);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    const dispatchedMessage = (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(dispatchedMessage).toContain("[DRAFT]");
+  });
+
+  it("prefers merged PR check over open PR (merged takes priority)", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+    // Both a merged and an open PR exist (edge case)
+    mockFindExistingPRs.mockReturnValue([
+      { number: 5, title: "Merged PR", url: "url1", state: "merged", isDraft: false },
+      { number: 6, title: "Open PR", url: "url2", state: "open", isDraft: false },
+    ]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("calls findExistingPRsForIssue with correct repo and issue number", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 123, title: "Task", body: "Do work", url: "https://...", labels: [] },
+    ]);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(mockFindExistingPRs).toHaveBeenCalledWith("owner/my-repo", 123);
+  });
+
+  it("proceeds with dispatch when findExistingPRsForIssue returns empty (fail-open)", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
   });
 });
 

@@ -9,6 +9,83 @@ export interface GitHubIssue {
   labels: string[];
 }
 
+export interface LinkedPR {
+  number: number;
+  title: string;
+  url: string;
+  /** "open" includes draft PRs. "merged" means the PR was merged (not just closed). */
+  state: "open" | "merged";
+  isDraft: boolean;
+}
+
+/**
+ * Find open or recently-merged PRs that close a given issue number.
+ *
+ * Searches PR bodies for closing keywords ("closes #N", "fixes #N",
+ * "resolves #N", and their variants) to identify PRs linked to the issue.
+ *
+ * Returns an empty array on any error (fail-open: the caller proceeds with
+ * dispatch rather than silently dropping work when the check fails).
+ */
+export function findExistingPRsForIssue(repo: string, issueNumber: number): LinkedPR[] {
+  const closingPattern = new RegExp(
+    `\\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\\s+#${issueNumber}\\b`,
+    "i",
+  );
+
+  try {
+    // Fetch open (including draft) PRs
+    const openRaw = execSync(
+      `gh api "repos/${repo}/pulls?state=open&per_page=100" --jq '[.[] | {number, title, url: .html_url, isDraft: .draft, body: .body}]'`,
+      { encoding: "utf-8", timeout: 30000 },
+    );
+    const openPRs = (
+      JSON.parse(openRaw.trim() || "[]") as Array<{
+        number: number;
+        title: string;
+        url: string;
+        isDraft: boolean;
+        body: string | null;
+      }>
+    )
+      .filter((pr) => closingPattern.test(pr.body ?? ""))
+      .map((pr) => ({
+        number: pr.number,
+        title: pr.title,
+        url: pr.url,
+        state: "open" as const,
+        isDraft: pr.isDraft,
+      }));
+
+    // Fetch recently merged PRs (last 30 closed PRs that were merged)
+    const mergedRaw = execSync(
+      `gh api "repos/${repo}/pulls?state=closed&per_page=30" --jq '[.[] | select(.merged_at != null) | {number, title, url: .html_url, body: .body}]'`,
+      { encoding: "utf-8", timeout: 30000 },
+    );
+    const mergedPRs = (
+      JSON.parse(mergedRaw.trim() || "[]") as Array<{
+        number: number;
+        title: string;
+        url: string;
+        body: string | null;
+      }>
+    )
+      .filter((pr) => closingPattern.test(pr.body ?? ""))
+      .map((pr) => ({
+        number: pr.number,
+        title: pr.title,
+        url: pr.url,
+        state: "merged" as const,
+        isDraft: false,
+      }));
+
+    return [...openPRs, ...mergedPRs];
+  } catch {
+    // Non-fatal: if the PR check fails, proceed with dispatch (fail open)
+    return [];
+  }
+}
+
 export function fetchOpenIssues(repo: string): GitHubIssue[] {
   try {
     const output = execSync(

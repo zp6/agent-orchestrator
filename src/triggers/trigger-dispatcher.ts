@@ -1,4 +1,4 @@
-import { fetchOpenIssues, type GitHubIssue } from "./github.js";
+import { fetchOpenIssues, findExistingPRsForIssue, type GitHubIssue } from "./github.js";
 import { reportResult } from "./reporters.js";
 import { checkDuplicate } from "./duplicate-guard.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
@@ -97,7 +97,37 @@ export async function dispatchGitHubIssues(
         continue;
       }
 
-      const message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}\n\n---\nWhen done: create a branch, commit, push, and open a PR with \`gh pr create --title "[${agentName}] <title>" --body "Closes #${issue.number}"\`. The "Closes #${issue.number}" is required so the issue auto-closes on merge.`;
+      // Check for existing PRs that already address this issue
+      const existingPRs = findExistingPRsForIssue(agent.github, issue.number);
+      const mergedPR = existingPRs.find((pr) => pr.state === "merged");
+      const openPR = existingPRs.find((pr) => pr.state === "open");
+
+      if (mergedPR) {
+        log.info("Skipping dispatch: issue already addressed by merged PR", {
+          sourceRef,
+          prNumber: mergedPR.number,
+          prUrl: mergedPR.url,
+        });
+        // Mark processed so this issue isn't re-checked on every daemon cycle
+        store.markProcessed("github", sourceRef, `merged-pr-${mergedPR.number}`);
+        result.skipped++;
+        continue;
+      }
+
+      let message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}`;
+
+      if (openPR) {
+        log.info("Existing open PR found for issue — injecting PR context", {
+          sourceRef,
+          prNumber: openPR.number,
+          prUrl: openPR.url,
+          isDraft: openPR.isDraft,
+        });
+        message += `\n\n⚠️ This issue already has an open PR: #${openPR.number} (${openPR.url})${openPR.isDraft ? " [DRAFT]" : ""}. Do NOT create a new branch or open another PR. Instead, review the existing PR, make any needed fixes, and push to its branch.`;
+        message += `\n\n---\nWhen done: commit your changes and push to the existing PR branch. Do NOT run \`gh pr create\`.`;
+      } else {
+        message += `\n\n---\nWhen done: create a branch, commit, push, and open a PR with \`gh pr create --title "[${agentName}] <title>" --body "Closes #${issue.number}"\`. The "Closes #${issue.number}" is required so the issue auto-closes on merge.`;
+      }
 
       // Mark processed immediately to prevent duplicate dispatches
       inFlightDispatches.add(sourceRef);
