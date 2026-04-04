@@ -17,6 +17,8 @@ import {
 import { writePid, removePid } from "./pid.js";
 import { createLogger } from "./logger.js";
 import { execSync } from "node:child_process";
+import { ManagementClient } from "../client/management-client.js";
+import { planSync, executeSync } from "../orchestrator/sync.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
@@ -81,6 +83,10 @@ export class Daemon {
     if (linearTeams.length) console.log(`Linear: ${linearTeams.join(", ")}`);
     if (slackChannels.length) console.log(`Slack: ${slackChannels.join(", ")}`);
     console.log();
+
+    // Ensure all agents from agents.yaml are registered with the proxy.
+    // The management API loses agent state on proxy restart, so we sync on every daemon start.
+    await this.syncAgents();
 
     while (this.running) {
       await this.pollCycle();
@@ -153,6 +159,28 @@ export class Daemon {
       console.log(`[${time}] Cycle #${this.cycleCount} complete (${durationMs}ms)`);
     }
 
+  }
+
+  private async syncAgents(): Promise<void> {
+    try {
+      const management = new ManagementClient(this.config.proxy);
+      const proxyAgents = await management.listAgents();
+      const actions = planSync(this.config, proxyAgents);
+      const needsWork = actions.filter((a) => a.type !== "skip");
+      if (needsWork.length === 0) {
+        this.log.info("Agent sync: all agents registered");
+        return;
+      }
+      this.log.info("Agent sync: registering missing agents", {
+        actions: needsWork.map((a) => `${a.type} ${a.agentName}`),
+      });
+      const result = await executeSync(this.config, management, actions);
+      if (result.errors.length > 0) {
+        this.log.error("Agent sync errors", { errors: result.errors });
+      }
+    } catch (err) {
+      this.log.error("Agent sync failed", { error: err instanceof Error ? err.message : String(err) });
+    }
   }
 
   private checkStaleTasks(time: string): void {
