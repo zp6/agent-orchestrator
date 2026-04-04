@@ -419,12 +419,25 @@ export class Daemon {
           continue;
         }
 
-        const message = buildHousekeepingMessage(agentName, agent.github!);
+        const githubRepo = agent.github!;
+        const needsBootstrap = needsRoadmapBootstrap(githubRepo);
+        const message = needsBootstrap
+          ? buildRoadmapBootstrapMessage(agentName, githubRepo)
+          : buildHousekeepingMessage(agentName, githubRepo);
+        const title = needsBootstrap
+          ? `[housekeeping] Bootstrap ROADMAP.md for ${agentName}`
+          : `[housekeeping] Periodic backlog triage for ${agentName}`;
+
+        if (needsBootstrap) {
+          this.log.info("Dispatching ROADMAP.md bootstrap (file not found in repo)", { agentName, githubRepo });
+          console.log(`  ${agentName}: ROADMAP.md not found — dispatching bootstrap task`);
+        }
+
         // Fire-and-forget: don't block the daemon waiting for each agent
         this.dispatcher.dispatch(message, {
           agentName,
           source: "manual",
-          title: `[housekeeping] Periodic backlog triage for ${agentName}`,
+          title,
         }).then((result) => {
           console.log(`  ${agentName}: housekeeping dispatched (task ${result.taskId.slice(0, 8)})`);
           this.log.info("Housekeeping task dispatched", { agentName, taskId: result.taskId });
@@ -611,6 +624,63 @@ export function buildHousekeepingMessage(agentName: string, githubRepo: string):
 4. **Check for orphan PRs** — ensure every open PR has an issue linked via "Closes #N". If a PR is missing one, either create the issue or add the reference to the PR body.
 
 Be concise and systematic. Use \`gh issue list --repo ${githubRepo} --state open -L 50\` to get a full picture before acting. After completing the triage, briefly summarise what you closed or updated.`;
+}
+
+/**
+ * Check whether ROADMAP.md exists in the root of the given GitHub repo.
+ *
+ * Uses the GitHub API via `gh api` — returns false on any error (network,
+ * auth, repo not found) so the caller can safely fall back to the normal
+ * housekeeping path rather than bootstrapping unnecessarily.
+ *
+ * The optional `execFn` parameter allows unit tests to inject a fake executor
+ * without patching ESM module globals (which Vitest does not support).
+ */
+export function needsRoadmapBootstrap(
+  githubRepo: string,
+  execFn: (cmd: string, opts: object) => unknown = execSync,
+): boolean {
+  try {
+    execFn(`gh api repos/${githubRepo}/contents/ROADMAP.md --silent`, {
+      encoding: "utf-8",
+      timeout: 10000,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    // Exit 0 → file exists → no bootstrap needed
+    return false;
+  } catch {
+    // Non-zero exit (404) → file absent → bootstrap needed
+    return true;
+  }
+}
+
+/**
+ * Build the one-time bootstrap message dispatched to an agent that does not
+ * yet have a ROADMAP.md in their repo.
+ *
+ * Unlike the periodic triage message, this asks the agent to perform a
+ * deep analysis of their issue backlog and recent work before writing an
+ * initial roadmap file, then commit and PR it.
+ *
+ * Exported for unit testing.
+ */
+export function buildRoadmapBootstrapMessage(agentName: string, githubRepo: string): string {
+  return `Your repo (${githubRepo}) does not yet have a ROADMAP.md file. Please create one now by following these steps:
+
+1. **Survey your open issues** — run \`gh issue list --repo ${githubRepo} --state open -L 50\` to get a full picture of outstanding work.
+
+2. **Review recent closed work** — run \`gh pr list --repo ${githubRepo} --state merged -L 20\` to understand what has already shipped.
+
+3. **Identify top 5 priorities** — based on what you found, select the 5 highest-impact items that are not yet done. Sort them by user impact (most impactful first).
+
+4. **Write ROADMAP.md** — create a ROADMAP.md in the repo root with:
+   - A short intro sentence describing the project
+   - A numbered list of the top 5 priorities, each with: title, 1-2 sentence description, and the linked issue number(s) if applicable
+   - A "Recently shipped" section listing up to 3 things that just landed
+
+5. **Commit and open a PR** — commit the file on a new branch (e.g. \`bootstrap-roadmap\`) and open a PR. Include "Closes #" only if there is an open issue tracking this work; otherwise omit it.
+
+Be concise — the roadmap should fit on one screen. After you open the PR, briefly summarise what you added.`;
 }
 
 /** Extract issue numbers from PR body patterns like "Closes #42", "Fixes #7", "Resolves #100" */

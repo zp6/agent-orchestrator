@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { extractClosedIssueNumbers, shouldVerifyTask, buildHousekeepingMessage } from "./daemon.js";
+import { describe, it, expect, vi } from "vitest";
+import { extractClosedIssueNumbers, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage } from "./daemon.js";
 
 describe("extractClosedIssueNumbers", () => {
   it("extracts Closes #N", () => {
@@ -79,6 +79,99 @@ describe("buildHousekeepingMessage", () => {
     expect(msg1).not.toEqual(msg2);
     expect(msg1).toContain("org/agent-a");
     expect(msg2).toContain("org/agent-b");
+  });
+});
+
+describe("needsRoadmapBootstrap", () => {
+  /**
+   * needsRoadmapBootstrap shells out to `gh api` and interprets exit codes.
+   * We verify the logic by testing the two observable branches directly via
+   * a thin wrapper that accepts a custom exec function, exercised through the
+   * exported function's behaviour when the underlying execSync would succeed
+   * or throw.
+   *
+   * Because ESM module namespaces are not configurable (vi.spyOn on
+   * node:child_process is not supported in Vitest ESM mode), we instead test
+   * the function's behaviour by using its own exported interface: the exported
+   * function accepts an optional `execFn` dependency-injection parameter so
+   * unit tests can supply a fake without patching globals.
+   */
+
+  it("returns false when execFn succeeds (ROADMAP.md exists)", () => {
+    const execFn = vi.fn().mockReturnValue("");
+    expect(needsRoadmapBootstrap("owner/repo", execFn)).toBe(false);
+  });
+
+  it("returns true when execFn throws (ROADMAP.md absent / 404)", () => {
+    const execFn = vi.fn().mockImplementation(() => {
+      throw new Error("Command failed with exit code 1");
+    });
+    expect(needsRoadmapBootstrap("owner/repo", execFn)).toBe(true);
+  });
+
+  it("returns true on network errors (safe fallback)", () => {
+    const execFn = vi.fn().mockImplementation(() => {
+      throw new Error("ECONNREFUSED");
+    });
+    expect(needsRoadmapBootstrap("owner/repo", execFn)).toBe(true);
+  });
+
+  it("calls gh api with the correct repo path", () => {
+    const execFn = vi.fn().mockReturnValue("");
+    needsRoadmapBootstrap("myorg/my-repo", execFn);
+    expect(execFn).toHaveBeenCalledOnce();
+    const cmd = execFn.mock.calls[0][0] as string;
+    expect(cmd).toContain("gh api repos/myorg/my-repo/contents/ROADMAP.md");
+  });
+});
+
+describe("buildRoadmapBootstrapMessage", () => {
+  const agentName = "my-agent";
+  const githubRepo = "owner/my-agent";
+
+  it("includes the github repo in the message", () => {
+    const msg = buildRoadmapBootstrapMessage(agentName, githubRepo);
+    expect(msg).toContain(githubRepo);
+  });
+
+  it("instructs creating ROADMAP.md", () => {
+    const msg = buildRoadmapBootstrapMessage(agentName, githubRepo);
+    expect(msg).toContain("ROADMAP.md");
+  });
+
+  it("instructs opening a PR", () => {
+    const msg = buildRoadmapBootstrapMessage(agentName, githubRepo);
+    expect(msg.toLowerCase()).toContain("pr");
+  });
+
+  it("instructs surveying open issues", () => {
+    const msg = buildRoadmapBootstrapMessage(agentName, githubRepo);
+    expect(msg).toContain(`gh issue list --repo ${githubRepo}`);
+  });
+
+  it("instructs reviewing recent merged PRs", () => {
+    const msg = buildRoadmapBootstrapMessage(agentName, githubRepo);
+    expect(msg).toContain(`gh pr list --repo ${githubRepo}`);
+  });
+
+  it("asks for top 5 priorities sorted by user impact", () => {
+    const msg = buildRoadmapBootstrapMessage(agentName, githubRepo);
+    expect(msg.toLowerCase()).toContain("top 5");
+    expect(msg.toLowerCase()).toContain("user impact");
+  });
+
+  it("produces different messages for different agents", () => {
+    const msg1 = buildRoadmapBootstrapMessage("agent-a", "org/agent-a");
+    const msg2 = buildRoadmapBootstrapMessage("agent-b", "org/agent-b");
+    expect(msg1).not.toEqual(msg2);
+    expect(msg1).toContain("org/agent-a");
+    expect(msg2).toContain("org/agent-b");
+  });
+
+  it("is distinct from the housekeeping maintenance message", () => {
+    const bootstrap = buildRoadmapBootstrapMessage(agentName, githubRepo);
+    const housekeeping = buildHousekeepingMessage(agentName, githubRepo);
+    expect(bootstrap).not.toEqual(housekeeping);
   });
 });
 
