@@ -27,6 +27,10 @@ export interface Task {
   verification_status: VerificationStatus;
   quality_score: number | null;
   verification_notes: string | null;
+  /** Number of dispatch attempts that have failed. 0 for a fresh task. */
+  retry_count: number;
+  /** ISO timestamp after which the task is eligible for retry, or null if not scheduled. */
+  next_retry_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -61,6 +65,25 @@ export interface CycleMetrics {
   last_cycle_at: string | null;
 }
 
+/**
+ * Distribution of quality scores across verified tasks, bucketed by tier.
+ * Counts are mutually exclusive and exhaustive over all verified top-level tasks.
+ */
+export interface ScoreDistribution {
+  /** Tasks with quality_score >= 0.90 */
+  excellent: number;
+  /** Tasks with 0.70 <= quality_score < 0.90 */
+  good: number;
+  /** Tasks with 0.50 <= quality_score < 0.70 */
+  fair: number;
+  /** Tasks with quality_score < 0.50 */
+  poor: number;
+  /** Tasks with verification_status set but quality_score IS NULL */
+  unscored: number;
+  /** Total number of verified tasks (sum of all buckets) */
+  total: number;
+}
+
 export interface SystemMetrics {
   /** Aggregated across all agents / tasks */
   total_tasks: number;
@@ -72,6 +95,8 @@ export interface SystemMetrics {
   verification_pass_rate: number | null;
   /** Global average quality score */
   avg_quality_score: number | null;
+  /** Distribution of quality scores across verified tasks */
+  score_distribution: ScoreDistribution;
   per_agent: AgentMetrics[];
   cycles: CycleMetrics;
 }
@@ -136,6 +161,7 @@ export class StateStore {
     this.runPhase5Migration();
     this.runPhase6Migration();
     this.runResearchMigration();
+    this.runRetryMigration();
   }
 
   private runPhase2Migration(): void {
@@ -186,6 +212,19 @@ export class StateStore {
     if (!colNames.has("task_type")) {
       this.db.exec(`
         ALTER TABLE tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'implementation';
+      `);
+    }
+  }
+
+  private runRetryMigration(): void {
+    const columns = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+    const colNames = new Set(columns.map((c) => c.name));
+
+    if (!colNames.has("retry_count")) {
+      this.db.exec(`
+        ALTER TABLE tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE tasks ADD COLUMN next_retry_at TEXT;
+        CREATE INDEX IF NOT EXISTS idx_tasks_retry ON tasks(next_retry_at) WHERE next_retry_at IS NOT NULL;
       `);
     }
   }
@@ -279,7 +318,7 @@ export class StateStore {
       .get(source, sourceRef) as Task | undefined;
   }
 
-  updateTask(id: string, updates: Partial<Pick<Task, "status" | "agent_name" | "conversation_id" | "result" | "plan" | "verification_status" | "quality_score" | "verification_notes">>): Task | undefined {
+  updateTask(id: string, updates: Partial<Pick<Task, "status" | "agent_name" | "conversation_id" | "result" | "plan" | "verification_status" | "quality_score" | "verification_notes" | "retry_count" | "next_retry_at">>): Task | undefined {
     const fields: string[] = [];
     const params: unknown[] = [];
 
@@ -370,10 +409,47 @@ export class StateStore {
     `).all(minScore, limit) as Task[];
   }
 
+  /**
+   * Return failed tasks that are eligible for retry: their `next_retry_at` has
+   * elapsed and they haven't yet reached `maxRetries` attempts.
+   * Results are ordered by `next_retry_at` ascending (oldest due first).
+   */
+  getRetryableTasks(maxRetries: number): Task[] {
+    const now = new Date().toISOString();
+    return this.db.prepare(`
+      SELECT * FROM tasks
+      WHERE status = 'failed'
+        AND next_retry_at IS NOT NULL
+        AND next_retry_at <= ?
+        AND retry_count < ?
+      ORDER BY next_retry_at ASC
+    `).all(now, maxRetries) as Task[];
+  }
+
   getUnverified(limit = 10): Task[] {
     return this.db.prepare(
       "SELECT * FROM tasks WHERE status = 'done' AND verification_status IS NULL AND parent_task_id IS NULL ORDER BY created_at DESC LIMIT ?",
     ).all(limit) as Task[];
+  }
+
+  /**
+   * Compute the quality score distribution across all verified top-level tasks.
+   * Buckets: excellent (≥0.90), good (0.70–0.89), fair (0.50–0.69), poor (<0.50),
+   * unscored (verified but no numeric score).
+   */
+  getScoreDistribution(): ScoreDistribution {
+    const row = this.db.prepare(`
+      SELECT
+        COALESCE(SUM(CASE WHEN quality_score >= 0.90 THEN 1 ELSE 0 END), 0) AS excellent,
+        COALESCE(SUM(CASE WHEN quality_score >= 0.70 AND quality_score < 0.90 THEN 1 ELSE 0 END), 0) AS good,
+        COALESCE(SUM(CASE WHEN quality_score >= 0.50 AND quality_score < 0.70 THEN 1 ELSE 0 END), 0) AS fair,
+        COALESCE(SUM(CASE WHEN quality_score IS NOT NULL AND quality_score < 0.50 THEN 1 ELSE 0 END), 0) AS poor,
+        COALESCE(SUM(CASE WHEN quality_score IS NULL THEN 1 ELSE 0 END), 0) AS unscored,
+        COUNT(*) AS total
+      FROM tasks
+      WHERE parent_task_id IS NULL AND verification_status IS NOT NULL
+    `).get() as ScoreDistribution;
+    return row;
   }
 
   getAgentStats(): Array<{ agent_name: string; total: number; done: number; failed: number; avg_score: number | null }> {
@@ -498,6 +574,8 @@ export class StateStore {
       last_cycle_at: string | null;
     };
 
+    const score_distribution = this.getScoreDistribution();
+
     return {
       total_tasks: global.total_tasks,
       done_tasks: global.done_tasks,
@@ -505,6 +583,7 @@ export class StateStore {
       avg_task_duration_ms: global.avg_task_duration_ms,
       verification_pass_rate: verify.verification_pass_rate,
       avg_quality_score: verify.avg_quality_score,
+      score_distribution,
       per_agent,
       cycles: {
         total_cycles: cycleRow.total_cycles,

@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { StateStore, type Task, type SystemMetrics } from "../../state/store.js";
+import { StateStore, type Task, type SystemMetrics, type ScoreDistribution } from "../../state/store.js";
 import { loadConfig } from "../../config/schema.js";
 
 const STATUS_COLORS: Record<string, (s: string) => string> = {
@@ -57,6 +57,33 @@ function formatPercent(rate: number | null): string {
   return color(`${pct}%`);
 }
 
+const BAR_WIDTH = 20;
+
+function scoreBar(count: number, total: number, color: (s: string) => string): string {
+  if (total === 0) return chalk.dim("—");
+  const filled = Math.round((count / total) * BAR_WIDTH);
+  const bar = "█".repeat(filled) + chalk.dim("░".repeat(BAR_WIDTH - filled));
+  const pct = `${Math.round((count / total) * 100)}%`.padStart(4);
+  return `${color(bar)} ${chalk.dim(pct)} ${String(count).padStart(4)}`;
+}
+
+function printScoreDistribution(dist: ScoreDistribution): void {
+  if (dist.total === 0) {
+    console.log(chalk.dim("  No verified tasks yet"));
+    return;
+  }
+  const { excellent, good, fair, poor, unscored, total } = dist;
+  console.log(`  ${"Excellent".padEnd(14)} ${chalk.dim("≥0.90")}  ${scoreBar(excellent, total, chalk.green)}`);
+  console.log(`  ${"Good".padEnd(14)} ${chalk.dim("0.70–0.89")}  ${scoreBar(good, total, chalk.cyan)}`);
+  console.log(`  ${"Fair".padEnd(14)} ${chalk.dim("0.50–0.69")}  ${scoreBar(fair, total, chalk.yellow)}`);
+  console.log(`  ${"Poor".padEnd(14)} ${chalk.dim("<0.50")}  ${scoreBar(poor, total, chalk.red)}`);
+  if (unscored > 0) {
+    console.log(`  ${"Unscored".padEnd(14)} ${chalk.dim("  n/a")}  ${scoreBar(unscored, total, chalk.dim)}`);
+  }
+  console.log(chalk.dim(`  ${"─".repeat(48)}`));
+  console.log(`  ${"Total verified".padEnd(20)} ${total}`);
+}
+
 interface ImprovementStats {
   minScore: number;
   qualifyingCount: number;
@@ -82,6 +109,10 @@ function printMetrics(metrics: SystemMetrics, improvement?: ImprovementStats): v
     ? chalk.dim(new Date(metrics.cycles.last_cycle_at).toLocaleString())
     : chalk.dim("—");
   console.log(`  Last cycle:   ${lastCycle}`);
+
+  // --- Score distribution ---
+  console.log(chalk.bold("\nQuality Score Distribution"));
+  printScoreDistribution(metrics.score_distribution);
 
   // --- Per-agent table ---
   if (metrics.per_agent.length > 0) {

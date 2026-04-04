@@ -277,6 +277,80 @@ describe("StateStore", () => {
     });
   });
 
+  describe("getScoreDistribution", () => {
+    it("returns all-zero distribution when no verified tasks exist", () => {
+      const dist = store.getScoreDistribution();
+      expect(dist.excellent).toBe(0);
+      expect(dist.good).toBe(0);
+      expect(dist.fair).toBe(0);
+      expect(dist.poor).toBe(0);
+      expect(dist.unscored).toBe(0);
+      expect(dist.total).toBe(0);
+    });
+
+    it("buckets scores correctly", () => {
+      const makeVerified = (score: number | null, status: "approved" | "rejected" = "approved") => {
+        const t = store.createTask({ title: `score-${score}`, source: "manual" });
+        store.updateTask(t.id, { status: "done", verification_status: status, quality_score: score });
+      };
+
+      makeVerified(1.0);   // excellent
+      makeVerified(0.95);  // excellent
+      makeVerified(0.85);  // good
+      makeVerified(0.70);  // good
+      makeVerified(0.60);  // fair
+      makeVerified(0.45, "rejected"); // poor
+      makeVerified(null);  // unscored
+
+      const dist = store.getScoreDistribution();
+      expect(dist.excellent).toBe(2);
+      expect(dist.good).toBe(2);
+      expect(dist.fair).toBe(1);
+      expect(dist.poor).toBe(1);
+      expect(dist.unscored).toBe(1);
+      expect(dist.total).toBe(7);
+    });
+
+    it("excludes sub-tasks from distribution", () => {
+      const parent = store.createTask({ title: "Parent", source: "manual" });
+      const child = store.createSubTask({
+        parent_task_id: parent.id,
+        step_id: "s1",
+        title: "Child",
+        description: "sub",
+        source: "manual",
+        agent_name: "alpha",
+      });
+      store.updateTask(parent.id, { status: "done", verification_status: "approved", quality_score: 0.95 });
+      store.updateTask(child.id, { status: "done", verification_status: "approved", quality_score: 0.95 });
+
+      const dist = store.getScoreDistribution();
+      expect(dist.total).toBe(1); // only the parent
+      expect(dist.excellent).toBe(1);
+    });
+
+    it("excludes unverified tasks from distribution", () => {
+      const t = store.createTask({ title: "Unverified", source: "manual" });
+      store.updateTask(t.id, { status: "done" }); // no verification_status
+
+      const dist = store.getScoreDistribution();
+      expect(dist.total).toBe(0);
+    });
+
+    it("getMetrics includes score_distribution", () => {
+      const t1 = store.createTask({ title: "T1", source: "manual" });
+      const t2 = store.createTask({ title: "T2", source: "manual" });
+      store.updateTask(t1.id, { status: "done", verification_status: "approved", quality_score: 0.95 });
+      store.updateTask(t2.id, { status: "done", verification_status: "rejected", quality_score: 0.40 });
+
+      const m = store.getMetrics();
+      expect(m.score_distribution).toBeDefined();
+      expect(m.score_distribution.excellent).toBe(1);
+      expect(m.score_distribution.poor).toBe(1);
+      expect(m.score_distribution.total).toBe(2);
+    });
+  });
+
   describe("getMetrics", () => {
     it("returns zeroed metrics when empty", () => {
       const m = store.getMetrics();
@@ -286,6 +360,7 @@ describe("StateStore", () => {
       expect(m.avg_task_duration_ms).toBeNull();
       expect(m.verification_pass_rate).toBeNull();
       expect(m.avg_quality_score).toBeNull();
+      expect(m.score_distribution.total).toBe(0);
       expect(m.per_agent).toHaveLength(0);
       expect(m.cycles.total_cycles).toBe(0);
     });
