@@ -39,7 +39,7 @@ describe("IssueCreator", () => {
 
   it("creates issues across repos for affected agents", () => {
     mockExecSync.mockImplementation((cmd: string) => {
-      if (typeof cmd === "string" && cmd.includes("--label orchestrator") && cmd.includes("--state open")) return "[]";
+      if (typeof cmd === "string" && cmd.includes("gh issue list")) return "[]";
       return "https://github.com/owner/repo/issues/42\n";
     });
 
@@ -54,13 +54,18 @@ describe("IssueCreator", () => {
     const creator = new IssueCreator(config);
     const results = creator.createAcrossRepos(improvement);
     expect(results).toHaveLength(2);
-    // 2 throttle checks + 2 issue creates = 4 calls
-    expect(mockExecSync).toHaveBeenCalledTimes(4);
+    // Each agent: 1 throttle check (--label orchestrator) + 1 dedup check (no --label) + 1 create = 3 calls × 2 agents = 6
+    expect(mockExecSync).toHaveBeenCalledTimes(6);
   });
 
   it("skips agents without github config", () => {
+    mockExecSync.mockImplementation((cmd: string) => {
+      if (typeof cmd === "string" && cmd.includes("gh issue list")) return "[]";
+      return "https://github.com/owner/repo/issues/42\n";
+    });
+
     const improvement: DetectedImprovement = {
-      title: "Fix",
+      title: "Fix some things",
       description: "Issue",
       affected_agents: ["agent-a", "no-github"],
       severity: "low",
@@ -85,7 +90,7 @@ describe("IssueCreator", () => {
     it("skips creation when repo has too many open orchestrator issues", () => {
       const tenIssues = JSON.stringify(Array.from({ length: 10 }, (_, i) => ({ number: i + 1 })));
       mockExecSync.mockImplementation((cmd: string) => {
-        if (typeof cmd === "string" && cmd.includes("gh issue list") && cmd.includes("--state open")) return tenIssues;
+        if (typeof cmd === "string" && cmd.includes("gh issue list") && cmd.includes("--label orchestrator")) return tenIssues;
         return "https://github.com/owner/repo-a/issues/42\n";
       });
 
@@ -100,7 +105,22 @@ describe("IssueCreator", () => {
     it("allows creation when repo is below threshold", () => {
       const fiveIssues = JSON.stringify(Array.from({ length: 5 }, (_, i) => ({ number: i + 1 })));
       mockExecSync.mockImplementation((cmd: string) => {
-        if (typeof cmd === "string" && cmd.includes("gh issue list") && cmd.includes("--state open")) return fiveIssues;
+        if (typeof cmd === "string" && cmd.includes("gh issue list") && cmd.includes("--label orchestrator")) return fiveIssues;
+        if (typeof cmd === "string" && cmd.includes("gh issue list")) return "[]";
+        return "https://github.com/owner/repo-a/issues/42\n";
+      });
+
+      const improvement: DetectedImprovement = {
+        title: "Fix unique problem", description: "Issue", affected_agents: ["agent-a"], severity: "low", evidence: [],
+      };
+      const creator = new IssueCreator(config);
+      const results = creator.createAcrossRepos(improvement);
+      expect(results).toHaveLength(1);
+    });
+
+    it("fails open when count check errors", () => {
+      mockExecSync.mockImplementation((cmd: string) => {
+        if (typeof cmd === "string" && cmd.includes("gh issue list")) throw new Error("gh failed");
         return "https://github.com/owner/repo-a/issues/42\n";
       });
 
@@ -111,16 +131,125 @@ describe("IssueCreator", () => {
       const results = creator.createAcrossRepos(improvement);
       expect(results).toHaveLength(1);
     });
+  });
 
-    it("fails open when count check errors", () => {
+  describe("titleSimilarity", () => {
+    it("returns 1 for identical titles", () => {
+      const creator = new IssueCreator(config);
+      expect(creator.titleSimilarity("Add retry logic", "Add retry logic")).toBe(1);
+    });
+
+    it("returns 0 for completely different titles", () => {
+      const creator = new IssueCreator(config);
+      expect(creator.titleSimilarity("Improve caching layer", "Fix broken authentication")).toBe(0);
+    });
+
+    it("detects partial overlap as moderate similarity", () => {
+      const creator = new IssueCreator(config);
+      const sim = creator.titleSimilarity(
+        "[Orchestrator] Add retry logic for failed tasks",
+        "Add retry logic",
+      );
+      // "retry" and "logic" overlap → should be above 0 but below 1
+      expect(sim).toBeGreaterThan(0);
+      expect(sim).toBeLessThan(1);
+    });
+
+    it("ignores stop words and punctuation", () => {
+      const creator = new IssueCreator(config);
+      // "the", "a", "and" are stop words; meaningful words "streaming" and "bug" only partially overlap
+      const sim = creator.titleSimilarity("Fix the streaming bug", "Fix a streaming issue");
+      // "streaming" overlaps, "bug" vs "issue" don't → should be > 0
+      expect(sim).toBeGreaterThan(0);
+    });
+
+    it("handles empty strings gracefully", () => {
+      const creator = new IssueCreator(config);
+      expect(creator.titleSimilarity("", "")).toBe(1);
+      expect(creator.titleSimilarity("Add retry", "")).toBe(0);
+    });
+  });
+
+  describe("isDuplicate", () => {
+    it("returns true when a highly similar issue exists", () => {
+      const existingTitles = JSON.stringify([
+        { title: "[Orchestrator] Add retry logic for failed tasks" },
+      ]);
+      mockExecSync.mockReturnValue(existingTitles);
+
+      const creator = new IssueCreator(config);
+      // Near-identical title — should be detected as duplicate
+      expect(creator.isDuplicate("owner/repo", "[Orchestrator] Add retry logic for tasks")).toBe(true);
+    });
+
+    it("returns false when no similar issue exists", () => {
+      const existingTitles = JSON.stringify([
+        { title: "Improve caching layer" },
+        { title: "Fix broken authentication flow" },
+      ]);
+      mockExecSync.mockReturnValue(existingTitles);
+
+      const creator = new IssueCreator(config);
+      expect(creator.isDuplicate("owner/repo", "[Orchestrator] Add metrics dashboard")).toBe(false);
+    });
+
+    it("fails open (returns false) when gh errors", () => {
+      mockExecSync.mockImplementation(() => { throw new Error("gh failed"); });
+
+      const creator = new IssueCreator(config);
+      expect(creator.isDuplicate("owner/repo", "Any title")).toBe(false);
+    });
+  });
+
+  describe("dedup in createAcrossRepos", () => {
+    it("skips issue creation when a similar issue already exists", () => {
+      const existingIssues = JSON.stringify([
+        { title: "[Orchestrator] Add retry logic for failed tasks" },
+      ]);
+
       mockExecSync.mockImplementation((cmd: string) => {
-        if (typeof cmd === "string" && cmd.includes("gh issue list") && cmd.includes("--state open")) throw new Error("gh failed");
+        if (typeof cmd === "string" && cmd.includes("--label orchestrator")) return "[]";
+        if (typeof cmd === "string" && cmd.includes("gh issue list")) return existingIssues;
+        return "https://github.com/owner/repo/issues/42\n";
+      });
+
+      const improvement: DetectedImprovement = {
+        title: "Add retry logic for tasks", // similar to existing
+        description: "Agents need retries",
+        affected_agents: ["agent-a"],
+        severity: "medium",
+        evidence: [],
+      };
+
+      const creator = new IssueCreator(config);
+      const results = creator.createAcrossRepos(improvement);
+      expect(results).toHaveLength(0);
+      expect(mockExecSync).not.toHaveBeenCalledWith(
+        expect.stringContaining("gh issue create"),
+        expect.any(Object),
+      );
+    });
+
+    it("creates issue when existing issues are dissimilar", () => {
+      const existingIssues = JSON.stringify([
+        { title: "Improve caching layer" },
+        { title: "Fix authentication" },
+      ]);
+
+      mockExecSync.mockImplementation((cmd: string) => {
+        if (typeof cmd === "string" && cmd.includes("--label orchestrator")) return "[]";
+        if (typeof cmd === "string" && cmd.includes("gh issue list")) return existingIssues;
         return "https://github.com/owner/repo-a/issues/42\n";
       });
 
       const improvement: DetectedImprovement = {
-        title: "Fix", description: "Issue", affected_agents: ["agent-a"], severity: "low", evidence: [],
+        title: "Add metrics dashboard",
+        description: "Need visibility into task throughput",
+        affected_agents: ["agent-a"],
+        severity: "low",
+        evidence: [],
       };
+
       const creator = new IssueCreator(config);
       const results = creator.createAcrossRepos(improvement);
       expect(results).toHaveLength(1);
