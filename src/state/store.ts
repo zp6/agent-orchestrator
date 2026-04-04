@@ -117,6 +117,27 @@ export interface ScoreTrend {
   window_size: number;
 }
 
+/** Per-agent productivity metrics for a rolling time window */
+export interface WindowedAgentMetrics {
+  agent_name: string;
+  /** Total top-level tasks in the window */
+  total: number;
+  /** Tasks with status='done' in the window */
+  done: number;
+  /** Tasks with status='failed' in the window */
+  failed: number;
+  /** Percentage of tasks that failed: failed / total * 100, or null if no tasks */
+  fail_pct: number | null;
+  /** Rejection rate: rejected / (approved + rejected), or null if no verified tasks */
+  rejection_pct: number | null;
+  /** Average quality_score across verified tasks in the window, or null */
+  avg_quality_score: number | null;
+  /** Average milliseconds from task creation to done for completed tasks in window */
+  avg_duration_ms: number | null;
+  /** Quality score trend direction over the window */
+  trend: "improving" | "stable" | "declining" | "insufficient_data";
+}
+
 /** Per-day task metrics for trend view */
 export interface DailyTaskMetrics {
   /** ISO date string: 'YYYY-MM-DD' */
@@ -1012,6 +1033,61 @@ export class StateStore {
          ORDER BY failed DESC`,
       )
       .all(since, threshold) as Array<{ agent_name: string; failed: number }>;
+  }
+
+  /**
+   * Return per-agent productivity stats for the last `days` days.
+   * Only top-level tasks (parent_task_id IS NULL) are included.
+   * Results are ordered by tasks completed (done DESC).
+   */
+  getWindowedAgentMetrics(days = 7): WindowedAgentMetrics[] {
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+    const rows = this.db.prepare(`
+      SELECT
+        agent_name,
+        COUNT(*) AS total,
+        COALESCE(SUM(CASE WHEN status = 'done'   THEN 1 ELSE 0 END), 0) AS done,
+        COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+        AVG(CASE
+          WHEN status = 'done'
+          THEN (julianday(updated_at) - julianday(created_at)) * 86400000.0
+        END) AS avg_duration_ms,
+        AVG(CASE WHEN verification_status IS NOT NULL THEN quality_score END) AS avg_quality_score,
+        1.0 * SUM(CASE WHEN verification_status = 'rejected' THEN 1 ELSE 0 END) /
+          NULLIF(SUM(CASE WHEN verification_status IN ('approved','rejected') THEN 1 ELSE 0 END), 0)
+          AS rejection_rate
+      FROM tasks
+      WHERE agent_name IS NOT NULL
+        AND parent_task_id IS NULL
+        AND created_at >= ?
+      GROUP BY agent_name
+      ORDER BY done DESC, total DESC
+    `).all(since) as Array<{
+      agent_name: string;
+      total: number;
+      done: number;
+      failed: number;
+      avg_duration_ms: number | null;
+      avg_quality_score: number | null;
+      rejection_rate: number | null;
+    }>;
+
+    return rows.map((r) => {
+      // Get trend direction using existing getAgentScoreTrend
+      const trend = this.getAgentScoreTrend(r.agent_name);
+      return {
+        agent_name: r.agent_name,
+        total: r.total,
+        done: r.done,
+        failed: r.failed,
+        fail_pct: r.total > 0 ? (r.failed / r.total) * 100 : null,
+        rejection_pct: r.rejection_rate !== null ? r.rejection_rate * 100 : null,
+        avg_quality_score: r.avg_quality_score,
+        avg_duration_ms: r.avg_duration_ms,
+        trend: trend.direction,
+      };
+    });
   }
 
   // ── Supervisor memory ────────────────────────────────────────────────────

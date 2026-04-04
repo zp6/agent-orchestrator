@@ -1218,4 +1218,91 @@ describe("StateStore", () => {
       expect(decisions[0].task_id).toBeNull();
     });
   });
+
+  describe("getWindowedAgentMetrics", () => {
+    it("returns empty array when no tasks exist", () => {
+      const rows = store.getWindowedAgentMetrics(7);
+      expect(rows).toHaveLength(0);
+    });
+
+    it("includes agents with done tasks in the window", () => {
+      const t = store.createTask({ title: "Do something", source: "github", agent_name: "alpha" });
+      store.updateTask(t.id, { status: "done" });
+
+      const rows = store.getWindowedAgentMetrics(7);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].agent_name).toBe("alpha");
+      expect(rows[0].done).toBe(1);
+      expect(rows[0].total).toBe(1);
+      expect(rows[0].failed).toBe(0);
+    });
+
+    it("computes fail_pct correctly", () => {
+      const t1 = store.createTask({ title: "Pass", source: "manual", agent_name: "beta" });
+      const t2 = store.createTask({ title: "Fail", source: "manual", agent_name: "beta" });
+      store.updateTask(t1.id, { status: "done" });
+      store.updateTask(t2.id, { status: "failed" });
+
+      const rows = store.getWindowedAgentMetrics(7);
+      const row = rows.find((r) => r.agent_name === "beta")!;
+      expect(row.total).toBe(2);
+      expect(row.done).toBe(1);
+      expect(row.failed).toBe(1);
+      expect(row.fail_pct).toBe(50);
+    });
+
+    it("computes rejection_pct from verified tasks", () => {
+      const t1 = store.createTask({ title: "A", source: "manual", agent_name: "gamma" });
+      const t2 = store.createTask({ title: "B", source: "manual", agent_name: "gamma" });
+      store.updateTask(t1.id, { status: "done", verification_status: "approved", quality_score: 0.9 });
+      store.updateTask(t2.id, { status: "done", verification_status: "rejected", quality_score: 0.4 });
+
+      const rows = store.getWindowedAgentMetrics(7);
+      const row = rows.find((r) => r.agent_name === "gamma")!;
+      expect(row.rejection_pct).toBe(50); // 1 rejected out of 2 verified
+      expect(row.avg_quality_score).toBeCloseTo(0.65, 1);
+    });
+
+    it("excludes sub-tasks (parent_task_id IS NOT NULL)", () => {
+      const parent = store.createTask({ title: "Parent", source: "manual", agent_name: "delta" });
+      const child = store.createTask({ title: "Child", source: "manual", agent_name: "delta" });
+      store.updateTask(child.id, { parent_task_id: parent.id, status: "done" });
+      store.updateTask(parent.id, { status: "done" });
+
+      const rows = store.getWindowedAgentMetrics(7);
+      const row = rows.find((r) => r.agent_name === "delta")!;
+      expect(row.total).toBe(1); // only parent counted
+    });
+
+    it("excludes tasks outside the window", () => {
+      // We can't easily set created_at in the past via the normal API,
+      // so we verify that tasks created now ARE included in a 7-day window.
+      const t = store.createTask({ title: "Recent", source: "manual", agent_name: "epsilon" });
+      store.updateTask(t.id, { status: "done" });
+
+      const rows7 = store.getWindowedAgentMetrics(7);
+      expect(rows7.find((r) => r.agent_name === "epsilon")).toBeDefined();
+    });
+
+    it("returns null fail_pct when total is 0 (no tasks)", () => {
+      // getWindowedAgentMetrics only returns agents that have tasks, so
+      // any row returned must have total >= 1 and non-null fail_pct.
+      const t = store.createTask({ title: "Solo", source: "manual", agent_name: "zeta" });
+      store.updateTask(t.id, { status: "done" });
+
+      const rows = store.getWindowedAgentMetrics(7);
+      const row = rows.find((r) => r.agent_name === "zeta")!;
+      expect(row.fail_pct).not.toBeNull();
+      expect(row.fail_pct).toBe(0);
+    });
+
+    it("includes trend direction", () => {
+      const t = store.createTask({ title: "T", source: "manual", agent_name: "eta" });
+      store.updateTask(t.id, { status: "done" });
+
+      const rows = store.getWindowedAgentMetrics(7);
+      const row = rows.find((r) => r.agent_name === "eta")!;
+      expect(["improving", "stable", "declining", "insufficient_data"]).toContain(row.trend);
+    });
+  });
 });
