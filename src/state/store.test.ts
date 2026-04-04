@@ -192,6 +192,66 @@ describe("StateStore", () => {
     });
   });
 
+  describe("getRecentVerified", () => {
+    it("returns only approved tasks", () => {
+      const t1 = store.createTask({ title: "Approved", source: "manual" });
+      const t2 = store.createTask({ title: "Rejected", source: "manual" });
+      const t3 = store.createTask({ title: "Unverified", source: "manual" });
+      store.updateTask(t1.id, { status: "done", verification_status: "approved" });
+      store.updateTask(t2.id, { status: "done", verification_status: "rejected", quality_score: 0.3 });
+      store.updateTask(t3.id, { status: "done" });
+
+      const results = store.getRecentVerified(20, 0.7);
+      expect(results.map((t) => t.id)).toContain(t1.id);
+      expect(results.map((t) => t.id)).not.toContain(t2.id);
+      expect(results.map((t) => t.id)).not.toContain(t3.id);
+    });
+
+    it("includes tasks with quality_score >= minScore even if not explicitly approved", () => {
+      const t1 = store.createTask({ title: "High quality", source: "manual" });
+      const t2 = store.createTask({ title: "Low quality", source: "manual" });
+      store.updateTask(t1.id, { status: "done", quality_score: 0.9 });
+      store.updateTask(t2.id, { status: "done", quality_score: 0.5 });
+
+      const results = store.getRecentVerified(20, 0.7);
+      expect(results.map((t) => t.id)).toContain(t1.id);
+      expect(results.map((t) => t.id)).not.toContain(t2.id);
+    });
+
+    it("excludes sub-tasks", () => {
+      const parent = store.createTask({ title: "Parent", source: "manual" });
+      const child = store.createSubTask({
+        parent_task_id: parent.id,
+        step_id: "step-1",
+        title: "Child",
+        description: "sub",
+        source: "manual",
+        agent_name: "alpha",
+      });
+      store.updateTask(parent.id, { status: "done", verification_status: "approved" });
+      store.updateTask(child.id, { status: "done", verification_status: "approved" });
+
+      const results = store.getRecentVerified(20, 0.7);
+      expect(results.map((t) => t.id)).toContain(parent.id);
+      expect(results.map((t) => t.id)).not.toContain(child.id);
+    });
+
+    it("respects the limit parameter", () => {
+      for (let i = 0; i < 5; i++) {
+        const t = store.createTask({ title: `Task ${i}`, source: "manual" });
+        store.updateTask(t.id, { status: "done", verification_status: "approved" });
+      }
+      const results = store.getRecentVerified(3, 0.7);
+      expect(results.length).toBe(3);
+    });
+
+    it("returns empty array when no qualifying tasks", () => {
+      const t = store.createTask({ title: "Bad", source: "manual" });
+      store.updateTask(t.id, { status: "done", verification_status: "rejected", quality_score: 0.2 });
+      expect(store.getRecentVerified(20, 0.7)).toHaveLength(0);
+    });
+  });
+
   describe("getMetrics", () => {
     it("returns zeroed metrics when empty", () => {
       const m = store.getMetrics();

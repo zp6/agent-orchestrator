@@ -267,7 +267,8 @@ export class Daemon {
 
   private async detectImprovements(time: string): Promise<void> {
     try {
-      const recent = this.store.getRecentCompleted(20);
+      const minScore = this.config.verification?.min_score ?? 0.7;
+      const recent = this.store.getRecentVerified(20, minScore);
       if (recent.length < 5) return; // need enough data
 
       const improvements = await this.detector.analyze(recent);

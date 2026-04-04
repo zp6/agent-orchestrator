@@ -331,6 +331,26 @@ export class StateStore {
     ).all(limit) as Task[];
   }
 
+  /**
+   * Return recently completed top-level tasks that are high-quality:
+   * either explicitly approved by the verifier OR have a quality score
+   * at or above `minScore`. Low-quality and rejected tasks are excluded
+   * so they don't pollute improvement-detection signal.
+   */
+  getRecentVerified(limit = 20, minScore = 0.7): Task[] {
+    return this.db.prepare(`
+      SELECT * FROM tasks
+      WHERE status = 'done'
+        AND parent_task_id IS NULL
+        AND (
+          verification_status = 'approved'
+          OR (quality_score IS NOT NULL AND quality_score >= ?)
+        )
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(minScore, limit) as Task[];
+  }
+
   getUnverified(limit = 10): Task[] {
     return this.db.prepare(
       "SELECT * FROM tasks WHERE status = 'done' AND verification_status IS NULL AND parent_task_id IS NULL ORDER BY created_at DESC LIMIT ?",
