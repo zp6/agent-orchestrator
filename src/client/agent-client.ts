@@ -24,6 +24,8 @@ CRITICAL — Git workflow:
 - Create a feature branch for your work: \`git checkout -b issue-N-description\`
 - When done: commit, push, and open a PR with \`gh pr create\`
 - Never commit directly to main
+- Every commit MUST end with: \`Co-Authored-By: ${agentName} <${agentName}@agent>\`
+  Use your agent name, NOT the model name. This is for traceability.
 
 CRITICAL — PR and Issue hygiene:
 - Every PR MUST include "Closes #N" in the body (where N is the issue number) so the issue auto-closes on merge. This is mandatory, not optional.
