@@ -19,12 +19,26 @@ import { createLogger } from "./logger.js";
 import { execSync } from "node:child_process";
 import { ManagementClient } from "../client/management-client.js";
 import { planSync, executeSync } from "../orchestrator/sync.js";
+import { MAX_RETRIES } from "../orchestrator/dispatcher.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
 const SUPERVISOR_CHECK_EVERY_N_CYCLES = 3; // ~15min at default interval
 const BACKLOG_TRIAGE_EVERY_N_CYCLES = 60; // ~5h at default interval
 const STALE_ISSUE_AGE_DAYS = 7;
+
+/**
+ * Maximum number of automatic retries for tasks that time out (exit code 143 /
+ * SIGTERM from container timeout).  Kept intentionally lower than MAX_RETRIES
+ * so that hard timeouts don't exhaust the full retry budget.
+ */
+export const TIMEOUT_MAX_RETRIES = 2;
+
+/**
+ * Fixed backoff delay (ms) between timeout-retry attempts.
+ * 2 minutes gives the agent container time to recover before re-dispatch.
+ */
+export const TIMEOUT_RETRY_DELAY_MS = 2 * 60 * 1000; // 2 minutes
 
 export class Daemon {
   private running = false;

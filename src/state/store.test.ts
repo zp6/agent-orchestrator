@@ -1063,4 +1063,84 @@ describe("StateStore", () => {
       expect(result).toEqual([]);
     });
   });
+
+  describe("getRetryableTasks", () => {
+    it("returns failed tasks whose next_retry_at has elapsed", () => {
+      const task = store.createTask({ title: "Retryable", source: "github", agent_name: "test-agent" });
+      // Set next_retry_at in the past so it's due now
+      const pastRetryAt = new Date(Date.now() - 5000).toISOString();
+      store.updateTask(task.id, {
+        status: "failed",
+        retry_count: 1,
+        next_retry_at: pastRetryAt,
+      });
+
+      const due = store.getRetryableTasks(3);
+      expect(due).toHaveLength(1);
+      expect(due[0].id).toBe(task.id);
+    });
+
+    it("does not return tasks whose next_retry_at is in the future", () => {
+      const task = store.createTask({ title: "Not yet due", source: "github", agent_name: "test-agent" });
+      const futureRetryAt = new Date(Date.now() + 60_000).toISOString();
+      store.updateTask(task.id, {
+        status: "failed",
+        retry_count: 1,
+        next_retry_at: futureRetryAt,
+      });
+
+      const due = store.getRetryableTasks(3);
+      expect(due).toHaveLength(0);
+    });
+
+    it("does not return tasks where retry_count >= maxRetries", () => {
+      const task = store.createTask({ title: "Exhausted", source: "github", agent_name: "test-agent" });
+      const pastRetryAt = new Date(Date.now() - 5000).toISOString();
+      store.updateTask(task.id, {
+        status: "failed",
+        retry_count: 3,
+        next_retry_at: pastRetryAt,
+      });
+
+      const due = store.getRetryableTasks(3);
+      expect(due).toHaveLength(0);
+    });
+
+    it("does not return failed tasks with no next_retry_at (permanently failed)", () => {
+      const task = store.createTask({ title: "Permanent fail", source: "github", agent_name: "test-agent" });
+      store.updateTask(task.id, {
+        status: "failed",
+        retry_count: 3,
+        next_retry_at: null,
+      });
+
+      const due = store.getRetryableTasks(3);
+      expect(due).toHaveLength(0);
+    });
+
+    it("does not return done tasks", () => {
+      const task = store.createTask({ title: "Done task", source: "github", agent_name: "test-agent" });
+      const pastRetryAt = new Date(Date.now() - 5000).toISOString();
+      // Manually set next_retry_at on a done task (should never happen in practice, but guards against it)
+      store.updateTask(task.id, { status: "done", retry_count: 1, next_retry_at: pastRetryAt });
+
+      const due = store.getRetryableTasks(3);
+      expect(due).toHaveLength(0);
+    });
+
+    it("returns tasks ordered by next_retry_at ascending (oldest due first)", () => {
+      const older = store.createTask({ title: "Older retry", source: "github", agent_name: "agent-a" });
+      const newer = store.createTask({ title: "Newer retry", source: "github", agent_name: "agent-b" });
+
+      const olderRetryAt = new Date(Date.now() - 10_000).toISOString();
+      const newerRetryAt = new Date(Date.now() - 1_000).toISOString();
+
+      store.updateTask(older.id, { status: "failed", retry_count: 1, next_retry_at: olderRetryAt });
+      store.updateTask(newer.id, { status: "failed", retry_count: 1, next_retry_at: newerRetryAt });
+
+      const due = store.getRetryableTasks(3);
+      expect(due).toHaveLength(2);
+      expect(due[0].id).toBe(older.id); // older timestamp comes first
+    });
+  });
 });

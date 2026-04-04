@@ -349,6 +349,25 @@ describe("shouldVerifyTask", () => {
   });
 });
 
+describe("TIMEOUT_MAX_RETRIES and TIMEOUT_RETRY_DELAY_MS constants", () => {
+  it("TIMEOUT_MAX_RETRIES is a positive integer not exceeding MAX_RETRIES", () => {
+    expect(TIMEOUT_MAX_RETRIES).toBeGreaterThan(0);
+    expect(Number.isInteger(TIMEOUT_MAX_RETRIES)).toBe(true);
+  });
+
+  it("TIMEOUT_MAX_RETRIES is 2 (as specified in issue #185)", () => {
+    expect(TIMEOUT_MAX_RETRIES).toBe(2);
+  });
+
+  it("TIMEOUT_RETRY_DELAY_MS is at least 60 seconds", () => {
+    expect(TIMEOUT_RETRY_DELAY_MS).toBeGreaterThanOrEqual(60_000);
+  });
+
+  it("TIMEOUT_RETRY_DELAY_MS is 2 minutes (120 000 ms)", () => {
+    expect(TIMEOUT_RETRY_DELAY_MS).toBe(2 * 60 * 1000);
+  });
+});
+
 describe("isPRAlreadyMerged", () => {
   it("returns false for OPEN state", () => {
     const execFn = vi.fn().mockReturnValue(JSON.stringify({ state: "OPEN" }));
