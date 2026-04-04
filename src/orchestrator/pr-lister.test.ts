@@ -6,9 +6,10 @@ import {
   formatAge,
   formatStaleDays,
   rollupCIStatus,
+  computeMergeReady,
 } from "./pr-lister.js";
 import type { OrchestratorConfig } from "../config/schema.js";
-import type { PRListItem, StatusCheck } from "./pr-lister.js";
+import type { PRListItem, PRRow, StatusCheck } from "./pr-lister.js";
 
 const mockExecFileSync = vi.fn();
 
@@ -577,5 +578,171 @@ describe("PRLister", () => {
     const { rows } = lister.listAll();
 
     expect(rows).toHaveLength(0);
+  });
+
+  it("populates agent name from config when repo matches", () => {
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo === "owner/repo-a") return JSON.stringify([makePR({ number: 1 })]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const { rows } = lister.listAll({ repo: "owner/repo-a" });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].agent).toBe("agent-a");
+  });
+
+  it("uses empty string for agent when repo is not in config", () => {
+    mockExecFileSync.mockReturnValue(JSON.stringify([makePR({ number: 1 })]));
+
+    const lister = new PRLister(config);
+    const { rows } = lister.listAll({ repo: "unknown/repo" });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].agent).toBe("");
+  });
+
+  it("filters by --agent option using config-derived repo", () => {
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo === "owner/repo-a") return JSON.stringify([makePR({ number: 1, title: "Agent A PR" })]);
+      if (repo === "owner/repo-b") return JSON.stringify([makePR({ number: 2, title: "Agent B PR" })]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const { rows } = lister.listAll({ agent: "agent-a" });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].title).toBe("Agent A PR");
+    expect(rows[0].agent).toBe("agent-a");
+  });
+
+  it("returns empty rows when --agent has no github configured", () => {
+    mockExecFileSync.mockReturnValue(JSON.stringify([makePR()]));
+
+    const lister = new PRLister(config);
+    const { rows } = lister.listAll({ agent: "agent-no-github" });
+
+    expect(rows).toHaveLength(0);
+    expect(mockExecFileSync).not.toHaveBeenCalled();
+  });
+});
+
+// Helper to build a partial PRRow for computeMergeReady tests
+const makePartialRow = (
+  overrides: Partial<Omit<PRRow, "mergeReady" | "agent">> = {},
+): Omit<PRRow, "mergeReady" | "agent"> => ({
+  repo: "owner/repo",
+  number: 1,
+  title: "Test PR",
+  ageDays: 1,
+  staleDays: 1,
+  reviewStatus: "approved",
+  mergeable: "yes",
+  ciStatus: "passing",
+  linkedIssue: "#1",
+  ...overrides,
+});
+
+describe("computeMergeReady", () => {
+  it("returns 'ready' when all signals are green", () => {
+    expect(computeMergeReady(makePartialRow())).toBe("ready");
+  });
+
+  it("returns 'ready' when CI is 'none' (no checks configured)", () => {
+    expect(computeMergeReady(makePartialRow({ ciStatus: "none" }))).toBe("ready");
+  });
+
+  it("returns 'conflict' for conflicting PRs (highest priority)", () => {
+    expect(
+      computeMergeReady(
+        makePartialRow({ mergeable: "conflict", ciStatus: "failing", reviewStatus: "pending" }),
+      ),
+    ).toBe("conflict");
+  });
+
+  it("returns 'ci-failing' when CI fails but no conflict", () => {
+    expect(
+      computeMergeReady(makePartialRow({ ciStatus: "failing", reviewStatus: "pending" })),
+    ).toBe("ci-failing");
+  });
+
+  it("returns 'changes-requested' when review requested changes (no conflict/ci-fail)", () => {
+    expect(
+      computeMergeReady(makePartialRow({ reviewStatus: "changes-requested" })),
+    ).toBe("changes-requested");
+  });
+
+  it("returns 'needs-review' when review is pending (no conflict/ci-fail)", () => {
+    expect(computeMergeReady(makePartialRow({ reviewStatus: "pending" }))).toBe("needs-review");
+  });
+
+  it("returns 'stale' when staleDays ≥7 and all other signals green", () => {
+    expect(
+      computeMergeReady(makePartialRow({ staleDays: 7 })),
+    ).toBe("stale");
+  });
+
+  it("returns 'ready' when staleDays is 6 (below stale threshold)", () => {
+    expect(computeMergeReady(makePartialRow({ staleDays: 6 }))).toBe("ready");
+  });
+
+  it("conflict takes priority over stale", () => {
+    expect(
+      computeMergeReady(makePartialRow({ mergeable: "conflict", staleDays: 10 })),
+    ).toBe("conflict");
+  });
+
+  it("ci-failing takes priority over needs-review", () => {
+    expect(
+      computeMergeReady(makePartialRow({ ciStatus: "failing", reviewStatus: "pending" })),
+    ).toBe("ci-failing");
+  });
+
+  it("changes-requested takes priority over stale", () => {
+    expect(
+      computeMergeReady(makePartialRow({ reviewStatus: "changes-requested", staleDays: 10 })),
+    ).toBe("changes-requested");
+  });
+});
+
+describe("toPRRow — agent field", () => {
+  const now = new Date("2024-01-10T12:00:00Z");
+
+  it("sets agent to provided agentName", () => {
+    const item = makePR({ createdAt: "2024-01-08T12:00:00Z", updatedAt: "2024-01-08T12:00:00Z" });
+    const row = toPRRow(item, "owner/repo", now, "cheese-hater");
+    expect(row.agent).toBe("cheese-hater");
+  });
+
+  it("defaults agent to empty string when not provided", () => {
+    const item = makePR({ createdAt: "2024-01-08T12:00:00Z", updatedAt: "2024-01-08T12:00:00Z" });
+    const row = toPRRow(item, "owner/repo", now);
+    expect(row.agent).toBe("");
+  });
+
+  it("includes mergeReady in the returned row", () => {
+    const item = makePR({
+      createdAt: "2024-01-08T12:00:00Z",
+      updatedAt: "2024-01-08T12:00:00Z",
+      reviewDecision: "APPROVED",
+      mergeable: "MERGEABLE",
+      statusCheckRollup: [{ name: "ci", status: "COMPLETED", conclusion: "SUCCESS" }],
+    });
+    const row = toPRRow(item, "owner/repo", now);
+    expect(row.mergeReady).toBe("ready");
+  });
+
+  it("mergeReady reflects conflict when PR is conflicting", () => {
+    const item = makePR({
+      createdAt: "2024-01-08T12:00:00Z",
+      updatedAt: "2024-01-08T12:00:00Z",
+      mergeable: "CONFLICTING",
+    });
+    const row = toPRRow(item, "owner/repo", now);
+    expect(row.mergeReady).toBe("conflict");
   });
 });

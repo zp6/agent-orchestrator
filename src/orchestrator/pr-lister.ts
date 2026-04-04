@@ -21,6 +21,8 @@ export interface PRListItem {
 
 export interface PRRow {
   repo: string;
+  /** Agent name from config (e.g. "cheese-hater"), or empty string if unknown. */
+  agent: string;
   number: number;
   title: string;
   ageDays: number;
@@ -29,6 +31,14 @@ export interface PRRow {
   mergeable: "yes" | "no" | "conflict" | "unknown";
   ciStatus: "passing" | "failing" | "pending" | "none";
   linkedIssue: string;
+  /**
+   * Primary merge-readiness signal: the highest-priority blocker, or "ready"
+   * when all signals are green.
+   *
+   * Priority (highest → lowest):
+   *   conflict > ci-failing > changes-requested > needs-review > stale > ready
+   */
+  mergeReady: "ready" | "conflict" | "ci-failing" | "changes-requested" | "needs-review" | "stale";
 }
 
 export function rollupCIStatus(checks: StatusCheck[] | null | undefined): PRRow["ciStatus"] {
@@ -64,7 +74,20 @@ export function formatStaleDays(days: number): string {
   return `${days}d`;
 }
 
-export function toPRRow(item: PRListItem, repo: string, now: Date = new Date()): PRRow {
+/**
+ * Compute the primary merge-readiness blocker for a PR row.
+ * Returns "ready" only when all signals are green.
+ */
+export function computeMergeReady(row: Omit<PRRow, "mergeReady" | "agent">): PRRow["mergeReady"] {
+  if (row.mergeable === "conflict") return "conflict";
+  if (row.ciStatus === "failing") return "ci-failing";
+  if (row.reviewStatus === "changes-requested") return "changes-requested";
+  if (row.reviewStatus === "pending") return "needs-review";
+  if (row.staleDays >= 7) return "stale";
+  return "ready";
+}
+
+export function toPRRow(item: PRListItem, repo: string, now: Date = new Date(), agentName = ""): PRRow {
   const createdAt = new Date(item.createdAt);
   const ageDays = Math.floor((now.getTime() - createdAt.getTime()) / (1000 * 60 * 60 * 24));
 
@@ -90,17 +113,20 @@ export function toPRRow(item: PRListItem, repo: string, now: Date = new Date()):
     mergeable = "unknown";
   }
 
-  return {
+  const ciStatus = rollupCIStatus(item.statusCheckRollup);
+  const partial = {
     repo,
+    agent: agentName,
     number: item.number,
     title: item.title,
     ageDays,
     staleDays,
     reviewStatus,
     mergeable,
-    ciStatus: rollupCIStatus(item.statusCheckRollup),
+    ciStatus,
     linkedIssue: extractLinkedIssue(item.body ?? ""),
   };
+  return { ...partial, mergeReady: computeMergeReady(partial) };
 }
 
 export class PRLister {
@@ -128,6 +154,18 @@ export class PRLister {
     }
   }
 
+  /** Build a map of github-repo → agent-name for fast lookup. */
+  private buildRepoToAgentMap(): Map<string, string> {
+    const map = new Map<string, string>();
+    for (const [name, agent] of Object.entries(this.config.agents)) {
+      if (agent.github) {
+        // If multiple agents share a repo, last one wins (rare edge case)
+        map.set(agent.github, name);
+      }
+    }
+    return map;
+  }
+
   listAll(
     opts: {
       stale?: boolean;
@@ -136,24 +174,37 @@ export class PRLister {
       conflict?: boolean;
       ciFailed?: boolean;
       repo?: string;
+      /** Filter by agent name (e.g. "cheese-hater") */
+      agent?: string;
     } = {},
   ): {
     rows: PRRow[];
     hasConflicts: boolean;
   } {
-    const repos = opts.repo
-      ? [opts.repo]
-      : Object.values(this.config.agents)
-          .filter((a) => a.github)
-          .map((a) => a.github!)
-          .filter((r, i, arr) => arr.indexOf(r) === i);
+    const repoToAgent = this.buildRepoToAgentMap();
+
+    // When filtering by agent name, derive the repo from config.
+    // If the agent exists but has no github, return empty immediately.
+    let repos: string[];
+    if (opts.repo) {
+      repos = [opts.repo];
+    } else if (opts.agent !== undefined) {
+      const agentRepo = this.config.agents[opts.agent]?.github;
+      repos = agentRepo ? [agentRepo] : [];
+    } else {
+      repos = Object.values(this.config.agents)
+        .filter((a) => a.github)
+        .map((a) => a.github!)
+        .filter((r, i, arr) => arr.indexOf(r) === i);
+    }
 
     const allRows: PRRow[] = [];
 
     for (const repo of repos) {
+      const agentName = repoToAgent.get(repo) ?? "";
       const prs = this.fetchOpenPRs(repo);
       for (const pr of prs) {
-        allRows.push(toPRRow(pr, repo));
+        allRows.push(toPRRow(pr, repo, new Date(), agentName));
       }
     }
 
