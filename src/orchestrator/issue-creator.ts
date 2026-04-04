@@ -135,6 +135,7 @@ export class IssueCreator {
       const agent = this.config.agents[agentName];
       if (!agent?.github) continue;
 
+      // Throttle: skip if repo already has too many open orchestrator issues
       const openCount = this.getOpenOrchestratorIssueCount(agent.github);
       if (openCount >= MAX_OPEN_ORCHESTRATOR_ISSUES) {
         this.log.warn("Skipping issue creation: too many open orchestrator issues", {

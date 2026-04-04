@@ -219,9 +219,14 @@ describe("Verifier.verifyAndRevise — retry mechanism", () => {
     const task = store.createTask({ title: "Test task", description: "Do something", source: "manual", agent_name: "busy-agent" });
     store.updateTask(task.id, { status: "done", result: "Partial work" });
 
-    // Simulate agent being busy: create a dispatched task for the same agent
-    const activeTask = store.createTask({ title: "Active task", source: "manual", agent_name: "busy-agent" });
-    store.updateTask(activeTask.id, { status: "dispatched" });
+    // Spy on hasActiveTask so that:
+    //   - pre-verify check (first call): returns false → lets the LLM run
+    //   - post-verify check (second call): returns true → defers revision dispatch
+    // This tests the post-verify capacity guard (the pre-verify guard is covered by
+    // the "verifyAndRevise — capacity guard" describe block above).
+    const hasActiveTaskSpy = vi.spyOn(store, "hasActiveTask")
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
 
     const verifier = new Verifier(config, store);
     const result = await verifier.verifyAndRevise(task.id);
@@ -236,6 +241,8 @@ describe("Verifier.verifyAndRevise — retry mechanism", () => {
 
     // Dispatcher should NOT have been called (agent was busy)
     expect(mockDispatch).not.toHaveBeenCalled();
+
+    hasActiveTaskSpy.mockRestore();
   });
 
   it("resets verification_status to null on transient dispatch failure", async () => {

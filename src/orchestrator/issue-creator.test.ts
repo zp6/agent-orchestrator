@@ -4,7 +4,12 @@ import type { OrchestratorConfig } from "../config/schema.js";
 import type { DetectedImprovement } from "./improvement-detector.js";
 
 vi.mock("node:child_process", () => ({
-  execSync: vi.fn().mockReturnValue("https://github.com/owner/repo/issues/42\n"),
+  execSync: vi.fn((cmd: string) => {
+    if (typeof cmd === "string" && cmd.includes("gh issue list")) {
+      return "[]";
+    }
+    return "https://github.com/owner/repo/issues/42\n";
+  }),
 }));
 
 import { execSync } from "node:child_process";
