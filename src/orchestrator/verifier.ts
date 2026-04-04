@@ -92,6 +92,18 @@ export class Verifier {
 
     // Re-dispatch with revision feedback
     const task = this.store.getTask(taskId)!;
+
+    // Capacity guard: if the agent is already busy, defer the revision by resetting
+    // verification_status to null so the daemon re-picks the task on the next cycle.
+    if (task.agent_name && this.store.hasActiveTask(task.agent_name)) {
+      this.log.info("Revision deferred: agent busy, will retry next cycle", {
+        taskId,
+        agentName: task.agent_name,
+      });
+      this.store.updateTask(taskId, { verification_status: null });
+      return result;
+    }
+
     const { Dispatcher } = await import("./dispatcher.js");
     const dispatcher = new Dispatcher(this.config, this.store);
 
@@ -107,7 +119,14 @@ export class Verifier {
 
       // Verify the revision
       return this.verify(revisionResult.taskId);
-    } catch {
+    } catch (err) {
+      // Dispatch failed (e.g. transient connection error): reset to null so the
+      // daemon retries on the next cycle rather than silently dropping the revision.
+      this.log.warn("Revision dispatch failed, resetting for retry", {
+        taskId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this.store.updateTask(taskId, { verification_status: null });
       return result;
     }
   }
