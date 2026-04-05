@@ -25,6 +25,7 @@ const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
 const SUPERVISOR_CHECK_EVERY_N_CYCLES = 3; // ~15min at default interval
 const BACKLOG_TRIAGE_EVERY_N_CYCLES = 60; // ~5h at default interval
+const CONTAINER_RESTART_EVERY_N_CYCLES = 100; // ~50min at 30s interval — prevents Docker stalls
 const STALE_ISSUE_AGE_DAYS = 7;
 
 /**
@@ -214,6 +215,11 @@ export class Daemon {
 
       // 5. Redeploy agents with new code (only registered ones)
       await this.redeployStale(time, registeredAgents);
+
+      // 5b. Preventive container restart — clear accumulated state before containers stall
+      if (this.cycleCount % CONTAINER_RESTART_EVERY_N_CYCLES === 0) {
+        await this.preventiveRestart(time, registeredAgents);
+      }
 
       // 6. Supervisor review — strategic reasoning about what needs attention
       if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
@@ -585,6 +591,31 @@ export class Daemon {
       }
     } catch (err) {
       console.error(`[${time}] Deploy check failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  private async preventiveRestart(time: string, registeredAgents?: Set<string>): Promise<void> {
+    const agents = registeredAgents
+      ? [...registeredAgents]
+      : Object.keys(this.config.agents);
+
+    // Only restart agents that don't have active tasks
+    const idleAgents = agents.filter((name) => !this.store.hasActiveTask(name));
+    if (idleAgents.length === 0) {
+      this.log.info("Preventive restart skipped: all agents busy");
+      return;
+    }
+
+    this.log.info("Preventive container restart", { agents: idleAgents, cycle: this.cycleCount });
+    for (const name of idleAgents) {
+      try {
+        const result = await this.deployer.restartAgent(name);
+        if (result.action === "health-check-failed") {
+          this.log.warn("Agent unhealthy after preventive restart", { agentName: name });
+        }
+      } catch (err) {
+        this.log.error("Preventive restart failed", { agentName: name, error: err instanceof Error ? err.message : String(err) });
+      }
     }
   }
 
