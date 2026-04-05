@@ -1,8 +1,8 @@
 import { createLogger } from "./logger.js";
-import { notifyOperator } from "./notify.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { execSync } from "node:child_process";
 import type { StateStore } from "../state/store.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { OrchestratorConfig } from "../config/schema.js";
@@ -27,6 +27,7 @@ interface TelegramContext {
 let lastUpdateId = 0;
 let botToken: string | null = null;
 let chatId: string | null = null;
+let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
 function loadConfig(): boolean {
   if (botToken) return true;
@@ -48,46 +49,67 @@ function loadConfig(): boolean {
 
 async function sendReply(text: string): Promise<void> {
   if (!botToken || !chatId) return;
+  // Telegram has a 4096 char limit — truncate if needed
+  const truncated = text.length > 4000 ? text.slice(0, 4000) + "\n\n...(truncated)" : text;
   try {
     await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text, parse_mode: "Markdown" }),
+      body: JSON.stringify({ chat_id: chatId, text: truncated, parse_mode: "Markdown" }),
     });
   } catch (err) {
-    log.error("Failed to send reply", { error: err instanceof Error ? err.message : String(err) });
+    // Retry without markdown if parse fails
+    try {
+      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, text: truncated }),
+      });
+    } catch {
+      log.error("Failed to send reply", { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+}
+
+function gh(cmd: string): string {
+  try {
+    return execSync(cmd, { encoding: "utf-8", timeout: 15000 }).trim();
+  } catch {
+    return "";
   }
 }
 
 async function handleCommand(text: string, ctx: TelegramContext): Promise<string> {
   const cmd = text.trim().toLowerCase();
-  const args = text.trim().split(/\s+/).slice(1).join(" ");
 
-  // Status
+  // Summary — the main command
+  if (cmd === "summary" || cmd === "/summary" || cmd === "s") {
+    return buildSummary(ctx);
+  }
+
+  // Status — quick agent status
   if (cmd === "status" || cmd === "/status") {
-    const tasks = ctx.store.listTasks({ limit: 5 });
-    const active = tasks.filter((t) => t.status === "dispatched" || t.status === "in_progress");
     const agents = Object.keys(ctx.config.agents);
-    const agentStatus = agents.map((name) => {
+    const lines = agents.map((name) => {
       const busy = ctx.store.hasActiveTask(name);
-      return `  ${busy ? "🔵" : "⚪"} ${name}${busy ? " (working)" : " (idle)"}`;
-    }).join("\n");
-
-    return `📊 *Status*\n\nAgents:\n${agentStatus}\n\nActive tasks: ${active.length}\nRecent tasks: ${tasks.slice(0, 3).map((t) => `  ${t.status === "done" ? "✅" : t.status === "failed" ? "❌" : "🔵"} ${t.title?.slice(0, 60)}`).join("\n")}`;
+      const tasks = ctx.store.listTasks({ agent_name: name, limit: 1 });
+      const current = busy && tasks[0] ? `: ${tasks[0].title?.slice(0, 50)}` : "";
+      return `${busy ? "🔵" : "⚪"} ${name}${busy ? current : " (idle)"}`;
+    });
+    return `📊 *Agents*\n\n${lines.join("\n")}`;
   }
 
   // Health
   if (cmd === "health" || cmd === "/health") {
     const agents = Object.keys(ctx.config.agents);
     const checks = await Promise.all(agents.map(async (name) => {
-      const agent = ctx.config.agents[name];
-      const port = agent.docker?.port;
-      if (!port) return `  ❓ ${name}: no port configured`;
+      const port = ctx.config.agents[name].docker?.port;
+      if (!port) return `❓ ${name}: no port`;
       try {
         const res = await fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(5000) });
-        return res.ok ? `  ✅ ${name} (port ${port})` : `  ❌ ${name} (port ${port}): ${res.status}`;
+        return res.ok ? `✅ ${name}` : `❌ ${name} (${res.status})`;
       } catch {
-        return `  ❌ ${name} (port ${port}): unreachable`;
+        return `❌ ${name} (unreachable)`;
       }
     }));
     return `🏥 *Health*\n\n${checks.join("\n")}`;
@@ -95,142 +117,198 @@ async function handleCommand(text: string, ctx: TelegramContext): Promise<string
 
   // Issues
   if (cmd === "issues" || cmd === "/issues") {
-    const repos = Object.values(ctx.config.agents)
-      .map((a) => a.github)
-      .filter(Boolean) as string[];
-    const uniqueRepos = [...new Set(repos)];
+    const repos = [...new Set(Object.values(ctx.config.agents).map((a) => a.github).filter(Boolean))] as string[];
     const lines: string[] = [];
-    for (const repo of uniqueRepos) {
-      try {
-        const { execSync } = await import("node:child_process");
-        const raw = execSync(`gh issue list --repo ${repo} --state open --json number,title -L 5`, { encoding: "utf-8", timeout: 15000 });
-        const issues = JSON.parse(raw) as Array<{ number: number; title: string }>;
-        if (issues.length > 0) {
-          lines.push(`*${repo}*`);
-          for (const i of issues) lines.push(`  #${i.number} ${i.title.slice(0, 50)}`);
-        }
-      } catch { /* skip */ }
+    for (const repo of repos) {
+      const raw = gh(`gh issue list --repo ${repo} --state open --json number,title -L 5`);
+      if (!raw) continue;
+      const issues = JSON.parse(raw) as Array<{ number: number; title: string }>;
+      if (issues.length > 0) {
+        lines.push(`*${repo.split("/")[1]}*`);
+        for (const i of issues) lines.push(`  #${i.number} ${i.title.slice(0, 45)}`);
+      }
     }
-    return lines.length > 0 ? `📋 *Open Issues*\n\n${lines.join("\n")}` : "📋 No open issues across repos";
+    return lines.length > 0 ? `📋 *Issues*\n\n${lines.join("\n")}` : "📋 No open issues";
   }
 
   // PRs
   if (cmd === "prs" || cmd === "/prs") {
-    const repos = Object.values(ctx.config.agents)
-      .map((a) => a.github)
-      .filter(Boolean) as string[];
-    const uniqueRepos = [...new Set(repos)];
+    const repos = [...new Set(Object.values(ctx.config.agents).map((a) => a.github).filter(Boolean))] as string[];
     const lines: string[] = [];
-    for (const repo of uniqueRepos) {
-      try {
-        const { execSync } = await import("node:child_process");
-        const raw = execSync(`gh pr list --repo ${repo} --state open --json number,title -L 5`, { encoding: "utf-8", timeout: 15000 });
-        const prs = JSON.parse(raw) as Array<{ number: number; title: string }>;
-        if (prs.length > 0) {
-          lines.push(`*${repo}*`);
-          for (const pr of prs) lines.push(`  #${pr.number} ${pr.title.slice(0, 50)}`);
+    for (const repo of repos) {
+      const raw = gh(`gh pr list --repo ${repo} --state open --json number,title,mergeable -L 5`);
+      if (!raw) continue;
+      const prs = JSON.parse(raw) as Array<{ number: number; title: string; mergeable: string }>;
+      if (prs.length > 0) {
+        lines.push(`*${repo.split("/")[1]}*`);
+        for (const pr of prs) {
+          const icon = pr.mergeable === "MERGEABLE" ? "✅" : pr.mergeable === "CONFLICTING" ? "⚠️" : "❓";
+          lines.push(`  ${icon} #${pr.number} ${pr.title.slice(0, 40)}`);
         }
-      } catch { /* skip */ }
+      }
     }
-    return lines.length > 0 ? `🔀 *Open PRs*\n\n${lines.join("\n")}` : "🔀 No open PRs";
+    return lines.length > 0 ? `🔀 *PRs*\n\n${lines.join("\n")}` : "🔀 No open PRs";
   }
 
-  // Dispatch to specific agent
+  // Dispatch
   if (cmd.startsWith("dispatch ") || cmd.startsWith("/dispatch ")) {
     const parts = text.trim().split(/\s+/);
     const agentName = parts[1];
     const message = parts.slice(2).join(" ");
-    if (!agentName || !message) return "Usage: `dispatch <agent> <message>`";
-    if (!ctx.config.agents[agentName]) {
-      return `❌ Unknown agent: ${agentName}\nAvailable: ${Object.keys(ctx.config.agents).join(", ")}`;
-    }
+    if (!agentName || !message) return "Usage: dispatch <agent> <message>";
+    if (!ctx.config.agents[agentName]) return `❌ Unknown agent. Available: ${Object.keys(ctx.config.agents).join(", ")}`;
     try {
       const result = await ctx.dispatcher.dispatch(message, { agentName, source: "manual", title: `[telegram] ${message.slice(0, 60)}` });
-      return `✅ Dispatched to ${agentName}\nTask ID: ${result.taskId}`;
+      return `✅ Dispatched to ${agentName} (${result.taskId})`;
     } catch (err) {
-      return `❌ Dispatch failed: ${err instanceof Error ? err.message : String(err)}`;
-    }
-  }
-
-  // Ask any agent
-  if (cmd.startsWith("ask ") || cmd.startsWith("/ask ")) {
-    const parts = text.trim().split(/\s+/);
-    const agentName = parts[1];
-    const message = parts.slice(2).join(" ");
-    if (!agentName || !message) return "Usage: `ask <agent> <question>`";
-    if (!ctx.config.agents[agentName]) {
-      return `❌ Unknown agent: ${agentName}\nAvailable: ${Object.keys(ctx.config.agents).join(", ")}`;
-    }
-    try {
-      const result = await ctx.dispatcher.dispatch(message, { agentName, source: "manual", title: `[telegram-ask] ${message.slice(0, 60)}` });
-      return `✅ Asked ${agentName}: "${message.slice(0, 80)}"\nTask ID: ${result.taskId}\nI'll send the response when it completes.`;
-    } catch (err) {
-      return `❌ Ask failed: ${err instanceof Error ? err.message : String(err)}`;
+      return `❌ ${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
   // Help
   if (cmd === "help" || cmd === "/help" || cmd === "/start") {
-    return `🤖 *Orchestrator Commands*\n
-\`status\` — agent status + recent tasks
-\`health\` — ping all agent containers
-\`issues\` — open issues across all repos
-\`prs\` — open PRs across all repos
-\`dispatch <agent> <message>\` — send task to agent
-\`ask <agent> <question>\` — ask agent a question
-\`help\` — this message
+    return `🤖 *Commands*
 
-Or just send free text — it will be forwarded to the supervisor as an operator directive.`;
+summary (or s) — what's happening
+status — agent status
+health — ping containers
+issues — open issues
+prs — open PRs
+dispatch <agent> <msg> — send task
+help — this message`;
   }
 
-  // Free text → forward to supervisor as directive
+  // Default: treat as directive
   try {
     const result = await ctx.dispatcher.dispatch(
       `Operator directive via Telegram: ${text}`,
-      { agentName: Object.keys(ctx.config.agents)[0], source: "manual", title: `[telegram-directive] ${text.slice(0, 60)}` },
+      { agentName: Object.keys(ctx.config.agents)[0], source: "manual", title: `[telegram] ${text.slice(0, 60)}` },
     );
-    return `📨 Forwarded to supervisor as directive\nTask ID: ${result.taskId}`;
+    return `📨 Forwarded as directive (${result.taskId})`;
   } catch (err) {
-    return `❌ Failed to forward: ${err instanceof Error ? err.message : String(err)}`;
+    return `❌ ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+function buildSummary(ctx: TelegramContext): string {
+  const agents = Object.keys(ctx.config.agents);
+
+  // Agent status
+  const agentLines = agents.map((name) => {
+    const busy = ctx.store.hasActiveTask(name);
+    const tasks = ctx.store.listTasks({ agent_name: name, limit: 1 });
+    const current = busy && tasks[0] ? tasks[0].title?.slice(0, 45) : null;
+    return `${busy ? "🔵" : "⚪"} ${name}${current ? `: ${current}` : ""}`;
+  });
+
+  // Recent completions (last 5)
+  const recent = ctx.store.listTasks({ status: "done", limit: 5 });
+  const recentLines = recent.map((t) => {
+    const score = t.quality_score !== null ? ` (${t.quality_score.toFixed(1)})` : "";
+    const icon = t.verification_status === "approved" ? "✅" : t.verification_status === "rejected" ? "❌" : "⏳";
+    return `${icon}${score} ${t.title?.slice(0, 45)}`;
+  });
+
+  // Recent failures (last 3)
+  const failures = ctx.store.listTasks({ status: "failed", limit: 3 });
+  const failLines = failures.length > 0
+    ? failures.map((t) => `❌ ${t.title?.slice(0, 45)}`).join("\n")
+    : "None";
+
+  // Open PRs count
+  const repos = [...new Set(Object.values(ctx.config.agents).map((a) => a.github).filter(Boolean))] as string[];
+  let prCount = 0;
+  for (const repo of repos) {
+    const raw = gh(`gh pr list --repo ${repo} --state open --json number -q length`);
+    prCount += parseInt(raw) || 0;
+  }
+
+  // Stats
+  const stats = ctx.store.getAgentStats();
+  const totalDone = stats.reduce((s, a) => s + a.done, 0);
+  const totalFailed = stats.reduce((s, a) => s + a.failed, 0);
+  const successRate = totalDone + totalFailed > 0
+    ? Math.round((totalDone / (totalDone + totalFailed)) * 100)
+    : 0;
+
+  return `📋 *Summary*
+
+*Agents*
+${agentLines.join("\n")}
+
+*Recent*
+${recentLines.join("\n")}
+
+*Failures*
+${failLines}
+
+*Stats*
+Done: ${totalDone} | Failed: ${totalFailed} | Success: ${successRate}%
+Open PRs: ${prCount}`;
+}
+
+/**
+ * Start independent Telegram polling loop (every 3 seconds).
+ * Runs in the background, independent of the daemon poll cycle.
+ */
+export function startTelegramPolling(ctx: TelegramContext): void {
+  if (!loadConfig()) {
+    log.info("Telegram not configured — skipping polling");
+    return;
+  }
+  if (pollingInterval) return; // already running
+
+  log.info("Telegram polling started (3s interval)");
+
+  const poll = async () => {
+    try {
+      const res = await fetch(
+        `https://api.telegram.org/bot${botToken}/getUpdates?offset=${lastUpdateId + 1}&timeout=0&limit=10`,
+        { signal: AbortSignal.timeout(5000) },
+      );
+      if (!res.ok) return;
+
+      const data = await res.json() as { ok: boolean; result: TelegramUpdate[] };
+      if (!data.ok || !data.result.length) return;
+
+      for (const update of data.result) {
+        lastUpdateId = Math.max(lastUpdateId, update.update_id);
+        const msg = update.message;
+        if (!msg?.text) continue;
+        if (String(msg.chat.id) !== chatId) continue;
+
+        log.info("Telegram command", { text: msg.text });
+        const reply = await handleCommand(msg.text, ctx);
+        await sendReply(reply);
+      }
+    } catch {
+      // Silent — don't spam logs every 3 seconds
+    }
+  };
+
+  // Poll immediately, then every 3 seconds
+  poll();
+  pollingInterval = setInterval(poll, 3000);
+}
+
+/**
+ * Stop Telegram polling.
+ */
+export function stopTelegramPolling(): void {
+  if (pollingInterval) {
+    clearInterval(pollingInterval);
+    pollingInterval = null;
   }
 }
 
 /**
- * Poll Telegram for new messages and process commands.
- * Call this from the daemon poll cycle.
+ * Legacy: poll once (called from daemon cycle).
+ * Kept for backward compatibility but startTelegramPolling is preferred.
  */
 export async function pollTelegram(ctx: TelegramContext): Promise<void> {
+  // If independent polling is running, skip the daemon-triggered poll
+  if (pollingInterval) return;
+  // Otherwise fall back to one-shot poll (shouldn't happen normally)
   if (!loadConfig()) return;
-
-  try {
-    const res = await fetch(
-      `https://api.telegram.org/bot${botToken}/getUpdates?offset=${lastUpdateId + 1}&timeout=0&limit=10`,
-      { signal: AbortSignal.timeout(10000) },
-    );
-    if (!res.ok) return;
-
-    const data = await res.json() as { ok: boolean; result: TelegramUpdate[] };
-    if (!data.ok || !data.result.length) return;
-
-    for (const update of data.result) {
-      lastUpdateId = Math.max(lastUpdateId, update.update_id);
-
-      const msg = update.message;
-      if (!msg?.text) continue;
-
-      // Security: only process messages from configured chat ID
-      if (String(msg.chat.id) !== chatId) {
-        log.warn("Ignoring message from unknown chat", { chatId: msg.chat.id });
-        continue;
-      }
-
-      log.info("Telegram command received", { text: msg.text, from: msg.from?.first_name });
-
-      const reply = await handleCommand(msg.text, ctx);
-      await sendReply(reply);
-    }
-  } catch (err) {
-    // Don't log on every cycle if Telegram is just slow
-    log.error("Telegram poll error", { error: err instanceof Error ? err.message : String(err) });
-  }
+  startTelegramPolling(ctx);
 }

@@ -23,7 +23,7 @@ import { execSync } from "node:child_process";
 import { ManagementClient } from "../client/management-client.js";
 import { planSync, executeSync } from "../orchestrator/sync.js";
 import { notifyOperator } from "./notify.js";
-import { pollTelegram } from "./telegram.js";
+import { startTelegramPolling, stopTelegramPolling, pollTelegram } from "./telegram.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
@@ -156,6 +156,9 @@ export class Daemon {
     // Ensure all agents from agents.yaml are registered with the proxy.
     // The management API loses agent state on proxy restart, so we sync on every daemon start.
     await this.syncAgents();
+
+    // Start independent Telegram polling (3s interval, doesn't block cycles)
+    startTelegramPolling({ config: this.config, store: this.store, dispatcher: this.dispatcher });
 
     while (this.running) {
       await this.pollCycle();
@@ -1106,6 +1109,7 @@ export class Daemon {
   }
 
   private cleanup(): void {
+    stopTelegramPolling();
     removePid();
     this.store.close();
     console.log("Daemon stopped.");
