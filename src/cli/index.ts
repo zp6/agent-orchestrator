@@ -17,6 +17,7 @@ import { registerHealthCommand } from "./commands/health.js";
 import { registerMetricsCommand } from "./commands/metrics.js";
 import { registerPreflightCommand } from "./commands/preflight.js";
 import { registerAuditCommand } from "./commands/audit.js";
+import { registerDigestCommand } from "./commands/digest.js";
 
 const program = new Command();
 
@@ -43,5 +44,6 @@ registerHealthCommand(program);
 registerMetricsCommand(program);
 registerPreflightCommand(program);
 registerAuditCommand(program);
+registerDigestCommand(program);
 
 program.parse();
