@@ -675,6 +675,26 @@ export class StateStore {
   }
 
   /**
+   * Check whether any pr-feedback task exists for the given source_ref that was
+   * created after the specified ISO timestamp.  Used by the duplicate guard to
+   * determine if new review feedback has arrived since the last verified-approved
+   * task completed — if not, re-dispatching the same issue would be a no-op
+   * (see issue #387).
+   */
+  hasPrFeedbackSince(sourceRef: string, sinceIso: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM tasks
+         WHERE source = 'pr-feedback'
+           AND source_ref = ?
+           AND created_at > ?
+         LIMIT 1`,
+      )
+      .get(sourceRef, sinceIso);
+    return !!row;
+  }
+
+  /**
    * Return all pr-feedback tasks for a given source_ref (e.g. "owner/repo#42"),
    * ordered chronologically (oldest first).  Used by `orch status` to show the
    * full feedback-cycle history for a PR.

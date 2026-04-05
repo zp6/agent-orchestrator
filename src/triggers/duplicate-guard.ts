@@ -91,6 +91,34 @@ export function checkDuplicate(
       return { isDuplicate: false };
     }
 
+    // Verified-and-approved tasks are definitively complete.  Re-dispatching
+    // would be a no-op that burns agent tokens only to confirm the work is
+    // already done (see issue #387 — third dispatch of #28 scored 0.72 doing
+    // exactly this).  Only allow re-dispatch if new PR review feedback has
+    // arrived since the task completed, which means the reviewer found issues
+    // the agent needs to address.
+    if (task.status === "done" && task.verification_status === "approved") {
+      const hasNewFeedback = store.hasPrFeedbackSince(sourceRef, task.updated_at);
+      if (!hasNewFeedback) {
+        log.info("Duplicate suppressed: task already verified-approved with no new feedback", {
+          sourceRef,
+          taskId: task.id,
+          completedAt: task.updated_at,
+        });
+        return {
+          isDuplicate: true,
+          reason: `already completed: verified-approved task ${task.id} with no new PR feedback since ${task.updated_at}`,
+          existingTask: task,
+        };
+      }
+      log.info("Allowing re-dispatch: verified-approved task has new PR feedback", {
+        sourceRef,
+        taskId: task.id,
+        completedAt: task.updated_at,
+      });
+      return { isDuplicate: false };
+    }
+
     // Suppress within the recency window to avoid piling on before the
     // result is reviewed or the issue is closed.
     const ageHours =

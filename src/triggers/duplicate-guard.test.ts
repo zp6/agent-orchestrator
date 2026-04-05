@@ -10,8 +10,14 @@ function hoursAgo(h: number): string {
   return new Date(Date.now() - h * 3_600_000).toISOString();
 }
 
-function makeStore(task: Task | undefined): Pick<StateStore, "findTaskBySourceRef"> {
-  return { findTaskBySourceRef: () => task } as unknown as StateStore;
+function makeStore(
+  task: Task | undefined,
+  opts?: { hasPrFeedbackSince?: boolean },
+): Pick<StateStore, "findTaskBySourceRef" | "hasPrFeedbackSince"> {
+  return {
+    findTaskBySourceRef: () => task,
+    hasPrFeedbackSince: () => opts?.hasPrFeedbackSince ?? false,
+  } as unknown as StateStore;
 }
 
 function makeTask(overrides: Partial<Task> = {}): Task {
@@ -154,6 +160,71 @@ describe("verifier-rejected tasks", () => {
     );
     const result = checkDuplicate(store as StateStore, "github", "owner/repo#1");
     expect(result.isDuplicate).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Verified-approved tasks — skip no-op re-dispatches (issue #387)
+// ---------------------------------------------------------------------------
+
+describe("verified-approved tasks (issue #387)", () => {
+  it("blocks re-dispatch of a verified-approved task with no new feedback", () => {
+    const store = makeStore(
+      makeTask({
+        status: "done",
+        verification_status: "approved",
+        quality_score: 0.89,
+        updated_at: hoursAgo(2),
+      }),
+      { hasPrFeedbackSince: false },
+    );
+    const result = checkDuplicate(store as StateStore, "github", "owner/repo#1");
+    expect(result.isDuplicate).toBe(true);
+    expect(result.reason).toContain("already completed");
+    expect(result.reason).toContain("verified-approved");
+  });
+
+  it("blocks re-dispatch even when outside the normal recency window", () => {
+    // Verified-approved check is stronger than the recency window —
+    // blocks indefinitely as long as no new feedback exists
+    const store = makeStore(
+      makeTask({
+        status: "done",
+        verification_status: "approved",
+        updated_at: hoursAgo(RECENCY_WINDOW_HOURS + 10),
+      }),
+      { hasPrFeedbackSince: false },
+    );
+    const result = checkDuplicate(store as StateStore, "github", "owner/repo#1");
+    expect(result.isDuplicate).toBe(true);
+    expect(result.reason).toContain("already completed");
+  });
+
+  it("allows re-dispatch of a verified-approved task when new PR feedback exists", () => {
+    const store = makeStore(
+      makeTask({
+        status: "done",
+        verification_status: "approved",
+        updated_at: hoursAgo(2),
+      }),
+      { hasPrFeedbackSince: true },
+    );
+    const result = checkDuplicate(store as StateStore, "github", "owner/repo#1");
+    expect(result.isDuplicate).toBe(false);
+  });
+
+  it("does not apply verified-approved check to failed tasks", () => {
+    // A failed task with approved verification is unusual but should fall
+    // through to the normal recency window, not the verified-approved block.
+    const store = makeStore(
+      makeTask({
+        status: "failed",
+        verification_status: "approved",
+        updated_at: hoursAgo(RECENCY_WINDOW_HOURS + 1),
+      }),
+    );
+    const result = checkDuplicate(store as StateStore, "github", "owner/repo#1");
+    expect(result.isDuplicate).toBe(false);
   });
 });
 
