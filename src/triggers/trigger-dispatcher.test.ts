@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { dispatchGitHubIssues, dispatchIdleAgentBacklog, dispatchLinearChecks, dispatchSlackChecks } from "./trigger-dispatcher.js";
+import { dispatchGitHubIssues, dispatchIdleAgentBacklog, dispatchLinearChecks, dispatchSlackChecks, buildExistingPRReviewChecklist } from "./trigger-dispatcher.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { StateStore } from "../state/store.js";
@@ -307,6 +307,40 @@ describe("duplicate PR detection before dispatch", () => {
     expect(dispatchedMessage).toContain("push to the existing PR branch");
   });
 
+  it("injects structured review checklist when an open PR already exists", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 7, title: "WIP fix", url: "https://github.com/owner/my-repo/pull/7", state: "open", isDraft: false },
+    ]);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    const dispatchedMessage = (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    // Checklist must be present with all four required steps
+    expect(dispatchedMessage).toContain("Mandatory pre-declaration checklist");
+    expect(dispatchedMessage).toContain("Read the full diff");
+    expect(dispatchedMessage).toContain("logic bugs and off-by-one errors");
+    expect(dispatchedMessage).toContain("tests cover the new/changed code");
+    expect(dispatchedMessage).toContain("Closes #<issue>");
+    expect(dispatchedMessage).toContain("Only after checking off all four items");
+    // The checklist must reference the correct PR URL
+    expect(dispatchedMessage).toContain("https://github.com/owner/my-repo/pull/7");
+  });
+
+  it("does NOT inject review checklist when no open PR exists", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([]);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    const dispatchedMessage = (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(dispatchedMessage).not.toContain("Mandatory pre-declaration checklist");
+  });
+
   it("marks draft PRs as [DRAFT] in injected context", async () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
@@ -606,6 +640,51 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
 
     expect(result.dispatched).toBe(0);
     expect(result.dispatchedAgents).toEqual([]);
+  });
+
+  it("injects structured review checklist into idle pickup message when open PR exists", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 9, title: "Open fix", url: "https://github.com/owner/my-repo/pull/9", state: "open", isDraft: false },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+    const dispatchedMessage = (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(dispatchedMessage).toContain("Mandatory pre-declaration checklist");
+    expect(dispatchedMessage).toContain("Read the full diff");
+    expect(dispatchedMessage).toContain("logic bugs and off-by-one errors");
+    expect(dispatchedMessage).toContain("tests cover the new/changed code");
+    expect(dispatchedMessage).toContain("Closes #<issue>");
+    expect(dispatchedMessage).toContain("https://github.com/owner/my-repo/pull/9");
+  });
+});
+
+describe("buildExistingPRReviewChecklist", () => {
+  it("returns a string containing all four required checklist steps", () => {
+    const checklist = buildExistingPRReviewChecklist(7, "https://github.com/owner/repo/pull/7");
+    expect(checklist).toContain("Mandatory pre-declaration checklist");
+    expect(checklist).toContain("Read the full diff");
+    expect(checklist).toContain("gh pr diff 7");
+    expect(checklist).toContain("https://github.com/owner/repo/pull/7");
+    expect(checklist).toContain("logic bugs and off-by-one errors");
+    expect(checklist).toContain("tests cover the new/changed code");
+    expect(checklist).toContain("Closes #<issue>");
+    expect(checklist).toContain("Only after checking off all four items");
+  });
+
+  it("includes the correct PR number in the gh pr diff command", () => {
+    const checklist = buildExistingPRReviewChecklist(42, "https://github.com/owner/repo/pull/42");
+    expect(checklist).toContain("gh pr diff 42");
+    expect(checklist).not.toContain("gh pr diff 7");
+  });
+
+  it("includes the correct PR URL for viewing the diff online", () => {
+    const checklist = buildExistingPRReviewChecklist(123, "https://github.com/example/proj/pull/123");
+    expect(checklist).toContain("https://github.com/example/proj/pull/123/files");
   });
 });
 

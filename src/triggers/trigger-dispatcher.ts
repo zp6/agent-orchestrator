@@ -12,6 +12,26 @@ const log = createLogger("trigger-dispatcher");
 // while dispatch is in-flight, without violating DB foreign key constraints)
 const inFlightDispatches = new Set<string>();
 
+/**
+ * Build the mandatory pre-declaration review checklist injected into every
+ * fix-existing-PR task message.  Agents must work through all four steps
+ * before they are allowed to declare "no changes needed".
+ *
+ * Exported for unit testing.
+ */
+export function buildExistingPRReviewChecklist(prNumber: number, prUrl: string): string {
+  return (
+    `\n\n**Mandatory pre-declaration checklist — you MUST complete all four steps before ` +
+    `declaring the PR clean or pushing:**\n` +
+    `- [ ] 1. Read the full diff: \`gh pr diff ${prNumber}\` (or visit ${prUrl}/files)\n` +
+    `- [ ] 2. Check for logic bugs and off-by-one errors in every changed function\n` +
+    `- [ ] 3. Verify that tests cover the new/changed code paths\n` +
+    `- [ ] 4. Confirm the PR body includes the required \`Closes #<issue>\` reference\n\n` +
+    `Only after checking off all four items above may you declare "no changes needed". ` +
+    `If you skipped any item, your review will be considered incomplete.`
+  );
+}
+
 export interface TriggerResult {
   dispatched: number;
   skipped: number;
@@ -189,6 +209,7 @@ export async function dispatchGitHubIssues(
           isDraft: openPR.isDraft,
         });
         message += `\n\n⚠️ This issue already has an open PR: #${openPR.number} (${openPR.url})${openPR.isDraft ? " [DRAFT]" : ""}. Do NOT create a new branch or open another PR. Instead, review the existing PR, make any needed fixes, and push to its branch.`;
+        message += buildExistingPRReviewChecklist(openPR.number, openPR.url);
         message += `\n\n---\nWhen done: commit your changes and push to the existing PR branch. Do NOT run \`gh pr create\`.`;
       } else {
         // Check for an in-flight branch without a PR (e.g. agent pushed but
@@ -369,6 +390,7 @@ export async function dispatchIdleAgentBacklog(
           isDraft: openPR.isDraft,
         });
         message += `\n\n⚠️ This issue already has an open PR: #${openPR.number} (${openPR.url})${openPR.isDraft ? " [DRAFT]" : ""}. Do NOT create a new branch or open another PR. Instead, review the existing PR, make any needed fixes, and push to its branch.`;
+        message += buildExistingPRReviewChecklist(openPR.number, openPR.url);
         message += `\n\n---\nWhen done: commit your changes and push to the existing PR branch. Do NOT run \`gh pr create\`.`;
       } else {
         // Check for an in-flight branch without a PR
