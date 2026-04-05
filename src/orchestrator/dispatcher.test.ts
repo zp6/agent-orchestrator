@@ -3,6 +3,16 @@ import { Dispatcher, MAX_RETRIES, RETRY_DELAYS_MS, TIMEOUT_RETRY_MAX, TIMEOUT_RE
 import { StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 
+// Mock validateGhAuth so tests don't shell out.  Use importOriginal so that
+// GhAuthError (and other real exports) remain accessible in tests.
+vi.mock("../triggers/github.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../triggers/github.js")>();
+  return { ...actual, validateGhAuth: vi.fn().mockReturnValue({ ok: true }) };
+});
+
+import { validateGhAuth, GhAuthError } from "../triggers/github.js";
+const mockValidateGhAuth = vi.mocked(validateGhAuth);
+
 // Track the last mockSend across beforeEach
 let mockSend: ReturnType<typeof vi.fn>;
 
@@ -171,6 +181,212 @@ describe("Dispatcher.dispatch — retry scheduling on failure", () => {
     // First failure schedules a retry
     expect(tasks[0].retry_count).toBe(1);
     expect(tasks[0].next_retry_at).not.toBeNull();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// gh auth pre-flight (issue #307)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("Dispatcher.dispatch — gh auth pre-flight for github source", () => {
+  let store: StateStore;
+  let dispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+    dispatcher = new Dispatcher(makeConfig(), store);
+    // Restore default: auth OK
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+  });
+
+  it("throws immediately when gh auth fails for a github-sourced task", async () => {
+    mockValidateGhAuth.mockReturnValue({
+      ok: false,
+      reason: "gh CLI is not authenticated: token expired. Set GH_TOKEN or run `gh auth login`.",
+    });
+
+    await expect(
+      dispatcher.dispatch("fix the bug", {
+        agentName: "test-agent",
+        source: "github",
+        sourceRef: "owner/repo#42",
+      }),
+    ).rejects.toThrow("GH auth pre-flight failed");
+  });
+
+  it("does NOT create a task record when gh auth fails for a github-sourced task", async () => {
+    mockValidateGhAuth.mockReturnValue({ ok: false, reason: "not authenticated" });
+
+    try {
+      await dispatcher.dispatch("fix the bug", {
+        agentName: "test-agent",
+        source: "github",
+        sourceRef: "owner/repo#42",
+      });
+    } catch {
+      // expected
+    }
+
+    // No task should have been created — the dispatch was blocked before task creation
+    const tasks = store.listTasks({});
+    expect(tasks).toHaveLength(0);
+  });
+
+  it("does NOT call agent send when gh auth fails for a github-sourced task", async () => {
+    mockValidateGhAuth.mockReturnValue({ ok: false, reason: "not authenticated" });
+
+    try {
+      await dispatcher.dispatch("fix the bug", {
+        agentName: "test-agent",
+        source: "github",
+      });
+    } catch {
+      // expected
+    }
+
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it("proceeds normally when gh auth passes for a github-sourced task", async () => {
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+
+    const result = await dispatcher.dispatch("fix the bug", {
+      agentName: "test-agent",
+      source: "github",
+      sourceRef: "owner/repo#42",
+    });
+
+    expect(result.taskId).toBeDefined();
+    expect(mockSend).toHaveBeenCalledOnce();
+  });
+
+  it("does NOT check gh auth for non-github sources (manual, linear, slack)", async () => {
+    mockValidateGhAuth.mockReturnValue({ ok: false, reason: "not authenticated" });
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+
+    // Manual dispatch should succeed even when gh auth is down
+    const result = await dispatcher.dispatch("fix the bug", {
+      agentName: "test-agent",
+      source: "manual",
+    });
+
+    expect(result.taskId).toBeDefined();
+    expect(mockValidateGhAuth).not.toHaveBeenCalled();
+  });
+
+  it("throws GhAuthError (not plain Error) so callers can distinguish auth failures", async () => {
+    mockValidateGhAuth.mockReturnValue({
+      ok: false,
+      reason: "token expired",
+    });
+
+    const err = await dispatcher
+      .dispatch("fix the bug", { agentName: "test-agent", source: "github" })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(GhAuthError);
+    expect((err as GhAuthError).reason).toBe("token expired");
+  });
+
+  it("does not create a task record when gh auth fails", async () => {
+    mockValidateGhAuth.mockReturnValue({ ok: false, reason: "not authenticated" });
+
+    await dispatcher
+      .dispatch("fix the bug", { agentName: "test-agent", source: "github" })
+      .catch(() => {});
+
+    expect(store.listTasks()).toHaveLength(0);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// retryTask() — GH auth pre-flight
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("Dispatcher.retryTask — GH auth pre-flight", () => {
+  let store: StateStore;
+  let dispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+    dispatcher = new Dispatcher(makeConfig(), store);
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+  });
+
+  const makeGithubFailedTask = (retryCount = 1) => {
+    const task = store.createTask({
+      title: "github task",
+      description: "fix the issue",
+      source: "github",
+      source_ref: "owner/repo#99",
+      agent_name: "test-agent",
+    });
+    store.updateTask(task.id, {
+      status: "failed",
+      result: "pr creation failed",
+      retry_count: retryCount,
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    });
+    return store.getTask(task.id)!;
+  };
+
+  it("skips retry and preserves retry_count when gh auth fails for github-sourced task", async () => {
+    mockValidateGhAuth.mockReturnValue({ ok: false, reason: "gh: not authenticated." });
+    const task = makeGithubFailedTask(1);
+
+    await dispatcher.retryTask(task);
+
+    expect(mockSend).not.toHaveBeenCalled();
+    const updated = store.getTask(task.id)!;
+    // retry_count must NOT be incremented — auth failure does not burn a retry slot
+    expect(updated.retry_count).toBe(1);
+    // next_retry_at should be rescheduled for a future cycle
+    expect(updated.next_retry_at).not.toBeNull();
+    expect(new Date(updated.next_retry_at!).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it("proceeds with retry when gh auth succeeds for github-sourced task", async () => {
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+    mockSend.mockResolvedValueOnce({
+      content: "retry succeeded",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+    const task = makeGithubFailedTask(1);
+
+    await dispatcher.retryTask(task);
+
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(store.getTask(task.id)!.status).toBe("done");
+  });
+
+  it("does not check gh auth for manual-sourced retry tasks", async () => {
+    const task = store.createTask({
+      title: "manual task",
+      description: "do something",
+      source: "manual",
+      agent_name: "test-agent",
+    });
+    store.updateTask(task.id, {
+      status: "failed",
+      result: "transient error",
+      retry_count: 1,
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    });
+    mockSend.mockResolvedValueOnce({ content: "ok", usage: { input_tokens: 1, output_tokens: 1 } });
+
+    await dispatcher.retryTask(store.getTask(task.id)!);
+
+    expect(mockValidateGhAuth).not.toHaveBeenCalled();
+    expect(mockSend).toHaveBeenCalledTimes(1);
   });
 });
 

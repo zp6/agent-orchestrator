@@ -17,6 +17,24 @@ export interface GhAuthStatus {
 }
 
 /**
+ * Thrown when GitHub CLI authentication fails before or during dispatch.
+ *
+ * Callers can use `instanceof GhAuthError` to distinguish auth failures from
+ * other dispatch errors and surface a clear, actionable message — rather than
+ * letting the task proceed and produce an orphan branch with no linked PR.
+ */
+export class GhAuthError extends Error {
+  constructor(
+    message: string,
+    /** The underlying reason returned by validateGhAuth(). */
+    public readonly reason: string,
+  ) {
+    super(message);
+    this.name = "GhAuthError";
+  }
+}
+
+/**
  * Validate that the `gh` CLI is authenticated before attempting any GitHub
  * API calls.
  *

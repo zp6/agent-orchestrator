@@ -23,7 +23,11 @@ CRITICAL — Git workflow:
 - Before starting work, ensure you're on main and up to date: \`git checkout main && git pull origin main\`
 - Create a feature branch for your work: \`git checkout -b issue-N-description\`
 - **Before any \`git push\`**, validate \`gh\` auth: \`gh auth status\`. If it fails, stop immediately and surface the error — do NOT push. Fix auth first (set \`GH_TOKEN\` or run \`gh auth login\`).
-- Treat \`git push\` + \`gh pr create\` as a **single atomic unit**. If \`gh pr create\` fails after a successful push, retry up to 2 times (with a few seconds between attempts) before giving up. Do NOT leave a pushed branch without a PR — if all retries fail, report the error clearly so it can be recovered.
+- Treat \`git push\` + \`gh pr create\` as a **single atomic unit**. If \`gh pr create\` fails after a successful push, retry up to 2 times (with a few seconds between attempts) before giving up. If all retries fail, you MUST post a comment on the linked issue explaining what happened — do NOT silently abandon:
+  \`\`\`
+  gh issue comment <N> --repo ${githubRepo} --body "Branch \\\`<branch-name>\\\` was pushed but \\\`gh pr create\\\` failed after retries (likely a gh auth issue). Please create the PR manually or re-run after fixing auth. Branch: \\\`<branch-name>\\\`"
+  \`\`\`
+  No task should end with a pushed branch and no PR without an issue comment explaining why.
 - When done: commit, push, and open a PR with \`gh pr create\`
 - Never commit directly to main
 - Every commit MUST end with: \`Co-Authored-By: ${agentName} <${agentName}@agent>\`

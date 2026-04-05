@@ -7,6 +7,7 @@ import { StateStore, type Task, type TaskSource, type TaskType } from "../state/
 import type { OrchestratorConfig } from "../config/schema.js";
 import { ulid } from "ulid";
 import { createLogger } from "../service/logger.js";
+import { validateGhAuth, GhAuthError } from "../triggers/github.js";
 
 /** Maximum number of retry attempts for a failed dispatch. */
 export const MAX_RETRIES = 3;
@@ -82,6 +83,27 @@ export class Dispatcher {
       throw new Error(
         `Unknown agent: ${agentName}. Available: ${Object.keys(this.config.agents).join(", ")}`,
       );
+    }
+
+    // Pre-flight: for GitHub-sourced tasks, verify gh is authenticated before
+    // dispatching.  A missing/expired credential lets the agent push a branch
+    // successfully (via SSH) but then fail on `gh pr create`, producing a silent
+    // orphan branch.  Blocking here gives a clear error and keeps the issue in
+    // the unprocessed queue so the daemon retries when auth recovers.
+    if (options?.source === "github") {
+      const authStatus = validateGhAuth();
+      if (!authStatus.ok) {
+        const reason = authStatus.reason ?? "gh CLI is not authenticated";
+        this.log.error("GitHub dispatch blocked: gh auth pre-flight failed", {
+          agentName,
+          reason,
+          sourceRef: options?.sourceRef,
+        });
+        throw new GhAuthError(
+          `GH auth pre-flight failed — aborting dispatch to prevent orphan branch: ${reason}`,
+          reason,
+        );
+      }
     }
 
     // Create task
@@ -189,6 +211,28 @@ export class Dispatcher {
         next_retry_at: null,
       });
       return;
+    }
+
+    // Pre-flight: for GitHub-sourced tasks, skip the retry attempt (without
+    // burning a retry slot) when gh is not authenticated.  Auth failures are
+    // typically transient — the token may be refreshed before the next daemon
+    // cycle.  Incrementing retry_count would waste budget on a problem the
+    // agent cannot fix by retrying.
+    if (task.source === "github") {
+      const authStatus = validateGhAuth();
+      if (!authStatus.ok) {
+        const reason = authStatus.reason ?? "gh CLI is not authenticated";
+        this.log.warn("Retry skipped: gh auth pre-flight failed — will try again next cycle", {
+          taskId: task.id,
+          agentName,
+          reason,
+        });
+        // Restore next_retry_at so the task is eligible for the next cycle
+        // without consuming a retry attempt.
+        const deferredAt = new Date(Date.now() + RETRY_DELAYS_MS[0]).toISOString();
+        this.store.updateTask(task.id, { next_retry_at: deferredAt });
+        return;
+      }
     }
 
     const message = task.description ?? task.title;

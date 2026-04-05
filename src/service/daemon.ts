@@ -9,6 +9,7 @@ import { Supervisor, isDecisionAlreadyResolved } from "../orchestrator/superviso
 import { PRReviewer } from "../orchestrator/pr-reviewer.js";
 import { findOrphanBranches, createPRForBranch } from "../orchestrator/pr-creator.js";
 import { PRCreationRetryQueue } from "../orchestrator/pr-creation-retry-queue.js";
+import { validateGhAuth } from "../triggers/github.js";
 import {
   dispatchGitHubIssues,
   dispatchIdleAgentBacklog,
@@ -674,6 +675,32 @@ export class Daemon {
 
       // 3. Detect new orphan branches and attempt PR creation.
       const orphans = findOrphanBranches(this.config);
+
+      // Pre-flight: verify gh is authenticated before attempting any PR creation.
+      // If auth is down for the orchestrator, all `gh pr create` calls will fail
+      // and we'd just accumulate noisy retry entries.  Enqueue with a clear
+      // "gh-auth-failed" error so the retry queue surfaces the root cause, then
+      // skip this cycle.  Auth recovery will be detected on the next cycle and
+      // normal processing resumes automatically.
+      if (orphans.length > 0) {
+        const authStatus = validateGhAuth();
+        if (!authStatus.ok) {
+          const reason = authStatus.reason ?? "gh CLI is not authenticated";
+          this.log.error(
+            "gh auth pre-flight failed — skipping orphan PR creation; branches queued for retry",
+            { reason, orphanCount: orphans.length },
+          );
+          for (const orphan of orphans) {
+            this.prRetryQueue.enqueue(
+              orphan.repo,
+              orphan.branch,
+              `gh-auth-failed: ${reason}`,
+            );
+          }
+          return;
+        }
+      }
+
       for (const orphan of orphans) {
         console.log(`[${time}] Orphan branch: ${orphan.repo}/${orphan.branch} — creating PR`);
         // Pass config (for issue resolution + local path detection) and store (for task_logs)
