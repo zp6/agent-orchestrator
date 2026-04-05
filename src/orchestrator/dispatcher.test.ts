@@ -1,5 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { Dispatcher, MAX_RETRIES, RETRY_DELAYS_MS, TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "./dispatcher.js";
+import {
+  Dispatcher,
+  MAX_RETRIES,
+  RETRY_DELAYS_MS,
+  TIMEOUT_RETRY_MAX,
+  TIMEOUT_RETRY_BACKOFF_MS,
+  extractRepoFromSourceRef,
+  buildTargetRepoHeader,
+} from "./dispatcher.js";
 import { StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 
@@ -876,5 +884,153 @@ describe("StateStore.countFailedTasksForSourceRef", () => {
     store.updateTask(t2.id, { status: "failed" });
     expect(store.countFailedTasksForSourceRef("github", "owner/repo#1")).toBe(1);
     expect(store.countFailedTasksForSourceRef("github", "owner/repo#2")).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Target-repo header injection (issue #338)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("extractRepoFromSourceRef", () => {
+  it("extracts owner/repo from a GitHub source_ref", () => {
+    expect(extractRepoFromSourceRef("rapartlu/claude-agent-orchestrator#338")).toBe(
+      "rapartlu/claude-agent-orchestrator",
+    );
+  });
+
+  it("extracts repo when issue number is multi-digit", () => {
+    expect(extractRepoFromSourceRef("owner/repo#1234")).toBe("owner/repo");
+  });
+
+  it("returns undefined for non-GitHub refs (linear, slack)", () => {
+    expect(extractRepoFromSourceRef("linear-check:agent:2026-04-05T14")).toBeUndefined();
+    expect(extractRepoFromSourceRef("slack-check:agent:2026-04-05T14")).toBeUndefined();
+  });
+
+  it("returns undefined for undefined / null / empty", () => {
+    expect(extractRepoFromSourceRef(undefined)).toBeUndefined();
+    expect(extractRepoFromSourceRef(null)).toBeUndefined();
+    expect(extractRepoFromSourceRef("")).toBeUndefined();
+  });
+
+  it("returns undefined when there is no slash before the hash", () => {
+    expect(extractRepoFromSourceRef("repo#5")).toBeUndefined();
+  });
+
+  it("returns undefined when there is no hash", () => {
+    expect(extractRepoFromSourceRef("owner/repo")).toBeUndefined();
+  });
+});
+
+describe("buildTargetRepoHeader", () => {
+  it("returns a markdown block containing the repo name", () => {
+    const header = buildTargetRepoHeader("rapartlu/claude-agent-orchestrator#338");
+    expect(header).toBeDefined();
+    expect(header).toContain("rapartlu/claude-agent-orchestrator");
+    expect(header).toContain("Target repository");
+  });
+
+  it("returns undefined for non-GitHub source refs", () => {
+    expect(buildTargetRepoHeader("linear-check:agent:2026-04-05T14")).toBeUndefined();
+  });
+
+  it("returns undefined for undefined source ref", () => {
+    expect(buildTargetRepoHeader(undefined)).toBeUndefined();
+  });
+});
+
+describe("Dispatcher — target-repo header injection (issue #338)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+  });
+
+  it("prepends the target-repo header when dispatching a GitHub-sourced task", async () => {
+    const store = new StateStore(":memory:");
+    const dispatcher = new Dispatcher(makeConfig(), store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    await dispatcher.dispatch("Implement feature X", {
+      agentName: "test-agent",
+      source: "github",
+      sourceRef: "rapartlu/claude-agent-orchestrator#338",
+    });
+
+    const [, sentMessage] = mockSend.mock.calls[0];
+    expect(sentMessage).toContain("rapartlu/claude-agent-orchestrator");
+    expect(sentMessage).toContain("Target repository");
+    expect(sentMessage).toContain("Implement feature X");
+    // Header must come before the task body
+    expect(sentMessage.indexOf("Target repository")).toBeLessThan(
+      sentMessage.indexOf("Implement feature X"),
+    );
+  });
+
+  it("does NOT prepend a header for manual (non-GitHub) tasks", async () => {
+    const store = new StateStore(":memory:");
+    const dispatcher = new Dispatcher(makeConfig(), store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    await dispatcher.dispatch("Do something", {
+      agentName: "test-agent",
+      source: "manual",
+    });
+
+    const [, sentMessage] = mockSend.mock.calls[0];
+    expect(sentMessage).toBe("Do something");
+    expect(sentMessage).not.toContain("Target repository");
+  });
+
+  it("includes the repo header on retry dispatch", async () => {
+    const store = new StateStore(":memory:");
+    const dispatcher = new Dispatcher(makeConfig(), store);
+    const task = store.createTask({
+      title: "Fix the bug",
+      description: "Fix the bug in detail",
+      source: "github",
+      source_ref: "rapartlu/claude-agent-orchestrator#338",
+      agent_name: "test-agent",
+    });
+    store.updateTask(task.id, {
+      status: "failed",
+      retry_count: 1,
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    });
+    mockSend.mockResolvedValueOnce({
+      content: "fixed",
+      usage: { input_tokens: 5, output_tokens: 5 },
+    });
+
+    await dispatcher.retryTask(store.getTask(task.id)!);
+
+    const [, sentMessage] = mockSend.mock.calls[0];
+    expect(sentMessage).toContain("rapartlu/claude-agent-orchestrator");
+    expect(sentMessage).toContain("Target repository");
+    expect(sentMessage).toContain("Fix the bug in detail");
+  });
+
+  it("does not add a header when sourceRef has no repo (linear task)", async () => {
+    const store = new StateStore(":memory:");
+    const dispatcher = new Dispatcher(makeConfig(), store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    await dispatcher.dispatch("A linear task", {
+      agentName: "test-agent",
+      source: "linear",
+      sourceRef: "linear-check:test-agent:2026-04-05T14",
+    });
+
+    const [, sentMessage] = mockSend.mock.calls[0];
+    expect(sentMessage).toBe("A linear task");
+    expect(sentMessage).not.toContain("Target repository");
   });
 });

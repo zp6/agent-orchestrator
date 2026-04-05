@@ -29,6 +29,37 @@ export const TIMEOUT_RETRY_MAX = 2;
  */
 export const TIMEOUT_RETRY_BACKOFF_MS = 2 * 60 * 1000; // 2 minutes
 
+/**
+ * Extract the owner/repo portion from a source_ref string like "owner/repo#42".
+ * Returns undefined when the ref has no "#" separator or does not look like a
+ * GitHub repo ref (e.g. "linear-check:agentName:2026-01-01T00").
+ */
+export function extractRepoFromSourceRef(sourceRef: string | undefined | null): string | undefined {
+  if (!sourceRef) return undefined;
+  const hashIdx = sourceRef.lastIndexOf("#");
+  if (hashIdx <= 0) return undefined;
+  const candidate = sourceRef.slice(0, hashIdx);
+  // Must look like "owner/repo" — at least one slash present
+  if (!candidate.includes("/")) return undefined;
+  return candidate;
+}
+
+/**
+ * Build the structured target-repo header injected at the top of every
+ * dispatched message when a GitHub source_ref is available.  The header
+ * makes the destination repository unambiguous, preventing agents from
+ * accidentally opening PRs on the wrong repo (issue #338).
+ */
+export function buildTargetRepoHeader(sourceRef: string | undefined | null): string | undefined {
+  const repo = extractRepoFromSourceRef(sourceRef);
+  if (!repo) return undefined;
+  return (
+    `> **Target repository: \`${repo}\`**\n` +
+    `> All git operations (branches, commits, PRs) for this task must target **${repo}** only.\n` +
+    `> Do NOT open PRs or push branches to any other repository.\n`
+  );
+}
+
 export interface DispatchResult {
   taskId: string;
   agentName: string;
@@ -136,18 +167,23 @@ export class Dispatcher {
       conversation_id: conversationId,
     });
 
+    // Prepend the target-repo header so the agent always knows which repo to
+    // target, even when instructions are deeply nested in a long message.
+    const repoHeader = buildTargetRepoHeader(options?.sourceRef);
+    const messageToSend = repoHeader ? `${repoHeader}\n${message}` : message;
+
     // Log the outgoing message
     this.log.info("Dispatching to agent", { taskId: task.id, agentName, title: task.title });
     this.store.addLog({
       task_id: task.id,
       direction: "to_agent",
       agent_name: agentName,
-      content: message,
+      content: messageToSend,
     });
 
     try {
       // Send to agent
-      const response = await this.client.send(agentName, message, {
+      const response = await this.client.send(agentName, messageToSend, {
         conversationId,
         taskType,
       });
@@ -281,6 +317,8 @@ export class Dispatcher {
 
     const message = task.description ?? task.title;
     const conversationId = task.conversation_id ?? ulid();
+    const repoHeader = buildTargetRepoHeader(task.source_ref);
+    const messageToSend = repoHeader ? `${repoHeader}\n${message}` : message;
 
     // Reset to dispatched for this attempt
     this.store.updateTask(task.id, {
@@ -297,7 +335,7 @@ export class Dispatcher {
     });
 
     try {
-      const response = await this.client.send(agentName, message, { conversationId });
+      const response = await this.client.send(agentName, messageToSend, { conversationId });
 
       this.store.addLog({
         task_id: task.id,
