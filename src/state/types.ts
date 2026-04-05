@@ -4,7 +4,14 @@
  * can read from the same shared state.db.
  */
 
-export type TaskStatus = "pending" | "dispatched" | "done" | "failed";
+export type TaskStatus =
+  | "pending"
+  | "planning"
+  | "dispatched"
+  | "in_progress"
+  | "done"
+  | "failed"
+  | "escalated";
 export type VerificationStatus = "pending" | "approved" | "rejected" | null;
 export type TaskType = "implementation" | "research";
 
@@ -26,23 +33,29 @@ export interface Task {
 }
 
 export interface SupervisorDecisionRecord {
-  id: string;
+  id: number | string;
   action: string;
   agent_name?: string | null;
   task_id?: string | null;
   reason: string;
+  message?: string | null;
   outcome: string;
   created_at: string;
 }
 
 export interface MergeQueueEntry {
+  id?: number;
   repo: string;
   pr_number: number;
   branch: string;
-  status: "queued" | "merging" | "merged" | "failed";
+  status: "queued" | "merging" | "merged" | "failed" | "skipped";
   position: number;
   error?: string | null;
-  created_at: string;
+  /** Alias for created_at; the orchestrator uses enqueued_at */
+  enqueued_at?: string;
+  created_at?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
 }
 
 export interface AgentStats {
@@ -50,6 +63,7 @@ export interface AgentStats {
   total: number;
   done: number;
   failed: number;
+  avg_score?: number | null;
 }
 
 /**
@@ -59,7 +73,7 @@ export interface AgentStats {
  */
 export interface IStateStore {
   // Task operations
-  getTask(id: string): Task | null;
+  getTask(id: string): Task | null | undefined;
   updateTask(id: string, updates: Partial<Task>): void;
   hasActiveTask(agentName: string): boolean;
   listTasks(opts: { status?: TaskStatus; agent_name?: string; limit?: number }): Task[];

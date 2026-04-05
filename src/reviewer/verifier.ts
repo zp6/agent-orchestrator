@@ -145,7 +145,8 @@ export class Verifier {
    * If the agent is busy (has an active task), `verification_status` is reset
    * to null so the daemon retries on the next cycle.
    */
-  async verifyAndRevise(taskId: string): Promise<VerificationResult> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async verifyAndRevise(taskId: string, _maxRevisions?: number): Promise<VerificationResult> {
     const result = await this.verify(taskId);
 
     if (result.approved || !result.revision) {
