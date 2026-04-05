@@ -26,6 +26,12 @@ export interface AgentSlackConfig {
 export interface AgentConfig {
   dir: string;
   repo?: string;
+  /**
+   * Branch to watch for new commits when `repo` is set.
+   * Used by the auto-redeploy check in `getStaleRepoAgents()`.
+   * Defaults to `"main"` when omitted.
+   */
+  deploy_branch?: string;
   description: string;
   capabilities: string[];
   github?: string;

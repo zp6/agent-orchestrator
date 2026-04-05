@@ -216,6 +216,41 @@ describe("Deployer — repo-based agents", () => {
     const stale = deployer.getStaleRepoAgents();
     expect(stale).not.toContain("repo-agent");
   });
+
+  it("getStaleRepoAgents uses deploy_branch instead of main when configured", () => {
+    const customConfig: OrchestratorConfig = {
+      ...config,
+      agents: {
+        ...config.agents,
+        "repo-agent": {
+          ...config.agents["repo-agent"],
+          deploy_branch: "develop",
+        },
+      },
+    };
+    mockExecSync.mockReturnValue("develop-sha-001\n");
+    const deployer = new Deployer(customConfig);
+    deployer.getStaleRepoAgents();
+    // Verify the gh api command used the custom branch, not "main"
+    expect(mockExecSync).toHaveBeenCalledWith(
+      expect.stringContaining("commits/develop"),
+      expect.anything(),
+    );
+    expect(mockExecSync).not.toHaveBeenCalledWith(
+      expect.stringContaining("commits/main"),
+      expect.anything(),
+    );
+  });
+
+  it("getStaleRepoAgents defaults to main when deploy_branch is not set", () => {
+    mockExecSync.mockReturnValue("main-sha-001\n");
+    const deployer = new Deployer(config);
+    deployer.getStaleRepoAgents();
+    expect(mockExecSync).toHaveBeenCalledWith(
+      expect.stringContaining("commits/main"),
+      expect.anything(),
+    );
+  });
 });
 
 describe("parseRepoSlug", () => {

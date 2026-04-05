@@ -155,9 +155,10 @@ export class Deployer {
   }
 
   /**
-   * Check which repo-based agents have new commits on their remote main branch
+   * Check which repo-based agents have new commits on their remote deploy branch
    * since the last time they were restarted by the orchestrator.
    * Uses `gh api` to query the remote HEAD SHA (no local clone needed).
+   * The branch is determined by `agent.deploy_branch` (defaults to `"main"`).
    */
   getStaleRepoAgents(registeredAgents?: Set<string>): string[] {
     const stale: string[] = [];
@@ -171,9 +172,11 @@ export class Deployer {
       const repoSlug = parseRepoSlug(agent.repo);
       if (!repoSlug) continue;
 
+      const branch = agent.deploy_branch ?? "main";
+
       try {
         const remoteSha = execSync(
-          `gh api repos/${repoSlug}/commits/main --jq .sha`,
+          `gh api repos/${repoSlug}/commits/${branch} --jq .sha`,
           { encoding: "utf-8", timeout: 10000 },
         ).trim();
 
@@ -210,9 +213,10 @@ export class Deployer {
         const agent = this.config.agents[name];
         const repoSlug = agent?.repo ? parseRepoSlug(agent.repo) : null;
         if (repoSlug) {
+          const branch = agent?.deploy_branch ?? "main";
           try {
             const remoteSha = execSync(
-              `gh api repos/${repoSlug}/commits/main --jq .sha`,
+              `gh api repos/${repoSlug}/commits/${branch} --jq .sha`,
               { encoding: "utf-8", timeout: 10000 },
             ).trim();
             this.markRepoDeployed(name, remoteSha);
