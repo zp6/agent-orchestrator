@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING } from "./daemon.js";
+import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING, IDLE_RECLAIM_THRESHOLD_CYCLES } from "./daemon.js";
 import { TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -419,5 +419,20 @@ describe("PR_FEEDBACK_CEILING", () => {
   it("is a positive integer", () => {
     expect(PR_FEEDBACK_CEILING).toBeGreaterThan(0);
     expect(Number.isInteger(PR_FEEDBACK_CEILING)).toBe(true);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// IDLE_RECLAIM_THRESHOLD_CYCLES — idle reclaim constant checks
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("IDLE_RECLAIM_THRESHOLD_CYCLES", () => {
+  it("is 2 (force-reclaim triggers after 2 idle cycles with no dispatch)", () => {
+    expect(IDLE_RECLAIM_THRESHOLD_CYCLES).toBe(2);
+  });
+
+  it("is a positive integer", () => {
+    expect(IDLE_RECLAIM_THRESHOLD_CYCLES).toBeGreaterThan(0);
+    expect(Number.isInteger(IDLE_RECLAIM_THRESHOLD_CYCLES)).toBe(true);
   });
 });

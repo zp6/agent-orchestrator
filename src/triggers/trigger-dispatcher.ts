@@ -16,6 +16,8 @@ export interface TriggerResult {
   dispatched: number;
   skipped: number;
   errors: string[];
+  /** Names of agents that received a dispatch in this call. */
+  dispatchedAgents?: string[];
 }
 
 /** @deprecated Use store.hasActiveTask() directly */
@@ -174,14 +176,22 @@ export async function dispatchGitHubIssues(
  * Agents without a `github` field, or with an active task, are skipped.
  * Already-processed issues are skipped via the same duplicate-guard used
  * by `dispatchGitHubIssues`.
+ *
+ * @param forceReclaimAgents - When an agent name is in this set, the
+ *   duplicate-guard recency window is bypassed. This is used for agents
+ *   that have been idle for multiple poll cycles despite having open issues
+ *   — a sign that all their issues are within the recency window (recently
+ *   attempted but not yet resolved). Force-reclaim re-dispatches the oldest
+ *   open issue so the agent can make another attempt.
  */
 export async function dispatchIdleAgentBacklog(
   config: OrchestratorConfig,
   store: StateStore,
   dispatcher: Dispatcher,
   registeredAgents?: Set<string>,
+  forceReclaimAgents?: Set<string>,
 ): Promise<TriggerResult> {
-  const result: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
+  const result: TriggerResult = { dispatched: 0, skipped: 0, errors: [], dispatchedAgents: [] };
 
   for (const [agentName, agent] of Object.entries(config.agents)) {
     if (!agent.github) continue;
@@ -192,6 +202,8 @@ export async function dispatchIdleAgentBacklog(
       log.info("Idle pickup: skipping busy agent", { agentName });
       continue;
     }
+
+    const forceReclaim = forceReclaimAgents?.has(agentName) ?? false;
 
     let issues: GitHubIssue[];
     try {
@@ -210,13 +222,37 @@ export async function dispatchIdleAgentBacklog(
 
       const sourceRef = `${issue.repo}#${issue.number}`;
 
-      const dupCheck = checkDuplicate(store, "github", sourceRef);
-      if (inFlightDispatches.has(sourceRef) || dupCheck.isDuplicate) {
-        if (dupCheck.isDuplicate) {
-          log.info("Idle pickup: skipping duplicate issue", { sourceRef, reason: dupCheck.reason });
+      // In force-reclaim mode, bypass the duplicate-guard recency window — only
+      // block on truly in-flight dispatches to prevent same-cycle duplication.
+      if (forceReclaim) {
+        if (inFlightDispatches.has(sourceRef)) {
+          result.skipped++;
+          continue;
         }
-        result.skipped++;
-        continue;
+        // Still block on genuinely active tasks (pending/dispatched/in_progress)
+        const dupCheck = checkDuplicate(store, "github", sourceRef);
+        if (dupCheck.isDuplicate && dupCheck.existingTask &&
+            ["pending", "planning", "dispatched", "in_progress"].includes(dupCheck.existingTask.status)) {
+          log.info("Idle reclaim: skipping issue with active task", { sourceRef, agentName });
+          result.skipped++;
+          continue;
+        }
+        if (dupCheck.isDuplicate) {
+          log.info("Idle reclaim: bypassing recency window for idle agent", {
+            sourceRef,
+            agentName,
+            reason: dupCheck.reason,
+          });
+        }
+      } else {
+        const dupCheck = checkDuplicate(store, "github", sourceRef);
+        if (inFlightDispatches.has(sourceRef) || dupCheck.isDuplicate) {
+          if (dupCheck.isDuplicate) {
+            log.info("Idle pickup: skipping duplicate issue", { sourceRef, reason: dupCheck.reason });
+          }
+          result.skipped++;
+          continue;
+        }
       }
 
       // Pre-dispatch issue state validation: skip closed issues
@@ -265,14 +301,16 @@ export async function dispatchIdleAgentBacklog(
         title: `[${issue.repo}#${issue.number}] ${issue.title}`,
       });
 
-      log.info("Idle pickup: dispatched highest-priority issue to idle agent", {
+      log.info(forceReclaim ? "Idle reclaim: dispatched issue to long-idle agent" : "Idle pickup: dispatched highest-priority issue to idle agent", {
         agentName,
         sourceRef,
         issueNumber: issue.number,
         issueTitle: issue.title,
+        forceReclaim,
       });
 
       result.dispatched++;
+      result.dispatchedAgents!.push(agentName);
       dispatched = true;
     }
   }

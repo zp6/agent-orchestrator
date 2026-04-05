@@ -28,6 +28,15 @@ const BACKLOG_TRIAGE_EVERY_N_CYCLES = 60; // ~5h at default interval
 const STALE_ISSUE_AGE_DAYS = 7;
 
 /**
+ * After this many consecutive idle poll cycles with no dispatch for an agent
+ * that has open GitHub issues, switch to force-reclaim mode: bypass the
+ * duplicate-guard recency window so the oldest open issue is re-dispatched
+ * even if it was recently attempted.  This prevents agents from staying idle
+ * indefinitely when all their open issues sit just inside the recency window.
+ */
+export const IDLE_RECLAIM_THRESHOLD_CYCLES = 2;
+
+/**
  * Default maximum number of pr-feedback dispatch rounds before the daemon stops
  * dispatching and automatically escalates the PR to a human reviewer.  This is
  * the last-resort ceiling: the reviewer itself also escalates after N "Changes
@@ -66,6 +75,14 @@ export class Daemon {
   private pollInterval: number;
   private cycleCount = 0;
   private log = createLogger("daemon");
+
+  /**
+   * Tracks how many consecutive poll cycles each agent has been idle
+   * (no active task AND no dispatch occurred).  Reset to 0 when a dispatch
+   * succeeds.  Used to trigger force-reclaim when the duplicate-guard recency
+   * window is blocking all available issues.
+   */
+  private idleCyclesSinceDispatch = new Map<string, number>();
 
   constructor(configPath?: string, pollIntervalMs?: number) {
     this.config = loadConfig(configPath);
@@ -350,21 +367,82 @@ export class Daemon {
    * Uses the dedicated `dispatchIdleAgentBacklog` function which explicitly checks
    * idle status and sorts issues by priority (oldest issue first) rather than the
    * general `dispatchGitHubIssues` used in the regular trigger step.
+   *
+   * Agents that remain idle for more than IDLE_RECLAIM_THRESHOLD_CYCLES consecutive
+   * cycles are escalated to force-reclaim mode: the duplicate-guard recency window
+   * is bypassed so previously-attempted open issues can be re-dispatched.  This
+   * eliminates the supervisor "agent is idle" workaround and makes backlog pickup
+   * fully deterministic.
    */
   private async pickupIdleAgents(time: string, registeredAgents: Set<string>): Promise<void> {
     try {
+      // Identify agents that are currently idle (registered + github + no active task)
+      const idleAgents = new Set<string>();
+      for (const [agentName, agent] of Object.entries(this.config.agents)) {
+        if (!agent.github) continue;
+        if (!registeredAgents.has(agentName)) continue;
+        if (!this.store.hasActiveTask(agentName)) {
+          idleAgents.add(agentName);
+        }
+      }
+
+      // Agents idle for > threshold consecutive cycles get force-reclaim
+      const forceReclaimAgents = new Set<string>();
+      for (const agentName of idleAgents) {
+        const idleCycles = this.idleCyclesSinceDispatch.get(agentName) ?? 0;
+        if (idleCycles >= IDLE_RECLAIM_THRESHOLD_CYCLES) {
+          forceReclaimAgents.add(agentName);
+          this.log.info("Idle reclaim: agent eligible for force-reclaim", {
+            agentName,
+            idleCycles,
+            threshold: IDLE_RECLAIM_THRESHOLD_CYCLES,
+          });
+        }
+      }
+
       const result = await dispatchIdleAgentBacklog(
         this.config,
         this.store,
         this.dispatcher,
         registeredAgents,
+        forceReclaimAgents,
       );
+
+      // Update idle cycle counters based on dispatch results
+      const dispatchedSet = new Set(result.dispatchedAgents ?? []);
+      for (const agentName of idleAgents) {
+        if (dispatchedSet.has(agentName)) {
+          // Agent received work — reset idle counter
+          this.idleCyclesSinceDispatch.set(agentName, 0);
+        } else {
+          // Agent is still idle with no dispatch — increment counter
+          const current = this.idleCyclesSinceDispatch.get(agentName) ?? 0;
+          this.idleCyclesSinceDispatch.set(agentName, current + 1);
+        }
+      }
+      // Clear counters for agents that are now busy (picked up work in dispatchTriggers)
+      for (const [agentName] of Object.entries(this.config.agents)) {
+        if (!idleAgents.has(agentName)) {
+          // Agent was busy or not eligible — don't accumulate idle cycles
+          this.idleCyclesSinceDispatch.set(agentName, 0);
+        }
+      }
+
       if (result.dispatched > 0) {
+        const reclaimCount = result.dispatchedAgents?.filter((a) => forceReclaimAgents.has(a)).length ?? 0;
         this.log.info("Idle agent pickup: dispatched highest-priority issue to idle agent(s)", {
           dispatched: result.dispatched,
+          forceReclaim: reclaimCount,
         });
-        console.log(`[${time}] Idle pickup: ${result.dispatched} dispatched for idle agent(s)`);
+        if (reclaimCount > 0) {
+          console.log(`[${time}] Idle pickup: ${result.dispatched} dispatched (${reclaimCount} force-reclaim)`);
+        } else {
+          console.log(`[${time}] Idle pickup: ${result.dispatched} dispatched for idle agent(s)`);
+        }
         this.store.incrementStat("idle_fill_dispatches", result.dispatched);
+        if (reclaimCount > 0) {
+          this.store.incrementStat("idle_reclaim_dispatches", reclaimCount);
+        }
       }
       if (result.errors.length > 0) {
         for (const err of result.errors) {

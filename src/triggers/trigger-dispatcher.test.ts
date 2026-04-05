@@ -426,6 +426,153 @@ describe("idle agent pickup (post-completion dispatch)", () => {
   });
 });
 
+describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
+  let mockStore: StateStore;
+  let mockDispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStore = {
+      isProcessed: vi.fn().mockReturnValue(false),
+      markProcessed: vi.fn(),
+      getTask: vi.fn().mockReturnValue(null),
+      listTasks: vi.fn().mockReturnValue([]),
+      hasActiveTask: vi.fn().mockReturnValue(false),
+      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
+    } as unknown as StateStore;
+    mockDispatcher = {
+      dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
+    } as unknown as Dispatcher;
+    mockIsIssueOpen.mockReturnValue(true);
+    mockFindExistingPRs.mockReturnValue([]);
+  });
+
+  it("normally skips issues within the recency window (baseline)", async () => {
+    // Issue #1 has a recent done task — duplicate-guard blocks it
+    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: "task-recent",
+      status: "done",
+      verification_status: null,
+      updated_at: new Date().toISOString(), // just now, well within 4h window
+    });
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Still open", body: "", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("force-reclaim bypasses recency window and dispatches oldest open issue", async () => {
+    // Issue #1 has a recent done task — normally blocked by duplicate-guard
+    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: "task-recent",
+      status: "done",
+      verification_status: null,
+      updated_at: new Date().toISOString(),
+    });
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Still open", body: "Needs retry", url: "https://...", labels: [] },
+    ]);
+
+    const forceReclaimAgents = new Set(["my-agent"]);
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher, undefined, forceReclaimAgents);
+
+    expect(result.dispatched).toBe(1);
+    expect(result.dispatchedAgents).toContain("my-agent");
+    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(
+      expect.stringContaining("Still open"),
+      expect.objectContaining({ agentName: "my-agent", sourceRef: "owner/my-repo#1" }),
+    );
+  });
+
+  it("force-reclaim still skips issues with active tasks (pending/dispatched/in_progress)", async () => {
+    // Active task — even force-reclaim should not double-dispatch
+    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: "task-active",
+      status: "dispatched",
+      verification_status: null,
+      updated_at: new Date().toISOString(),
+    });
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 5, title: "In progress", body: "", url: "https://...", labels: [] },
+    ]);
+
+    const forceReclaimAgents = new Set(["my-agent"]);
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher, undefined, forceReclaimAgents);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("force-reclaim dispatches even when task was failed within recency window", async () => {
+    // Failed task within recency window — normally duplicate-guard blocks; force-reclaim overrides
+    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: "task-failed",
+      status: "failed",
+      verification_status: null,
+      updated_at: new Date().toISOString(),
+    });
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 7, title: "Failed issue", body: "Try again", url: "https://...", labels: [] },
+    ]);
+
+    const forceReclaimAgents = new Set(["my-agent"]);
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher, undefined, forceReclaimAgents);
+
+    expect(result.dispatched).toBe(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalled();
+  });
+
+  it("force-reclaim only applies to agents in the set — others are unaffected", async () => {
+    // Issue has recent done task — blocks for non-force agents
+    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: "task-recent",
+      status: "done",
+      verification_status: null,
+      updated_at: new Date().toISOString(),
+    });
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Issue", body: "", url: "https://...", labels: [] },
+    ]);
+
+    // my-agent is NOT in forceReclaimAgents
+    const forceReclaimAgents = new Set(["some-other-agent"]);
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher, undefined, forceReclaimAgents);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("result includes dispatchedAgents list", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Task", body: "Work", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+    expect(result.dispatchedAgents).toEqual(["my-agent"]);
+  });
+
+  it("result dispatchedAgents is empty when nothing was dispatched", async () => {
+    (mockStore.hasActiveTask as ReturnType<typeof vi.fn>).mockReturnValue(true); // agent busy
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Task", body: "", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.dispatchedAgents).toEqual([]);
+  });
+});
+
 describe("dispatchLinearChecks", () => {
   let mockStore: StateStore;
   let mockDispatcher: Dispatcher;
