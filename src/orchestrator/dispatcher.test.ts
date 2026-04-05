@@ -509,6 +509,106 @@ describe("Dispatcher.retryTask", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
+// dispatch() — conversationId passthrough (issue #333)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("Dispatcher.dispatch — conversationId passthrough", () => {
+  let store: StateStore;
+  let dispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+    dispatcher = new Dispatcher(makeConfig(), store);
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+    mockSend.mockResolvedValue({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+  });
+
+  it("reuses the provided conversationId instead of generating a new ULID", async () => {
+    const fixedConversationId = "01HXYZ_FIXED_CONVERSATION_ID";
+
+    const result = await dispatcher.dispatch("do something", {
+      agentName: "test-agent",
+      source: "manual",
+      conversationId: fixedConversationId,
+    });
+
+    const task = store.getTask(result.taskId);
+    expect(task?.conversation_id).toBe(fixedConversationId);
+  });
+
+  it("passes the provided conversationId to agent client send()", async () => {
+    const fixedConversationId = "01HXYZ_FIXED_CONVERSATION_ID";
+
+    await dispatcher.dispatch("do something", {
+      agentName: "test-agent",
+      source: "pr-feedback",
+      conversationId: fixedConversationId,
+    });
+
+    expect(mockSend).toHaveBeenCalledOnce();
+    const callArgs = mockSend.mock.calls[0];
+    // callArgs[2] is the options object { conversationId, taskType }
+    expect(callArgs[2]).toMatchObject({ conversationId: fixedConversationId });
+  });
+
+  it("generates a new ULID when conversationId is omitted", async () => {
+    const result = await dispatcher.dispatch("do something", {
+      agentName: "test-agent",
+      source: "manual",
+    });
+
+    const task = store.getTask(result.taskId);
+    // A ULID is 26 chars of uppercase Crockford base32
+    expect(task?.conversation_id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+  });
+
+  it("generates a new ULID when conversationId is undefined", async () => {
+    const result1 = await dispatcher.dispatch("task 1", {
+      agentName: "test-agent",
+      source: "manual",
+      conversationId: undefined,
+    });
+    const result2 = await dispatcher.dispatch("task 2", {
+      agentName: "test-agent",
+      source: "manual",
+      conversationId: undefined,
+    });
+
+    const task1 = store.getTask(result1.taskId);
+    const task2 = store.getTask(result2.taskId);
+
+    // Each task should get a unique, non-empty conversation ID
+    expect(task1?.conversation_id).toBeTruthy();
+    expect(task2?.conversation_id).toBeTruthy();
+    expect(task1?.conversation_id).not.toBe(task2?.conversation_id);
+  });
+
+  it("reuses exact conversation_id in the task record (PR feedback resume)", async () => {
+    // Simulate what the daemon does for PR feedback: pass the original task's
+    // conversation_id so the agent resumes the same session.
+    const originalConversationId = "01HXYZ_ORIGINAL_SESSION";
+
+    const prFeedbackResult = await dispatcher.dispatch(
+      "Your PR needs changes: add error handling",
+      {
+        agentName: "test-agent",
+        source: "pr-feedback",
+        sourceRef: "owner/repo#42",
+        title: "[PR feedback] owner/repo#42",
+        conversationId: originalConversationId,
+      },
+    );
+
+    const task = store.getTask(prFeedbackResult.taskId);
+    expect(task?.conversation_id).toBe(originalConversationId);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
 // StateStore.getRetryableTasks — integration with retry logic
 // ────────────────────────────────────────────────────────────────────────────
 

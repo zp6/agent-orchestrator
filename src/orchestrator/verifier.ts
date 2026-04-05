@@ -152,6 +152,9 @@ export class Verifier {
         source: task.source,
         sourceRef: task.source_ref ?? undefined,
         title: `[revision] ${task.title}`,
+        // Resume the original session so the agent remembers its first attempt
+        // instead of re-reading the entire codebase from scratch.
+        conversationId: task.conversation_id ?? undefined,
       });
 
       // Verify the revision

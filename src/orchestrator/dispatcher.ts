@@ -60,6 +60,8 @@ export class Dispatcher {
       sourceRef?: string;
       title?: string;
       taskType?: TaskType;
+      /** Resume an existing CLI session by reusing a prior conversation ID. */
+      conversationId?: string;
     },
   ): Promise<DispatchResult> {
     // Resolve agent
@@ -106,8 +108,9 @@ export class Dispatcher {
       }
     }
 
-    // Create task
-    const conversationId = ulid();
+    // Create task — reuse the caller's conversationId when provided (e.g. PR
+    // feedback or revision tasks that should resume the agent's prior session).
+    const conversationId = options?.conversationId ?? ulid();
     const taskType = options?.taskType ?? "implementation";
     const task = this.store.createTask({
       title: options?.title ?? message.slice(0, 100),

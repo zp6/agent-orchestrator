@@ -271,6 +271,57 @@ describe("Verifier.verifyAndRevise — retry mechanism", () => {
     expect(revised?.verification_status).toBe("approved");
   });
 
+  it("passes original task's conversation_id to revision dispatch", async () => {
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify({ approved: false, score: 0.3, notes: "Needs work", revision: "Fix the logic" }) }],
+    });
+
+    const originalConversationId = "01HXYZ_ORIGINAL_SESSION";
+    const task = store.createTask({ title: "Test task", description: "Do something", source: "manual", agent_name: "free-agent" });
+    store.updateTask(task.id, { status: "done", result: "Partial work", conversation_id: originalConversationId });
+
+    // Simulate dispatch succeeding and returning a revision task id
+    const revisionTask = store.createTask({ title: "[revision] Test task", source: "manual", agent_name: "free-agent" });
+    store.updateTask(revisionTask.id, { status: "done", result: "Improved work" });
+    mockDispatch.mockResolvedValueOnce({ taskId: revisionTask.id });
+    // Second verify: the revision is approved
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify({ approved: true, score: 0.9, notes: "Good" }) }],
+    });
+
+    const verifier = new Verifier(config, store);
+    await verifier.verifyAndRevise(task.id);
+
+    expect(mockDispatch).toHaveBeenCalledOnce();
+    const dispatchOptions = mockDispatch.mock.calls[0][1];
+    expect(dispatchOptions).toMatchObject({ conversationId: originalConversationId });
+  });
+
+  it("passes undefined conversationId to revision dispatch when original task has none", async () => {
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify({ approved: false, score: 0.3, notes: "Needs work", revision: "Fix the logic" }) }],
+    });
+
+    // Task has no conversation_id set
+    const task = store.createTask({ title: "Test task", description: "Do something", source: "manual", agent_name: "free-agent" });
+    store.updateTask(task.id, { status: "done", result: "Partial work" });
+
+    const revisionTask = store.createTask({ title: "[revision] Test task", source: "manual", agent_name: "free-agent" });
+    store.updateTask(revisionTask.id, { status: "done", result: "Improved work" });
+    mockDispatch.mockResolvedValueOnce({ taskId: revisionTask.id });
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify({ approved: true, score: 0.9, notes: "Good" }) }],
+    });
+
+    const verifier = new Verifier(config, store);
+    await verifier.verifyAndRevise(task.id);
+
+    expect(mockDispatch).toHaveBeenCalledOnce();
+    const dispatchOptions = mockDispatch.mock.calls[0][1];
+    // conversation_id is null in DB → coerced to undefined before dispatch
+    expect(dispatchOptions.conversationId).toBeUndefined();
+  });
+
   it("returns rejected result without dispatching when maxRetries is 0", async () => {
     mockCreate.mockResolvedValueOnce({
       content: [{ type: "text", text: JSON.stringify({ approved: false, score: 0.2, notes: "Poor", revision: "Redo everything" }) }],

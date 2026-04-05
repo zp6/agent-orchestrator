@@ -1,6 +1,7 @@
-import { describe, it, expect, vi } from "vitest";
-import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING, IDLE_RECLAIM_THRESHOLD_CYCLES, ORPHAN_PR_CHECK_EVERY_N_CYCLES, extractChecklistText, buildConsolidatedFeedbackMessage } from "./daemon.js";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING, IDLE_RECLAIM_THRESHOLD_CYCLES, ORPHAN_PR_CHECK_EVERY_N_CYCLES, extractChecklistText, buildConsolidatedFeedbackMessage, resolveConversationIdForPR } from "./daemon.js";
 import { TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
+import { StateStore } from "../state/store.js";
 
 // ────────────────────────────────────────────────────────────────────────────
 // computeTimeoutRetry — timeout retry scheduling
@@ -578,5 +579,102 @@ describe("buildConsolidatedFeedbackMessage", () => {
     const priorDesc = "Your PR was reviewed. Work through every item in the checklist below before pushing:\n\n1. item\n\nCheck off each item, commit, and push. Do not push until all checklist items are addressed.";
     const msg = buildConsolidatedFeedbackMessage("acme/widget", 99, "1. Fix it", [priorDesc]);
     expect(msg).toContain("PR #99 on acme/widget");
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// resolveConversationIdForPR — PR feedback session resume (issue #333)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("resolveConversationIdForPR", () => {
+  let store: StateStore;
+
+  beforeEach(() => {
+    store = new StateStore(":memory:");
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  it("returns the conversation_id of the original task linked via Closes #N", () => {
+    // Create an original task that was dispatched from github issue #42
+    const task = store.createTask({
+      title: "implement feature",
+      description: "do the thing",
+      source: "github",
+      source_ref: "owner/repo#42",
+      agent_name: "test-agent",
+    });
+    store.updateTask(task.id, { status: "done", conversation_id: "01HXYZ_ORIGINAL_SESSION" });
+
+    // PR body contains Closes #42
+    const conversationId = resolveConversationIdForPR(store, "owner/repo", "Closes #42");
+    expect(conversationId).toBe("01HXYZ_ORIGINAL_SESSION");
+  });
+
+  it("calls findTaskBySourceRef with 'github' source and correct repo#issue key", () => {
+    // Spy on findTaskBySourceRef to verify args
+    const spy = vi.spyOn(store, "findTaskBySourceRef");
+
+    resolveConversationIdForPR(store, "owner/my-repo", "Closes #99");
+
+    expect(spy).toHaveBeenCalledOnce();
+    expect(spy).toHaveBeenCalledWith("github", "owner/my-repo#99");
+  });
+
+  it("uses the first linked issue number when multiple Closes refs are present", () => {
+    const task42 = store.createTask({
+      title: "issue 42",
+      description: "feature",
+      source: "github",
+      source_ref: "owner/repo#42",
+      agent_name: "test-agent",
+    });
+    store.updateTask(task42.id, { status: "done", conversation_id: "CONV_42" });
+
+    const task55 = store.createTask({
+      title: "issue 55",
+      description: "feature",
+      source: "github",
+      source_ref: "owner/repo#55",
+      agent_name: "test-agent",
+    });
+    store.updateTask(task55.id, { status: "done", conversation_id: "CONV_55" });
+
+    // Only the first linked issue (#42) should be used
+    const conversationId = resolveConversationIdForPR(store, "owner/repo", "Closes #42\nFixes #55");
+    expect(conversationId).toBe("CONV_42");
+  });
+
+  it("returns undefined when PR body has no issue references", () => {
+    const conversationId = resolveConversationIdForPR(store, "owner/repo", "No issue reference here");
+    expect(conversationId).toBeUndefined();
+  });
+
+  it("returns undefined for empty PR body", () => {
+    const conversationId = resolveConversationIdForPR(store, "owner/repo", "");
+    expect(conversationId).toBeUndefined();
+  });
+
+  it("returns undefined when no matching task exists in the store", () => {
+    // PR body references issue #99, but no task has source_ref = owner/repo#99
+    const conversationId = resolveConversationIdForPR(store, "owner/repo", "Closes #99");
+    expect(conversationId).toBeUndefined();
+  });
+
+  it("returns undefined when matched task has no conversation_id", () => {
+    const task = store.createTask({
+      title: "task without session",
+      description: "do work",
+      source: "github",
+      source_ref: "owner/repo#7",
+      agent_name: "test-agent",
+    });
+    // Task exists but was never given a conversation_id
+    store.updateTask(task.id, { status: "done" });
+
+    const conversationId = resolveConversationIdForPR(store, "owner/repo", "Closes #7");
+    expect(conversationId).toBeUndefined();
   });
 });

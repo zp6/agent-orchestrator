@@ -903,12 +903,22 @@ export class Daemon {
                 const feedbackMessage = buildConsolidatedFeedbackMessage(
                   repo, prNumber, result.comment, priorDescriptions,
                 );
+                // Try to resume the original task's CLI session so the agent
+                // retains context about what it built, rather than starting blank.
+                const originalConversationId = resolveConversationIdForPR(this.store, repo, prBody);
                 this.log.info("Dispatching PR feedback to agent", {
                   repo, prNumber, agentName, feedbackRounds, priorRoundsIncluded: priorDescriptions.length,
+                  resumingSession: Boolean(originalConversationId),
                 });
                 this.dispatcher.dispatch(
                   feedbackMessage,
-                  { agentName, source: "pr-feedback", sourceRef, title: `[PR feedback] ${repo}#${prNumber}` },
+                  {
+                    agentName,
+                    source: "pr-feedback",
+                    sourceRef,
+                    title: `[PR feedback] ${repo}#${prNumber}`,
+                    conversationId: originalConversationId,
+                  },
                 ).catch((err) => {
                   this.log.error("Failed to dispatch PR feedback", { repo, prNumber, error: String(err) });
                 });
@@ -1467,4 +1477,26 @@ export function buildConsolidatedFeedbackMessage(
     priorSections,
     `\nFix every unchecked item above, commit, and push to the same branch.`,
   ].join("\n");
+}
+
+/**
+ * Given a PR body and repo slug, look up the conversation_id of the original
+ * task that produced the PR (via the `Closes #N` linked issue reference).
+ *
+ * Returns `undefined` when:
+ * - The PR body contains no issue references
+ * - No matching task was found in the store
+ * - The matched task has no conversation_id
+ *
+ * Exported for unit testing.
+ */
+export function resolveConversationIdForPR(
+  store: StateStore,
+  repo: string,
+  prBody: string,
+): string | undefined {
+  const linkedIssueNumbers = extractClosedIssueNumbers(prBody);
+  if (linkedIssueNumbers.length === 0) return undefined;
+  const originalTask = store.findTaskBySourceRef("github", `${repo}#${linkedIssueNumbers[0]}`);
+  return originalTask?.conversation_id ?? undefined;
 }
