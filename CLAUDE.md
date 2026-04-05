@@ -6,6 +6,17 @@ The orchestrator is the control plane for a fleet of Claude Code agents. Each ag
 
 **The orchestrator is itself an agent** in the system. It can receive improvement issues and work on itself.
 
+## CRITICAL: NEVER Push Directly to Main
+
+**ALL changes MUST go through a PR.** No exceptions, no "quick fixes", no "just a config change."
+
+1. Create a feature branch: `git checkout -b fix/description`
+2. Commit your changes
+3. Push and create a PR: `gh pr create`
+4. Wait for review/merge
+
+This applies to: code changes, config changes, agents.yaml updates, CLAUDE.md edits, test fixes — everything. If you catch yourself running `git push origin main`, stop and make a PR instead.
+
 ## CRITICAL: Scope Boundaries — What This Repo Does NOT Own
 
 The orchestrator has been split into specialized repos. This repo owns **core infrastructure only**:
