@@ -320,13 +320,13 @@ describe("duplicate PR detection before dispatch", () => {
     await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
     const dispatchedMessage = (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    // Checklist must be present with all four required steps
+    // Checklist must be present with all five required steps
     expect(dispatchedMessage).toContain("Mandatory pre-declaration checklist");
     expect(dispatchedMessage).toContain("Read the full diff");
-    expect(dispatchedMessage).toContain("logic bugs and off-by-one errors");
-    expect(dispatchedMessage).toContain("tests cover the new/changed code");
+    expect(dispatchedMessage).toContain("Check for logic bugs");
+    expect(dispatchedMessage).toContain("Verify test coverage");
     expect(dispatchedMessage).toContain("Closes #<issue>");
-    expect(dispatchedMessage).toContain("Only after checking off all four items");
+    expect(dispatchedMessage).toContain("Summarise your findings");
     // The checklist must reference the correct PR URL
     expect(dispatchedMessage).toContain("https://github.com/owner/my-repo/pull/7");
   });
@@ -658,24 +658,39 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
     const dispatchedMessage = (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
     expect(dispatchedMessage).toContain("Mandatory pre-declaration checklist");
     expect(dispatchedMessage).toContain("Read the full diff");
-    expect(dispatchedMessage).toContain("logic bugs and off-by-one errors");
-    expect(dispatchedMessage).toContain("tests cover the new/changed code");
+    expect(dispatchedMessage).toContain("Check for logic bugs");
+    expect(dispatchedMessage).toContain("Verify test coverage");
     expect(dispatchedMessage).toContain("Closes #<issue>");
+    expect(dispatchedMessage).toContain("Summarise your findings");
     expect(dispatchedMessage).toContain("https://github.com/owner/my-repo/pull/9");
   });
 });
 
 describe("buildExistingPRReviewChecklist", () => {
-  it("returns a string containing all four required checklist steps", () => {
+  it("returns a string containing all five required checklist steps", () => {
     const checklist = buildExistingPRReviewChecklist(7, "https://github.com/owner/repo/pull/7");
     expect(checklist).toContain("Mandatory pre-declaration checklist");
     expect(checklist).toContain("Read the full diff");
     expect(checklist).toContain("gh pr diff 7");
     expect(checklist).toContain("https://github.com/owner/repo/pull/7");
-    expect(checklist).toContain("logic bugs and off-by-one errors");
-    expect(checklist).toContain("tests cover the new/changed code");
+    expect(checklist).toContain("logic bugs");
+    expect(checklist).toContain("off-by-one errors");
+    expect(checklist).toContain("Math.min vs Math.max");
+    expect(checklist).toContain("Verify test coverage");
     expect(checklist).toContain("Closes #<issue>");
-    expect(checklist).toContain("Only after checking off all four items");
+    expect(checklist).toContain("Summarise your findings");
+  });
+
+  it("warns that a build alone is not sufficient", () => {
+    const checklist = buildExistingPRReviewChecklist(7, "https://github.com/owner/repo/pull/7");
+    expect(checklist).toContain("build alone is NOT sufficient");
+    expect(checklist).toContain("line by line");
+  });
+
+  it("warns that skipping items fails verification", () => {
+    const checklist = buildExistingPRReviewChecklist(7, "https://github.com/owner/repo/pull/7");
+    expect(checklist).toContain("scored as incomplete");
+    expect(checklist).toContain("will not pass verification");
   });
 
   it("includes the correct PR number in the gh pr diff command", () => {

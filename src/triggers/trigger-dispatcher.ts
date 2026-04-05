@@ -14,21 +14,33 @@ const inFlightDispatches = new Set<string>();
 
 /**
  * Build the mandatory pre-declaration review checklist injected into every
- * fix-existing-PR task message.  Agents must work through all four steps
+ * fix-existing-PR task message.  Agents must work through all five steps
  * before they are allowed to declare "no changes needed".
+ *
+ * Running `tsc` or a build command alone does NOT satisfy this checklist —
+ * agents must read the actual code diff and reason about correctness.
  *
  * Exported for unit testing.
  */
 export function buildExistingPRReviewChecklist(prNumber: number, prUrl: string): string {
   return (
-    `\n\n**Mandatory pre-declaration checklist — you MUST complete all four steps before ` +
+    `\n\n**Mandatory pre-declaration checklist — you MUST complete ALL steps before ` +
     `declaring the PR clean or pushing:**\n` +
-    `- [ ] 1. Read the full diff: \`gh pr diff ${prNumber}\` (or visit ${prUrl}/files)\n` +
-    `- [ ] 2. Check for logic bugs and off-by-one errors in every changed function\n` +
-    `- [ ] 3. Verify that tests cover the new/changed code paths\n` +
-    `- [ ] 4. Confirm the PR body includes the required \`Closes #<issue>\` reference\n\n` +
-    `Only after checking off all four items above may you declare "no changes needed". ` +
-    `If you skipped any item, your review will be considered incomplete.`
+    `- [ ] 1. **Read the full diff** — run \`gh pr diff ${prNumber}\` (or visit ${prUrl}/files) ` +
+    `and read every changed file. Running \`tsc\` or a build alone is NOT sufficient; ` +
+    `you must read the actual code changes line by line.\n` +
+    `- [ ] 2. **Check for logic bugs** — look for off-by-one errors, incorrect boundary ` +
+    `conditions (e.g. Math.min vs Math.max), null/undefined edge cases, and wrong ` +
+    `operator usage in every changed function.\n` +
+    `- [ ] 3. **Verify test coverage** — confirm that tests exist for the new/changed ` +
+    `code paths. If new logic was added without tests, add them.\n` +
+    `- [ ] 4. **Confirm the PR body** includes the required \`Closes #<issue>\` reference.\n` +
+    `- [ ] 5. **Summarise your findings** — before declaring "no changes needed", write ` +
+    `a brief summary of what you reviewed and why the code is correct. A review that ` +
+    `only says "looks good" or "build passes" will be rejected.\n\n` +
+    `⚠️ Only after completing all five items above may you declare "no changes needed". ` +
+    `If you skip any item or only run a build check, your review will be scored as ` +
+    `incomplete and will not pass verification.`
   );
 }
 

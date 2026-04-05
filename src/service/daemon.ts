@@ -1565,6 +1565,30 @@ export function buildAuditChecklist(feedbackComment: string): string {
 }
 
 /**
+ * Build the mandatory pre-declaration review checklist appended to every
+ * PR feedback dispatch message.  This ensures agents perform a substantive
+ * code review (read the diff, check logic, verify tests) rather than
+ * running a build and declaring the PR clean.
+ *
+ * Exported for unit testing.
+ */
+export function buildFeedbackPreDeclarationChecklist(prNumber: number): string {
+  return (
+    `\n**Mandatory pre-push checklist — complete ALL items before pushing or declaring done:**\n` +
+    `- [ ] 1. **Read the full diff** — run \`gh pr diff ${prNumber}\` and review every changed file ` +
+    `line by line. A passing build alone is NOT sufficient.\n` +
+    `- [ ] 2. **Check for logic bugs** — look for off-by-one errors, incorrect boundary conditions ` +
+    `(e.g. Math.min vs Math.max), null/undefined edge cases, and wrong operator usage.\n` +
+    `- [ ] 3. **Verify test coverage** — confirm tests exist for new/changed code paths. Add tests ` +
+    `if missing.\n` +
+    `- [ ] 4. **Confirm the PR body** includes a \`Closes #<issue>\` reference.\n` +
+    `- [ ] 5. **Summarise your review** — write what you checked and why the code is correct. ` +
+    `A response that only says "looks good" or "build passes" will be rejected.\n` +
+    `⚠️ Skipping any item will cause your task to fail verification.`
+  );
+}
+
+/**
  * Build a consolidated feedback dispatch message for a PR.
  *
  * When `priorFeedbackDescriptions` is empty (first feedback round) the
@@ -1579,6 +1603,9 @@ export function buildAuditChecklist(feedbackComment: string): string {
  *   1. A structured diff excerpt for the files flagged in the reviewer comment
  *   2. An explicit `- [ ]` audit checklist derived from the numbered items so
  *      the agent can confirm each point before pushing
+ *
+ * Every message (single-round and multi-round) now includes the mandatory
+ * pre-push review checklist so agents cannot skip substantive code review.
  *
  * Exported for unit testing.
  */
@@ -1598,6 +1625,9 @@ export function buildConsolidatedFeedbackMessage(
   // Build explicit audit checklist (may be empty when no numbered items)
   const auditChecklist = buildAuditChecklist(currentFeedback);
 
+  // Mandatory pre-declaration checklist — always appended
+  const preDeclaration = buildFeedbackPreDeclarationChecklist(prNumber);
+
   if (priorFeedbackDescriptions.length === 0) {
     // First round — structured feedback context is appended after the checklist
     const parts: string[] = [
@@ -1615,6 +1645,8 @@ export function buildConsolidatedFeedbackMessage(
     if (auditChecklist) {
       parts.push(`\n**Before pushing, confirm each item is addressed:**\n${auditChecklist}`);
     }
+
+    parts.push(preDeclaration);
 
     parts.push(
       `\nCheck off each item, commit, and push to the same branch. ` +
@@ -1655,6 +1687,7 @@ export function buildConsolidatedFeedbackMessage(
   parts.push(
     `\n**Prior feedback rounds — confirm these are also resolved:**`,
     priorSections,
+    preDeclaration,
     `\nFix every unchecked item above, commit, and push to the same branch.`,
   );
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING, IDLE_RECLAIM_THRESHOLD_CYCLES, ORPHAN_PR_CHECK_EVERY_N_CYCLES, extractChecklistText, buildConsolidatedFeedbackMessage, resolveConversationIdForPR, extractFlaggedFilesFromChecklist, buildDiffContextForFeedback, buildAuditChecklist } from "./daemon.js";
+import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING, IDLE_RECLAIM_THRESHOLD_CYCLES, ORPHAN_PR_CHECK_EVERY_N_CYCLES, extractChecklistText, buildConsolidatedFeedbackMessage, buildFeedbackPreDeclarationChecklist, resolveConversationIdForPR, extractFlaggedFilesFromChecklist, buildDiffContextForFeedback, buildAuditChecklist } from "./daemon.js";
 import { TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
 import { StateStore } from "../state/store.js";
 
@@ -654,6 +654,68 @@ describe("buildConsolidatedFeedbackMessage", () => {
     expect(msg).toContain("Before pushing, confirm each item is addressed:");
     expect(msg).toContain("- [ ] Fix src/bar.ts line handling");
     expect(msg).toContain("- [ ] Remove unused import");
+  });
+
+  it("single-round message includes mandatory pre-push review checklist", () => {
+    const msg = buildConsolidatedFeedbackMessage("owner/repo", 10, "1. Fix bug", []);
+    expect(msg).toContain("Mandatory pre-push checklist");
+    expect(msg).toContain("Read the full diff");
+    expect(msg).toContain("gh pr diff 10");
+    expect(msg).toContain("Check for logic bugs");
+    expect(msg).toContain("Math.min vs Math.max");
+    expect(msg).toContain("Verify test coverage");
+    expect(msg).toContain("Confirm the PR body");
+    expect(msg).toContain("Summarise your review");
+    expect(msg).toContain("fail verification");
+  });
+
+  it("multi-round message includes mandatory pre-push review checklist", () => {
+    const priorDesc =
+      "Your PR was reviewed. Work through every item in the checklist below before pushing:\n\n" +
+      "1. item\n\nCheck off each item, commit, and push to the same branch. Do not push until all checklist items are addressed.";
+    const msg = buildConsolidatedFeedbackMessage("owner/repo", 7, "1. Fix it", [priorDesc]);
+    expect(msg).toContain("Mandatory pre-push checklist");
+    expect(msg).toContain("gh pr diff 7");
+    expect(msg).toContain("Summarise your review");
+  });
+
+  it("pre-push checklist warns that build alone is not sufficient", () => {
+    const msg = buildConsolidatedFeedbackMessage("owner/repo", 5, "1. Fix it", []);
+    expect(msg).toContain("passing build alone is NOT sufficient");
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// buildFeedbackPreDeclarationChecklist — standalone unit tests
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("buildFeedbackPreDeclarationChecklist", () => {
+  it("includes all five checklist steps", () => {
+    const checklist = buildFeedbackPreDeclarationChecklist(42);
+    expect(checklist).toContain("Read the full diff");
+    expect(checklist).toContain("gh pr diff 42");
+    expect(checklist).toContain("Check for logic bugs");
+    expect(checklist).toContain("off-by-one errors");
+    expect(checklist).toContain("Math.min vs Math.max");
+    expect(checklist).toContain("Verify test coverage");
+    expect(checklist).toContain("Confirm the PR body");
+    expect(checklist).toContain("Summarise your review");
+  });
+
+  it("warns that build alone is not sufficient", () => {
+    const checklist = buildFeedbackPreDeclarationChecklist(1);
+    expect(checklist).toContain("passing build alone is NOT sufficient");
+  });
+
+  it("warns that skipping items fails verification", () => {
+    const checklist = buildFeedbackPreDeclarationChecklist(1);
+    expect(checklist).toContain("fail verification");
+  });
+
+  it("uses the correct PR number in the gh pr diff command", () => {
+    const checklist = buildFeedbackPreDeclarationChecklist(99);
+    expect(checklist).toContain("gh pr diff 99");
+    expect(checklist).not.toContain("gh pr diff 42");
   });
 });
 
