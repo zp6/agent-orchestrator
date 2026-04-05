@@ -5,6 +5,12 @@ import { createLLMClient } from "../client/llm-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { validatePreSubmit, formatValidationSummary } from "./pre-submit-validator.js";
 import type { StateStore } from "../state/store.js";
+import { validateGhAuth } from "../triggers/github.js";
+
+/** Maximum number of times to retry `gh pr create` after a transient failure. */
+export const PR_CREATE_MAX_RETRIES = 2;
+/** Base delay in ms between `gh pr create` retry attempts. */
+export const PR_CREATE_RETRY_DELAY_MS = 2_000;
 
 const log = createLogger("pr-creator");
 
@@ -255,6 +261,19 @@ export async function createPRForBranch(
   config?: OrchestratorConfig,
   store?: StateStore,
 ): Promise<string | null> {
+  // Pre-flight: verify gh is authenticated before attempting any remote git
+  // operation.  A missing/expired credential causes branch push to succeed but
+  // `gh pr create` to fail silently, burning 2 agent cycles per occurrence.
+  const authStatus = validateGhAuth();
+  if (!authStatus.ok) {
+    log.error("gh auth pre-flight failed — skipping PR creation", {
+      repo: orphan.repo,
+      branch: orphan.branch,
+      reason: authStatus.reason,
+    });
+    return null;
+  }
+
   try {
     const issueNumber = await findMatchingIssueNumber(orphan.repo, orphan.branch, config);
     let body = issueNumber
@@ -321,10 +340,9 @@ export async function createPRForBranch(
       return null;
     }
 
-    const url = execSync(
+    const url = await createPRWithRetry(
       `gh pr create --repo ${orphan.repo} --head ${orphan.branch} --title "[${orphan.agentName}] ${orphan.branch}" --body ${shellEscape(body)}`,
-      { encoding: "utf-8", timeout: 30000 },
-    ).trim();
+    );
 
     log.info("Created PR for orphan branch", {
       repo: orphan.repo,
@@ -345,4 +363,43 @@ export async function createPRForBranch(
 
 function shellEscape(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Execute `gh pr create` with up to PR_CREATE_MAX_RETRIES retries on failure.
+ *
+ * Branch push and PR creation are treated as a single atomic unit: if the
+ * branch was pushed successfully but `gh pr create` fails (e.g. due to a
+ * transient auth hiccup or rate limit), we retry before giving up.
+ *
+ * @param cmd - The full `gh pr create` shell command to run.
+ * @param delayFn - Optional override for the inter-retry delay (for tests).
+ * @returns The PR URL string on success.
+ * @throws The last error after all retries are exhausted.
+ */
+export async function createPRWithRetry(
+  cmd: string,
+  delayFn: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<string> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= PR_CREATE_MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      log.warn("Retrying gh pr create after failure", {
+        attempt,
+        maxRetries: PR_CREATE_MAX_RETRIES,
+        delayMs: PR_CREATE_RETRY_DELAY_MS * attempt,
+      });
+      await delayFn(PR_CREATE_RETRY_DELAY_MS * attempt);
+    }
+    try {
+      return execSync(cmd, { encoding: "utf-8", timeout: 30000 }).trim();
+    } catch (err) {
+      lastError = err;
+      log.warn("gh pr create attempt failed", {
+        attempt,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  throw lastError;
 }

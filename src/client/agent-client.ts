@@ -22,6 +22,8 @@ export function buildAgentSystemPrompt(agentName: string, githubRepo: string): s
 CRITICAL — Git workflow:
 - Before starting work, ensure you're on main and up to date: \`git checkout main && git pull origin main\`
 - Create a feature branch for your work: \`git checkout -b issue-N-description\`
+- **Before any \`git push\`**, validate \`gh\` auth: \`gh auth status\`. If it fails, stop immediately and surface the error — do NOT push. Fix auth first (set \`GH_TOKEN\` or run \`gh auth login\`).
+- Treat \`git push\` + \`gh pr create\` as a **single atomic unit**. If \`gh pr create\` fails after a successful push, retry up to 2 times (with a few seconds between attempts) before giving up. Do NOT leave a pushed branch without a PR — if all retries fail, report the error clearly so it can be recovered.
 - When done: commit, push, and open a PR with \`gh pr create\`
 - Never commit directly to main
 - Every commit MUST end with: \`Co-Authored-By: ${agentName} <${agentName}@agent>\`

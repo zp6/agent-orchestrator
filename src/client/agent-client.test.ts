@@ -214,6 +214,19 @@ describe("buildAgentSystemPrompt", () => {
     const prompt2 = buildAgentIdentityPrompt("test-agent", "owner/repo");
     expect(prompt1).toBe(prompt2);
   });
+
+  it("instructs agents to validate gh auth before any git push", () => {
+    const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("gh auth status");
+    expect(prompt).toContain("git push");
+  });
+
+  it("instructs agents to treat push+PR as an atomic retryable unit", () => {
+    const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("atomic");
+    expect(prompt).toContain("retry");
+    expect(prompt).toContain("gh pr create");
+  });
 });
 
 describe("buildResearchPrompt", () => {

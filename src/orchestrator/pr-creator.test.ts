@@ -4,8 +4,11 @@ import {
   fuzzyMatchIssues,
   findMatchingIssueNumber,
   createPRForBranch,
+  createPRWithRetry,
+  PR_CREATE_MAX_RETRIES,
 } from "./pr-creator.js";
 import type { OrphanBranch } from "./pr-creator.js";
+import { validateGhAuth } from "../triggers/github.js";
 
 const mockExecSync = vi.fn();
 
@@ -20,6 +23,11 @@ vi.mock("../service/logger.js", () => ({
     warn: vi.fn(),
     debug: vi.fn(),
   }),
+}));
+
+// Default: gh auth passes. Individual tests can override with mockReturnValueOnce.
+vi.mock("../triggers/github.js", () => ({
+  validateGhAuth: vi.fn().mockReturnValue({ ok: true }),
 }));
 
 // Mock LLM client — tests that exercise LLM disambiguation will override this
@@ -454,5 +462,90 @@ describe("createPRForBranch", () => {
     const gitFetchCall = (mockExecSync.mock.calls as Array<[string, unknown]>)
       .find(([cmd]) => typeof cmd === "string" && cmd.includes("git fetch"));
     expect(gitFetchCall).toBeDefined();
+  });
+
+  it("returns null immediately when gh auth pre-flight fails", async () => {
+    vi.mocked(validateGhAuth).mockReturnValueOnce({
+      ok: false,
+      reason: "gh CLI is not authenticated. Run `gh auth login`.",
+    });
+
+    const result = await createPRForBranch(orphan);
+
+    // Auth failure should bail out before any execSync calls (no gh or git calls)
+    expect(result).toBeNull();
+    expect(mockExecSync).not.toHaveBeenCalled();
+  });
+});
+
+describe("createPRWithRetry", () => {
+  const noDelay = async (_ms: number) => {};
+
+  beforeEach(() => {
+    mockExecSync.mockReset();
+  });
+
+  it("returns PR URL on first attempt when gh pr create succeeds", async () => {
+    mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/99\n");
+
+    const url = await createPRWithRetry("gh pr create --repo owner/repo", noDelay);
+
+    expect(url).toBe("https://github.com/owner/repo/pull/99");
+    expect(mockExecSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries and succeeds on second attempt after transient failure", async () => {
+    mockExecSync
+      .mockImplementationOnce(() => { throw new Error("connection reset"); })
+      .mockReturnValueOnce("https://github.com/owner/repo/pull/99\n");
+
+    const url = await createPRWithRetry("gh pr create --repo owner/repo", noDelay);
+
+    expect(url).toBe("https://github.com/owner/repo/pull/99");
+    expect(mockExecSync).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries up to PR_CREATE_MAX_RETRIES times and succeeds on last attempt", async () => {
+    // Fail PR_CREATE_MAX_RETRIES times, succeed on the last allowed attempt
+    for (let i = 0; i < PR_CREATE_MAX_RETRIES; i++) {
+      mockExecSync.mockImplementationOnce(() => { throw new Error(`transient error ${i}`); });
+    }
+    mockExecSync.mockReturnValueOnce("https://github.com/owner/repo/pull/99\n");
+
+    const url = await createPRWithRetry("gh pr create --repo owner/repo", noDelay);
+
+    expect(url).toBe("https://github.com/owner/repo/pull/99");
+    // 1 initial attempt + PR_CREATE_MAX_RETRIES retry attempts = PR_CREATE_MAX_RETRIES + 1 total
+    expect(mockExecSync).toHaveBeenCalledTimes(PR_CREATE_MAX_RETRIES + 1);
+  });
+
+  it("throws the last error after all retries are exhausted", async () => {
+    // Fail on every attempt (initial + all retries)
+    for (let i = 0; i <= PR_CREATE_MAX_RETRIES; i++) {
+      mockExecSync.mockImplementationOnce(() => { throw new Error(`gh: auth error (attempt ${i})`); });
+    }
+
+    await expect(
+      createPRWithRetry("gh pr create --repo owner/repo", noDelay),
+    ).rejects.toThrow("gh: auth error");
+
+    expect(mockExecSync).toHaveBeenCalledTimes(PR_CREATE_MAX_RETRIES + 1);
+  });
+
+  it("calls delayFn between retry attempts with increasing delay", async () => {
+    const delays: number[] = [];
+    const recordDelay = async (ms: number) => { delays.push(ms); };
+
+    mockExecSync
+      .mockImplementationOnce(() => { throw new Error("fail 1"); })
+      .mockImplementationOnce(() => { throw new Error("fail 2"); })
+      .mockReturnValueOnce("https://github.com/owner/repo/pull/99\n");
+
+    await createPRWithRetry("gh pr create --repo owner/repo", recordDelay);
+
+    // delay is called once before attempt 1, once before attempt 2
+    expect(delays).toHaveLength(2);
+    // Delay increases with each attempt
+    expect(delays[1]).toBeGreaterThan(delays[0]);
   });
 });
