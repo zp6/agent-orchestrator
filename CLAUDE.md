@@ -6,6 +6,19 @@ The orchestrator is the control plane for a fleet of Claude Code agents. Each ag
 
 **The orchestrator is itself an agent** in the system. It can receive improvement issues and work on itself.
 
+## CRITICAL: Scope Boundaries — What This Repo Does NOT Own
+
+The orchestrator has been split into specialized repos. This repo owns **core infrastructure only**:
+
+**This repo owns:** daemon loop, state store (SQLite), task dispatching, trigger polling (GitHub/Linear/Slack), agent deployment/sync, routing, planning, execution.
+
+**This repo does NOT own — do NOT create issues/PRs for these here:**
+- **Dashboard, CLI UI, activity views, metrics display** → `rapartlu/claude-orchestrator-dashboard`
+- **PR reviewer, task verifier, supervisor, improvement detector, Telegram notifications, escalation system** → `rapartlu/claude-orchestrator-reviewer`
+- **Proxy server, container management, CLI sessions** → `rapartlu/claude-proxy`
+
+If you discover an improvement that belongs to another repo, create the issue on that repo instead (`gh issue create --repo rapartlu/claude-orchestrator-dashboard`).
+
 ## CRITICAL: Daemon Must Always Be Running
 
 **The daemon is the heartbeat of the orchestrator. It MUST be running at all times.**

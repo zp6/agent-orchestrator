@@ -17,10 +17,10 @@ verification:
 agents:
   claude-agent-orchestrator:
     dir: "claude-agent-orchestrator"
-    description: "The orchestrator's own codebase. Handles self-improvement: daemon logic, routing, PR review, supervisor, verification, issue creation, and CLI commands."
-    capabilities: ["typescript", "orchestration", "cli", "sqlite"]
+    description: "Core orchestration infrastructure: daemon loop, state store, task dispatching, trigger polling, agent deployment, and sync. Does NOT own dashboard/CLI UI or PR review/verification quality layer — those belong to the dashboard and reviewer agents."
+    capabilities: ["typescript", "orchestration", "sqlite"]
     github: "rapartlu/claude-agent-orchestrator"
-    owns_topics: ["orchestrator", "daemon", "supervisor", "routing", "dispatcher", "verifier", "planner", "deployer", "pr-review"]
+    owns_topics: ["orchestrator", "daemon", "routing", "dispatcher", "planner", "deployer", "state", "triggers", "sync"]
     docker:
       port: 3472
       api_key: "cheese"
