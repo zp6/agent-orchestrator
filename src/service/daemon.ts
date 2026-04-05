@@ -833,7 +833,7 @@ export class Daemon {
     try {
       for (const [repo, agentName] of agentsByRepo) {
         const results = await this.prReviewer.reviewOpenPRs(repo);
-        for (const { prNumber, result, prBody, prBranch } of results) {
+        for (const { prNumber, result, prBody, prBranch, prDiff } of results) {
           console.log(`[${time}] PR review: ${repo}#${prNumber} → ${result.decision} (${result.reason})`);
 
           // Auto-close persistently conflicting PRs and re-dispatch the linked issue.
@@ -936,7 +936,7 @@ export class Daemon {
                   .filter((t) => t.status === "done" || t.status === "failed");
                 const priorDescriptions = priorTasks.map((t) => t.description ?? null);
                 const feedbackMessage = buildConsolidatedFeedbackMessage(
-                  repo, prNumber, result.comment, priorDescriptions,
+                  repo, prNumber, result.comment, priorDescriptions, { prDiff },
                 );
                 // Try to resume the original task's CLI session so the agent
                 // retains context about what it built, rather than starting blank.
@@ -1477,6 +1477,84 @@ export function extractChecklistText(description: string | null | undefined): st
 }
 
 /**
+ * Parse file paths mentioned in a PR reviewer checklist.
+ *
+ * Looks for common source file patterns (e.g. `src/foo.ts`, `lib/bar.js`)
+ * in the checklist text. Used to narrow down which diff hunks to include
+ * in the structured feedback context sent to the agent.
+ *
+ * Exported for unit testing.
+ */
+export function extractFlaggedFilesFromChecklist(comment: string): string[] {
+  // Match file paths: either starting with a known directory prefix or ending with
+  // a recognized source extension.  Anchored to word boundaries so we don't match
+  // partial words (e.g. "namespace" isn't a path).
+  const filePattern =
+    /(?:^|[\s("`'])(((?:src|lib|test|tests|spec|dist|config|scripts|\.github)\/[\w./\-]+\.\w+|[\w./\-]+\.(?:ts|js|tsx|jsx|py|go|rs|java|rb|md|yaml|yml|json|sh|toml|env)))/gm;
+  const files = new Set<string>();
+  let match: RegExpExecArray | null;
+  while ((match = filePattern.exec(comment)) !== null) {
+    files.add(match[1]);
+  }
+  return [...files];
+}
+
+/**
+ * Extract relevant diff hunks for flagged files from a full PR diff.
+ *
+ * Splits the diff into per-file sections and keeps only sections that touch
+ * one of the flagged file paths.  The result is truncated to `maxLength`
+ * characters to avoid overwhelming the agent context window.
+ *
+ * Returns an empty string when no flagged files are found in the diff or
+ * when the diff itself is empty.
+ *
+ * Exported for unit testing.
+ */
+export function buildDiffContextForFeedback(
+  diff: string,
+  flaggedFiles: string[],
+  maxLength = 3000,
+): string {
+  if (!diff || flaggedFiles.length === 0) return "";
+
+  // Diff sections start with "diff --git a/... b/..."
+  const sections = diff.split(/(?=^diff --git )/m);
+  const relevantSections: string[] = [];
+
+  for (const section of sections) {
+    if (flaggedFiles.some((f) => section.includes(f))) {
+      relevantSections.push(section.trimEnd());
+    }
+  }
+
+  if (relevantSections.length === 0) return "";
+
+  const combined = relevantSections.join("\n");
+  if (combined.length <= maxLength) return combined;
+  return combined.slice(0, maxLength) + "\n... (diff truncated — see full PR diff for remaining context)";
+}
+
+/**
+ * Convert numbered checklist items into an explicit `- [ ]` audit checklist.
+ *
+ * The reviewer's comment is already a numbered markdown list.  This function
+ * extracts those items and rewrites them as unchecked GitHub task-list boxes
+ * so the agent has a machine-readable form to check off before pushing.
+ *
+ * Returns an empty string when no numbered items are detected.
+ *
+ * Exported for unit testing.
+ */
+export function buildAuditChecklist(feedbackComment: string): string {
+  const items = feedbackComment.match(/^\d+[\.\)]\s+.+/gm) ?? [];
+  if (items.length === 0) return "";
+  return items
+    .map((item) => `- [ ] ${item.replace(/^\d+[\.\)]\s+/, "")}`)
+    .join("\n");
+}
+
+/**
  * Build a consolidated feedback dispatch message for a PR.
  *
  * When `priorFeedbackDescriptions` is empty (first feedback round) the
@@ -1487,6 +1565,11 @@ export function extractChecklistText(description: string | null | undefined): st
  * message so the agent can address everything in a single push, reducing
  * sequential revision cycles.
  *
+ * When `options.prDiff` is provided the message also includes:
+ *   1. A structured diff excerpt for the files flagged in the reviewer comment
+ *   2. An explicit `- [ ]` audit checklist derived from the numbered items so
+ *      the agent can confirm each point before pushing
+ *
  * Exported for unit testing.
  */
 export function buildConsolidatedFeedbackMessage(
@@ -1494,18 +1577,44 @@ export function buildConsolidatedFeedbackMessage(
   prNumber: number,
   currentFeedback: string,
   priorFeedbackDescriptions: Array<string | null>,
+  options?: { prDiff?: string },
 ): string {
+  const prDiff = options?.prDiff ?? "";
+
+  // Build structured diff context for flagged files (may be empty)
+  const flaggedFiles = extractFlaggedFilesFromChecklist(currentFeedback);
+  const diffContext = prDiff ? buildDiffContextForFeedback(prDiff, flaggedFiles) : "";
+
+  // Build explicit audit checklist (may be empty when no numbered items)
+  const auditChecklist = buildAuditChecklist(currentFeedback);
+
   if (priorFeedbackDescriptions.length === 0) {
-    // First round — preserve the original format exactly
-    return (
+    // First round — structured feedback context is appended after the checklist
+    const parts: string[] = [
       `Your PR #${prNumber} on ${repo} was reviewed and needs changes. ` +
-      `Work through every item in the checklist below before pushing:\n\n` +
-      `${currentFeedback}\n\n` +
-      `Check off each item, commit, and push to the same branch. ` +
-      `Do not push until all checklist items are addressed.`
+        `Work through every item in the checklist below before pushing:\n\n` +
+        `${currentFeedback}`,
+    ];
+
+    if (diffContext) {
+      parts.push(
+        `\n**Relevant diff sections for flagged items:**\n\`\`\`diff\n${diffContext}\n\`\`\``,
+      );
+    }
+
+    if (auditChecklist) {
+      parts.push(`\n**Before pushing, confirm each item is addressed:**\n${auditChecklist}`);
+    }
+
+    parts.push(
+      `\nCheck off each item, commit, and push to the same branch. ` +
+        `Do not push until all checklist items are addressed.`,
     );
+
+    return parts.join("\n");
   }
 
+  // Multi-round consolidated format
   const roundNum = priorFeedbackDescriptions.length + 1;
 
   const priorSections = priorFeedbackDescriptions
@@ -1516,15 +1625,30 @@ export function buildConsolidatedFeedbackMessage(
     })
     .join("\n\n");
 
-  return [
+  const parts: string[] = [
     `Your PR #${prNumber} on ${repo} has received ${roundNum} rounds of review feedback.`,
     `Address ALL outstanding items below in a single push — do not push until everything is fixed.\n`,
     `**Latest review (round ${roundNum}):**`,
     currentFeedback,
+  ];
+
+  if (diffContext) {
+    parts.push(
+      `\n**Relevant diff sections for flagged items:**\n\`\`\`diff\n${diffContext}\n\`\`\``,
+    );
+  }
+
+  if (auditChecklist) {
+    parts.push(`\n**Before pushing, confirm each item is addressed:**\n${auditChecklist}`);
+  }
+
+  parts.push(
     `\n**Prior feedback rounds — confirm these are also resolved:**`,
     priorSections,
     `\nFix every unchecked item above, commit, and push to the same branch.`,
-  ].join("\n");
+  );
+
+  return parts.join("\n");
 }
 
 /**

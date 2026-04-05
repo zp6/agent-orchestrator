@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING, IDLE_RECLAIM_THRESHOLD_CYCLES, ORPHAN_PR_CHECK_EVERY_N_CYCLES, extractChecklistText, buildConsolidatedFeedbackMessage, resolveConversationIdForPR } from "./daemon.js";
+import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING, IDLE_RECLAIM_THRESHOLD_CYCLES, ORPHAN_PR_CHECK_EVERY_N_CYCLES, extractChecklistText, buildConsolidatedFeedbackMessage, resolveConversationIdForPR, extractFlaggedFilesFromChecklist, buildDiffContextForFeedback, buildAuditChecklist } from "./daemon.js";
 import { TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
 import { StateStore } from "../state/store.js";
 
@@ -579,6 +579,180 @@ describe("buildConsolidatedFeedbackMessage", () => {
     const priorDesc = "Your PR was reviewed. Work through every item in the checklist below before pushing:\n\n1. item\n\nCheck off each item, commit, and push. Do not push until all checklist items are addressed.";
     const msg = buildConsolidatedFeedbackMessage("acme/widget", 99, "1. Fix it", [priorDesc]);
     expect(msg).toContain("PR #99 on acme/widget");
+  });
+
+  it("includes diff context section when prDiff option is provided and file is flagged", () => {
+    const feedback = "1. Fix the bug in src/foo.ts\n2. Add a test";
+    const prDiff = [
+      "diff --git a/src/foo.ts b/src/foo.ts",
+      "--- a/src/foo.ts",
+      "+++ b/src/foo.ts",
+      "@@ -1,3 +1,3 @@",
+      "-const x = 1;",
+      "+const x = 2;",
+    ].join("\n");
+    const msg = buildConsolidatedFeedbackMessage("owner/repo", 10, feedback, [], { prDiff });
+    expect(msg).toContain("Relevant diff sections for flagged items:");
+    expect(msg).toContain("src/foo.ts");
+    expect(msg).toContain("const x = 1");
+  });
+
+  it("includes audit checklist when numbered items exist", () => {
+    const feedback = "1. Fix the bug in src/foo.ts\n2. Add a test";
+    const msg = buildConsolidatedFeedbackMessage("owner/repo", 10, feedback, []);
+    expect(msg).toContain("Before pushing, confirm each item is addressed:");
+    expect(msg).toContain("- [ ] Fix the bug in src/foo.ts");
+    expect(msg).toContain("- [ ] Add a test");
+  });
+
+  it("omits diff context section when prDiff is not provided", () => {
+    const feedback = "1. Fix the bug in src/foo.ts";
+    const msg = buildConsolidatedFeedbackMessage("owner/repo", 10, feedback, []);
+    expect(msg).not.toContain("Relevant diff sections");
+  });
+
+  it("omits diff context when flagged file is not in diff", () => {
+    const feedback = "1. Fix the naming in the README";
+    const prDiff = "diff --git a/src/other.ts b/src/other.ts\n-old\n+new\n";
+    const msg = buildConsolidatedFeedbackMessage("owner/repo", 10, feedback, [], { prDiff });
+    expect(msg).not.toContain("Relevant diff sections");
+  });
+
+  it("includes diff context and audit checklist in consolidated (multi-round) format", () => {
+    const priorDesc =
+      "Your PR was reviewed. Work through every item in the checklist below before pushing:\n\n" +
+      "1. Old item\n\nCheck off each item, commit, and push to the same branch. Do not push until all checklist items are addressed.";
+    const feedback = "1. Fix src/bar.ts line handling\n2. Remove unused import";
+    const prDiff = [
+      "diff --git a/src/bar.ts b/src/bar.ts",
+      "--- a/src/bar.ts",
+      "+++ b/src/bar.ts",
+      "@@ -5,3 +5,3 @@",
+      "-old line",
+      "+new line",
+    ].join("\n");
+    const msg = buildConsolidatedFeedbackMessage("owner/repo", 7, feedback, [priorDesc], { prDiff });
+    expect(msg).toContain("2 rounds of review feedback");
+    expect(msg).toContain("Relevant diff sections for flagged items:");
+    expect(msg).toContain("src/bar.ts");
+    expect(msg).toContain("Before pushing, confirm each item is addressed:");
+    expect(msg).toContain("- [ ] Fix src/bar.ts line handling");
+    expect(msg).toContain("- [ ] Remove unused import");
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// extractFlaggedFilesFromChecklist — parse file paths from reviewer comments
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("extractFlaggedFilesFromChecklist", () => {
+  it("extracts src/ file paths from checklist text", () => {
+    const comment = "1. Fix the bug in src/orchestrator/pr-reviewer.ts at line 42\n2. Add test";
+    const files = extractFlaggedFilesFromChecklist(comment);
+    expect(files).toContain("src/orchestrator/pr-reviewer.ts");
+  });
+
+  it("extracts multiple file paths", () => {
+    const comment = "1. Update src/foo.ts\n2. Update lib/bar.js\n3. Add tests/baz.test.ts";
+    const files = extractFlaggedFilesFromChecklist(comment);
+    expect(files).toContain("src/foo.ts");
+    expect(files).toContain("lib/bar.js");
+    expect(files).toContain("tests/baz.test.ts");
+  });
+
+  it("returns empty array when no file paths in text", () => {
+    const comment = "1. Fix the naming convention\n2. Add proper error handling";
+    const files = extractFlaggedFilesFromChecklist(comment);
+    expect(files).toHaveLength(0);
+  });
+
+  it("deduplicates repeated file paths", () => {
+    const comment = "1. Fix src/foo.ts\n2. Also fix src/foo.ts";
+    const files = extractFlaggedFilesFromChecklist(comment);
+    expect(files.filter((f) => f === "src/foo.ts")).toHaveLength(1);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// buildDiffContextForFeedback — extract relevant diff hunks for flagged files
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("buildDiffContextForFeedback", () => {
+  const SAMPLE_DIFF = [
+    "diff --git a/src/foo.ts b/src/foo.ts",
+    "--- a/src/foo.ts",
+    "+++ b/src/foo.ts",
+    "@@ -1,3 +1,3 @@",
+    "-const x = 1;",
+    "+const x = 2;",
+    "diff --git a/src/bar.ts b/src/bar.ts",
+    "--- a/src/bar.ts",
+    "+++ b/src/bar.ts",
+    "@@ -10,3 +10,3 @@",
+    "-old bar",
+    "+new bar",
+  ].join("\n");
+
+  it("returns only sections for flagged files", () => {
+    const result = buildDiffContextForFeedback(SAMPLE_DIFF, ["src/foo.ts"]);
+    expect(result).toContain("src/foo.ts");
+    expect(result).toContain("const x = 1");
+    expect(result).not.toContain("old bar");
+  });
+
+  it("returns empty string when flagged files are not in diff", () => {
+    const result = buildDiffContextForFeedback(SAMPLE_DIFF, ["src/other.ts"]);
+    expect(result).toBe("");
+  });
+
+  it("returns empty string when diff is empty", () => {
+    const result = buildDiffContextForFeedback("", ["src/foo.ts"]);
+    expect(result).toBe("");
+  });
+
+  it("returns empty string when no flagged files", () => {
+    const result = buildDiffContextForFeedback(SAMPLE_DIFF, []);
+    expect(result).toBe("");
+  });
+
+  it("truncates output when combined sections exceed maxLength", () => {
+    const longDiff = "diff --git a/src/foo.ts b/src/foo.ts\n" + "x".repeat(5000);
+    const result = buildDiffContextForFeedback(longDiff, ["src/foo.ts"], 100);
+    expect(result.length).toBeLessThanOrEqual(200); // truncated + suffix
+    expect(result).toContain("truncated");
+  });
+
+  it("includes multiple flagged file sections", () => {
+    const result = buildDiffContextForFeedback(SAMPLE_DIFF, ["src/foo.ts", "src/bar.ts"]);
+    expect(result).toContain("src/foo.ts");
+    expect(result).toContain("src/bar.ts");
+    expect(result).toContain("const x = 1");
+    expect(result).toContain("old bar");
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// buildAuditChecklist — convert numbered checklist to task-list checkboxes
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("buildAuditChecklist", () => {
+  it("converts numbered items to unchecked task-list checkboxes", () => {
+    const comment = "1. Fix the bug\n2. Add a test\n3. Update docs";
+    const checklist = buildAuditChecklist(comment);
+    expect(checklist).toBe("- [ ] Fix the bug\n- [ ] Add a test\n- [ ] Update docs");
+  });
+
+  it("returns empty string when no numbered items", () => {
+    const comment = "No numbered items here, just prose.";
+    const checklist = buildAuditChecklist(comment);
+    expect(checklist).toBe("");
+  });
+
+  it("handles period and parenthesis list markers", () => {
+    const comment = "1. Item one\n2) Item two";
+    const checklist = buildAuditChecklist(comment);
+    expect(checklist).toContain("- [ ] Item one");
+    expect(checklist).toContain("- [ ] Item two");
   });
 });
 

@@ -289,14 +289,28 @@ export class PRReviewer {
     }
   }
 
-  async reviewOpenPRs(repo: string): Promise<Array<{ prNumber: number; result: PRReviewResult; prBody: string; prBranch: string }>> {
-    const results: Array<{ prNumber: number; result: PRReviewResult; prBody: string; prBranch: string }> = [];
+  async reviewOpenPRs(repo: string): Promise<Array<{ prNumber: number; result: PRReviewResult; prBody: string; prBranch: string; prDiff: string }>> {
+    const results: Array<{ prNumber: number; result: PRReviewResult; prBody: string; prBranch: string; prDiff: string }> = [];
 
     const prs = this.fetchOpenPRs(repo);
     for (const pr of prs) {
       try {
         const result = await this.reviewPR(repo, pr.number);
-        results.push({ prNumber: pr.number, result, prBody: pr.body, prBranch: pr.branch });
+        // Fetch diff only for request-changes decisions — used to build structured
+        // feedback context (flagged files + relevant hunks) without paying the cost
+        // for approve/escalate decisions where the diff is not dispatched to the agent.
+        let prDiff = "";
+        if (result.decision === "request-changes") {
+          try {
+            prDiff = execSync(
+              `gh pr diff ${pr.number} --repo ${repo}`,
+              { encoding: "utf-8", timeout: 30000 },
+            );
+          } catch {
+            // Non-fatal — feedback message degrades gracefully without diff context
+          }
+        }
+        results.push({ prNumber: pr.number, result, prBody: pr.body, prBranch: pr.branch, prDiff });
       } catch {
         // Continue reviewing other PRs
       }
