@@ -106,6 +106,16 @@ function formatLastSuccess(ts: string | null): string {
   return chalk.green("recent");
 }
 
+function formatRevisionRate(rate: number | null): string {
+  if (rate === null) return chalk.dim("  n/a");
+  const pct = Math.round(rate * 100);
+  const label = `${pct}%`.padStart(4);
+  // Low rework is good; high rework is bad
+  if (pct === 0) return chalk.green(label);
+  if (pct <= 20) return chalk.yellow(label);
+  return chalk.red(label);
+}
+
 function renderHealthTable(summaries: AgentHealthSummary[]): void {
   // Sort: agents with most consecutive failures first, then by success rate asc
   const sorted = [...summaries].sort((a, b) => {
@@ -118,13 +128,13 @@ function renderHealthTable(summaries: AgentHealthSummary[]): void {
 
   const nameLen = Math.max(12, ...sorted.map((s) => s.agent_name.length));
 
-  // Header
+  // Header — added REV% (revision rate) and 1ST% (first-attempt success rate)
   console.log(
     chalk.bold(
-      `  ${"AGENT".padEnd(nameLen + 2)} ${"RATE".padStart(4)}  ${"TASKS".padEnd(12)} ${"STREAK".padEnd(8)} ${"LAST OK".padEnd(10)} LAST FAILURE`,
+      `  ${"AGENT".padEnd(nameLen + 2)} ${"RATE".padStart(4)}  ${"REV%".padStart(4)}  ${"1ST%".padStart(4)}  ${"TASKS".padEnd(12)} ${"STREAK".padEnd(8)} ${"LAST OK".padEnd(10)} LAST FAILURE`,
     ),
   );
-  console.log(chalk.dim("  " + "─".repeat(nameLen + 2 + 4 + 2 + 12 + 8 + 10 + 30)));
+  console.log(chalk.dim("  " + "─".repeat(nameLen + 2 + 4 + 2 + 4 + 2 + 4 + 2 + 12 + 8 + 10 + 30)));
 
   for (const s of sorted) {
     const flagged = s.consecutive_failures > 2;
@@ -132,6 +142,8 @@ function renderHealthTable(summaries: AgentHealthSummary[]): void {
       ? chalk.red(s.agent_name.padEnd(nameLen + 2))
       : chalk.cyan(s.agent_name.padEnd(nameLen + 2));
     const rate = formatSuccessRate(s.success_rate);
+    const rev = formatRevisionRate(s.revision_rate);
+    const firstAttempt = formatSuccessRate(s.first_attempt_success_rate);
     const tasks = chalk.dim(`${s.done}/${s.total}`).padEnd(12);
     const streak = formatStreak(s.consecutive_failures).padEnd(8);
     const lastOk = formatLastSuccess(s.last_success_at).padEnd(10);
@@ -139,10 +151,11 @@ function renderHealthTable(summaries: AgentHealthSummary[]): void {
       ? chalk.dim(s.last_failure_reason.slice(0, 50))
       : chalk.dim("—");
 
-    console.log(`  ${name} ${rate}  ${tasks} ${streak} ${lastOk} ${reason}`);
+    console.log(`  ${name} ${rate}  ${rev}  ${firstAttempt}  ${tasks} ${streak} ${lastOk} ${reason}`);
   }
 
   const degraded = sorted.filter((s) => s.consecutive_failures > 2);
+  const highRevision = sorted.filter((s) => (s.revision_rate ?? 0) > 0.2);
   console.log();
   if (degraded.length > 0) {
     console.log(
@@ -152,6 +165,15 @@ function renderHealthTable(summaries: AgentHealthSummary[]): void {
   } else {
     console.log(chalk.green("✓  All agents within normal failure tolerances."));
   }
+  if (highRevision.length > 0) {
+    console.log(
+      chalk.yellow(`⚠  ${highRevision.length} agent(s) with high revision rate (>20%): `) +
+        highRevision.map((s) => chalk.yellow(`${s.agent_name} (${Math.round((s.revision_rate ?? 0) * 100)}%)`)).join(", "),
+    );
+  }
+  console.log();
+  console.log(chalk.dim("  REV%  = fraction of last 30 tasks that were revisions (PR feedback or verifier retries)"));
+  console.log(chalk.dim("  1ST%  = success rate on first-attempt tasks only (excluding revisions)"));
 }
 
 export function registerAgentsCommand(program: Command): void {

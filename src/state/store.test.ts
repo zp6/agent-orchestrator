@@ -1823,6 +1823,92 @@ describe("StateStore", () => {
       expect(names).toContain("agent-h");
       expect(names).toContain("agent-i");
     });
+
+    it("returns null revision_rate and first_attempt_success_rate when no tasks", () => {
+      const [s] = store.getAgentHealthSummary(["no-tasks-agent"]);
+      expect(s.revision_rate).toBeNull();
+      expect(s.first_attempt_success_rate).toBeNull();
+    });
+
+    it("counts pr-feedback source tasks as revisions", () => {
+      // 2 normal done tasks + 1 pr-feedback task
+      store.updateTask(
+        store.createTask({ title: "normal 1", source: "github", agent_name: "rev-agent" }).id,
+        { status: "done" },
+      );
+      store.updateTask(
+        store.createTask({ title: "normal 2", source: "manual", agent_name: "rev-agent" }).id,
+        { status: "done" },
+      );
+      store.updateTask(
+        store.createTask({ title: "[PR feedback] owner/repo#42", source: "pr-feedback", agent_name: "rev-agent" }).id,
+        { status: "done" },
+      );
+
+      const [s] = store.getAgentHealthSummary(["rev-agent"]);
+      expect(s.total).toBe(3);
+      expect(s.revision_rate).toBeCloseTo(1 / 3, 5);
+      // first-attempt: 2 done out of 2 first-attempt tasks
+      expect(s.first_attempt_success_rate).toBeCloseTo(1.0, 5);
+    });
+
+    it("counts [revision] title tasks as revisions", () => {
+      // 3 first-attempt tasks (2 done, 1 failed) + 1 revision task (done)
+      store.updateTask(
+        store.createTask({ title: "implement feature", source: "github", agent_name: "rev2-agent" }).id,
+        { status: "done" },
+      );
+      store.updateTask(
+        store.createTask({ title: "another task", source: "manual", agent_name: "rev2-agent" }).id,
+        { status: "failed", result: "exploded" },
+      );
+      store.updateTask(
+        store.createTask({ title: "third task", source: "github", agent_name: "rev2-agent" }).id,
+        { status: "done" },
+      );
+      store.updateTask(
+        store.createTask({ title: "[revision] implement feature", source: "manual", agent_name: "rev2-agent" }).id,
+        { status: "done" },
+      );
+
+      const [s] = store.getAgentHealthSummary(["rev2-agent"]);
+      expect(s.total).toBe(4);
+      expect(s.revision_rate).toBeCloseTo(1 / 4, 5);
+      // first-attempt: 2 done out of 3 first-attempt tasks → ~0.667
+      expect(s.first_attempt_success_rate).toBeCloseTo(2 / 3, 5);
+    });
+
+    it("reports revision_rate of 0 and first_attempt_success_rate matching success_rate when no revisions", () => {
+      store.updateTask(
+        store.createTask({ title: "task 1", source: "github", agent_name: "clean-agent" }).id,
+        { status: "done" },
+      );
+      store.updateTask(
+        store.createTask({ title: "task 2", source: "manual", agent_name: "clean-agent" }).id,
+        { status: "done" },
+      );
+
+      const [s] = store.getAgentHealthSummary(["clean-agent"]);
+      expect(s.revision_rate).toBeCloseTo(0, 5);
+      expect(s.first_attempt_success_rate).toBeCloseTo(1.0, 5);
+      expect(s.first_attempt_success_rate).toBeCloseTo(s.success_rate ?? 0, 5);
+    });
+
+    it("handles all tasks being revisions", () => {
+      store.updateTask(
+        store.createTask({ title: "[revision] task 1", source: "manual", agent_name: "all-rev-agent" }).id,
+        { status: "done" },
+      );
+      store.updateTask(
+        store.createTask({ title: "[PR feedback] repo#1", source: "pr-feedback", agent_name: "all-rev-agent" }).id,
+        { status: "done" },
+      );
+
+      const [s] = store.getAgentHealthSummary(["all-rev-agent"]);
+      expect(s.revision_rate).toBeCloseTo(1.0, 5);
+      // No first-attempt tasks → null
+      expect(s.first_attempt_success_rate).toBeNull();
+    });
   });
 
   describe("daemon stats (incrementStat / getStat)", () => {

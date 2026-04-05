@@ -273,6 +273,18 @@ export interface AgentHealthSummary {
   last_failure_reason: string | null;
   /** Timestamp of the most recent done task */
   last_success_at: string | null;
+  /**
+   * Fraction of the last 30 tasks that were revision/rework tasks
+   * (source=pr-feedback OR title starts with "[revision]").
+   * null when there are no tasks.
+   */
+  revision_rate: number | null;
+  /**
+   * Success rate on first-attempt tasks only (excluding revision/rework tasks).
+   * = done first-attempt tasks / total first-attempt tasks.
+   * null when there are no first-attempt tasks.
+   */
+  first_attempt_success_rate: number | null;
 }
 
 /**
@@ -1233,7 +1245,7 @@ export class StateStore {
       // Last 30 top-level tasks for this agent, newest first
       const recent = this.db
         .prepare(
-          `SELECT id, status, result, updated_at
+          `SELECT id, title, source, status, result, updated_at
            FROM tasks
            WHERE agent_name = ? AND parent_task_id IS NULL
            ORDER BY rowid DESC
@@ -1241,10 +1253,16 @@ export class StateStore {
         )
         .all(agentName) as Array<{
         id: string;
+        title: string;
+        source: string;
         status: string;
         result: string | null;
         updated_at: string;
       }>;
+
+      /** A task is a revision/rework if it was dispatched as PR feedback or a verifier retry. */
+      const isRevision = (t: { title: string; source: string }): boolean =>
+        t.source === "pr-feedback" || t.title.startsWith("[revision]");
 
       if (recent.length === 0) {
         return {
@@ -1256,6 +1274,8 @@ export class StateStore {
           consecutive_failures: 0,
           last_failure_reason: null,
           last_success_at: null,
+          revision_rate: null,
+          first_attempt_success_rate: null,
         };
       }
 
@@ -1284,6 +1304,16 @@ export class StateStore {
       const lastSuccess = recent.find((t) => t.status === "done");
       const last_success_at = lastSuccess?.updated_at ?? null;
 
+      // Revision rate: fraction of the last 30 tasks that were rework
+      const revisionCount = recent.filter(isRevision).length;
+      const revision_rate = total > 0 ? revisionCount / total : null;
+
+      // First-attempt success rate: done / total for non-revision tasks only
+      const firstAttemptTasks = recent.filter((t) => !isRevision(t));
+      const firstAttemptDone = firstAttemptTasks.filter((t) => t.status === "done").length;
+      const first_attempt_success_rate =
+        firstAttemptTasks.length > 0 ? firstAttemptDone / firstAttemptTasks.length : null;
+
       return {
         agent_name: agentName,
         success_rate,
@@ -1293,6 +1323,8 @@ export class StateStore {
         consecutive_failures,
         last_failure_reason,
         last_success_at,
+        revision_rate,
+        first_attempt_success_rate,
       };
     });
   }
