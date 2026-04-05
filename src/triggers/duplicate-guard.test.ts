@@ -173,7 +173,7 @@ describe("issue-15 real-world cases", () => {
 
   it("allows re-dispatch after the recency window expires", () => {
     const store = makeStore(
-      makeTask({ status: "done", source_ref: "owner/repo#10", updated_at: hoursAgo(5) }),
+      makeTask({ status: "done", source_ref: "owner/repo#10", updated_at: hoursAgo(RECENCY_WINDOW_HOURS + 1) }),
     );
     const result = checkDuplicate(store as StateStore, "github", "owner/repo#10");
     expect(result.isDuplicate).toBe(false);
@@ -183,6 +183,53 @@ describe("issue-15 real-world cases", () => {
     const store = makeStore(undefined);
     const result = checkDuplicate(store as StateStore, "github", "owner/repo#10");
     expect(result.isDuplicate).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #330 — 24-hour recency window
+// ---------------------------------------------------------------------------
+
+describe("issue-330: 24h recency window", () => {
+  it("RECENCY_WINDOW_HOURS is 24", () => {
+    expect(RECENCY_WINDOW_HOURS).toBe(24);
+  });
+
+  it("blocks re-dispatch of a task completed 4 hours ago (within 24h window)", () => {
+    // Reproduces the exact scenario from issue #330: task completed, issue
+    // still open, next poll cycle picks it up again within 4 hours.
+    const store = makeStore(
+      makeTask({ status: "done", updated_at: hoursAgo(4) }),
+    );
+    const result = checkDuplicate(store as StateStore, "github", "owner/repo#264");
+    expect(result.isDuplicate).toBe(true);
+    expect(result.reason).toContain("4.0h ago");
+    expect(result.reason).toContain("window: 24h");
+  });
+
+  it("blocks re-dispatch of a task completed 23 hours ago (still within window)", () => {
+    const store = makeStore(
+      makeTask({ status: "done", updated_at: hoursAgo(23) }),
+    );
+    const result = checkDuplicate(store as StateStore, "github", "owner/repo#264");
+    expect(result.isDuplicate).toBe(true);
+  });
+
+  it("allows re-dispatch of a task completed exactly at the window boundary (24h)", () => {
+    const store = makeStore(
+      makeTask({ status: "done", updated_at: hoursAgo(RECENCY_WINDOW_HOURS + 0.01) }),
+    );
+    const result = checkDuplicate(store as StateStore, "github", "owner/repo#264");
+    expect(result.isDuplicate).toBe(false);
+  });
+
+  it("reason message includes windowHours value", () => {
+    const store = makeStore(
+      makeTask({ status: "done", updated_at: hoursAgo(1) }),
+    );
+    const result = checkDuplicate(store as StateStore, "github", "owner/repo#264");
+    expect(result.isDuplicate).toBe(true);
+    expect(result.reason).toContain(`window: ${RECENCY_WINDOW_HOURS}h`);
   });
 });
 

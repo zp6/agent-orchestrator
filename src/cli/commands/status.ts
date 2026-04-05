@@ -3,6 +3,7 @@ import chalk from "chalk";
 import { StateStore, type Task, type SystemMetrics, type ScoreDistribution, type ScoreTrend, type MetricsTrend, type PRMetrics, type RetryMetrics } from "../../state/store.js";
 import { loadConfig } from "../../config/schema.js";
 import { MAX_RETRIES } from "../../orchestrator/dispatcher.js";
+import { checkDuplicate, RECENCY_WINDOW_HOURS } from "../../triggers/duplicate-guard.js";
 
 const STATUS_COLORS: Record<string, (s: string) => string> = {
   pending: chalk.yellow,
@@ -541,8 +542,58 @@ export function registerStatusCommand(program: Command): void {
     .option("-m, --metrics", "Show aggregated system metrics")
     .option("--trend [days]", "Show day-by-day metrics trend (default: 7 days)")
     .option("--unverified", "Show only done tasks that have not been verified yet")
-    .action((taskId?: string, opts?: { agent?: string; state?: string; type?: string; limit?: string; metrics?: boolean; trend?: string | boolean; unverified?: boolean }) => {
+    .option("--source-ref <ref>", "Show dedup status and full task history for a source ref (e.g. owner/repo#42)")
+    .action((taskId?: string, opts?: { agent?: string; state?: string; type?: string; limit?: string; metrics?: boolean; trend?: string | boolean; unverified?: boolean; sourceRef?: string }) => {
       const store = new StateStore();
+
+      // --source-ref: show dedup status and all tasks for a given source ref
+      if (opts?.sourceRef) {
+        const sourceRef = opts.sourceRef;
+        const tasks = store.findAllTasksBySourceRef(sourceRef);
+        const dupCheck = checkDuplicate(store, "github", sourceRef);
+        const processedInfo = store.getProcessedTriggerInfo("github", sourceRef);
+
+        console.log(chalk.bold(`\nDedup status for ${chalk.cyan(sourceRef)}\n`));
+
+        // Dedup result
+        if (dupCheck.isDuplicate) {
+          console.log(
+            chalk.yellow("⛔ Re-dispatch blocked") +
+            chalk.dim(` — ${dupCheck.reason}`),
+          );
+          if (dupCheck.existingTask) {
+            const colorFn = STATUS_COLORS[dupCheck.existingTask.status] ?? chalk.white;
+            console.log(
+              `   Blocking task: ${chalk.dim(dupCheck.existingTask.id)} ` +
+              colorFn(dupCheck.existingTask.status),
+            );
+          }
+        } else {
+          console.log(chalk.green("✓ Dispatch allowed") + chalk.dim(` — no active/recent task within ${RECENCY_WINDOW_HOURS}h window`));
+        }
+
+        // Processed-trigger record
+        if (processedInfo) {
+          console.log(
+            `\n${chalk.bold("Processed trigger:")} recorded at ${chalk.dim(processedInfo.created_at)}` +
+            (processedInfo.completed_at ? `, completed at ${chalk.dim(processedInfo.completed_at)}` : "") +
+            (processedInfo.task_id ? `, task ${chalk.dim(processedInfo.task_id)}` : ""),
+          );
+        }
+
+        // Full task history
+        if (tasks.length === 0) {
+          console.log(chalk.dim("\nNo tasks found for this source ref."));
+        } else {
+          console.log(chalk.bold(`\nTask history (${tasks.length}):\n`));
+          for (const task of tasks) {
+            console.log(formatTask(task));
+          }
+        }
+        store.close();
+        return;
+      }
+
 
       if (opts?.trend !== undefined) {
         const days = typeof opts.trend === "string" ? parseInt(opts.trend, 10) || 7 : 7;

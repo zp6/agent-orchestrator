@@ -479,6 +479,7 @@ export class StateStore {
     this.runMergeQueueMigration();
     this.runDaemonStatsMigration();
     this.runPRCreationRetryMigration();
+    this.runProcessedTriggersCompletedAtMigration();
   }
 
   private runPhase2Migration(): void {
@@ -764,10 +765,51 @@ export class StateStore {
   }
 
   markProcessed(source: string, sourceRef: string, taskId: string): void {
+    const now = new Date().toISOString();
     this.db.prepare(`
-      INSERT OR IGNORE INTO processed_triggers (source, source_ref, task_id, created_at)
-      VALUES (?, ?, ?, ?)
-    `).run(source, sourceRef, taskId, new Date().toISOString());
+      INSERT OR IGNORE INTO processed_triggers (source, source_ref, task_id, created_at, completed_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(source, sourceRef, taskId, now, now);
+  }
+
+  /**
+   * Return the processed-trigger record for a given source + source_ref, or
+   * undefined if no such record exists.  Used by `orch status --source-ref` to
+   * surface dedup information alongside task history.
+   */
+  getProcessedTriggerInfo(source: string, sourceRef: string): {
+    source: string;
+    source_ref: string;
+    task_id: string | null;
+    created_at: string;
+    completed_at: string | null;
+  } | undefined {
+    return this.db
+      .prepare(
+        "SELECT * FROM processed_triggers WHERE source = ? AND source_ref = ?",
+      )
+      .get(source, sourceRef) as
+      | {
+          source: string;
+          source_ref: string;
+          task_id: string | null;
+          created_at: string;
+          completed_at: string | null;
+        }
+      | undefined;
+  }
+
+  /**
+   * Return all top-level tasks whose source_ref exactly matches the given
+   * value, across all sources.  Used by `orch status --source-ref` to show
+   * the full dispatch history for a GitHub issue or similar trigger.
+   */
+  findAllTasksBySourceRef(sourceRef: string): Task[] {
+    return this.db
+      .prepare(
+        "SELECT * FROM tasks WHERE source_ref = ? AND parent_task_id IS NULL ORDER BY rowid DESC",
+      )
+      .all(sourceRef) as Task[];
   }
 
   getRecentActivity(limit = 50): TaskLog[] {
@@ -1880,6 +1922,25 @@ export class StateStore {
       CREATE INDEX IF NOT EXISTS idx_pr_creation_attempts_next_retry ON pr_creation_attempts(next_retry_at)
         WHERE next_retry_at IS NOT NULL;
     `);
+  }
+
+  /**
+   * Add completed_at column to processed_triggers for TTL-aware dedup.
+   * completed_at records when the task associated with the trigger actually
+   * finished, allowing the recency window to be anchored to task completion
+   * rather than the dispatch timestamp.
+   */
+  private runProcessedTriggersCompletedAtMigration(): void {
+    const columns = this.db
+      .prepare("PRAGMA table_info(processed_triggers)")
+      .all() as Array<{ name: string }>;
+    const colNames = new Set(columns.map((c) => c.name));
+
+    if (!colNames.has("completed_at")) {
+      this.db.exec(
+        "ALTER TABLE processed_triggers ADD COLUMN completed_at TEXT",
+      );
+    }
   }
 
   /** Insert a new PR creation attempt record. */

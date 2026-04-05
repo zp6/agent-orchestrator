@@ -7,8 +7,13 @@ const log = createLogger("duplicate-guard");
  * How long after a task completes before the same source_ref can be
  * dispatched again. Rejected tasks are exempt — they are re-dispatched
  * immediately so the agent can revise the work.
+ *
+ * 24 hours: prevents the double-dispatch pattern observed in issue #330,
+ * where the same GitHub issue was dispatched twice within a short window
+ * because the first task completed and the issue wasn't yet closed before
+ * the next poll cycle picked it up again.
  */
-export const RECENCY_WINDOW_HOURS = 4;
+export const RECENCY_WINDOW_HOURS = 24;
 
 export interface DuplicateCheckResult {
   isDuplicate: boolean;
@@ -81,11 +86,12 @@ export function checkDuplicate(
     const ageHours =
       (Date.now() - new Date(task.updated_at).getTime()) / 3_600_000;
     if (ageHours < RECENCY_WINDOW_HOURS) {
-      log.info("Duplicate suppressed: recent completed task", {
+      log.warn("Duplicate dispatch blocked: same source_ref completed within recency window", {
         sourceRef,
         taskId: task.id,
         status: task.status,
         ageHours: ageHours.toFixed(2),
+        windowHours: RECENCY_WINDOW_HOURS,
       });
       return {
         isDuplicate: true,

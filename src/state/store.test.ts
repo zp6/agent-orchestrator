@@ -2008,6 +2008,79 @@ describe("StateStore", () => {
     });
   });
 
+  // ── Issue #330: findAllTasksBySourceRef + getProcessedTriggerInfo ──────────
+
+  describe("findAllTasksBySourceRef", () => {
+    it("returns empty array when no tasks match", () => {
+      const tasks = store.findAllTasksBySourceRef("owner/repo#999");
+      expect(tasks).toEqual([]);
+    });
+
+    it("returns all top-level tasks with the given source_ref", () => {
+      store.createTask({ title: "First attempt", source: "github", source_ref: "owner/repo#42" });
+      store.createTask({ title: "Second attempt", source: "github", source_ref: "owner/repo#42" });
+      store.createTask({ title: "Other issue", source: "github", source_ref: "owner/repo#99" });
+
+      const tasks = store.findAllTasksBySourceRef("owner/repo#42");
+      expect(tasks).toHaveLength(2);
+      expect(tasks.every((t) => t.source_ref === "owner/repo#42")).toBe(true);
+    });
+
+    it("excludes sub-tasks (tasks with parent_task_id)", () => {
+      const parent = store.createTask({ title: "Parent", source: "github", source_ref: "owner/repo#42" });
+      store.createSubTask({
+        parent_task_id: parent.id,
+        step_id: "step-1",
+        title: "Sub-task",
+        description: "Sub",
+        source: "github",
+        agent_name: "agent",
+      });
+
+      const tasks = store.findAllTasksBySourceRef("owner/repo#42");
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]?.id).toBe(parent.id);
+    });
+
+    it("returns tasks ordered newest-first", () => {
+      const first = store.createTask({ title: "First", source: "github", source_ref: "owner/repo#42" });
+      const second = store.createTask({ title: "Second", source: "github", source_ref: "owner/repo#42" });
+
+      const tasks = store.findAllTasksBySourceRef("owner/repo#42");
+      expect(tasks[0]?.id).toBe(second.id);
+      expect(tasks[1]?.id).toBe(first.id);
+    });
+  });
+
+  describe("getProcessedTriggerInfo", () => {
+    it("returns undefined when no trigger has been recorded", () => {
+      const info = store.getProcessedTriggerInfo("github", "owner/repo#999");
+      expect(info).toBeUndefined();
+    });
+
+    it("returns the trigger record after markProcessed", () => {
+      const task = store.createTask({ title: "Task", source: "github", source_ref: "owner/repo#42" });
+      store.markProcessed("github", "owner/repo#42", task.id);
+
+      const info = store.getProcessedTriggerInfo("github", "owner/repo#42");
+      expect(info).toBeDefined();
+      expect(info?.source).toBe("github");
+      expect(info?.source_ref).toBe("owner/repo#42");
+      expect(info?.task_id).toBe(task.id);
+      expect(info?.created_at).toBeTruthy();
+      // completed_at is stored alongside created_at
+      expect(info?.completed_at).toBeTruthy();
+    });
+
+    it("returns undefined for a different source", () => {
+      const task = store.createTask({ title: "Task", source: "github", source_ref: "owner/repo#42" });
+      store.markProcessed("github", "owner/repo#42", task.id);
+
+      const info = store.getProcessedTriggerInfo("linear", "owner/repo#42");
+      expect(info).toBeUndefined();
+    });
+  });
+
   describe("daemon stats (incrementStat / getStat)", () => {
     it("returns 0 for an unknown key", () => {
       expect(store.getStat("idle_fill_dispatches")).toBe(0);
