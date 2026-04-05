@@ -1,5 +1,6 @@
 import { execSync } from "node:child_process";
 import { resolve } from "node:path";
+import { unlinkSync } from "node:fs";
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { OrchestratorConfig } from "../config/schema.js";
@@ -672,7 +673,15 @@ export class PRReviewer {
     // Match agent repos by their github field
     for (const agent of Object.values(this.config.agents)) {
       if (agent.github === repo) {
-        return resolve(this.config.base_dir, agent.dir);
+        const candidate = resolve(this.config.base_dir, agent.dir);
+        // Validate it's actually a git repo
+        try {
+          execSync("git rev-parse --git-dir", { cwd: candidate, encoding: "utf-8", timeout: 5000 });
+          return candidate;
+        } catch {
+          this.log.warn("Agent repo path is not a valid git repo", { repo, path: candidate });
+          continue;
+        }
       }
     }
     // Check if the orchestrator's own repo matches
@@ -682,7 +691,6 @@ export class PRReviewer {
         encoding: "utf-8",
         timeout: 10000,
       }).trim();
-      // remote may be "git@github.com:owner/repo.git" or "https://github.com/owner/repo"
       if (remote.includes(repo)) {
         return this.config.orchestrator_dir;
       }
@@ -701,55 +709,60 @@ export class PRReviewer {
    *   'failed'     — rebase had conflicts or another git error prevented completion
    */
   private tryAutoRebase(localPath: string, branch: string): "success" | "up-to-date" | "failed" {
+    // Build git env with credentials from config
+    const env: Record<string, string> = { ...process.env } as Record<string, string>;
+    if (this.config.proxy.ssh_key) {
+      const sshKeyPath = this.config.proxy.ssh_key.replace(/^~/, process.env.HOME ?? "");
+      env.GIT_SSH_COMMAND = `ssh -i ${sshKeyPath} -o StrictHostKeyChecking=no`;
+    }
+    env.GIT_TERMINAL_PROMPT = "0";
+
+    const opts = { cwd: localPath, encoding: "utf-8" as const, env };
     let currentBranch = "main";
+
     try {
+      // Clean stale git state that blocks future operations
+      try { execSync("git rebase --abort", { ...opts, timeout: 5000 }); } catch { /* no rebase in progress */ }
+      try { unlinkSync(resolve(localPath, ".git/index.lock")); } catch { /* no lock file */ }
+      try { execSync("git stash --include-untracked", { ...opts, timeout: 10000 }); } catch { /* nothing to stash */ }
+
       currentBranch =
-        execSync("git rev-parse --abbrev-ref HEAD", {
-          cwd: localPath,
-          encoding: "utf-8",
-          timeout: 10000,
-        }).trim() || "main";
+        execSync("git rev-parse --abbrev-ref HEAD", { ...opts, timeout: 10000 }).trim() || "main";
 
-      execSync("git fetch origin", { cwd: localPath, encoding: "utf-8", timeout: 30000 });
-      execSync(`git checkout ${branch}`, { cwd: localPath, encoding: "utf-8", timeout: 15000 });
+      execSync("git fetch origin", { ...opts, timeout: 30000 });
+      execSync(`git checkout ${branch}`, { ...opts, timeout: 15000 });
 
+      // Rebase step — separate try-catch so push failure doesn't abort the rebase
       try {
-        const rebaseOutput = execSync("git rebase origin/main", {
-          cwd: localPath,
-          encoding: "utf-8",
-          timeout: 60000,
-        });
-        // Git prints "Current branch <name> is up to date." when nothing to rebase.
+        const rebaseOutput = execSync("git rebase origin/main", { ...opts, timeout: 60000 });
         if (rebaseOutput.includes("is up to date")) {
           return "up-to-date";
         }
-        execSync(`git push --force-with-lease origin ${branch}`, {
-          cwd: localPath,
-          encoding: "utf-8",
-          timeout: 30000,
-        });
-        return "success";
       } catch {
-        try {
-          execSync("git rebase --abort", { cwd: localPath, encoding: "utf-8", timeout: 10000 });
-        } catch {
-          // Ignore abort failure
-        }
+        try { execSync("git rebase --abort", { ...opts, timeout: 10000 }); } catch { /* ignore */ }
         return "failed";
       }
-    } catch {
+
+      // Push step — if this fails, the rebase succeeded but push didn't. Don't abort.
+      try {
+        execSync(`git push --force-with-lease origin ${branch}`, { ...opts, timeout: 30000 });
+        return "success";
+      } catch (err) {
+        this.log.warn("Rebase succeeded but push failed — will retry next cycle", {
+          localPath, branch, error: err instanceof Error ? err.message : String(err),
+        });
+        return "failed";
+      }
+    } catch (err) {
+      this.log.warn("Auto-rebase git error", {
+        localPath, branch, error: err instanceof Error ? err.message : String(err),
+      });
       return "failed";
     } finally {
       // Restore original branch (best-effort)
       try {
-        execSync(`git checkout ${currentBranch}`, {
-          cwd: localPath,
-          encoding: "utf-8",
-          timeout: 10000,
-        });
-      } catch {
-        // Ignore restore failure
-      }
+        execSync(`git checkout ${currentBranch}`, { ...opts, timeout: 10000 });
+      } catch { /* ignore */ }
     }
   }
 
