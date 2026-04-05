@@ -3,6 +3,7 @@ import {
   enforceChecklist,
   extractChecklistItems,
   buildFeedbackTaskMessage,
+  validateClosesReferences,
 } from "../reviewer/pr-reviewer.js";
 
 describe("enforceChecklist", () => {
@@ -162,5 +163,78 @@ describe("buildFeedbackTaskMessage", () => {
     const msg = buildFeedbackTaskMessage({ ...baseOpts, reviewComment: comment });
     expect(msg).toContain("- [ ] Fix the race condition");
     expect(msg).toContain("- [ ] Add a lock");
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// validateClosesReferences (issue #373)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("validateClosesReferences", () => {
+  const prRepo = "rapartlu/claude-orchestrator-reviewer";
+  const issueRepo = "rapartlu/claude-agent-orchestrator";
+
+  it("returns empty array when repos are the same (bare refs are fine)", () => {
+    const body = "## Summary\n\nCloses #42\n\nSome description";
+    expect(validateClosesReferences(prRepo, body, prRepo)).toEqual([]);
+  });
+
+  it("flags bare 'Closes #N' when PR and issue repos differ", () => {
+    const body = "## Summary\n\nCloses #373\n\nImplemented the feature.";
+    const issues = validateClosesReferences(prRepo, body, issueRepo);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].keyword).toBe("Closes");
+    expect(issues[0].number).toBe(373);
+    expect(issues[0].suggestedRef).toBe("rapartlu/claude-agent-orchestrator#373");
+  });
+
+  it("flags bare 'Fixes #N' and 'Resolves #N' variants", () => {
+    const body = "Fixes #100\nResolves #200";
+    const issues = validateClosesReferences(prRepo, body, issueRepo);
+    expect(issues).toHaveLength(2);
+    expect(issues[0].keyword).toBe("Fixes");
+    expect(issues[0].number).toBe(100);
+    expect(issues[1].keyword).toBe("Resolves");
+    expect(issues[1].number).toBe(200);
+  });
+
+  it("is case-insensitive", () => {
+    const body = "closes #42\nFIXES #99";
+    const issues = validateClosesReferences(prRepo, body, issueRepo);
+    expect(issues).toHaveLength(2);
+    expect(issues[0].number).toBe(42);
+    expect(issues[1].number).toBe(99);
+  });
+
+  it("does NOT flag fully qualified references (already correct)", () => {
+    const body = "Closes rapartlu/claude-agent-orchestrator#373";
+    const issues = validateClosesReferences(prRepo, body, issueRepo);
+    expect(issues).toEqual([]);
+  });
+
+  it("flags bare refs but not qualified refs in the same body", () => {
+    const body =
+      "Closes rapartlu/claude-agent-orchestrator#373\n\nAlso closes #99";
+    const issues = validateClosesReferences(prRepo, body, issueRepo);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].number).toBe(99);
+    expect(issues[0].keyword.toLowerCase()).toBe("closes");
+  });
+
+  it("returns empty array when body has no closing keywords", () => {
+    const body = "Just a regular PR description with no closing refs.";
+    expect(validateClosesReferences(prRepo, body, issueRepo)).toEqual([]);
+  });
+
+  it("returns empty array when body is empty", () => {
+    expect(validateClosesReferences(prRepo, "", issueRepo)).toEqual([]);
+  });
+
+  it("handles multiple bare refs to the same issue", () => {
+    // Agents sometimes put Closes #N in both Summary and at the bottom
+    const body = "## Summary\nCloses #373\n\n## Details\nFixes #373";
+    const issues = validateClosesReferences(prRepo, body, issueRepo);
+    expect(issues).toHaveLength(2);
+    expect(issues.every((i) => i.number === 373)).toBe(true);
   });
 });

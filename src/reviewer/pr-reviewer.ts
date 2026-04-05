@@ -299,6 +299,41 @@ export class PRReviewer {
       }
     }
 
+    // ── Cross-repo Closes #N validator (issue #373) ───────────────────────
+    // GitHub only auto-closes issues via bare "Closes #N" within the SAME
+    // repo.  Cross-repo references require "Closes owner/repo#N".  Agents
+    // frequently get this wrong when they implement an issue from repo A but
+    // open a PR on repo B.
+    const issueRepo = this.inferIssueRepo(pr.body, repo);
+    if (issueRepo && issueRepo !== repo) {
+      const crossRepoIssues = validateClosesReferences(repo, pr.body, issueRepo);
+      if (crossRepoIssues.length > 0) {
+        const fixes = crossRepoIssues
+          .map(
+            (issue) =>
+              `- \`${issue.keyword} #${issue.number}\` → should be \`${issue.keyword} ${issue.suggestedRef}\``,
+          )
+          .join("\n");
+        const result: PRReviewResult = {
+          decision: "request-changes",
+          comment:
+            `This PR is on \`${repo}\` but uses bare \`Closes #N\` references that only work within the same repo. ` +
+            `GitHub will **not** auto-close the linked issue on merge.\n\n` +
+            `Please update the PR body:\n${fixes}\n\n` +
+            `You can fix this with:\n\`\`\`\ngh pr edit ${prNumber} --repo ${repo} --body "$(gh pr view ${prNumber} --repo ${repo} --json body -q .body | sed 's/${crossRepoIssues.map(i => `${i.keyword} #${i.number}`).join("\\|")}/${crossRepoIssues.map(i => `${i.keyword} ${i.suggestedRef}`).join("\\|")}/g')"\n\`\`\``,
+          reason: "PR body uses bare Closes #N for cross-repo issue reference — GitHub won't auto-close",
+        };
+        this.log.warn("Cross-repo Closes #N detected", {
+          repo,
+          prNumber,
+          issueRepo,
+          issues: crossRepoIssues,
+        });
+        await this.executeDecision(repo, prNumber, result);
+        return result;
+      }
+    }
+
     // ── Feedback ceiling: escalate after too many revision rounds ──────────
     const reviewCeiling = this.config.pr_review?.feedback_ceiling ?? 3;
     const priorReviews = this.countPriorReviews(repo, prNumber);
@@ -1088,7 +1123,27 @@ export class PRReviewer {
   }
 
   private hasIssueRef(pr: PRInfo): boolean {
-    return /(?:closes|fixes|resolves)\s+#\d+/i.test(pr.body);
+    // Match both bare "#N" and fully qualified "owner/repo#N" forms
+    return /(?:closes|fixes|resolves)\s+(?:[\w.-]+\/[\w.-]+)?#\d+/i.test(pr.body);
+  }
+
+  /**
+   * Try to determine which repo the PR's issue belongs to by scanning the
+   * body for fully qualified references (e.g. `rapartlu/claude-agent-orchestrator#373`).
+   * Returns the first `owner/repo` found, or undefined if none detected.
+   */
+  private inferIssueRepo(prBody: string, _prRepo: string): string | undefined {
+    // Look for fully qualified "owner/repo#N" references in the body
+    // (anywhere, not just after Closes/Fixes/Resolves — could be in a URL or description)
+    const fullRefPattern = /([\w.-]+\/[\w.-]+)#(\d+)/g;
+    let match;
+    while ((match = fullRefPattern.exec(prBody)) !== null) {
+      const candidate = match[1];
+      // Filter out obvious non-repo strings (URLs with protocol, etc.)
+      if (!candidate.includes(".") || candidate.includes("://")) continue;
+      return candidate;
+    }
+    return undefined;
   }
 
   private async patchPRBodyWithIssueRef(
@@ -1155,6 +1210,71 @@ export class PRReviewer {
       reason: "Parse failure",
     };
   }
+}
+
+/**
+ * Returned by validateClosesReferences for each bare `Closes #N` that should
+ * use a fully qualified `owner/repo#N` form for cross-repo auto-close.
+ */
+export interface CrossRepoCloseIssue {
+  /** The keyword used (e.g. "Closes", "Fixes", "Resolves") */
+  keyword: string;
+  /** The bare issue number */
+  number: number;
+  /** The suggested fully qualified reference (e.g. "rapartlu/claude-agent-orchestrator#373") */
+  suggestedRef: string;
+}
+
+/**
+ * Validate that `Closes/Fixes/Resolves` references in a PR body use the
+ * correct form for cross-repo auto-close.
+ *
+ * GitHub only auto-closes issues via bare `Closes #N` when the PR and issue
+ * are in the same repo.  For cross-repo references, the full `owner/repo#N`
+ * form is required (e.g. `Closes rapartlu/claude-agent-orchestrator#373`).
+ *
+ * @param prRepo    The repo the PR is on (e.g. "rapartlu/claude-orchestrator-reviewer")
+ * @param prBody    The PR body text
+ * @param issueRepo The repo the issue lives on (e.g. "rapartlu/claude-agent-orchestrator")
+ * @returns Array of bare references that need to be rewritten. Empty if all references are correct.
+ *
+ * Exported for testing.
+ */
+export function validateClosesReferences(
+  prRepo: string,
+  prBody: string,
+  issueRepo: string,
+): CrossRepoCloseIssue[] {
+  // Same repo — bare references are fine
+  if (prRepo === issueRepo) return [];
+
+  const issues: CrossRepoCloseIssue[] = [];
+  // Match bare "Closes #N" (NOT "Closes owner/repo#N")
+  // Use a negative lookbehind to exclude fully qualified refs would be ideal,
+  // but instead we use a pattern that explicitly captures the bare form:
+  // keyword + whitespace + # + digits, ensuring there's no "word/" before the #
+  const bareRefPattern = /(?:closes|fixes|resolves)\s+#(\d+)/gi;
+  let match;
+  while ((match = bareRefPattern.exec(prBody)) !== null) {
+    const fullMatch = match[0];
+    const number = parseInt(match[1], 10);
+    // Extract the keyword (Closes/Fixes/Resolves) from the match
+    const keyword = fullMatch.split(/\s/)[0];
+
+    // Check this isn't actually part of a fully-qualified ref by looking at
+    // what comes before the match. If there's "owner/repo" immediately before
+    // the "#", it's already qualified.
+    const beforeMatch = prBody.slice(0, match.index);
+    if (/[\w.-]+\/[\w.-]+\s*$/.test(beforeMatch)) continue;
+
+    issues.push({
+      keyword,
+      number,
+      suggestedRef: `${issueRepo}#${number}`,
+    });
+  }
+
+  return issues;
 }
 
 /**

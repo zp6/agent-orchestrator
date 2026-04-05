@@ -16,8 +16,8 @@
  */
 
 // Core reviewer modules
-export { PRReviewer, enforceChecklist } from "./reviewer/pr-reviewer.js";
-export type { PRInfo, PRReviewResult } from "./reviewer/pr-reviewer.js";
+export { PRReviewer, enforceChecklist, validateClosesReferences } from "./reviewer/pr-reviewer.js";
+export type { PRInfo, PRReviewResult, CrossRepoCloseIssue } from "./reviewer/pr-reviewer.js";
 
 export { Verifier } from "./reviewer/verifier.js";
 export type { VerificationResult } from "./reviewer/verifier.js";
