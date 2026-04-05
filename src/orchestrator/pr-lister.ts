@@ -139,6 +139,37 @@ export function toPRRow(item: PRListItem, repo: string, now: Date = new Date(), 
   return { ...partial, mergeReady: computeMergeReady(partial) };
 }
 
+/**
+ * Per-agent health summary for the `orch prs --health` view.
+ *
+ * Health score (0–100) is computed as:
+ *   100 - (conflicts × 30) - (ciFailures × 20) - (changesRequested × 15)
+ *       - (escalated × 10) - (stale × 5)
+ * clamped to [0, 100].  "ready" PRs contribute nothing negative.
+ */
+export interface AgentHealthSummary {
+  agent: string;
+  repo: string;
+  total: number;
+  ready: number;
+  conflicts: number;
+  ciFailures: number;
+  changesRequested: number;
+  escalated: number;
+  stale: number;
+  score: number; // 0–100
+}
+
+export function computeHealthScore(s: Omit<AgentHealthSummary, "score" | "agent" | "repo" | "total" | "ready">): number {
+  const penalty =
+    s.conflicts * 30 +
+    s.ciFailures * 20 +
+    s.changesRequested * 15 +
+    s.escalated * 10 +
+    s.stale * 5;
+  return Math.max(0, Math.min(100, 100 - penalty));
+}
+
 export class PRLister {
   constructor(private config: OrchestratorConfig) {}
 
@@ -259,5 +290,61 @@ export class PRLister {
     });
 
     return { rows: filtered, hasConflicts };
+  }
+
+  /**
+   * Compute a per-agent health summary across all agent repos.
+   * Each entry aggregates the PR rows for one agent/repo and derives a
+   * health score (0–100).  Repos with no open PRs are included with score 100.
+   */
+  healthSummary(opts: { repo?: string; agent?: string } = {}): AgentHealthSummary[] {
+    const repoToAgent = this.buildRepoToAgentMap();
+
+    let agentEntries: Array<{ agentName: string; repo: string }>;
+    if (opts.repo) {
+      agentEntries = [{ agentName: repoToAgent.get(opts.repo) ?? "", repo: opts.repo }];
+    } else if (opts.agent !== undefined) {
+      const agentRepo = this.config.agents[opts.agent]?.github;
+      agentEntries = agentRepo ? [{ agentName: opts.agent, repo: agentRepo }] : [];
+    } else {
+      // One entry per configured agent that has a github field
+      agentEntries = Object.entries(this.config.agents)
+        .filter(([, a]) => a.github)
+        .map(([name, a]) => ({ agentName: name, repo: a.github! }));
+      // De-duplicate by repo (keep first agent for shared repos)
+      const seen = new Set<string>();
+      agentEntries = agentEntries.filter(({ repo }) => {
+        if (seen.has(repo)) return false;
+        seen.add(repo);
+        return true;
+      });
+    }
+
+    return agentEntries.map(({ agentName, repo }) => {
+      const prs = this.fetchOpenPRs(repo);
+      const rows = prs.map((pr) => toPRRow(pr, repo, new Date(), agentName));
+
+      const conflicts = rows.filter((r) => r.mergeable === "conflict").length;
+      const ciFailures = rows.filter((r) => r.ciStatus === "failing").length;
+      const changesRequested = rows.filter((r) => r.reviewStatus === "changes-requested").length;
+      const escalated = rows.filter((r) => r.escalated).length;
+      const stale = rows.filter((r) => r.staleDays >= 3).length;
+      const ready = rows.filter((r) => r.mergeReady === "ready").length;
+
+      const score = computeHealthScore({ conflicts, ciFailures, changesRequested, escalated, stale });
+
+      return {
+        agent: agentName || repo,
+        repo,
+        total: rows.length,
+        ready,
+        conflicts,
+        ciFailures,
+        changesRequested,
+        escalated,
+        stale,
+        score,
+      };
+    });
   }
 }

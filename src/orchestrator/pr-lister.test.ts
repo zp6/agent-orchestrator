@@ -7,6 +7,7 @@ import {
   formatStaleDays,
   rollupCIStatus,
   computeMergeReady,
+  computeHealthScore,
 } from "./pr-lister.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { PRListItem, PRRow, StatusCheck } from "./pr-lister.js";
@@ -955,5 +956,200 @@ describe("PRLister — reviewRequests fetched from gh CLI", () => {
     const args = mockExecFileSync.mock.calls[0][1] as string[];
     const jsonFields = args[args.indexOf("--json") + 1] ?? "";
     expect(jsonFields).toContain("reviewRequests");
+  });
+});
+
+describe("computeHealthScore", () => {
+  it("returns 100 when there are no problems", () => {
+    expect(computeHealthScore({ conflicts: 0, ciFailures: 0, changesRequested: 0, escalated: 0, stale: 0 })).toBe(100);
+  });
+
+  it("deducts 30 per conflict", () => {
+    expect(computeHealthScore({ conflicts: 1, ciFailures: 0, changesRequested: 0, escalated: 0, stale: 0 })).toBe(70);
+  });
+
+  it("deducts 20 per CI failure", () => {
+    expect(computeHealthScore({ conflicts: 0, ciFailures: 1, changesRequested: 0, escalated: 0, stale: 0 })).toBe(80);
+  });
+
+  it("deducts 15 per changes-requested", () => {
+    expect(computeHealthScore({ conflicts: 0, ciFailures: 0, changesRequested: 1, escalated: 0, stale: 0 })).toBe(85);
+  });
+
+  it("deducts 10 per escalated PR", () => {
+    expect(computeHealthScore({ conflicts: 0, ciFailures: 0, changesRequested: 0, escalated: 1, stale: 0 })).toBe(90);
+  });
+
+  it("deducts 5 per stale PR", () => {
+    expect(computeHealthScore({ conflicts: 0, ciFailures: 0, changesRequested: 0, escalated: 0, stale: 1 })).toBe(95);
+  });
+
+  it("accumulates penalties across multiple problem types", () => {
+    // 30 + 20 + 15 = 65 penalty → score 35
+    expect(computeHealthScore({ conflicts: 1, ciFailures: 1, changesRequested: 1, escalated: 0, stale: 0 })).toBe(35);
+  });
+
+  it("clamps to 0 for extremely unhealthy repos", () => {
+    expect(computeHealthScore({ conflicts: 10, ciFailures: 10, changesRequested: 10, escalated: 10, stale: 10 })).toBe(0);
+  });
+
+  it("never returns a negative score", () => {
+    const score = computeHealthScore({ conflicts: 5, ciFailures: 3, changesRequested: 2, escalated: 2, stale: 4 });
+    expect(score).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("PRLister — healthSummary", () => {
+  beforeEach(() => {
+    mockExecFileSync.mockReset();
+  });
+
+  it("returns one entry per agent with github configured", () => {
+    mockExecFileSync.mockReturnValue("[]");
+
+    const lister = new PRLister(config);
+    const summaries = lister.healthSummary();
+
+    expect(summaries).toHaveLength(2); // agent-a and agent-b (agent-no-github excluded)
+    const agents = summaries.map((s) => s.agent);
+    expect(agents).toContain("agent-a");
+    expect(agents).toContain("agent-b");
+  });
+
+  it("scores 100 when agent has no open PRs", () => {
+    mockExecFileSync.mockReturnValue("[]");
+
+    const lister = new PRLister(config);
+    const summaries = lister.healthSummary({ agent: "agent-a" });
+
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].score).toBe(100);
+    expect(summaries[0].total).toBe(0);
+  });
+
+  it("computes correct counts for a conflicting PR", () => {
+    const conflicting = makePR({ number: 1, mergeable: "CONFLICTING" });
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo === "owner/repo-a") return JSON.stringify([conflicting]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const summaries = lister.healthSummary({ agent: "agent-a" });
+
+    expect(summaries[0].conflicts).toBe(1);
+    expect(summaries[0].total).toBe(1);
+    expect(summaries[0].score).toBe(70); // 100 - 30
+  });
+
+  it("computes correct counts for a CI-failing PR", () => {
+    const failing = makePR({
+      number: 2,
+      statusCheckRollup: [{ name: "build", status: "COMPLETED", conclusion: "FAILURE" }],
+    });
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo === "owner/repo-a") return JSON.stringify([failing]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const summaries = lister.healthSummary({ agent: "agent-a" });
+
+    expect(summaries[0].ciFailures).toBe(1);
+    expect(summaries[0].score).toBe(80); // 100 - 20
+  });
+
+  it("counts stale PRs (updatedAt ≥3 days ago)", () => {
+    const now = Date.now();
+    const stalePR = makePR({
+      number: 3,
+      createdAt: new Date(now - 10 * 24 * 60 * 60 * 1000).toISOString(),
+      updatedAt: new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo === "owner/repo-a") return JSON.stringify([stalePR]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const summaries = lister.healthSummary({ agent: "agent-a" });
+
+    expect(summaries[0].stale).toBe(1);
+    expect(summaries[0].score).toBe(95); // 100 - 5
+  });
+
+  it("counts ready PRs correctly", () => {
+    const readyPR = makePR({
+      number: 4,
+      mergeable: "MERGEABLE",
+      reviewDecision: "APPROVED",
+      statusCheckRollup: [{ name: "ci", status: "COMPLETED", conclusion: "SUCCESS" }],
+    });
+    mockExecFileSync.mockImplementation((_prog: string, args: string[]) => {
+      const repo = args[args.indexOf("--repo") + 1] ?? "";
+      if (repo === "owner/repo-a") return JSON.stringify([readyPR]);
+      return "[]";
+    });
+
+    const lister = new PRLister(config);
+    const summaries = lister.healthSummary({ agent: "agent-a" });
+
+    expect(summaries[0].ready).toBe(1);
+    expect(summaries[0].total).toBe(1);
+    // ready PRs add no penalty
+    expect(summaries[0].score).toBe(100);
+  });
+
+  it("filters by --repo option", () => {
+    mockExecFileSync.mockReturnValue("[]");
+
+    const lister = new PRLister(config);
+    const summaries = lister.healthSummary({ repo: "owner/repo-a" });
+
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].repo).toBe("owner/repo-a");
+    expect(mockExecFileSync.mock.calls).toHaveLength(1);
+  });
+
+  it("returns empty when --agent has no github", () => {
+    mockExecFileSync.mockReturnValue("[]");
+
+    const lister = new PRLister(config);
+    const summaries = lister.healthSummary({ agent: "agent-no-github" });
+
+    expect(summaries).toHaveLength(0);
+    expect(mockExecFileSync).not.toHaveBeenCalled();
+  });
+
+  it("uses repo as agent label when repo is not in config", () => {
+    mockExecFileSync.mockReturnValue("[]");
+
+    const lister = new PRLister(config);
+    const summaries = lister.healthSummary({ repo: "unknown/custom-repo" });
+
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].agent).toBe("unknown/custom-repo");
+  });
+
+  it("deduplicates repos when multiple agents share the same github repo", () => {
+    const sharedConfig: OrchestratorConfig = {
+      ...config,
+      agents: {
+        "agent-1": { ...config.agents["agent-a"]!, github: "owner/shared-repo" },
+        "agent-2": { ...config.agents["agent-b"]!, github: "owner/shared-repo" },
+      },
+    };
+
+    mockExecFileSync.mockReturnValue("[]");
+
+    const lister = new PRLister(sharedConfig);
+    const summaries = lister.healthSummary();
+
+    // Should produce only one entry for shared-repo
+    expect(summaries).toHaveLength(1);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
   });
 });

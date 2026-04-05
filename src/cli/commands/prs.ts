@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { loadConfig } from "../../config/schema.js";
 import { PRLister } from "../../orchestrator/pr-lister.js";
-import type { PRRow } from "../../orchestrator/pr-lister.js";
+import type { PRRow, AgentHealthSummary } from "../../orchestrator/pr-lister.js";
 import { formatAge, formatStaleDays } from "../../orchestrator/pr-lister.js";
 
 function formatMergeReady(mergeReady: PRRow["mergeReady"], width = 0): string {
@@ -173,10 +173,107 @@ function printTable(rows: PRRow[]): void {
   }
 }
 
+function scoreBar(score: number): string {
+  // 5-char bar: each block represents 20 points
+  const filled = Math.round(score / 20);
+  const bar = "█".repeat(filled) + "░".repeat(5 - filled);
+  if (score >= 80) return chalk.green(bar);
+  if (score >= 50) return chalk.yellow(bar);
+  return chalk.red(bar);
+}
+
+function scoreLabel(score: number): string {
+  const label = `${score}%`;
+  if (score >= 80) return chalk.green(label.padStart(4));
+  if (score >= 50) return chalk.yellow(label.padStart(4));
+  return chalk.red(label.padStart(4));
+}
+
+function printHealthTable(summaries: AgentHealthSummary[]): void {
+  if (summaries.length === 0) {
+    console.log(chalk.dim("No agent repos configured with github field."));
+    return;
+  }
+
+  const agentWidth = Math.max(5, ...summaries.map((s) => s.agent.length));
+
+  const header =
+    chalk.bold("AGENT".padEnd(agentWidth)) +
+    "  " +
+    chalk.bold("HEALTH") +
+    "         " +
+    chalk.bold("SCORE") +
+    "  " +
+    chalk.bold("OPEN".padEnd(4)) +
+    "  " +
+    chalk.bold("READY".padEnd(5)) +
+    "  " +
+    chalk.bold("CONFLICT".padEnd(8)) +
+    "  " +
+    chalk.bold("CI FAIL".padEnd(7)) +
+    "  " +
+    chalk.bold("CHG REQ".padEnd(7)) +
+    "  " +
+    chalk.bold("ESCALATED".padEnd(9)) +
+    "  " +
+    chalk.bold("STALE");
+
+  console.log(chalk.bold("\n🩺 PR Pipeline Health\n"));
+  console.log(header);
+  console.log(chalk.dim("─".repeat(agentWidth + 80)));
+
+  for (const s of summaries) {
+    const line =
+      s.agent.padEnd(agentWidth) +
+      "  " +
+      scoreBar(s.score) +
+      "  " +
+      scoreLabel(s.score) +
+      "  " +
+      String(s.total).padEnd(4) +
+      "  " +
+      (s.ready > 0 ? chalk.green(String(s.ready).padEnd(5)) : chalk.dim("0".padEnd(5))) +
+      "  " +
+      (s.conflicts > 0 ? chalk.red(String(s.conflicts).padEnd(8)) : chalk.dim("0".padEnd(8))) +
+      "  " +
+      (s.ciFailures > 0 ? chalk.red(String(s.ciFailures).padEnd(7)) : chalk.dim("0".padEnd(7))) +
+      "  " +
+      (s.changesRequested > 0 ? chalk.red(String(s.changesRequested).padEnd(7)) : chalk.dim("0".padEnd(7))) +
+      "  " +
+      (s.escalated > 0 ? chalk.magenta(String(s.escalated).padEnd(9)) : chalk.dim("0".padEnd(9))) +
+      "  " +
+      (s.stale > 0 ? chalk.yellow(String(s.stale)) : chalk.dim("0"));
+
+    console.log(line);
+  }
+
+  // Fleet-wide summary
+  const totalPRs = summaries.reduce((n, s) => n + s.total, 0);
+  const totalReady = summaries.reduce((n, s) => n + s.ready, 0);
+  const totalConflicts = summaries.reduce((n, s) => n + s.conflicts, 0);
+  const totalCI = summaries.reduce((n, s) => n + s.ciFailures, 0);
+  const totalChanges = summaries.reduce((n, s) => n + s.changesRequested, 0);
+  const totalEscalated = summaries.reduce((n, s) => n + s.escalated, 0);
+  const fleetScore =
+    summaries.length > 0
+      ? Math.round(summaries.reduce((n, s) => n + s.score, 0) / summaries.length)
+      : 100;
+
+  const parts: string[] = [`${summaries.length} agent(s)`, `${totalPRs} open PR(s)`];
+  if (totalReady > 0) parts.push(chalk.green(`${totalReady} ready`));
+  if (totalConflicts > 0) parts.push(chalk.red(`${totalConflicts} conflict(s)`));
+  if (totalCI > 0) parts.push(chalk.red(`${totalCI} CI failing`));
+  if (totalChanges > 0) parts.push(chalk.red(`${totalChanges} changes-requested`));
+  if (totalEscalated > 0) parts.push(chalk.magenta(`${totalEscalated} escalated`));
+  parts.push(`fleet health ${scoreLabel(fleetScore)}`);
+  console.log(chalk.dim("\n" + parts.join(" · ")));
+}
+
 export function registerPRsCommand(program: Command): void {
   program
     .command("prs")
     .description("List all open PRs across agent repos with CI, review, and merge readiness")
+    .option("--health", "Show a per-agent health summary with health scores instead of a PR table")
     .option("--stale", "Show only PRs not pushed to in ≥3 days")
     .option("--stale-days <days>", "Show only PRs not pushed to in ≥N days", parseInt)
     .option("--conflicts", "Show only PRs with merge conflicts (alias: --conflict)")
@@ -191,6 +288,7 @@ export function registerPRsCommand(program: Command): void {
     )
     .action(
       (opts: {
+        health?: boolean;
         stale?: boolean;
         staleDays?: number;
         conflicts?: boolean;
@@ -203,6 +301,15 @@ export function registerPRsCommand(program: Command): void {
       }) => {
         const config = loadConfig(program.opts().config);
         const lister = new PRLister(config);
+
+        // --health: per-agent health summary view
+        if (opts.health) {
+          const summaries = lister.healthSummary({ repo: opts.repo, agent: opts.agent });
+          printHealthTable(summaries);
+          const hasUnhealthy = summaries.some((s) => s.score < 50);
+          if (hasUnhealthy) process.exit(1);
+          return;
+        }
 
         const { rows: rawRows, hasConflicts } = lister.listAll(opts);
         const rows = opts.blocked ? rawRows.filter((r) => r.mergeReady !== "ready") : rawRows;
