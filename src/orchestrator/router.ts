@@ -21,8 +21,16 @@ export class Router {
 
   route(task: string, sourceRepo?: string): AgentMatch[] {
     const matches: AgentMatch[] = [];
+    const seenPools = new Set<string>();
 
     for (const [name, agent] of Object.entries(this.config.agents)) {
+      // For pool members, only score the primary (one with github: set, or first seen).
+      // The dispatcher handles picking an idle instance from the pool.
+      if (agent.pool) {
+        if (seenPools.has(agent.pool)) continue;
+        seenPools.add(agent.pool);
+      }
+
       const score = this.score(task, name, agent, sourceRepo);
       if (score.confidence > 0) {
         matches.push({ agentName: name, ...score });

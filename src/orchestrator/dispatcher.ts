@@ -4,7 +4,7 @@ import { LLMRouter } from "./llm-router.js";
 import { Planner, type Plan } from "./planner.js";
 import { PlanExecutor, type ExecutionResult } from "./executor.js";
 import { StateStore, type Task, type TaskSource, type TaskType } from "../state/store.js";
-import type { OrchestratorConfig } from "../config/schema.js";
+import { type OrchestratorConfig, getPoolMembers } from "../config/schema.js";
 import { ulid } from "ulid";
 import { createLogger } from "../service/logger.js";
 import { validateGhAuth, GhAuthError } from "../triggers/github.js";
@@ -118,6 +118,17 @@ export class Dispatcher {
       agentName = matches[0].agentName;
       routeReason = `Auto-routed (${matches[0].reason}, confidence: ${matches[0].confidence.toFixed(2)})`;
       this.log.info("Routed task", { agentName, reason: routeReason, confidence: matches[0].confidence });
+    }
+
+    // Pool resolution: if the selected agent belongs to a pool, pick an idle member
+    const poolMembers = getPoolMembers(this.config, agentName);
+    if (poolMembers.length > 1) {
+      const idle = poolMembers.find((name) => !this.store.hasActiveTask(name));
+      if (idle) {
+        this.log.info("Pool routing: picked idle member", { pool: this.config.agents[agentName]?.pool, selected: idle, from: agentName });
+        agentName = idle;
+      }
+      // If all busy, stick with the originally selected agent
     }
 
     // Validate agent exists
