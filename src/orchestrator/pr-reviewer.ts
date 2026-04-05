@@ -1,0 +1,927 @@
+import { execSync } from "node:child_process";
+import { resolve } from "node:path";
+import { unlinkSync } from "node:fs";
+import { createLLMClient } from "../client/llm-client.js";
+import { createLogger } from "../service/logger.js";
+import type { OrchestratorConfig } from "../config/schema.js";
+import { StateStore, type MergeQueueEntry } from "../state/store.js";
+import { Deployer } from "./deployer.js";
+import { extractIssueNumberFromBranch, findMatchingIssueNumber } from "./pr-creator.js";
+import { notifyOperator } from "../service/notify.js";
+
+export interface PRInfo {
+  number: number;
+  title: string;
+  body: string;
+  repo: string;
+  author: string;
+  branch: string;
+  diff: string;
+  files_changed: number;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+}
+
+export interface PRReviewResult {
+  decision: "approve" | "request-changes" | "escalate";
+  comment: string;
+  reason: string;
+  /**
+   * Set to true when the escalation is specifically due to unresolvable merge
+   * conflicts (auto-rebase failed or no local repo for rebase).  The daemon
+   * uses this flag to decide when to auto-close a persistently conflicting PR
+   * and re-dispatch the linked issue from a clean state.
+   */
+  conflictEscalation?: boolean;
+}
+
+const SYSTEM_PROMPT = `You are a code reviewer for a multi-agent system. Your job is to catch real bugs and security issues, NOT to enforce style preferences.
+
+Decide ONE of:
+
+1. **approve** — the code works, is safe, and achieves its goal. Approve even if you'd write it differently.
+2. **request-changes** — there are BLOCKING issues only: bugs that will break at runtime, security vulnerabilities, data loss risks, or missing critical functionality. Style, naming, structure preferences, and "could be cleaner" observations are NOT blocking.
+3. **escalate** — needs human review (security-sensitive, architectural, breaking changes, or genuinely uncertain)
+
+IMPORTANT:
+- Default to APPROVE. Most PRs that work correctly should be approved.
+- Only request changes for issues that would cause real failures or security problems.
+- Never block on: code style, naming conventions, missing comments/docs, "could use a helper function", edge cases that are unlikely in practice, or suggestions for follow-up work.
+- If you have minor suggestions, include them in an approval comment — don't block the PR for them.
+
+CRITICAL — when decision is "request-changes", the "comment" field MUST be a numbered markdown checklist.
+Each item must be a concrete, self-contained action the agent can check off. No narrative prose.
+Example format:
+"1. Add \`Closes #N\` to the PR body\\n2. Guard \`parseInt\` against empty string input in \`src/foo.ts:42\`\\n3. Add unit test for the empty-array edge case in \`processItems()\`"
+
+Respond with ONLY a JSON object (no markdown, no code fences):
+{
+  "decision": "approve|request-changes|escalate",
+  "comment": "Your review comment to post on the PR",
+  "reason": "Brief internal reason for the decision"
+}`;
+
+export class PRReviewer {
+  private log = createLogger("pr-reviewer");
+  private deployer: Deployer;
+  private store: StateStore;
+
+  /**
+   * In-memory counter tracking how many times each PR has been escalated due
+   * to unresolvable merge conflicts (auto-rebase failed or no local repo).
+   * Key: "repo#prNumber", value: consecutive conflict escalation count.
+   * Resets on daemon restart — acceptable since a few extra cycles before
+   * re-hitting the threshold is harmless.
+   */
+  private conflictEscalationCount = new Map<string, number>();
+
+  constructor(private config: OrchestratorConfig, store?: StateStore) {
+    this.deployer = new Deployer(config);
+    this.store = store ?? new StateStore();
+  }
+
+  async reviewPR(repo: string, prNumber: number): Promise<PRReviewResult> {
+    const pr = this.fetchPRInfo(repo, prNumber);
+    this.log.info("Reviewing PR", { repo, prNumber, title: pr.title, filesChanged: pr.files_changed, mergeable: pr.mergeable });
+
+    // Pre-review rebase: attempt to keep the branch current with origin/main before evaluating
+    // code quality. This covers two scenarios:
+    //   1. CONFLICTING — the branch has actual merge conflicts; rebase or escalate.
+    //   2. MERGEABLE/UNKNOWN — the branch may be stale (behind main); proactively rebase so
+    //      reviews reflect the current codebase. Best-effort: always continue to review.
+    const localPath = this.findLocalRepoPath(repo);
+
+    if (pr.mergeable === "CONFLICTING") {
+      if (localPath) {
+        this.log.info("PR has merge conflicts, attempting auto-rebase", {
+          repo,
+          prNumber,
+          branch: pr.branch,
+          localPath,
+        });
+        const rebaseOutcome = this.tryAutoRebase(localPath, pr.branch);
+        if (rebaseOutcome === "success") {
+          this.log.info("Auto-rebase succeeded — continuing with review", {
+            repo,
+            prNumber,
+            branch: pr.branch,
+          });
+          // Fall through to normal review — the branch is now rebased onto main
+        } else {
+          // Rebase failed — escalate instead of dispatching a rebase task to the agent
+          const conflictKey = `${repo}#${prNumber}`;
+          const conflictCount = (this.conflictEscalationCount.get(conflictKey) ?? 0) + 1;
+          this.conflictEscalationCount.set(conflictKey, conflictCount);
+          const result: PRReviewResult = {
+            decision: "escalate",
+            comment: `This PR has merge conflicts and auto-rebase onto \`origin/main\` failed (real conflicts need manual resolution).\n\n\`\`\`\ngit fetch origin\ngit rebase origin/main\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``,
+            reason: "Merge conflict — auto-rebase failed, escalating to human",
+            conflictEscalation: true,
+          };
+          this.log.warn("Auto-rebase failed, escalating PR to human", {
+            repo,
+            prNumber,
+            branch: pr.branch,
+            conflictEscalationCount: conflictCount,
+          });
+          await this.executeDecision(repo, prNumber, result);
+          return result;
+        }
+      } else {
+        // No local repo path found — escalate rather than dispatch a rebase task
+        const conflictKey = `${repo}#${prNumber}`;
+        const conflictCount = (this.conflictEscalationCount.get(conflictKey) ?? 0) + 1;
+        this.conflictEscalationCount.set(conflictKey, conflictCount);
+        const result: PRReviewResult = {
+          decision: "escalate",
+          comment: `This PR has merge conflicts. No local repository found for auto-rebase. Please rebase manually:\n\n\`\`\`\ngit fetch origin\ngit rebase origin/main\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``,
+          reason: "Merge conflict — no local repo for auto-rebase, escalating to human",
+          conflictEscalation: true,
+        };
+        this.log.info("PR has merge conflicts and no local repo found, escalating", {
+          repo,
+          prNumber,
+          conflictEscalationCount: conflictCount,
+        });
+        await this.executeDecision(repo, prNumber, result);
+        return result;
+      }
+    } else if (localPath) {
+      // Proactive rebase for stale branches (behind main but not yet CONFLICTING).
+      // This prevents slow accumulation of lag that eventually causes conflicts.
+      // Always continue to review regardless of outcome — this is best-effort.
+      const rebaseOutcome = this.tryAutoRebase(localPath, pr.branch);
+      this.log.info("Proactive pre-review rebase", {
+        repo,
+        prNumber,
+        branch: pr.branch,
+        outcome: rebaseOutcome,
+      });
+    }
+
+    // PR body linter: agent PRs must include "Closes #N"
+    if (this.isAgentPR(pr) && !this.hasIssueRef(pr)) {
+      this.log.warn("PR body linter: missing Closes #N", {
+        repo,
+        prNumber,
+        title: pr.title,
+        branch: pr.branch,
+        hasAgentTitlePrefix: Object.keys(this.config.agents).some((name) => pr.title.includes(`[${name}]`)),
+      });
+      // Try to auto-patch the PR body by inferring the issue number from the branch name,
+      // rather than wasting a full review cycle dispatching feedback to the agent.
+      // Uses all 3 tiers: direct branch parse → fuzzy title match → LLM disambiguation.
+      const inferredIssue = await findMatchingIssueNumber(repo, pr.branch, this.config);
+      if (inferredIssue) {
+        const patched = await this.patchPRBodyWithIssueRef(repo, prNumber, pr.body, inferredIssue);
+        if (patched) {
+          // Successfully patched — refresh body and continue to LLM review
+          pr.body = pr.body.trim()
+            ? `${pr.body.trim()}\n\nCloses #${inferredIssue}`
+            : `Closes #${inferredIssue}`;
+          this.log.info("PR body auto-patched with issue ref", { repo, prNumber, inferredIssue });
+        } else {
+          // Patch failed — fall back to requesting changes from the agent
+          const result: PRReviewResult = {
+            decision: "request-changes",
+            comment: `PR body must include "Closes #${inferredIssue}" so the issue auto-closes on merge. Please update the PR body with \`gh pr edit ${prNumber} --body "...Closes #${inferredIssue}"\`.`,
+            reason: "PR body missing issue reference (Closes #N) — auto-patch failed",
+          };
+          this.log.info("PR body linter: auto-patch failed, requesting changes", { repo, prNumber, inferredIssue });
+          await this.executeDecision(repo, prNumber, result);
+          return result;
+        }
+      } else {
+        // Can't infer issue number from branch even after fuzzy + LLM matching — give the agent actionable steps
+        const result: PRReviewResult = {
+          decision: "request-changes",
+          comment: `PR body is missing a "Closes #N" reference and no matching open issue could be found for branch \`${pr.branch}\`.\n\nFind the relevant issue:\n\`\`\`\ngh issue list --repo ${repo} --state open\n\`\`\`\n\nThen add the reference to the PR body:\n\`\`\`\ngh pr edit ${prNumber} --repo ${repo} --body "$(gh pr view ${prNumber} --repo ${repo} --json body -q .body)\n\nCloses #N"\n\`\`\`\n\nReplace \`N\` with the actual issue number before running.`,
+          reason: "PR body missing issue reference (Closes #N) — could not infer from branch name, fuzzy match, or LLM",
+        };
+        this.log.warn("PR body linter: missing issue ref, cannot infer from branch (all 3 tiers failed)", {
+          repo,
+          prNumber,
+          branch: pr.branch,
+          title: pr.title,
+        });
+        await this.executeDecision(repo, prNumber, result);
+        return result;
+      }
+    }
+
+    // Escalate after too many review rounds instead of endlessly requesting changes.
+    // The ceiling is configurable via agents.yaml: pr_review.feedback_ceiling (default: 3).
+    const reviewCeiling = this.config.pr_review?.feedback_ceiling ?? 3;
+    const priorReviews = this.countPriorReviews(repo, prNumber);
+    if (priorReviews >= reviewCeiling) {
+      const result: PRReviewResult = {
+        decision: "escalate",
+        comment: `This PR has gone through ${priorReviews} revision rounds without merging — escalating to human review.`,
+        reason: `${priorReviews} revision rounds without merging — escalating to break the loop`,
+      };
+      this.log.info("PR review cycle cap reached, escalating", { repo, prNumber, priorReviews, reviewCeiling });
+      await this.executeDecision(repo, prNumber, result);
+      return result;
+    }
+
+    // Diff size safety check
+    const DIFF_WARN_THRESHOLD = 80_000;   // 80 KB — warn LLM that diff is truncated
+    const DIFF_ESCALATE_THRESHOLD = 200_000; // 200 KB — auto-escalate, too large to review safely
+    const diffSize = pr.diff.length;
+
+    if (diffSize > DIFF_ESCALATE_THRESHOLD) {
+      // Skip size check for bootstrap PRs (first PR on a repo with no merged PRs yet)
+      const isBootstrap = this.isBootstrapPR(repo);
+      if (!isBootstrap) {
+        const result: PRReviewResult = {
+          decision: "escalate",
+          comment: `This PR's diff is ${Math.round(diffSize / 1024)} KB, which exceeds the safe review limit (200 KB). Automated review would only see a small fraction of the changes and could give false confidence. Escalating to human review.`,
+          reason: `Diff too large for automated review (${Math.round(diffSize / 1024)} KB > 200 KB threshold)`,
+        };
+        this.log.warn("PR diff too large — auto-escalating", { repo, prNumber, diffSize });
+        await this.executeDecision(repo, prNumber, result);
+        return result;
+      }
+      this.log.info("Large diff allowed — bootstrap PR on new repo", { repo, prNumber, diffSize });
+    }
+
+    const diffTruncated = diffSize > DIFF_WARN_THRESHOLD;
+    const truncatedDiff = pr.diff.slice(0, 100_000);
+    const diffWarning = diffTruncated
+      ? `\n\n> ⚠️ **TRUNCATED DIFF WARNING**: The full diff is ${Math.round(diffSize / 1024)} KB but only the first ~${Math.round(truncatedDiff.length / 1024)} KB is shown here. Your review is INCOMPLETE — you have not seen all the changes. Factor this into your decision: note in your comment which files/areas you could not review, and consider escalating if the unseen portion looks significant based on file names or context.`
+      : "";
+
+    const client = createLLMClient(this.config
+    );
+
+    const prompt = `## PR #${pr.number}: ${pr.title}\n**Repo:** ${pr.repo}\n**Author:** ${pr.author}\n**Branch:** ${pr.branch}\n**Files changed:** ${pr.files_changed}${diffWarning}\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${truncatedDiff}\n\`\`\``;
+
+    const LLM_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — PR reviews need more time via proxy CLI
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
+    try {
+      let response;
+      try {
+        response = await client.messages.create({
+          model: "claude-sonnet-4-6",
+          max_tokens: 2048,
+          system: SYSTEM_PROMPT,
+          messages: [{ role: "user", content: prompt }],
+        }, { signal: abortController.signal });
+      } finally {
+        clearTimeout(timer);
+      }
+
+      const text = response.content
+        .filter((b) => b.type === "text")
+        .map((b) => "text" in b ? b.text : "")
+        .join("");
+
+      const result = this.parseResponse(text);
+      this.log.info("PR review complete", { repo, prNumber, decision: result.decision, reason: result.reason });
+
+      // Execute the decision — pass branch so approve can enqueue without an extra API call
+      await this.executeDecision(repo, prNumber, result, pr.branch);
+
+      return result;
+    } catch (err) {
+      this.log.error("PR review failed", { repo, prNumber, error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    }
+  }
+
+  async reviewOpenPRs(repo: string): Promise<Array<{ prNumber: number; result: PRReviewResult; prBody: string; prBranch: string }>> {
+    const results: Array<{ prNumber: number; result: PRReviewResult; prBody: string; prBranch: string }> = [];
+
+    const prs = this.fetchOpenPRs(repo);
+    for (const pr of prs) {
+      try {
+        const result = await this.reviewPR(repo, pr.number);
+        results.push({ prNumber: pr.number, result, prBody: pr.body, prBranch: pr.branch });
+      } catch {
+        // Continue reviewing other PRs
+      }
+    }
+
+    return results;
+  }
+
+  private async executeDecision(repo: string, prNumber: number, result: PRReviewResult, prBranch?: string): Promise<void> {
+    switch (result.decision) {
+      case "approve":
+        try {
+          // Fetch branch name if not provided
+          const branch = prBranch ?? this.fetchPRBranch(repo, prNumber);
+
+          // Skip if already in queue to avoid duplicate enqueues
+          if (this.store.isPRInMergeQueue(repo, prNumber)) {
+            this.log.info("PR already in merge queue, skipping re-enqueue", { repo, prNumber });
+            break;
+          }
+
+          // Enqueue instead of merging immediately — the merge queue processes one at a time
+          const entry = this.store.queuePRForMerge(repo, prNumber, branch);
+          const queueSize = this.store.getMergeQueue(repo).length;
+          const positionMsg = entry.position === 0
+            ? "next in queue"
+            : `position ${entry.position + 1} of ${queueSize} in queue`;
+
+          execSync(
+            `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**[orchestrator] PR Review — Approved** ✅\n\n${result.comment}\n\n---\n🔀 Added to merge queue (${positionMsg}). PRs merge sequentially to avoid branch conflicts.`)}`,
+            { encoding: "utf-8", timeout: 30000 },
+          );
+          this.log.info("PR approved and added to merge queue", { repo, prNumber, position: entry.position });
+          this.store.recordPRReview(repo, prNumber, "approve");
+        } catch (err) {
+          this.log.error("Failed to approve/enqueue PR", { repo, prNumber, error: String(err) });
+        }
+        break;
+
+      case "request-changes":
+        try {
+          execSync(
+            `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**[orchestrator] PR Review — Changes Requested**\n\n${result.comment}`)}`,
+            { encoding: "utf-8", timeout: 30000 },
+          );
+          this.log.info("PR changes requested", { repo, prNumber });
+          this.store.recordPRReview(repo, prNumber, "request-changes");
+        } catch (err) {
+          this.log.error("Failed to request changes on PR", { repo, prNumber, error: String(err) });
+        }
+        break;
+
+      case "escalate":
+        try {
+          // Try to add human reviewer (may fail if rapartlu is the PR author)
+          try {
+            execSync(
+              `gh pr edit ${prNumber} --repo ${repo} --add-reviewer rapartlu`,
+              { encoding: "utf-8", timeout: 30000 },
+            );
+          } catch {
+            // Can't request review from PR author — add label instead
+            try {
+              execSync(
+                `gh pr edit ${prNumber} --repo ${repo} --add-label "needs-human-review"`,
+                { encoding: "utf-8", timeout: 30000 },
+              );
+            } catch {
+              // Label may not exist, that's fine — the comment below is the important part
+            }
+          }
+          // Leave a comment explaining why
+          execSync(
+            `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**Orchestrator escalation:** ${result.comment}`)}`,
+            { encoding: "utf-8", timeout: 30000 },
+          );
+          this.log.info("PR escalated to human", { repo, prNumber, reason: result.reason });
+          this.store.recordPRReview(repo, prNumber, "escalate");
+          // Notify operator via Telegram
+          notifyOperator(
+            `PR #${prNumber} escalated`,
+            `${repo}#${prNumber}: ${result.reason}`,
+            "warning",
+            `escalate:${repo}#${prNumber}`,
+          ).catch(() => {});
+
+        } catch (err) {
+          this.log.error("Failed to escalate PR", { repo, prNumber, error: String(err) });
+        }
+        break;
+    }
+  }
+
+  /**
+   * Expose escalation as a public method so the daemon's dispatch loop can trigger it
+   * directly when the feedback ceiling is hit (without going through the full review flow).
+   */
+  async escalatePR(repo: string, prNumber: number, reason: string): Promise<void> {
+    const result: PRReviewResult = {
+      decision: "escalate",
+      comment: reason,
+      reason,
+    };
+    this.log.info("Escalating PR via public escalatePR()", { repo, prNumber, reason });
+    await this.executeDecision(repo, prNumber, result);
+  }
+
+  /**
+   * Returns the number of consecutive conflict escalations recorded for a PR
+   * (in-memory — resets on daemon restart).
+   */
+  getConflictEscalationCount(repo: string, prNumber: number): number {
+    return this.conflictEscalationCount.get(`${repo}#${prNumber}`) ?? 0;
+  }
+
+  /**
+   * Clears the conflict escalation counter for a PR (called after auto-close
+   * so the same branch/issue pair doesn't immediately re-trigger).
+   */
+  resetConflictEscalation(repo: string, prNumber: number): void {
+    this.conflictEscalationCount.delete(`${repo}#${prNumber}`);
+  }
+
+  /**
+   * Auto-close a persistently conflicting PR and delete its branch.
+   * Posts an explanatory comment before closing so the history is clear.
+   * Returns true on success, false if any step failed.
+   */
+  autoCloseConflictingPR(repo: string, prNumber: number, branch: string, conflictCount: number): boolean {
+    const comment = [
+      `**[orchestrator] Auto-closed due to persistent merge conflicts**`,
+      ``,
+      `This PR has been in a conflict state for ${conflictCount} consecutive review cycles and auto-rebase has failed each time. Rather than continuing to escalate, the orchestrator is closing this PR and will re-dispatch the original issue so the agent can start fresh from \`main\`.`,
+      ``,
+      `The branch \`${branch}\` will be deleted to prevent the orphan-branch detector from recreating this PR.`,
+      ``,
+      `The linked issue will be re-opened automatically and dispatched to the agent.`,
+    ].join("\n");
+
+    try {
+      execSync(
+        `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(comment)}`,
+        { encoding: "utf-8", timeout: 30000 },
+      );
+    } catch (err) {
+      this.log.error("Failed to post auto-close comment on conflicting PR", { repo, prNumber, error: String(err) });
+      // Continue — still try to close
+    }
+
+    try {
+      execSync(
+        `gh pr close ${prNumber} --repo ${repo} --delete-branch`,
+        { encoding: "utf-8", timeout: 30000 },
+      );
+      this.log.info("Auto-closed persistently conflicting PR and deleted branch", { repo, prNumber, branch, conflictCount });
+      this.store.recordPRReview(repo, prNumber, "escalate"); // Record close as escalate for metrics
+      return true;
+    } catch (err) {
+      this.log.error("Failed to auto-close conflicting PR", { repo, prNumber, branch, error: String(err) });
+      // Branch deletion may have failed independently — try explicitly
+      try {
+        execSync(
+          `gh api repos/${repo}/git/refs/heads/${branch} -X DELETE`,
+          { encoding: "utf-8", timeout: 15000 },
+        );
+        this.log.info("Deleted conflicting branch via API after PR close failed", { repo, branch });
+      } catch {
+        // Best-effort — log and move on
+        this.log.warn("Could not delete conflicting branch", { repo, branch });
+      }
+      return false;
+    }
+  }
+
+  private countPriorReviews(repo: string, prNumber: number): number {
+    try {
+      // Count specifically "Changes Requested" review comments — not approvals or escalations.
+      // Approvals cause the PR to be merged (no more reviews), so in practice we only want
+      // to count the change-request rounds that are keeping the feedback loop alive.
+      const raw = execSync(
+        `gh api "repos/${repo}/issues/${prNumber}/comments?per_page=100" --jq '[.[] | select(.body | contains("[orchestrator] PR Review — Changes Requested"))] | length'`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+      return parseInt(raw, 10) || 0;
+    } catch {
+      return 0; // fail-open
+    }
+  }
+
+  private isAgentPR(pr: PRInfo): boolean {
+    // Match PRs where the title contains [agent-name]
+    const agentNames = Object.keys(this.config.agents);
+    if (agentNames.some((name) => pr.title.includes(`[${name}]`))) return true;
+
+    // Also match PRs whose branch follows the issue-N-* naming convention.
+    // Agents are instructed to use this format, so a branch like "issue-42-add-feature"
+    // is almost certainly agent-created even if the title prefix was omitted.
+    // This catches the common failure mode where an agent forgets [agent-name] in the
+    // title and the Closes #N linter would otherwise silently be skipped.
+    if (extractIssueNumberFromBranch(pr.branch) !== null) return true;
+
+    return false;
+  }
+
+  private hasIssueRef(pr: PRInfo): boolean {
+    return /(?:closes|fixes|resolves)\s+#\d+/i.test(pr.body);
+  }
+
+  /**
+   * Auto-patch a PR body to include "Closes #N" using gh pr edit.
+   * Returns true if the patch succeeded, false otherwise.
+   */
+  private async patchPRBodyWithIssueRef(repo: string, prNumber: number, currentBody: string, issueNumber: string): Promise<boolean> {
+    try {
+      const newBody = currentBody.trim()
+        ? `${currentBody.trim()}\n\nCloses #${issueNumber}`
+        : `Closes #${issueNumber}`;
+      execSync(
+        `gh pr edit ${prNumber} --repo ${repo} --body ${shellEscape(newBody)}`,
+        { encoding: "utf-8", timeout: 30000 },
+      );
+      return true;
+    } catch (err) {
+      this.log.error("Failed to auto-patch PR body with issue ref", { repo, prNumber, issueNumber, error: String(err) });
+      return false;
+    }
+  }
+
+  private async restartAgentsForRepo(repo: string): Promise<void> {
+    for (const [name, agent] of Object.entries(this.config.agents)) {
+      if (agent.github === repo && agent.repo) {
+        this.log.info("Restarting agent after PR merge", { agentName: name, repo });
+        await this.deployer.restartAgent(name);
+      }
+    }
+  }
+
+  /**
+   * Return the current merge queue entries for display.
+   * Pass repo to restrict to a single repo, or omit for all repos.
+   */
+  getMergeQueue(repo?: string): MergeQueueEntry[] {
+    return this.store.getMergeQueue(repo);
+  }
+
+  /**
+   * Process the merge queue: dequeue one PR at a time, merge it, then rebase
+   * remaining queued branches onto the new main so they don't conflict.
+   *
+   * Called by the daemon each cycle.  For each repo, we take the next queued PR,
+   * attempt a squash merge, mark it merged, then rebase all remaining queued
+   * branches for that repo so they stay current.
+   */
+  async processMergeQueue(): Promise<void> {
+    // Build set of repos that have queued PRs
+    const queue = this.store.getMergeQueue();
+    if (queue.length === 0) return;
+
+    const repos = [...new Set(queue.map((e) => e.repo))];
+
+    for (const repo of repos) {
+      // Skip if there's already a merge in progress for this repo
+      const repoQueue = this.store.getMergeQueue(repo);
+      const merging = repoQueue.find((e) => e.status === "merging");
+      if (merging) {
+        // A merge was started last cycle — check if the PR is now merged/closed
+        const isOpen = this.isPROpen(repo, merging.pr_number);
+        if (!isOpen) {
+          // It's been merged (or closed) — mark completed and continue
+          this.store.markQueuedPRMerged(repo, merging.pr_number);
+          this.log.info("Queued PR merge completed (detected closed)", { repo, prNumber: merging.pr_number });
+          await this.rebaseRemainingQueue(repo, merging.branch);
+          await this.restartAgentsForRepo(repo);
+        } else {
+          // Still in progress — wait for next cycle
+          this.log.info("Merge still in progress, waiting", { repo, prNumber: merging.pr_number });
+        }
+        continue;
+      }
+
+      const next = repoQueue.find((e) => e.status === "queued");
+      if (!next) continue;
+
+      // Verify PR is still open before attempting merge
+      if (!this.isPROpen(repo, next.pr_number)) {
+        this.log.info("Queued PR is no longer open, removing from queue", { repo, prNumber: next.pr_number });
+        this.store.removeFromMergeQueue(repo, next.pr_number);
+        continue;
+      }
+
+      // Mark as merging and attempt the squash merge
+      this.store.markQueuedPRMerging(repo, next.pr_number);
+      this.log.info("Processing merge queue: merging PR", { repo, prNumber: next.pr_number, branch: next.branch });
+
+      try {
+        execSync(
+          `gh pr merge ${next.pr_number} --repo ${repo} --squash --delete-branch`,
+          { encoding: "utf-8", timeout: 60000 },
+        );
+        this.store.markQueuedPRMerged(repo, next.pr_number);
+        this.log.info("Merge queue: PR merged successfully", { repo, prNumber: next.pr_number });
+
+        // Rebase remaining queued branches now that main has advanced
+        await this.rebaseRemainingQueue(repo, next.branch);
+        await this.restartAgentsForRepo(repo);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        this.store.markQueuedPRFailed(repo, next.pr_number, errMsg);
+        this.log.error("Merge queue: PR merge failed", { repo, prNumber: next.pr_number, error: errMsg });
+        // Post a comment so the agent knows the merge failed
+        try {
+          execSync(
+            `gh pr comment ${next.pr_number} --repo ${repo} --body ${shellEscape(`**[orchestrator] Merge Queue — Merge Failed** ❌\n\nFailed to merge PR automatically:\n\`\`\`\n${errMsg.slice(0, 500)}\n\`\`\`\nThis PR has been removed from the merge queue. Please resolve any issues and re-open a review.`)}`,
+            { encoding: "utf-8", timeout: 30000 },
+          );
+        } catch {
+          // Best effort
+        }
+      }
+    }
+  }
+
+  /**
+   * After a successful merge, rebase all remaining queued PRs for the repo
+   * onto the new main so they stay conflict-free.
+   */
+  private async rebaseRemainingQueue(repo: string, justMergedBranch: string): Promise<void> {
+    const localPath = this.findLocalRepoPath(repo);
+    if (!localPath) {
+      this.log.warn("Cannot rebase queued branches: no local repo path found", { repo });
+      return;
+    }
+
+    const remaining = this.store.getMergeQueue(repo).filter((e) => e.branch !== justMergedBranch);
+    if (remaining.length === 0) return;
+
+    this.log.info("Rebasing remaining queued branches after merge", { repo, count: remaining.length });
+
+    for (const entry of remaining) {
+      try {
+        const outcome = this.tryAutoRebase(localPath, entry.branch);
+        this.log.info("Rebase of queued branch", { repo, branch: entry.branch, outcome });
+        if (outcome === "failed") {
+          // Remove from queue and notify — can't safely merge if rebase fails
+          this.store.markQueuedPRFailed(repo, entry.pr_number, "Rebase onto new main failed after previous merge");
+          try {
+            execSync(
+              `gh pr comment ${entry.pr_number} --repo ${repo} --body ${shellEscape(`**[orchestrator] Merge Queue — Rebase Failed** ⚠️\n\nAfter the preceding PR was merged, this branch could not be automatically rebased onto the new \`main\`. Please rebase manually and re-queue:\n\`\`\`\ngit fetch origin && git rebase origin/main\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``)}`,
+              { encoding: "utf-8", timeout: 30000 },
+            );
+          } catch {
+            // Best effort
+          }
+        }
+      } catch (err) {
+        this.log.error("Error rebasing queued branch", { repo, branch: entry.branch, error: String(err) });
+      }
+    }
+  }
+
+  /** Fetch only the branch name for a PR without pulling the full diff. */
+  private fetchPRBranch(repo: string, prNumber: number): string {
+    try {
+      return execSync(
+        `gh pr view ${prNumber} --repo ${repo} --json headRefName -q .headRefName`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+    } catch {
+      return "unknown";
+    }
+  }
+
+  isPROpen(repo: string, prNumber: number): boolean {
+    try {
+      const state = execSync(
+        `gh pr view ${prNumber} --repo ${repo} --json state -q .state`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+      return state === "OPEN";
+    } catch {
+      // Fail-safe: if we can't verify the state, don't dispatch
+      this.log.warn("Could not verify PR state, skipping feedback dispatch", { repo, prNumber });
+      return false;
+    }
+  }
+
+  /**
+   * Find the local filesystem path for a GitHub repo slug (owner/repo).
+   * Checks agent configs first, then falls back to inspecting the orchestrator's
+   * own git remote. Returns null when no local path is known.
+   */
+  /**
+   * Check if a repo has no merged PRs yet (first PR = bootstrap).
+   * Bootstrap PRs are exempt from the large-diff escalation threshold.
+   */
+  private isBootstrapPR(repo: string): boolean {
+    try {
+      const raw = execSync(
+        `gh pr list --repo ${repo} --state merged --json number -L 1`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+      const merged = JSON.parse(raw) as Array<{ number: number }>;
+      return merged.length === 0;
+    } catch {
+      return false; // fail-closed: assume not bootstrap
+    }
+  }
+
+  private findLocalRepoPath(repo: string): string | null {
+    // Match agent repos by their github field
+    for (const agent of Object.values(this.config.agents)) {
+      if (agent.github === repo) {
+        const candidate = resolve(this.config.base_dir, agent.dir);
+        // Validate it's actually a git repo
+        try {
+          execSync("git rev-parse --git-dir", { cwd: candidate, encoding: "utf-8", timeout: 5000 });
+          return candidate;
+        } catch {
+          this.log.warn("Agent repo path is not a valid git repo", { repo, path: candidate });
+          continue;
+        }
+      }
+    }
+    // Check if the orchestrator's own repo matches
+    try {
+      const remote = execSync("git remote get-url origin", {
+        cwd: this.config.orchestrator_dir,
+        encoding: "utf-8",
+        timeout: 10000,
+      }).trim();
+      if (remote.includes(repo)) {
+        return this.config.orchestrator_dir;
+      }
+    } catch {
+      // orchestrator_dir has no git remote — skip
+    }
+    return null;
+  }
+
+  /**
+   * Attempt to rebase the given branch onto origin/main in a local repo directory.
+   * Saves and restores the current branch regardless of outcome.
+   * Returns:
+   *   'up-to-date' — branch was already current with origin/main, nothing to do
+   *   'success'    — rebase completed and changes were pushed
+   *   'failed'     — rebase had conflicts or another git error prevented completion
+   */
+  private tryAutoRebase(localPath: string, branch: string): "success" | "up-to-date" | "failed" {
+    // Build git env with credentials from config
+    const env: Record<string, string> = { ...process.env } as Record<string, string>;
+    if (this.config.proxy.ssh_key) {
+      const sshKeyPath = this.config.proxy.ssh_key.replace(/^~/, process.env.HOME ?? "");
+      env.GIT_SSH_COMMAND = `ssh -i ${sshKeyPath} -o StrictHostKeyChecking=no`;
+    }
+    env.GIT_TERMINAL_PROMPT = "0";
+
+    const opts = { cwd: localPath, encoding: "utf-8" as const, env };
+    let currentBranch = "main";
+
+    try {
+      // Clean stale git state that blocks future operations
+      try { execSync("git rebase --abort", { ...opts, timeout: 5000 }); } catch { /* no rebase in progress */ }
+      try { unlinkSync(resolve(localPath, ".git/index.lock")); } catch { /* no lock file */ }
+      try { execSync("git stash --include-untracked", { ...opts, timeout: 10000 }); } catch { /* nothing to stash */ }
+
+      currentBranch =
+        execSync("git rev-parse --abbrev-ref HEAD", { ...opts, timeout: 10000 }).trim() || "main";
+
+      execSync("git fetch origin", { ...opts, timeout: 30000 });
+      execSync(`git checkout ${branch}`, { ...opts, timeout: 15000 });
+
+      // Rebase step — separate try-catch so push failure doesn't abort the rebase
+      try {
+        const rebaseOutput = execSync("git rebase origin/main", { ...opts, timeout: 60000 });
+        if (rebaseOutput.includes("is up to date")) {
+          return "up-to-date";
+        }
+      } catch {
+        try { execSync("git rebase --abort", { ...opts, timeout: 10000 }); } catch { /* ignore */ }
+        return "failed";
+      }
+
+      // Push step — if this fails, the rebase succeeded but push didn't. Don't abort.
+      try {
+        execSync(`git push --force-with-lease origin ${branch}`, { ...opts, timeout: 30000 });
+        return "success";
+      } catch (err) {
+        this.log.warn("Rebase succeeded but push failed — will retry next cycle", {
+          localPath, branch, error: err instanceof Error ? err.message : String(err),
+        });
+        return "failed";
+      }
+    } catch (err) {
+      this.log.warn("Auto-rebase git error", {
+        localPath, branch, error: err instanceof Error ? err.message : String(err),
+      });
+      return "failed";
+    } finally {
+      // Restore original branch (best-effort)
+      try {
+        execSync(`git checkout ${currentBranch}`, { ...opts, timeout: 10000 });
+      } catch { /* ignore */ }
+    }
+  }
+
+  private fetchPRInfo(repo: string, prNumber: number): PRInfo {
+    const prJson = execSync(
+      `gh pr view ${prNumber} --repo ${repo} --json number,title,body,author,headRefName,changedFiles,mergeable`,
+      { encoding: "utf-8", timeout: 30000 },
+    );
+    const pr = JSON.parse(prJson);
+
+    const diff = execSync(
+      `gh pr diff ${prNumber} --repo ${repo}`,
+      { encoding: "utf-8", timeout: 30000 },
+    );
+
+    return {
+      number: pr.number,
+      title: pr.title,
+      body: pr.body ?? "",
+      repo,
+      author: pr.author?.login ?? "unknown",
+      branch: pr.headRefName,
+      diff,
+      files_changed: pr.changedFiles ?? 0,
+      mergeable: pr.mergeable ?? "UNKNOWN",
+    };
+  }
+
+  private fetchOpenPRs(repo: string): Array<{ number: number; title: string; body: string; branch: string }> {
+    const output = execSync(
+      `gh pr list --repo ${repo} --state open --json number,title,body,headRefName`,
+      { encoding: "utf-8", timeout: 30000 },
+    );
+    const prs = JSON.parse(output) as Array<{ number: number; title: string; body?: string; headRefName?: string }>;
+    return prs.map((pr) => ({ ...pr, body: pr.body ?? "", branch: pr.headRefName ?? "" }));
+  }
+
+  private parseResponse(text: string): PRReviewResult {
+    // Try multiple extraction strategies to handle varied LLM output formats.
+    // 57% of reviews were failing to parse — Claude often wraps JSON in
+    // explanation text or adds trailing commentary.
+    const strategies = [
+      // 1. Strip code fences and parse directly
+      () => JSON.parse(text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim()),
+      // 2. Extract first JSON object containing "decision" from anywhere
+      () => {
+        const match = text.match(/\{[\s\S]*?"decision"[\s\S]*?\}/);
+        if (!match) throw new Error("No JSON object found");
+        return JSON.parse(match[0]);
+      },
+      // 3. Find JSON between code fences specifically
+      () => {
+        const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (!match) throw new Error("No code fence found");
+        return JSON.parse(match[1].trim());
+      },
+    ];
+
+    for (const strategy of strategies) {
+      try {
+        const parsed = strategy();
+        const decision = ["approve", "request-changes", "escalate"].includes(parsed.decision)
+          ? parsed.decision as PRReviewResult["decision"]
+          : "escalate";
+        const comment = String(parsed.comment ?? "");
+        return {
+          decision,
+          comment: decision === "request-changes" ? enforceChecklist(comment) : comment,
+          reason: String(parsed.reason ?? ""),
+        };
+      } catch {
+        continue;
+      }
+    }
+
+    return { decision: "escalate", comment: "Could not parse review — escalating to human.", reason: "Parse failure" };
+  }
+}
+
+/**
+ * Ensure a request-changes comment is a numbered markdown checklist.
+ * Exported for testing.
+ *
+ * When the LLM ignores the system prompt and returns narrative prose, this
+ * function converts it into numbered items so agents receive a concrete,
+ * checkable list rather than open-ended text.  The conversion is best-effort:
+ * if the comment already contains numbered items (e.g. "1. Fix X") it is
+ * returned unchanged.  Otherwise, each sentence / clause is turned into a
+ * numbered line.
+ */
+export function enforceChecklist(comment: string): string {
+  const trimmed = comment.trim();
+  if (!trimmed) return trimmed;
+
+  // Already has numbered checklist items (e.g. "1. …" or "1) …")
+  if (/^\d+[.)]\s/m.test(trimmed)) return trimmed;
+
+  // Split on newlines or sentence boundaries, filter blanks, re-number
+  const lines = trimmed
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  if (lines.length === 1) {
+    // Single paragraph — split on ". " sentence boundaries
+    const sentences = trimmed
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (sentences.length > 1) {
+      return sentences.map((s, i) => `${i + 1}. ${s}`).join("\n");
+    }
+    // Single sentence — wrap as item 1
+    return `1. ${trimmed}`;
+  }
+
+  return lines.map((line, i) => {
+    // Strip existing bullet markers (-, *, •) before re-numbering
+    const stripped = line.replace(/^[-*•]\s*/, "");
+    return `${i + 1}. ${stripped}`;
+  }).join("\n");
+}
+
+function shellEscape(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
