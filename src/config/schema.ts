@@ -117,6 +117,26 @@ export interface EscalationConfig {
   notify_channel?: string;
 }
 
+export interface DigestConfig {
+  /**
+   * Slack incoming webhook URL to POST the daily digest to.
+   * When omitted, the scheduled digest is disabled even if `schedule` is set.
+   * Example: "https://hooks.slack.com/services/T.../B.../..."
+   */
+  slack_webhook: string;
+
+  /**
+   * Wall-clock time to post the digest each day, in "HH:MM" 24-hour format
+   * (local time on the host running the daemon).
+   * Defaults to "09:00" when omitted.
+   */
+  schedule?: string;
+}
+
+export interface DashboardConfig {
+  digest?: DigestConfig;
+}
+
 export interface OrchestratorConfig {
   proxy: ProxyConfig;
   base_dir: string;
@@ -124,6 +144,7 @@ export interface OrchestratorConfig {
   verification?: VerificationConfig;
   pr_review?: PRReviewConfig;
   escalation?: EscalationConfig;
+  dashboard?: DashboardConfig;
   agents: Record<string, AgentConfig>;
 }
 

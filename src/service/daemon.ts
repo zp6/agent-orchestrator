@@ -24,6 +24,7 @@ import { ManagementClient } from "../client/management-client.js";
 import { planSync, executeSync } from "../orchestrator/sync.js";
 import { notifyOperator } from "./notify.js";
 import { startTelegramPolling, stopTelegramPolling, pollTelegram } from "./telegram.js";
+import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
@@ -108,6 +109,9 @@ export class Daemon {
    * window is blocking all available issues.
    */
   private idleCyclesSinceDispatch = new Map<string, number>();
+
+  /** Tracks when the daily Slack digest was last sent (re-arms on new calendar day). */
+  private digestState: DigestSchedulerState = { lastDigestDate: null };
 
   constructor(configPath?: string, pollIntervalMs?: number) {
     this.config = loadConfig(configPath);
@@ -255,6 +259,9 @@ export class Daemon {
       if (this.cycleCount % BACKLOG_TRIAGE_EVERY_N_CYCLES === 0) {
         await this.triageBacklogs(time);
       }
+
+      // 9. Daily Slack digest — posts once per day at the configured wall-clock time
+      await maybePostDailyDigest(this.digestState, this.store, this.config);
     } finally {
       this.store.recordCycleEnd(cycleId, cycleStartedAt);
       const durationMs = Date.now() - cycleStartedAt.getTime();
