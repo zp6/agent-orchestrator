@@ -81,6 +81,17 @@ agents:
       permissions: "bypassPermissions"
       session: "continue"
 
+  claude-orchestrator-telegram:
+    dir: "claude-agent-orchestrator"
+    description: "Dedicated lightweight instance for Telegram command handling. Not for dispatched work — only serves quick queries (status, health, summary) without blocking on long tasks."
+    capabilities: ["telegram", "status"]
+    owns_topics: []
+    docker:
+      port: 3477
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
   claude-proxy:
     dir: "claude-proxy"
     repo: "git@github.com:rapartlu/claude-proxy.git"

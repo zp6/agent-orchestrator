@@ -150,19 +150,17 @@ async function handleCommand(text: string, ctx: TelegramContext): Promise<string
     return lines.length > 0 ? `🔀 *PRs*\n\n${lines.join("\n")}` : "🔀 No open PRs";
   }
 
-  // Dispatch
+  // Dispatch (fire-and-forget — reply immediately, don't block polling)
   if (cmd.startsWith("dispatch ") || cmd.startsWith("/dispatch ")) {
     const parts = text.trim().split(/\s+/);
     const agentName = parts[1];
     const message = parts.slice(2).join(" ");
     if (!agentName || !message) return "Usage: dispatch <agent> <message>";
     if (!ctx.config.agents[agentName]) return `❌ Unknown agent. Available: ${Object.keys(ctx.config.agents).join(", ")}`;
-    try {
-      const result = await ctx.dispatcher.dispatch(message, { agentName, source: "manual", title: `[telegram] ${message.slice(0, 60)}` });
-      return `✅ Dispatched to ${agentName} (${result.taskId})`;
-    } catch (err) {
-      return `❌ ${err instanceof Error ? err.message : String(err)}`;
-    }
+    ctx.dispatcher.dispatch(message, { agentName, source: "manual", title: `[telegram] ${message.slice(0, 60)}` })
+      .then((r) => sendReply(`✅ Task completed (${r.taskId})`))
+      .catch((e) => sendReply(`❌ Task failed: ${e instanceof Error ? e.message : String(e)}`));
+    return `📤 Dispatching to ${agentName}...`;
   }
 
   // Help
@@ -178,16 +176,14 @@ dispatch <agent> <msg> — send task
 help — this message`;
   }
 
-  // Default: treat as directive
-  try {
-    const result = await ctx.dispatcher.dispatch(
-      `Operator directive via Telegram: ${text}`,
-      { agentName: Object.keys(ctx.config.agents)[0], source: "manual", title: `[telegram] ${text.slice(0, 60)}` },
-    );
-    return `📨 Forwarded as directive (${result.taskId})`;
-  } catch (err) {
-    return `❌ ${err instanceof Error ? err.message : String(err)}`;
-  }
+  // Default: treat as directive (fire-and-forget)
+  ctx.dispatcher.dispatch(
+    `Operator directive via Telegram: ${text}`,
+    { agentName: Object.keys(ctx.config.agents)[0], source: "manual", title: `[telegram] ${text.slice(0, 60)}` },
+  )
+    .then((r) => sendReply(`✅ Directive completed (${r.taskId})`))
+    .catch((e) => sendReply(`❌ Directive failed: ${e instanceof Error ? e.message : String(e)}`));
+  return `📨 Forwarding as directive...`;
 }
 
 function buildSummary(ctx: TelegramContext): string {
