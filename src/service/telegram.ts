@@ -73,10 +73,19 @@ async function sendReply(text: string): Promise<void> {
 
 function gh(cmd: string): string {
   try {
-    return execSync(cmd, { encoding: "utf-8", timeout: 15000 }).trim();
+    return execSync(cmd, { encoding: "utf-8", timeout: 10000 }).trim();
   } catch {
     return "";
   }
+}
+
+async function ghAsync(cmd: string): Promise<string> {
+  const { exec } = await import("node:child_process");
+  return new Promise((resolve) => {
+    exec(cmd, { encoding: "utf-8", timeout: 10000 }, (err, stdout) => {
+      resolve(err ? "" : stdout.trim());
+    });
+  });
 }
 
 async function handleCommand(text: string, ctx: TelegramContext): Promise<string> {
@@ -115,39 +124,35 @@ async function handleCommand(text: string, ctx: TelegramContext): Promise<string
     return `🏥 *Health*\n\n${checks.join("\n")}`;
   }
 
-  // Issues
+  // Issues (parallel across repos)
   if (cmd === "issues" || cmd === "/issues") {
     const repos = [...new Set(Object.values(ctx.config.agents).map((a) => a.github).filter(Boolean))] as string[];
-    const lines: string[] = [];
-    for (const repo of repos) {
-      const raw = gh(`gh issue list --repo ${repo} --state open --json number,title -L 5`);
-      if (!raw) continue;
+    const results = await Promise.all(repos.map(async (repo) => {
+      const raw = await ghAsync(`gh issue list --repo ${repo} --state open --json number,title -L 5`);
+      if (!raw) return "";
       const issues = JSON.parse(raw) as Array<{ number: number; title: string }>;
-      if (issues.length > 0) {
-        lines.push(`*${repo.split("/")[1]}*`);
-        for (const i of issues) lines.push(`  #${i.number} ${i.title.slice(0, 45)}`);
-      }
-    }
-    return lines.length > 0 ? `📋 *Issues*\n\n${lines.join("\n")}` : "📋 No open issues";
+      if (issues.length === 0) return "";
+      return `*${repo.split("/")[1]}*\n${issues.map((i) => `  #${i.number} ${i.title.slice(0, 45)}`).join("\n")}`;
+    }));
+    const lines = results.filter(Boolean).join("\n");
+    return lines ? `📋 *Issues*\n\n${lines}` : "📋 No open issues";
   }
 
-  // PRs
+  // PRs (parallel across repos)
   if (cmd === "prs" || cmd === "/prs") {
     const repos = [...new Set(Object.values(ctx.config.agents).map((a) => a.github).filter(Boolean))] as string[];
-    const lines: string[] = [];
-    for (const repo of repos) {
-      const raw = gh(`gh pr list --repo ${repo} --state open --json number,title,mergeable -L 5`);
-      if (!raw) continue;
+    const results = await Promise.all(repos.map(async (repo) => {
+      const raw = await ghAsync(`gh pr list --repo ${repo} --state open --json number,title,mergeable -L 5`);
+      if (!raw) return "";
       const prs = JSON.parse(raw) as Array<{ number: number; title: string; mergeable: string }>;
-      if (prs.length > 0) {
-        lines.push(`*${repo.split("/")[1]}*`);
-        for (const pr of prs) {
-          const icon = pr.mergeable === "MERGEABLE" ? "✅" : pr.mergeable === "CONFLICTING" ? "⚠️" : "❓";
-          lines.push(`  ${icon} #${pr.number} ${pr.title.slice(0, 40)}`);
-        }
-      }
-    }
-    return lines.length > 0 ? `🔀 *PRs*\n\n${lines.join("\n")}` : "🔀 No open PRs";
+      if (prs.length === 0) return "";
+      return `*${repo.split("/")[1]}*\n${prs.map((pr) => {
+        const icon = pr.mergeable === "MERGEABLE" ? "✅" : pr.mergeable === "CONFLICTING" ? "⚠️" : "❓";
+        return `  ${icon} #${pr.number} ${pr.title.slice(0, 40)}`;
+      }).join("\n")}`;
+    }));
+    const lines = results.filter(Boolean).join("\n");
+    return lines ? `🔀 *PRs*\n\n${lines}` : "🔀 No open PRs";
   }
 
   // Dispatch (fire-and-forget — reply immediately, don't block polling)
