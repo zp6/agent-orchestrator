@@ -1,4 +1,4 @@
-import { fetchOpenIssues, findExistingPRsForIssue, isIssueOpen, validateGhAuth, type GitHubIssue } from "./github.js";
+import { fetchOpenIssues, findBranchForIssue, findExistingPRsForIssue, isIssueOpen, validateGhAuth, type GitHubIssue } from "./github.js";
 import { reportResult } from "./reporters.js";
 import { checkDuplicate } from "./duplicate-guard.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
@@ -191,7 +191,21 @@ export async function dispatchGitHubIssues(
         message += `\n\n⚠️ This issue already has an open PR: #${openPR.number} (${openPR.url})${openPR.isDraft ? " [DRAFT]" : ""}. Do NOT create a new branch or open another PR. Instead, review the existing PR, make any needed fixes, and push to its branch.`;
         message += `\n\n---\nWhen done: commit your changes and push to the existing PR branch. Do NOT run \`gh pr create\`.`;
       } else {
-        message += `\n\n---\nWhen done: create a branch, commit, push, and open a PR with \`gh pr create --title "[${agentName}] <title>" --body "Closes #${issue.number}"\`. The "Closes #${issue.number}" is required so the issue auto-closes on merge.`;
+        // Check for an in-flight branch without a PR (e.g. agent pushed but
+        // was interrupted before opening the PR).  Inject branch context so
+        // the agent continues from the existing branch rather than starting
+        // fresh and creating a duplicate.
+        const existingBranch = findBranchForIssue(agent.github, issue.number);
+        if (existingBranch) {
+          log.info("In-flight branch found for issue — injecting branch context", {
+            sourceRef,
+            branch: existingBranch,
+          });
+          message += `\n\n⚠️ A branch for this issue already exists: \`${existingBranch}\`. Do NOT create a new branch. Check out this branch, continue the work, and open a PR when ready.`;
+          message += `\n\n---\nWhen done: push to branch \`${existingBranch}\` and open a PR with \`gh pr create --head ${existingBranch} --title "[${agentName}] <title>" --body "Closes #${issue.number}"\`.`;
+        } else {
+          message += `\n\n---\nWhen done: create a branch, commit, push, and open a PR with \`gh pr create --title "[${agentName}] <title>" --body "Closes #${issue.number}"\`. The "Closes #${issue.number}" is required so the issue auto-closes on merge.`;
+        }
       }
 
       // Mark processed immediately to prevent duplicate dispatches
@@ -357,7 +371,18 @@ export async function dispatchIdleAgentBacklog(
         message += `\n\n⚠️ This issue already has an open PR: #${openPR.number} (${openPR.url})${openPR.isDraft ? " [DRAFT]" : ""}. Do NOT create a new branch or open another PR. Instead, review the existing PR, make any needed fixes, and push to its branch.`;
         message += `\n\n---\nWhen done: commit your changes and push to the existing PR branch. Do NOT run \`gh pr create\`.`;
       } else {
-        message += `\n\n---\nWhen done: create a branch, commit, push, and open a PR with \`gh pr create --title "[${agentName}] <title>" --body "Closes #${issue.number}"\`. The "Closes #${issue.number}" is required so the issue auto-closes on merge.`;
+        // Check for an in-flight branch without a PR
+        const existingBranch = findBranchForIssue(agent.github, issue.number);
+        if (existingBranch) {
+          log.info("Idle pickup: in-flight branch found for issue — injecting branch context", {
+            sourceRef,
+            branch: existingBranch,
+          });
+          message += `\n\n⚠️ A branch for this issue already exists: \`${existingBranch}\`. Do NOT create a new branch. Check out this branch, continue the work, and open a PR when ready.`;
+          message += `\n\n---\nWhen done: push to branch \`${existingBranch}\` and open a PR with \`gh pr create --head ${existingBranch} --title "[${agentName}] <title>" --body "Closes #${issue.number}"\`.`;
+        } else {
+          message += `\n\n---\nWhen done: create a branch, commit, push, and open a PR with \`gh pr create --title "[${agentName}] <title>" --body "Closes #${issue.number}"\`. The "Closes #${issue.number}" is required so the issue auto-closes on merge.`;
+        }
       }
 
       inFlightDispatches.add(sourceRef);

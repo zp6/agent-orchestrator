@@ -6,6 +6,7 @@ import type { StateStore } from "../state/store.js";
 
 vi.mock("./github.js", () => ({
   fetchOpenIssues: vi.fn(),
+  findBranchForIssue: vi.fn().mockReturnValue(null),
   findExistingPRsForIssue: vi.fn().mockReturnValue([]),
   isIssueOpen: vi.fn().mockReturnValue(true),
   // Default: authenticated — tests that need unauthenticated state override this
@@ -16,8 +17,9 @@ vi.mock("./reporters.js", () => ({
   reportResult: vi.fn(),
 }));
 
-import { fetchOpenIssues, findExistingPRsForIssue, isIssueOpen, validateGhAuth } from "./github.js";
+import { fetchOpenIssues, findBranchForIssue, findExistingPRsForIssue, isIssueOpen, validateGhAuth } from "./github.js";
 const mockFetchIssues = vi.mocked(fetchOpenIssues);
+const mockFindBranchForIssue = vi.mocked(findBranchForIssue);
 const mockFindExistingPRs = vi.mocked(findExistingPRsForIssue);
 const mockIsIssueOpen = vi.mocked(isIssueOpen);
 const mockValidateGhAuth = vi.mocked(validateGhAuth);
@@ -977,5 +979,163 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
     await new Promise((r) => setTimeout(r, 0));
     // Hook was still called
     expect(failingHook).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// In-flight branch detection (issue #352)
+// ---------------------------------------------------------------------------
+
+describe("in-flight branch detection", () => {
+  const branchConfig: OrchestratorConfig = {
+    proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 5000 },
+    orchestrator_dir: "/tmp",
+    base_dir: "/projects",
+    agents: {
+      "my-agent": {
+        dir: "my-agent",
+        description: "Test agent",
+        capabilities: [],
+        owns_topics: [],
+        github: "owner/my-repo",
+      },
+    },
+  };
+
+  const baseIssue = {
+    repo: "owner/my-repo",
+    number: 42,
+    title: "Fix something",
+    body: "Details here",
+    url: "https://github.com/owner/my-repo/issues/42",
+    labels: [],
+  };
+
+  beforeEach(() => {
+    mockFetchIssues.mockReturnValue([baseIssue]);
+    mockIsIssueOpen.mockReturnValue(true);
+    mockFindExistingPRs.mockReturnValue([]);
+    mockFindBranchForIssue.mockReturnValue(null);
+  });
+
+  it("injects existing branch context into dispatch message when branch found", async () => {
+    mockFindBranchForIssue.mockReturnValue("issue-42-fix-something");
+
+    const dispatched: string[] = [];
+    const mockDispatcher = {
+      dispatch: vi.fn().mockImplementation(async (msg: string) => {
+        dispatched.push(msg);
+        return { taskId: "t1", agentName: "my-agent" };
+      }),
+    } as unknown as Dispatcher;
+
+    const mockStore = {
+      hasActiveTask: vi.fn().mockReturnValue(false),
+      isProcessed: vi.fn().mockReturnValue(false),
+      markProcessed: vi.fn(),
+      getTask: vi.fn().mockReturnValue(null),
+      addLog: vi.fn(),
+      findTaskBySourceRef: vi.fn().mockReturnValue(null),
+    } as unknown as StateStore;
+
+    vi.mocked(mockStore.hasActiveTask).mockReturnValue(false);
+
+    await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
+
+    // Wait for fire-and-forget
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]).toContain("issue-42-fix-something");
+    expect(dispatched[0]).toContain("Do NOT create a new branch");
+  });
+
+  it("does not inject branch context when no matching branch found", async () => {
+    mockFindBranchForIssue.mockReturnValue(null);
+
+    const dispatched: string[] = [];
+    const mockDispatcher = {
+      dispatch: vi.fn().mockImplementation(async (msg: string) => {
+        dispatched.push(msg);
+        return { taskId: "t1", agentName: "my-agent" };
+      }),
+    } as unknown as Dispatcher;
+
+    const mockStore = {
+      hasActiveTask: vi.fn().mockReturnValue(false),
+      isProcessed: vi.fn().mockReturnValue(false),
+      markProcessed: vi.fn(),
+      getTask: vi.fn().mockReturnValue(null),
+      addLog: vi.fn(),
+      findTaskBySourceRef: vi.fn().mockReturnValue(null),
+    } as unknown as StateStore;
+
+    await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]).toContain("gh pr create");
+    expect(dispatched[0]).not.toContain("Do NOT create a new branch");
+  });
+
+  it("skips branch check when issue already has an open PR", async () => {
+    mockFindExistingPRs.mockReturnValue([
+      { number: 10, title: "PR", url: "https://github.com/owner/my-repo/pull/10", state: "open", isDraft: false },
+    ]);
+    // Even if a branch exists, the open PR takes precedence
+    mockFindBranchForIssue.mockReturnValue("issue-42-fix-something");
+
+    const dispatched: string[] = [];
+    const mockDispatcher = {
+      dispatch: vi.fn().mockImplementation(async (msg: string) => {
+        dispatched.push(msg);
+        return { taskId: "t1", agentName: "my-agent" };
+      }),
+    } as unknown as Dispatcher;
+
+    const mockStore = {
+      hasActiveTask: vi.fn().mockReturnValue(false),
+      isProcessed: vi.fn().mockReturnValue(false),
+      markProcessed: vi.fn(),
+      getTask: vi.fn().mockReturnValue(null),
+      addLog: vi.fn(),
+      findTaskBySourceRef: vi.fn().mockReturnValue(null),
+    } as unknown as StateStore;
+
+    await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(dispatched).toHaveLength(1);
+    // Should inject PR context (PR takes precedence over branch)
+    expect(dispatched[0]).toContain("already has an open PR");
+    expect(dispatched[0]).not.toContain("A branch for this issue already exists");
+  });
+
+  it("idle pickup: injects branch context when in-flight branch found", async () => {
+    mockFindBranchForIssue.mockReturnValue("issue-42-in-flight");
+
+    const dispatched: string[] = [];
+    const mockDispatcher = {
+      dispatch: vi.fn().mockImplementation(async (msg: string) => {
+        dispatched.push(msg);
+        return { taskId: "t1", agentName: "my-agent" };
+      }),
+    } as unknown as Dispatcher;
+
+    const mockStore = {
+      hasActiveTask: vi.fn().mockReturnValue(false),
+      isProcessed: vi.fn().mockReturnValue(false),
+      markProcessed: vi.fn(),
+      getTask: vi.fn().mockReturnValue(null),
+      addLog: vi.fn(),
+      findTaskBySourceRef: vi.fn().mockReturnValue(null),
+    } as unknown as StateStore;
+
+    await dispatchIdleAgentBacklog(branchConfig, mockStore, mockDispatcher);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]).toContain("issue-42-in-flight");
+    expect(dispatched[0]).toContain("Do NOT create a new branch");
   });
 });

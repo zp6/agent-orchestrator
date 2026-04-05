@@ -287,3 +287,65 @@ describe("validateGhAuth", () => {
     expect(result.reason).toMatch(/GH_TOKEN|gh auth login/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// findBranchForIssue
+// ---------------------------------------------------------------------------
+
+import { findBranchForIssue } from "./github.js";
+
+describe("findBranchForIssue", () => {
+  it("returns matching branch for issue-N-description pattern", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify(["main", "issue-352-pre-dispatch-check", "feature-branch"]),
+    );
+    expect(findBranchForIssue("owner/repo", 352, mockExec)).toBe("issue-352-pre-dispatch-check");
+  });
+
+  it("returns matching branch for fix/issue-N-description pattern", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify(["main", "fix/issue-352-something"]),
+    );
+    expect(findBranchForIssue("owner/repo", 352, mockExec)).toBe("fix/issue-352-something");
+  });
+
+  it("returns matching branch for N-description pattern (leading number)", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify(["main", "352-my-feature"]),
+    );
+    expect(findBranchForIssue("owner/repo", 352, mockExec)).toBe("352-my-feature");
+  });
+
+  it("returns null when no matching branch exists", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify(["main", "feature-unrelated", "fix-something-else"]),
+    );
+    expect(findBranchForIssue("owner/repo", 352, mockExec)).toBeNull();
+  });
+
+  it("does not match a different issue number (e.g. 3520 does not match 352)", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify(["main", "issue-3520-other"]),
+    );
+    expect(findBranchForIssue("owner/repo", 352, mockExec)).toBeNull();
+  });
+
+  it("returns null on gh CLI failure (fail-open)", () => {
+    const mockExec = vi.fn().mockImplementation(() => { throw new Error("API error"); });
+    expect(findBranchForIssue("owner/repo", 352, mockExec)).toBeNull();
+  });
+
+  it("returns null when branches list is empty", () => {
+    const mockExec = vi.fn().mockReturnValue(JSON.stringify([]));
+    expect(findBranchForIssue("owner/repo", 352, mockExec)).toBeNull();
+  });
+
+  it("uses the correct repo in the gh api call", () => {
+    const mockExec = vi.fn().mockReturnValue(JSON.stringify([]));
+    findBranchForIssue("rapartlu/my-agent", 99, mockExec);
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining("rapartlu/my-agent"),
+      expect.anything(),
+    );
+  });
+});

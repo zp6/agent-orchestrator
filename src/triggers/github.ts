@@ -181,6 +181,41 @@ export function isIssueOpen(
   }
 }
 
+/**
+ * Find an existing remote branch that appears to be in-flight work for a
+ * given issue number.  Matches branches whose name contains `issue-{N}` or
+ * starts with `{N}-` (common agent naming conventions).
+ *
+ * Returns the matching branch name, or null when none is found.
+ *
+ * Fails open: returns null on any error so a transient gh CLI failure does
+ * not silently suppress real work.
+ *
+ * @param execFn - optional override for unit tests
+ */
+export function findBranchForIssue(
+  repo: string,
+  issueNumber: number,
+  execFn: (cmd: string, opts: { encoding: "utf-8"; timeout: number }) => string = (cmd, opts) =>
+    execSync(cmd, opts),
+): string | null {
+  try {
+    const raw = execFn(
+      `gh api "repos/${repo}/branches?per_page=100" --jq '[.[].name]'`,
+      { encoding: "utf-8", timeout: 15000 },
+    );
+    const branches = JSON.parse(raw.trim() || "[]") as string[];
+
+    // Match branches containing "issue-N" (e.g. issue-352-fix, fix/issue-352)
+    // or starting with "N-" (e.g. 352-pre-dispatch-check)
+    const issuePattern = new RegExp(`(?:^|[-/])issue[-_]${issueNumber}(?:[-_/]|$)|^${issueNumber}[-_]`);
+    return branches.find((b) => issuePattern.test(b)) ?? null;
+  } catch {
+    // Fail open: don't suppress dispatch when branch lookup fails
+    return null;
+  }
+}
+
 export function fetchOpenIssues(repo: string): GitHubIssue[] {
   try {
     const output = execSync(
