@@ -44,12 +44,37 @@ agents:
   claude-orchestrator-reviewer:
     dir: "claude-orchestrator-reviewer"
     repo: "git@github.com:rapartlu/claude-orchestrator-reviewer.git"
+    pool: "reviewer"
     description: "Quality and oversight layer. PR reviewer, task verifier, supervisor, improvement detector, and escalation system (Telegram notifications). Also serves as the LLM backend for all orchestrator operations."
     capabilities: ["typescript", "llm", "review", "verification"]
     github: "rapartlu/claude-orchestrator-reviewer"
     owns_topics: ["review", "verification", "supervisor", "improvement", "escalation", "telegram", "quality"]
     docker:
       port: 3474
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "continue"
+
+  claude-orchestrator-reviewer-2:
+    dir: "claude-orchestrator-reviewer"
+    pool: "reviewer"
+    description: "Reviewer pool instance 2. Shares LLM workload with other reviewer instances."
+    capabilities: ["typescript", "llm", "review", "verification"]
+    owns_topics: []
+    docker:
+      port: 3475
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "continue"
+
+  claude-orchestrator-reviewer-3:
+    dir: "claude-orchestrator-reviewer"
+    pool: "reviewer"
+    description: "Reviewer pool instance 3. Shares LLM workload with other reviewer instances."
+    capabilities: ["typescript", "llm", "review", "verification"]
+    owns_topics: []
+    docker:
+      port: 3476
       api_key: "cheese"
       permissions: "bypassPermissions"
       session: "continue"

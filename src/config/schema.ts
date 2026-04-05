@@ -26,6 +26,8 @@ export interface AgentSlackConfig {
 export interface AgentConfig {
   dir: string;
   repo?: string;
+  /** Agents with the same pool share a capability and work is distributed across them. */
+  pool?: string;
   /**
    * Branch to watch for new commits when `repo` is set.
    * Used by the auto-redeploy check in `getStaleRepoAgents()`.
@@ -213,6 +215,36 @@ export function getAgentDir(config: OrchestratorConfig, agentName: string): stri
 
 export function getManagerUrl(config: OrchestratorConfig): string {
   return config.proxy.manager_url ?? "http://localhost:3400";
+}
+
+/**
+ * Get all agent names in a pool. If the agent has no pool, returns just that agent.
+ * Useful for distributing work across multiple instances of the same capability.
+ */
+export function getPoolMembers(config: OrchestratorConfig, agentName: string): string[] {
+  const agent = config.agents[agentName];
+  if (!agent?.pool) return [agentName];
+
+  return Object.entries(config.agents)
+    .filter(([, a]) => a.pool === agent.pool)
+    .map(([name]) => name);
+}
+
+/**
+ * Resolve a pool name or agent name to the pool's member list.
+ * If poolOrAgent matches a pool name, returns all members.
+ * If it matches an agent name, returns that agent's pool members (or just itself).
+ */
+export function resolvePool(config: OrchestratorConfig, poolOrAgent: string): string[] {
+  // Direct agent name match
+  if (config.agents[poolOrAgent]) {
+    return getPoolMembers(config, poolOrAgent);
+  }
+  // Pool name match
+  const members = Object.entries(config.agents)
+    .filter(([, a]) => a.pool === poolOrAgent)
+    .map(([name]) => name);
+  return members.length > 0 ? members : [poolOrAgent];
 }
 
 export function getAgentApiKey(config: OrchestratorConfig, agentName: string): string {
