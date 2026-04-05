@@ -9,7 +9,7 @@ export function registerAskCommand(program: Command): void {
     .description("Ask an agent a question (streaming response)")
     .argument("<question>", "Question to ask")
     .requiredOption("-a, --agent <name>", "Target agent")
-    .option("-m, --model <model>", "Model to use", "claude-sonnet-4-6")
+    .option("-m, --model <model>", "Model to use", "claude-opus-4-6")
     .action(async (question: string, opts: { agent: string; model: string }) => {
       const config = loadConfig(program.opts().config);
       const client = new AgentClient(config);
