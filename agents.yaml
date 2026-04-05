@@ -27,6 +27,30 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
+  claude-orchestrator-dashboard:
+    dir: "claude-orchestrator-dashboard"
+    description: "Dashboard, CLI commands, and observability UI for the orchestrator. Owns all user-facing interfaces: web dashboard, status/health/metrics commands, activity views, escalation queue."
+    capabilities: ["typescript", "html", "css", "express", "dashboard"]
+    github: "rapartlu/claude-orchestrator-dashboard"
+    owns_topics: ["dashboard", "cli", "status", "health", "metrics", "activity", "ui", "escalation-ui"]
+    docker:
+      port: 3473
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
+  claude-orchestrator-reviewer:
+    dir: "claude-orchestrator-reviewer"
+    description: "Quality and oversight layer. PR reviewer, task verifier, supervisor, improvement detector, and escalation system (Telegram notifications)."
+    capabilities: ["typescript", "llm", "review", "verification"]
+    github: "rapartlu/claude-orchestrator-reviewer"
+    owns_topics: ["review", "verification", "supervisor", "improvement", "escalation", "telegram", "quality"]
+    docker:
+      port: 3474
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
   claude-proxy:
     dir: "claude-proxy"
     repo: "git@github.com:rapartlu/claude-proxy.git"
