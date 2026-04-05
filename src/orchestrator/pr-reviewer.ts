@@ -7,6 +7,7 @@ import type { OrchestratorConfig } from "../config/schema.js";
 import { StateStore, type MergeQueueEntry } from "../state/store.js";
 import { Deployer } from "./deployer.js";
 import { extractIssueNumberFromBranch, findMatchingIssueNumber } from "./pr-creator.js";
+import { notifyOperator } from "../service/notify.js";
 
 export interface PRInfo {
   number: number;
@@ -369,6 +370,14 @@ export class PRReviewer {
           );
           this.log.info("PR escalated to human", { repo, prNumber, reason: result.reason });
           this.store.recordPRReview(repo, prNumber, "escalate");
+          // Notify operator via Telegram
+          notifyOperator(
+            `PR #${prNumber} escalated`,
+            `${repo}#${prNumber}: ${result.reason}`,
+            "warning",
+            `escalate:${repo}#${prNumber}`,
+          ).catch(() => {});
+
         } catch (err) {
           this.log.error("Failed to escalate PR", { repo, prNumber, error: String(err) });
         }

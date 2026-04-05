@@ -21,6 +21,8 @@ import { createLogger } from "./logger.js";
 import { execSync } from "node:child_process";
 import { ManagementClient } from "../client/management-client.js";
 import { planSync, executeSync } from "../orchestrator/sync.js";
+import { notifyOperator } from "./notify.js";
+import { pollTelegram } from "./telegram.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
@@ -178,6 +180,9 @@ export class Daemon {
     try {
       // Fetch which agents are actually deployed on the proxy
       registeredAgents = await this.deployer.getRegisteredAgents();
+
+      // 0. Poll Telegram for operator commands (lightweight — single HTTP call)
+      await pollTelegram({ config: this.config, store: this.store, dispatcher: this.dispatcher });
 
       // 1. Check for stale dispatched tasks (stuck or crashed agents).
       //    Timeout failures are scheduled for retry (up to TIMEOUT_RETRY_MAX times)
@@ -594,6 +599,12 @@ export class Daemon {
         } else if (r.action === "health-check-failed") {
           console.error(`  ${r.agentName}: ⚠ deployed but health check failed — agent may be broken. ${r.detail}`);
           this.log.warn("Agent health check failed after deploy", { agentName: r.agentName, detail: r.detail });
+          notifyOperator(
+            `Deploy health check failed: ${r.agentName}`,
+            `Agent ${r.agentName} was redeployed but failed health check. May be broken.`,
+            "critical",
+            `health-fail:${r.agentName}`,
+          ).catch(() => {});
         } else if (r.action === "error") {
           console.error(`  ${r.agentName}: ${r.detail}`);
         }
