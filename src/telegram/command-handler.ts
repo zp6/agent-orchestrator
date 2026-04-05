@@ -9,6 +9,8 @@
  *   /dispatch <agent> <instruction...>  → inserts dispatch_request row for orchestrator
  *   /prioritize <item>     → bumps priority on matching task row
  *   /queue [repo]          → shows PR merge queue entries, optionally filtered by repo
+ *   /logs [n]    → last N supervisor decisions (default 10), newest first
+ *   /agents      → per-agent stats: total/done/failed/avg quality score
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -40,7 +42,7 @@ interface TelegramGetUpdatesResponse {
 
 // ── Supported commands ────────────────────────────────────────────────────
 
-type CommandName = "status" | "health" | "pause" | "resume" | "dispatch" | "prioritize" | "queue";
+type CommandName = "status" | "health" | "pause" | "resume" | "dispatch" | "prioritize" | "queue" | "logs" | "agents";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -50,6 +52,8 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "dispatch",
   "prioritize",
   "queue",
+  "logs",
+  "agents",
 ]);
 
 interface ParsedCommand {
@@ -199,6 +203,15 @@ async function executeCommand(
       const repo = cmd.args[0]?.trim() || undefined;
       return handleQueue(store, repo);
     }
+
+    case "logs": {
+      const n = parseInt(cmd.args[0] ?? "10", 10);
+      const limit = Number.isNaN(n) || n < 1 ? 10 : Math.min(n, 50);
+      return handleLogs(store, limit);
+    }
+
+    case "agents":
+      return handleAgents(store);
   }
 }
 
@@ -365,6 +378,54 @@ function handleQueue(store: ITelegramStateStore, repo?: string): string {
   if (lines[lines.length - 1] === "") lines.pop();
 
   return lines.join("\n");
+}
+
+async function handleLogs(store: ITelegramStateStore, limit: number): Promise<string> {
+  const decisions = store.getRecentSupervisorDecisions(limit);
+
+  if (decisions.length === 0) {
+    return "📋 *Supervisor Logs*\n\nNo decisions recorded yet.";
+  }
+
+  const lines: string[] = [`📋 *Supervisor Logs* (last ${decisions.length})`, ``];
+
+  for (const d of decisions) {
+    const ts = d.created_at ? new Date(d.created_at).toISOString().replace("T", " ").slice(0, 19) : "—";
+    const agent = d.agent_name ? ` · \`${d.agent_name}\`` : "";
+    lines.push(`*${d.action}*${agent}`);
+    lines.push(`  Outcome: ${d.outcome}`);
+    lines.push(`  Reason: ${d.reason.slice(0, 120)}${d.reason.length > 120 ? "…" : ""}`);
+    lines.push(`  _${ts}_`);
+    lines.push(``);
+  }
+
+  return lines.join("\n").trimEnd();
+}
+
+async function handleAgents(store: ITelegramStateStore): Promise<string> {
+  const stats = store.getAgentStats();
+
+  if (stats.length === 0) {
+    return "🤖 *Agent Stats*\n\nNo agents have recorded tasks yet.";
+  }
+
+  const lines: string[] = [`🤖 *Agent Stats*`, ``];
+
+  for (const s of stats) {
+    const score =
+      s.avg_score != null
+        ? ` · score ${(s.avg_score * 100).toFixed(0)}%`
+        : "";
+    const failRate =
+      s.total > 0
+        ? ` (${((s.failed / s.total) * 100).toFixed(0)}% fail rate)`
+        : "";
+    lines.push(`*${s.agent_name}*${score}`);
+    lines.push(`  Total: ${s.total} · Done: ${s.done} · Failed: ${s.failed}${failRate}`);
+    lines.push(``);
+  }
+
+  return lines.join("\n").trimEnd();
 }
 
 // ── TelegramCommandHandler class ──────────────────────────────────────────
