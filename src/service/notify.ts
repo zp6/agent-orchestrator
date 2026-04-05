@@ -72,7 +72,7 @@ export async function notifyOperator(
         body: JSON.stringify({
           chat_id: config.chatId,
           text,
-          parse_mode: "Markdown",
+          parse_mode: "MarkdownV2",
         }),
       },
     );
