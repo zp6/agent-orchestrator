@@ -216,6 +216,65 @@ export function findBranchForIssue(
   }
 }
 
+export interface ApprovedPR {
+  number: number;
+  headRefName: string;
+}
+
+/**
+ * Check whether an open PR for the given issue is approved and clean (ready
+ * to merge).
+ *
+ * Queries all open PRs on the repo and filters by branch name pattern
+ * (`issue-N-*` or `N-*`) to find PRs that belong to this issue. If any such
+ * PR has `reviewDecision == "APPROVED"` and `mergeStateStatus == "CLEAN"`,
+ * returns that PR's details so the caller can skip dispatch.
+ *
+ * Fails open: returns null on any error so a transient gh CLI failure does
+ * not silently suppress real work.
+ *
+ * @param execFn - optional override for unit tests
+ */
+export function findApprovedPRForIssue(
+  repo: string,
+  issueNumber: number,
+  execFn: (cmd: string, opts: { encoding: "utf-8"; timeout: number }) => string = (cmd, opts) =>
+    execSync(cmd, opts),
+): ApprovedPR | null {
+  try {
+    const raw = execFn(
+      `gh pr list --repo ${repo} --state open --json number,headRefName,reviewDecision,mergeStateStatus`,
+      { encoding: "utf-8", timeout: 15000 },
+    );
+
+    const prs = JSON.parse(raw.trim() || "[]") as Array<{
+      number: number;
+      headRefName: string;
+      reviewDecision: string | null;
+      mergeStateStatus: string;
+    }>;
+
+    // Match branches that belong to this issue: issue-N-*, issue_N_*, N-*, N_*
+    const issuePattern = new RegExp(
+      `(?:^|[-/])issue[-_]${issueNumber}(?:[-_/]|$)|^${issueNumber}[-_]`,
+    );
+
+    const approvedPR = prs.find(
+      (pr) =>
+        issuePattern.test(pr.headRefName) &&
+        pr.reviewDecision === "APPROVED" &&
+        pr.mergeStateStatus === "CLEAN",
+    );
+
+    return approvedPR
+      ? { number: approvedPR.number, headRefName: approvedPR.headRefName }
+      : null;
+  } catch {
+    // Fail open: don't suppress dispatch when the check fails
+    return null;
+  }
+}
+
 export function fetchOpenIssues(repo: string): GitHubIssue[] {
   try {
     const output = execSync(

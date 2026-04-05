@@ -6,6 +6,7 @@ import type { StateStore } from "../state/store.js";
 
 vi.mock("./github.js", () => ({
   fetchOpenIssues: vi.fn(),
+  findApprovedPRForIssue: vi.fn().mockReturnValue(null),
   findBranchForIssue: vi.fn().mockReturnValue(null),
   findExistingPRsForIssue: vi.fn().mockReturnValue([]),
   isIssueOpen: vi.fn().mockReturnValue(true),
@@ -17,8 +18,9 @@ vi.mock("./reporters.js", () => ({
   reportResult: vi.fn(),
 }));
 
-import { fetchOpenIssues, findBranchForIssue, findExistingPRsForIssue, isIssueOpen, validateGhAuth } from "./github.js";
+import { fetchOpenIssues, findApprovedPRForIssue, findBranchForIssue, findExistingPRsForIssue, isIssueOpen, validateGhAuth } from "./github.js";
 const mockFetchIssues = vi.mocked(fetchOpenIssues);
+const mockFindApprovedPR = vi.mocked(findApprovedPRForIssue);
 const mockFindBranchForIssue = vi.mocked(findBranchForIssue);
 const mockFindExistingPRs = vi.mocked(findExistingPRsForIssue);
 const mockIsIssueOpen = vi.mocked(isIssueOpen);
@@ -1216,5 +1218,136 @@ describe("in-flight branch detection", () => {
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0]).toContain("issue-42-in-flight");
     expect(dispatched[0]).toContain("Do NOT create a new branch");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Approved PR skip logic (issue #381)
+// ---------------------------------------------------------------------------
+
+describe("approved PR skip logic", () => {
+  let mockStore: StateStore;
+  let mockDispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStore = {
+      isProcessed: vi.fn().mockReturnValue(false),
+      markProcessed: vi.fn(),
+      getTask: vi.fn().mockReturnValue(null),
+      listTasks: vi.fn().mockReturnValue([]),
+      hasActiveTask: vi.fn().mockReturnValue(false),
+      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
+    } as unknown as StateStore;
+    mockDispatcher = {
+      dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
+    } as unknown as Dispatcher;
+    mockIsIssueOpen.mockReturnValue(true);
+    mockFindExistingPRs.mockReturnValue([]);
+    // Default: no approved PR
+    mockFindApprovedPR.mockReturnValue(null);
+  });
+
+  // --- dispatchGitHubIssues ---
+
+  it("dispatchGitHubIssues: skips dispatch when approved+clean PR exists", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 381, title: "Skip me", body: "body", url: "https://...", labels: [] },
+    ]);
+    mockFindApprovedPR.mockReturnValue({ number: 10, headRefName: "issue-381-fix" });
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("dispatchGitHubIssues: dispatches normally when no approved PR exists", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 381, title: "Do me", body: "body", url: "https://...", labels: [] },
+    ]);
+    mockFindApprovedPR.mockReturnValue(null);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalled();
+  });
+
+  it("dispatchGitHubIssues: dispatches when PR has CHANGES_REQUESTED (not approved)", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 381, title: "Needs work", body: "body", url: "https://...", labels: [] },
+    ]);
+    // findApprovedPRForIssue returns null because CHANGES_REQUESTED is filtered out inside the function
+    mockFindApprovedPR.mockReturnValue(null);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalled();
+  });
+
+  it("dispatchGitHubIssues: dispatches when PR is approved but CONFLICTING", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 381, title: "Conflicting", body: "body", url: "https://...", labels: [] },
+    ]);
+    // findApprovedPRForIssue returns null because CONFLICTING is filtered out inside the function
+    mockFindApprovedPR.mockReturnValue(null);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalled();
+  });
+
+  it("dispatchGitHubIssues: does NOT mark processed when skipping approved PR (PR not yet merged)", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 381, title: "Skip me", body: "body", url: "https://...", labels: [] },
+    ]);
+    mockFindApprovedPR.mockReturnValue({ number: 10, headRefName: "issue-381-fix" });
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // markProcessed must NOT be called for approved-PR skip — the issue should
+    // remain pollable so it is re-evaluated after the PR merges and closes the issue.
+    expect(mockStore.markProcessed).not.toHaveBeenCalled();
+  });
+
+  it("dispatchGitHubIssues: calls findApprovedPRForIssue with correct repo and issue number", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Task", body: "body", url: "https://...", labels: [] },
+    ]);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(mockFindApprovedPR).toHaveBeenCalledWith("owner/my-repo", 42);
+  });
+
+  // --- dispatchIdleAgentBacklog ---
+
+  it("dispatchIdleAgentBacklog: skips dispatch when approved+clean PR exists", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 381, title: "Skip me", body: "body", url: "https://...", labels: [] },
+    ]);
+    mockFindApprovedPR.mockReturnValue({ number: 10, headRefName: "issue-381-fix" });
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("dispatchIdleAgentBacklog: dispatches when no approved PR exists", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 381, title: "Do me", body: "body", url: "https://...", labels: [] },
+    ]);
+    mockFindApprovedPR.mockReturnValue(null);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalled();
   });
 });

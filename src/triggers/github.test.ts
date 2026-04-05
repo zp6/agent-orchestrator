@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fetchOpenIssues, findExistingPRsForIssue, isIssueOpen, validateGhAuth } from "./github.js";
+import { fetchOpenIssues, findApprovedPRForIssue, findExistingPRsForIssue, isIssueOpen, validateGhAuth } from "./github.js";
 
 vi.mock("node:child_process", () => ({
   execSync: vi.fn(),
@@ -293,6 +293,144 @@ describe("validateGhAuth", () => {
 // ---------------------------------------------------------------------------
 
 import { findBranchForIssue } from "./github.js";
+
+// ---------------------------------------------------------------------------
+// findApprovedPRForIssue
+// ---------------------------------------------------------------------------
+
+describe("findApprovedPRForIssue", () => {
+  function makePR(overrides: {
+    number?: number;
+    headRefName?: string;
+    reviewDecision?: string | null;
+    mergeStateStatus?: string;
+  }) {
+    return {
+      number: 10,
+      headRefName: "issue-381-fix",
+      reviewDecision: "APPROVED",
+      mergeStateStatus: "CLEAN",
+      ...overrides,
+    };
+  }
+
+  it("returns PR details when an open PR is approved and clean", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify([makePR({ number: 10, headRefName: "issue-381-skip-dispatch" })]),
+    );
+    const result = findApprovedPRForIssue("owner/repo", 381, mockExec);
+    expect(result).toEqual({ number: 10, headRefName: "issue-381-skip-dispatch" });
+  });
+
+  it("returns null when reviewDecision is not APPROVED", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify([makePR({ reviewDecision: "CHANGES_REQUESTED", mergeStateStatus: "CLEAN" })]),
+    );
+    expect(findApprovedPRForIssue("owner/repo", 381, mockExec)).toBeNull();
+  });
+
+  it("returns null when reviewDecision is null (no review yet)", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify([makePR({ reviewDecision: null, mergeStateStatus: "CLEAN" })]),
+    );
+    expect(findApprovedPRForIssue("owner/repo", 381, mockExec)).toBeNull();
+  });
+
+  it("returns null when mergeStateStatus is CONFLICTING", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify([makePR({ reviewDecision: "APPROVED", mergeStateStatus: "CONFLICTING" })]),
+    );
+    expect(findApprovedPRForIssue("owner/repo", 381, mockExec)).toBeNull();
+  });
+
+  it("returns null when mergeStateStatus is BLOCKED", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify([makePR({ reviewDecision: "APPROVED", mergeStateStatus: "BLOCKED" })]),
+    );
+    expect(findApprovedPRForIssue("owner/repo", 381, mockExec)).toBeNull();
+  });
+
+  it("returns null when branch does not match the issue number", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify([makePR({ headRefName: "issue-999-other", reviewDecision: "APPROVED", mergeStateStatus: "CLEAN" })]),
+    );
+    expect(findApprovedPRForIssue("owner/repo", 381, mockExec)).toBeNull();
+  });
+
+  it("matches branch pattern N-description (leading number)", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify([makePR({ number: 5, headRefName: "381-fix-dispatch" })]),
+    );
+    expect(findApprovedPRForIssue("owner/repo", 381, mockExec)).toEqual({
+      number: 5,
+      headRefName: "381-fix-dispatch",
+    });
+  });
+
+  it("matches branch pattern fix/issue-N-description", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify([makePR({ number: 7, headRefName: "fix/issue-381-something" })]),
+    );
+    expect(findApprovedPRForIssue("owner/repo", 381, mockExec)).toEqual({
+      number: 7,
+      headRefName: "fix/issue-381-something",
+    });
+  });
+
+  it("does NOT match issue-3810 for issue 381 (no false positives)", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify([makePR({ headRefName: "issue-3810-something" })]),
+    );
+    expect(findApprovedPRForIssue("owner/repo", 381, mockExec)).toBeNull();
+  });
+
+  it("returns null when there are no open PRs", () => {
+    const mockExec = vi.fn().mockReturnValue(JSON.stringify([]));
+    expect(findApprovedPRForIssue("owner/repo", 381, mockExec)).toBeNull();
+  });
+
+  it("returns null on gh CLI failure (fail-open)", () => {
+    const mockExec = vi.fn().mockImplementation(() => { throw new Error("network error"); });
+    expect(findApprovedPRForIssue("owner/repo", 381, mockExec)).toBeNull();
+  });
+
+  it("returns null on empty output (fail-open)", () => {
+    const mockExec = vi.fn().mockReturnValue("");
+    expect(findApprovedPRForIssue("owner/repo", 381, mockExec)).toBeNull();
+  });
+
+  it("calls gh with the correct repo", () => {
+    const mockExec = vi.fn().mockReturnValue(JSON.stringify([]));
+    findApprovedPRForIssue("rapartlu/my-agent", 381, mockExec);
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining("rapartlu/my-agent"),
+      expect.any(Object),
+    );
+  });
+
+  it("uses gh pr list with open state and correct JSON fields", () => {
+    const mockExec = vi.fn().mockReturnValue(JSON.stringify([]));
+    findApprovedPRForIssue("owner/repo", 42, mockExec);
+    const cmd = (mockExec as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(cmd).toContain("--state open");
+    expect(cmd).toContain("reviewDecision");
+    expect(cmd).toContain("mergeStateStatus");
+  });
+
+  it("skips non-matching PRs and returns the approved+clean one", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify([
+        makePR({ number: 1, headRefName: "issue-999-other", reviewDecision: "APPROVED", mergeStateStatus: "CLEAN" }),
+        makePR({ number: 2, headRefName: "issue-381-fix", reviewDecision: "CHANGES_REQUESTED", mergeStateStatus: "CLEAN" }),
+        makePR({ number: 3, headRefName: "issue-381-fix-v2", reviewDecision: "APPROVED", mergeStateStatus: "CLEAN" }),
+      ]),
+    );
+    expect(findApprovedPRForIssue("owner/repo", 381, mockExec)).toEqual({
+      number: 3,
+      headRefName: "issue-381-fix-v2",
+    });
+  });
+});
 
 describe("findBranchForIssue", () => {
   it("returns matching branch for issue-N-description pattern", () => {

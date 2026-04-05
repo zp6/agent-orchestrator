@@ -1,4 +1,4 @@
-import { fetchOpenIssues, findBranchForIssue, findExistingPRsForIssue, isIssueOpen, validateGhAuth, type GitHubIssue } from "./github.js";
+import { fetchOpenIssues, findApprovedPRForIssue, findBranchForIssue, findExistingPRsForIssue, isIssueOpen, validateGhAuth, type GitHubIssue } from "./github.js";
 import { reportResult } from "./reporters.js";
 import { checkDuplicate } from "./duplicate-guard.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
@@ -199,6 +199,20 @@ export async function dispatchGitHubIssues(
         continue;
       }
 
+      // Skip dispatch if there is already an approved, conflict-free PR waiting
+      // to merge. Re-dispatching in this state just wastes cycles (see issue #28:
+      // three dispatches, third only confirmed the already-approved PR was fine).
+      const approvedPR = findApprovedPRForIssue(agent.github, issue.number);
+      if (approvedPR) {
+        log.info("Skipping dispatch: issue has approved PR awaiting merge", {
+          sourceRef,
+          prNumber: approvedPR.number,
+          branch: approvedPR.headRefName,
+        });
+        result.skipped++;
+        continue;
+      }
+
       let message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}`;
 
       if (openPR) {
@@ -377,6 +391,19 @@ export async function dispatchIdleAgentBacklog(
           prNumber: mergedPR.number,
         });
         store.markProcessed("github", sourceRef, `merged-pr-${mergedPR.number}`);
+        result.skipped++;
+        continue;
+      }
+
+      // Skip dispatch if there is already an approved, conflict-free PR waiting
+      // to merge. Re-dispatching in this state wastes cycles.
+      const approvedPR = findApprovedPRForIssue(agent.github, issue.number);
+      if (approvedPR) {
+        log.info("Idle pickup: skipping dispatch — issue has approved PR awaiting merge", {
+          sourceRef,
+          prNumber: approvedPR.number,
+          branch: approvedPR.headRefName,
+        });
         result.skipped++;
         continue;
       }
