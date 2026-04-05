@@ -2,9 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { loadConfig } from "../../config/schema.js";
 import { StateStore } from "../../state/store.js";
-import { Verifier } from "../../orchestrator/verifier.js";
-import { ImprovementDetector } from "../../orchestrator/improvement-detector.js";
-import { IssueCreator } from "../../orchestrator/issue-creator.js";
+import { Verifier, ImprovementDetector, IssueCreator } from "claude-orchestrator-reviewer";
 
 export function registerImproveCommand(program: Command): void {
   const improveCmd = program
@@ -76,7 +74,7 @@ export function registerImproveCommand(program: Command): void {
     .action(async (opts: { limit: string }) => {
       const config = loadConfig(program.opts().config);
       const store = new StateStore();
-      const verifier = new Verifier(config, store);
+      const verifier = new Verifier(store);
 
       const tasks = store.getUnverified(parseInt(opts.limit, 10));
 

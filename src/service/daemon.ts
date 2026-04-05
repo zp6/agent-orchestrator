@@ -1,12 +1,15 @@
 import { loadConfig, type OrchestratorConfig } from "../config/schema.js";
 import { StateStore } from "../state/store.js";
 import { Dispatcher, MAX_RETRIES, TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
-import { Verifier } from "../orchestrator/verifier.js";
-import { ImprovementDetector } from "../orchestrator/improvement-detector.js";
-import { IssueCreator } from "../orchestrator/issue-creator.js";
+import {
+  Verifier,
+  ImprovementDetector,
+  IssueCreator,
+  Supervisor,
+  isDecisionAlreadyResolved,
+  PRReviewer,
+} from "claude-orchestrator-reviewer";
 import { Deployer } from "../orchestrator/deployer.js";
-import { Supervisor, isDecisionAlreadyResolved } from "../orchestrator/supervisor.js";
-import { PRReviewer } from "../orchestrator/pr-reviewer.js";
 import { findOrphanBranches, createPRForBranch } from "../orchestrator/pr-creator.js";
 import { PRCreationRetryQueue } from "../orchestrator/pr-creation-retry-queue.js";
 import { validateGhAuth } from "../triggers/github.js";
@@ -113,12 +116,22 @@ export class Daemon {
     this.config = loadConfig(configPath);
     this.store = new StateStore();
     this.dispatcher = new Dispatcher(this.config, this.store);
-    this.verifier = new Verifier(this.config, this.store);
+    this.verifier = new Verifier(this.store);
     this.detector = new ImprovementDetector(this.config);
     this.issueCreator = new IssueCreator(this.config);
     this.deployer = new Deployer(this.config);
     this.supervisor = new Supervisor(this.config, this.store);
-    this.prReviewer = new PRReviewer(this.config, this.store);
+    this.prReviewer = new PRReviewer(this.config, this.store, {
+      onAgentRestart: async (repo) => {
+        // Map repo slug → agent name by looking up the github field in config
+        const agentName = Object.entries(this.config.agents).find(
+          ([, a]) => a.github?.toLowerCase() === repo.toLowerCase(),
+        )?.[0];
+        if (agentName) {
+          await this.deployer.restartAgent(agentName);
+        }
+      },
+    });
     this.prRetryQueue = new PRCreationRetryQueue(this.store);
     this.pollInterval = pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   }
