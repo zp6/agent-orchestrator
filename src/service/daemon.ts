@@ -1536,22 +1536,32 @@ export function buildDiffContextForFeedback(
 }
 
 /**
- * Convert numbered checklist items into an explicit `- [ ]` audit checklist.
+ * Convert numbered or bullet checklist items into an explicit `- [ ]` audit checklist.
  *
- * The reviewer's comment is already a numbered markdown list.  This function
- * extracts those items and rewrites them as unchecked GitHub task-list boxes
- * so the agent has a machine-readable form to check off before pushing.
+ * Handles both numbered markdown lists (`1. item`, `2) item`) and bullet lists
+ * (`- item`, `* item`).  Existing unchecked task-list boxes (`- [ ] item`) are
+ * preserved as-is.  Items are rewritten as unchecked GitHub task-list boxes so
+ * the agent has a machine-readable form to confirm before pushing.
  *
- * Returns an empty string when no numbered items are detected.
+ * Returns an empty string when no list items are detected.
  *
  * Exported for unit testing.
  */
 export function buildAuditChecklist(feedbackComment: string): string {
-  const items = feedbackComment.match(/^\d+[\.\)]\s+.+/gm) ?? [];
-  if (items.length === 0) return "";
-  return items
-    .map((item) => `- [ ] ${item.replace(/^\d+[\.\)]\s+/, "")}`)
-    .join("\n");
+  // Match numbered items (1. or 1)), bullet items (- or *), and existing task boxes (- [ ])
+  const itemPattern = /^(?:(\d+[\.\)])|(-\s*\[[ x]\])|([*\-]))\s+(.+)/gm;
+  const items: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = itemPattern.exec(feedbackComment)) !== null) {
+    const [, numbered, taskBox, bullet, text] = match;
+    if (taskBox) {
+      // Already a task-list box — normalise to unchecked
+      items.push(`- [ ] ${text.trim()}`);
+    } else if (numbered || bullet) {
+      items.push(`- [ ] ${text.trim()}`);
+    }
+  }
+  return items.join("\n");
 }
 
 /**

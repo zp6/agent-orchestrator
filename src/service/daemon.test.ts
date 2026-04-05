@@ -605,6 +605,22 @@ describe("buildConsolidatedFeedbackMessage", () => {
     expect(msg).toContain("- [ ] Add a test");
   });
 
+  it("includes audit checklist when reviewer uses bullet items", () => {
+    const feedback = "- Fix null check in src/foo.ts\n- Add unit test for edge case";
+    const msg = buildConsolidatedFeedbackMessage("owner/repo", 10, feedback, []);
+    expect(msg).toContain("Before pushing, confirm each item is addressed:");
+    expect(msg).toContain("- [ ] Fix null check in src/foo.ts");
+    expect(msg).toContain("- [ ] Add unit test for edge case");
+  });
+
+  it("includes audit checklist when reviewer uses asterisk bullets", () => {
+    const feedback = "* Guard parseInt in src/utils.ts:42\n* Remove unused import";
+    const msg = buildConsolidatedFeedbackMessage("owner/repo", 11, feedback, []);
+    expect(msg).toContain("Before pushing, confirm each item is addressed:");
+    expect(msg).toContain("- [ ] Guard parseInt in src/utils.ts:42");
+    expect(msg).toContain("- [ ] Remove unused import");
+  });
+
   it("omits diff context section when prDiff is not provided", () => {
     const feedback = "1. Fix the bug in src/foo.ts";
     const msg = buildConsolidatedFeedbackMessage("owner/repo", 10, feedback, []);
@@ -742,8 +758,8 @@ describe("buildAuditChecklist", () => {
     expect(checklist).toBe("- [ ] Fix the bug\n- [ ] Add a test\n- [ ] Update docs");
   });
 
-  it("returns empty string when no numbered items", () => {
-    const comment = "No numbered items here, just prose.";
+  it("returns empty string when no list items", () => {
+    const comment = "No list items here, just prose.";
     const checklist = buildAuditChecklist(comment);
     expect(checklist).toBe("");
   });
@@ -753,6 +769,50 @@ describe("buildAuditChecklist", () => {
     const checklist = buildAuditChecklist(comment);
     expect(checklist).toContain("- [ ] Item one");
     expect(checklist).toContain("- [ ] Item two");
+  });
+
+  it("converts hyphen bullet items to unchecked task-list checkboxes", () => {
+    const comment = "- Fix the null pointer\n- Add error handling\n- Update the test";
+    const checklist = buildAuditChecklist(comment);
+    expect(checklist).toBe(
+      "- [ ] Fix the null pointer\n- [ ] Add error handling\n- [ ] Update the test",
+    );
+  });
+
+  it("converts asterisk bullet items to unchecked task-list checkboxes", () => {
+    const comment = "* Guard parseInt against empty string\n* Add unit test for edge case";
+    const checklist = buildAuditChecklist(comment);
+    expect(checklist).toBe(
+      "- [ ] Guard parseInt against empty string\n- [ ] Add unit test for edge case",
+    );
+  });
+
+  it("normalises existing unchecked task-list boxes to standard format", () => {
+    const comment = "- [ ] Fix the bug\n- [ ] Add a test";
+    const checklist = buildAuditChecklist(comment);
+    expect(checklist).toBe("- [ ] Fix the bug\n- [ ] Add a test");
+  });
+
+  it("normalises checked task-list boxes to unchecked (agent confirms each item)", () => {
+    const comment = "- [x] Old item already done\n- [ ] New item to fix";
+    const checklist = buildAuditChecklist(comment);
+    expect(checklist).toContain("- [ ] Old item already done");
+    expect(checklist).toContain("- [ ] New item to fix");
+  });
+
+  it("handles mixed numbered and bullet items in a single comment", () => {
+    const comment = "1. Fix src/foo.ts bug\n- Add unit test\n* Update docs";
+    const checklist = buildAuditChecklist(comment);
+    expect(checklist).toContain("- [ ] Fix src/foo.ts bug");
+    expect(checklist).toContain("- [ ] Add unit test");
+    expect(checklist).toContain("- [ ] Update docs");
+  });
+
+  it("strips leading/trailing whitespace from item text", () => {
+    const comment = "-   Fix the bug   \n*   Another fix   ";
+    const checklist = buildAuditChecklist(comment);
+    expect(checklist).toContain("- [ ] Fix the bug");
+    expect(checklist).toContain("- [ ] Another fix");
   });
 });
 
