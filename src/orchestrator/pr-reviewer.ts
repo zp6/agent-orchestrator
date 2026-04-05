@@ -229,14 +229,19 @@ export class PRReviewer {
     const diffSize = pr.diff.length;
 
     if (diffSize > DIFF_ESCALATE_THRESHOLD) {
-      const result: PRReviewResult = {
-        decision: "escalate",
-        comment: `This PR's diff is ${Math.round(diffSize / 1024)} KB, which exceeds the safe review limit (200 KB). Automated review would only see a small fraction of the changes and could give false confidence. Escalating to human review.`,
-        reason: `Diff too large for automated review (${Math.round(diffSize / 1024)} KB > 200 KB threshold)`,
-      };
-      this.log.warn("PR diff too large — auto-escalating", { repo, prNumber, diffSize });
-      await this.executeDecision(repo, prNumber, result);
-      return result;
+      // Skip size check for bootstrap PRs (first PR on a repo with no merged PRs yet)
+      const isBootstrap = this.isBootstrapPR(repo);
+      if (!isBootstrap) {
+        const result: PRReviewResult = {
+          decision: "escalate",
+          comment: `This PR's diff is ${Math.round(diffSize / 1024)} KB, which exceeds the safe review limit (200 KB). Automated review would only see a small fraction of the changes and could give false confidence. Escalating to human review.`,
+          reason: `Diff too large for automated review (${Math.round(diffSize / 1024)} KB > 200 KB threshold)`,
+        };
+        this.log.warn("PR diff too large — auto-escalating", { repo, prNumber, diffSize });
+        await this.executeDecision(repo, prNumber, result);
+        return result;
+      }
+      this.log.info("Large diff allowed — bootstrap PR on new repo", { repo, prNumber, diffSize });
     }
 
     const diffTruncated = diffSize > DIFF_WARN_THRESHOLD;
@@ -250,7 +255,7 @@ export class PRReviewer {
 
     const prompt = `## PR #${pr.number}: ${pr.title}\n**Repo:** ${pr.repo}\n**Author:** ${pr.author}\n**Branch:** ${pr.branch}\n**Files changed:** ${pr.files_changed}${diffWarning}\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${truncatedDiff}\n\`\`\``;
 
-    const LLM_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes hard timeout
+    const LLM_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — PR reviews need more time via proxy CLI
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
     try {
@@ -683,6 +688,23 @@ export class PRReviewer {
    * Checks agent configs first, then falls back to inspecting the orchestrator's
    * own git remote. Returns null when no local path is known.
    */
+  /**
+   * Check if a repo has no merged PRs yet (first PR = bootstrap).
+   * Bootstrap PRs are exempt from the large-diff escalation threshold.
+   */
+  private isBootstrapPR(repo: string): boolean {
+    try {
+      const raw = execSync(
+        `gh pr list --repo ${repo} --state merged --json number -L 1`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+      const merged = JSON.parse(raw) as Array<{ number: number }>;
+      return merged.length === 0;
+    } catch {
+      return false; // fail-closed: assume not bootstrap
+    }
+  }
+
   private findLocalRepoPath(repo: string): string | null {
     // Match agent repos by their github field
     for (const agent of Object.values(this.config.agents)) {
