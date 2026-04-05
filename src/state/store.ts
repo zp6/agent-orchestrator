@@ -224,6 +224,24 @@ export interface SystemMetrics {
   pr_metrics: PRMetrics;
 }
 
+export type MergeQueueStatus = "queued" | "merging" | "merged" | "failed" | "skipped";
+
+/**
+ * A single entry in the PR merge queue.
+ */
+export interface MergeQueueEntry {
+  id: number;
+  repo: string;
+  pr_number: number;
+  branch: string;
+  position: number;
+  status: MergeQueueStatus;
+  enqueued_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  error: string | null;
+}
+
 /**
  * A single PR review decision recorded by the orchestrator.
  */
@@ -333,6 +351,7 @@ export class StateStore {
     this.runRetryMigration();
     this.runSupervisorMemoryMigration();
     this.runPRReviewsMigration();
+    this.runMergeQueueMigration();
     this.runDaemonStatsMigration();
   }
 
@@ -1455,6 +1474,114 @@ export class StateStore {
       avg_cycle_time_ms,
       per_repo,
     };
+  }
+
+  // ── PR merge queue ───────────────────────────────────────────────────────
+
+  private runMergeQueueMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pr_merge_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        pr_number INTEGER NOT NULL,
+        branch TEXT NOT NULL,
+        position INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'queued',
+        enqueued_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT,
+        error TEXT,
+        UNIQUE(repo, pr_number)
+      );
+      CREATE INDEX IF NOT EXISTS idx_pr_merge_queue_status ON pr_merge_queue(status);
+      CREATE INDEX IF NOT EXISTS idx_pr_merge_queue_repo_status ON pr_merge_queue(repo, status);
+    `);
+  }
+
+  /** Add a PR to the merge queue. No-op (ignored) if it's already enqueued. */
+  queuePRForMerge(repo: string, prNumber: number, branch: string): MergeQueueEntry {
+    const now = new Date().toISOString();
+    // Compute next position for this repo
+    const posRow = this.db
+      .prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM pr_merge_queue WHERE repo = ? AND status = 'queued'")
+      .get(repo) as { next_pos: number };
+    const position = posRow.next_pos;
+    this.db
+      .prepare(
+        `INSERT INTO pr_merge_queue (repo, pr_number, branch, position, status, enqueued_at)
+         VALUES (?, ?, ?, ?, 'queued', ?)
+         ON CONFLICT(repo, pr_number) DO NOTHING`,
+      )
+      .run(repo, prNumber, branch, position, now);
+    return this.getMergeQueueEntry(repo, prNumber)!;
+  }
+
+  /** Get a single queue entry, or undefined if not present. */
+  getMergeQueueEntry(repo: string, prNumber: number): MergeQueueEntry | undefined {
+    return this.db
+      .prepare("SELECT * FROM pr_merge_queue WHERE repo = ? AND pr_number = ?")
+      .get(repo, prNumber) as MergeQueueEntry | undefined;
+  }
+
+  /** Return true if the given PR is currently in the queue (any non-terminal status). */
+  isPRInMergeQueue(repo: string, prNumber: number): boolean {
+    const entry = this.getMergeQueueEntry(repo, prNumber);
+    return entry !== undefined && (entry.status === "queued" || entry.status === "merging");
+  }
+
+  /**
+   * Get all queued/merging entries ordered by position.
+   * Pass repo to restrict to a single repo, or omit for all repos.
+   */
+  getMergeQueue(repo?: string): MergeQueueEntry[] {
+    if (repo) {
+      return this.db
+        .prepare("SELECT * FROM pr_merge_queue WHERE repo = ? AND status IN ('queued','merging') ORDER BY position ASC, enqueued_at ASC")
+        .all(repo) as MergeQueueEntry[];
+    }
+    return this.db
+      .prepare("SELECT * FROM pr_merge_queue WHERE status IN ('queued','merging') ORDER BY repo ASC, position ASC, enqueued_at ASC")
+      .all() as MergeQueueEntry[];
+  }
+
+  /** Return the next entry eligible to be merged for a given repo (or globally). */
+  getNextQueuedPR(repo?: string): MergeQueueEntry | undefined {
+    if (repo) {
+      return this.db
+        .prepare("SELECT * FROM pr_merge_queue WHERE repo = ? AND status = 'queued' ORDER BY position ASC, enqueued_at ASC LIMIT 1")
+        .get(repo) as MergeQueueEntry | undefined;
+    }
+    return this.db
+      .prepare("SELECT * FROM pr_merge_queue WHERE status = 'queued' ORDER BY repo ASC, position ASC, enqueued_at ASC LIMIT 1")
+      .get() as MergeQueueEntry | undefined;
+  }
+
+  /** Mark a queued PR as actively being merged. */
+  markQueuedPRMerging(repo: string, prNumber: number): void {
+    this.db
+      .prepare("UPDATE pr_merge_queue SET status = 'merging', started_at = ? WHERE repo = ? AND pr_number = ?")
+      .run(new Date().toISOString(), repo, prNumber);
+  }
+
+  /** Mark a queued PR as successfully merged. */
+  markQueuedPRMerged(repo: string, prNumber: number): void {
+    this.db
+      .prepare("UPDATE pr_merge_queue SET status = 'merged', completed_at = ? WHERE repo = ? AND pr_number = ?")
+      .run(new Date().toISOString(), repo, prNumber);
+  }
+
+  /** Mark a queued PR merge as failed. */
+  markQueuedPRFailed(repo: string, prNumber: number, error: string): void {
+    this.db
+      .prepare("UPDATE pr_merge_queue SET status = 'failed', completed_at = ?, error = ? WHERE repo = ? AND pr_number = ?")
+      .run(new Date().toISOString(), error, repo, prNumber);
+  }
+
+  /** Remove a PR from the queue entirely (e.g. if it was closed/merged externally). */
+  removeFromMergeQueue(repo: string, prNumber: number): void {
+    this.db
+      .prepare("DELETE FROM pr_merge_queue WHERE repo = ? AND pr_number = ?")
+      .run(repo, prNumber);
   }
 
   // ── Daemon stats (persistent counters) ──────────────────────────────────

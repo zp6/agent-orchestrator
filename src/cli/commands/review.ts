@@ -2,6 +2,8 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { loadConfig } from "../../config/schema.js";
 import { PRReviewer } from "../../orchestrator/pr-reviewer.js";
+import { StateStore, type MergeQueueEntry } from "../../state/store.js";
+import { execSync } from "node:child_process";
 
 export function registerReviewCommand(program: Command): void {
   program
@@ -10,8 +12,23 @@ export function registerReviewCommand(program: Command): void {
     .argument("[repo]", "Specific repo (owner/repo) to review, or all agent repos if omitted")
     .option("-n, --pr <number>", "Review a specific PR number (requires repo)")
     .option("--dry-run", "Show what would be reviewed without taking action")
-    .action(async (repo?: string, opts?: { pr?: string; dryRun?: boolean }) => {
+    .option("--queue", "Show the current merge queue instead of reviewing PRs")
+    .action(async (repo?: string, opts?: { pr?: string; dryRun?: boolean; queue?: boolean }) => {
       const config = loadConfig(program.opts().config);
+
+      // --queue: display the merge queue and exit
+      if (opts?.queue) {
+        const store = new StateStore();
+        const entries = store.getMergeQueue(repo);
+        if (entries.length === 0) {
+          console.log(chalk.dim(repo ? `No queued PRs for ${repo}.` : "Merge queue is empty."));
+          return;
+        }
+        console.log(chalk.bold(`\n🔀 Merge Queue${repo ? ` — ${repo}` : ""}\n`));
+        printMergeQueue(entries);
+        return;
+      }
+
       const reviewer = new PRReviewer(config);
 
       if (repo && opts?.pr) {
@@ -42,7 +59,7 @@ export function registerReviewCommand(program: Command): void {
         if (opts?.dryRun) {
           try {
             const prs = JSON.parse(
-              require("child_process").execSync(
+              execSync(
                 `gh pr list --repo ${repoName} --state open --json number,title`,
                 { encoding: "utf-8", timeout: 15000 },
               ),
@@ -87,4 +104,42 @@ function printResult(repo: string, prNumber: number, result: { decision: string;
     result.decision === "request-changes" ? chalk.yellow : chalk.red;
   console.log(`  ${color(result.decision.padEnd(16))} ${repo}#${prNumber}`);
   console.log(`    ${chalk.dim(result.reason)}`);
+}
+
+function printMergeQueue(entries: MergeQueueEntry[]): void {
+  // Group by repo for cleaner output
+  const byRepo = new Map<string, MergeQueueEntry[]>();
+  for (const e of entries) {
+    const list = byRepo.get(e.repo) ?? [];
+    list.push(e);
+    byRepo.set(e.repo, list);
+  }
+
+  for (const [repo, repoEntries] of byRepo) {
+    console.log(chalk.bold(`  ${repo}`));
+    for (const entry of repoEntries) {
+      const statusColor =
+        entry.status === "merging" ? chalk.cyan :
+        entry.status === "queued"  ? chalk.green :
+        entry.status === "merged"  ? chalk.dim :
+        chalk.red;
+
+      const posLabel = entry.status === "merging" ? "merging" : `#${entry.position + 1}`;
+      const enqueuedAgo = formatAgo(entry.enqueued_at);
+      console.log(
+        `    ${statusColor(posLabel.padEnd(8))} PR #${entry.pr_number}  ${chalk.dim(entry.branch)}  ${chalk.dim(`(queued ${enqueuedAgo})`)}`,
+      );
+    }
+    console.log();
+  }
+}
+
+function formatAgo(isoDate: string): string {
+  const ms = Date.now() - new Date(isoDate).getTime();
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
 }

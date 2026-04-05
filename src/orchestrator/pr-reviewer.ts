@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { OrchestratorConfig } from "../config/schema.js";
-import { StateStore } from "../state/store.js";
+import { StateStore, type MergeQueueEntry } from "../state/store.js";
 import { Deployer } from "./deployer.js";
 import { extractIssueNumberFromBranch, findMatchingIssueNumber } from "./pr-creator.js";
 
@@ -233,8 +233,8 @@ export class PRReviewer {
       const result = this.parseResponse(text);
       this.log.info("PR review complete", { repo, prNumber, decision: result.decision, reason: result.reason });
 
-      // Execute the decision
-      await this.executeDecision(repo, prNumber, result);
+      // Execute the decision — pass branch so approve can enqueue without an extra API call
+      await this.executeDecision(repo, prNumber, result, pr.branch);
 
       return result;
     } catch (err) {
@@ -259,25 +259,34 @@ export class PRReviewer {
     return results;
   }
 
-  private async executeDecision(repo: string, prNumber: number, result: PRReviewResult): Promise<void> {
+  private async executeDecision(repo: string, prNumber: number, result: PRReviewResult, prBranch?: string): Promise<void> {
     switch (result.decision) {
       case "approve":
         try {
-          // Comment with the review, then merge (can't approve own PRs on GitHub)
+          // Fetch branch name if not provided
+          const branch = prBranch ?? this.fetchPRBranch(repo, prNumber);
+
+          // Skip if already in queue to avoid duplicate enqueues
+          if (this.store.isPRInMergeQueue(repo, prNumber)) {
+            this.log.info("PR already in merge queue, skipping re-enqueue", { repo, prNumber });
+            break;
+          }
+
+          // Enqueue instead of merging immediately — the merge queue processes one at a time
+          const entry = this.store.queuePRForMerge(repo, prNumber, branch);
+          const queueSize = this.store.getMergeQueue(repo).length;
+          const positionMsg = entry.position === 0
+            ? "next in queue"
+            : `position ${entry.position + 1} of ${queueSize} in queue`;
+
           execSync(
-            `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**[orchestrator] PR Review — Approved**\n\n${result.comment}`)}`,
+            `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**[orchestrator] PR Review — Approved** ✅\n\n${result.comment}\n\n---\n🔀 Added to merge queue (${positionMsg}). PRs merge sequentially to avoid branch conflicts.`)}`,
             { encoding: "utf-8", timeout: 30000 },
           );
-          execSync(
-            `gh pr merge ${prNumber} --repo ${repo} --squash --delete-branch`,
-            { encoding: "utf-8", timeout: 30000 },
-          );
-          this.log.info("PR approved and merged", { repo, prNumber });
+          this.log.info("PR approved and added to merge queue", { repo, prNumber, position: entry.position });
           this.store.recordPRReview(repo, prNumber, "approve");
-          // Restart repo-based agent containers so they pull latest main
-          await this.restartAgentsForRepo(repo);
         } catch (err) {
-          this.log.error("Failed to approve/merge PR", { repo, prNumber, error: String(err) });
+          this.log.error("Failed to approve/enqueue PR", { repo, prNumber, error: String(err) });
         }
         break;
 
@@ -401,6 +410,141 @@ export class PRReviewer {
         this.log.info("Restarting agent after PR merge", { agentName: name, repo });
         await this.deployer.restartAgent(name);
       }
+    }
+  }
+
+  /**
+   * Return the current merge queue entries for display.
+   * Pass repo to restrict to a single repo, or omit for all repos.
+   */
+  getMergeQueue(repo?: string): MergeQueueEntry[] {
+    return this.store.getMergeQueue(repo);
+  }
+
+  /**
+   * Process the merge queue: dequeue one PR at a time, merge it, then rebase
+   * remaining queued branches onto the new main so they don't conflict.
+   *
+   * Called by the daemon each cycle.  For each repo, we take the next queued PR,
+   * attempt a squash merge, mark it merged, then rebase all remaining queued
+   * branches for that repo so they stay current.
+   */
+  async processMergeQueue(): Promise<void> {
+    // Build set of repos that have queued PRs
+    const queue = this.store.getMergeQueue();
+    if (queue.length === 0) return;
+
+    const repos = [...new Set(queue.map((e) => e.repo))];
+
+    for (const repo of repos) {
+      // Skip if there's already a merge in progress for this repo
+      const repoQueue = this.store.getMergeQueue(repo);
+      const merging = repoQueue.find((e) => e.status === "merging");
+      if (merging) {
+        // A merge was started last cycle — check if the PR is now merged/closed
+        const isOpen = this.isPROpen(repo, merging.pr_number);
+        if (!isOpen) {
+          // It's been merged (or closed) — mark completed and continue
+          this.store.markQueuedPRMerged(repo, merging.pr_number);
+          this.log.info("Queued PR merge completed (detected closed)", { repo, prNumber: merging.pr_number });
+          await this.rebaseRemainingQueue(repo, merging.branch);
+          await this.restartAgentsForRepo(repo);
+        } else {
+          // Still in progress — wait for next cycle
+          this.log.info("Merge still in progress, waiting", { repo, prNumber: merging.pr_number });
+        }
+        continue;
+      }
+
+      const next = repoQueue.find((e) => e.status === "queued");
+      if (!next) continue;
+
+      // Verify PR is still open before attempting merge
+      if (!this.isPROpen(repo, next.pr_number)) {
+        this.log.info("Queued PR is no longer open, removing from queue", { repo, prNumber: next.pr_number });
+        this.store.removeFromMergeQueue(repo, next.pr_number);
+        continue;
+      }
+
+      // Mark as merging and attempt the squash merge
+      this.store.markQueuedPRMerging(repo, next.pr_number);
+      this.log.info("Processing merge queue: merging PR", { repo, prNumber: next.pr_number, branch: next.branch });
+
+      try {
+        execSync(
+          `gh pr merge ${next.pr_number} --repo ${repo} --squash --delete-branch`,
+          { encoding: "utf-8", timeout: 60000 },
+        );
+        this.store.markQueuedPRMerged(repo, next.pr_number);
+        this.log.info("Merge queue: PR merged successfully", { repo, prNumber: next.pr_number });
+
+        // Rebase remaining queued branches now that main has advanced
+        await this.rebaseRemainingQueue(repo, next.branch);
+        await this.restartAgentsForRepo(repo);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        this.store.markQueuedPRFailed(repo, next.pr_number, errMsg);
+        this.log.error("Merge queue: PR merge failed", { repo, prNumber: next.pr_number, error: errMsg });
+        // Post a comment so the agent knows the merge failed
+        try {
+          execSync(
+            `gh pr comment ${next.pr_number} --repo ${repo} --body ${shellEscape(`**[orchestrator] Merge Queue — Merge Failed** ❌\n\nFailed to merge PR automatically:\n\`\`\`\n${errMsg.slice(0, 500)}\n\`\`\`\nThis PR has been removed from the merge queue. Please resolve any issues and re-open a review.`)}`,
+            { encoding: "utf-8", timeout: 30000 },
+          );
+        } catch {
+          // Best effort
+        }
+      }
+    }
+  }
+
+  /**
+   * After a successful merge, rebase all remaining queued PRs for the repo
+   * onto the new main so they stay conflict-free.
+   */
+  private async rebaseRemainingQueue(repo: string, justMergedBranch: string): Promise<void> {
+    const localPath = this.findLocalRepoPath(repo);
+    if (!localPath) {
+      this.log.warn("Cannot rebase queued branches: no local repo path found", { repo });
+      return;
+    }
+
+    const remaining = this.store.getMergeQueue(repo).filter((e) => e.branch !== justMergedBranch);
+    if (remaining.length === 0) return;
+
+    this.log.info("Rebasing remaining queued branches after merge", { repo, count: remaining.length });
+
+    for (const entry of remaining) {
+      try {
+        const outcome = this.tryAutoRebase(localPath, entry.branch);
+        this.log.info("Rebase of queued branch", { repo, branch: entry.branch, outcome });
+        if (outcome === "failed") {
+          // Remove from queue and notify — can't safely merge if rebase fails
+          this.store.markQueuedPRFailed(repo, entry.pr_number, "Rebase onto new main failed after previous merge");
+          try {
+            execSync(
+              `gh pr comment ${entry.pr_number} --repo ${repo} --body ${shellEscape(`**[orchestrator] Merge Queue — Rebase Failed** ⚠️\n\nAfter the preceding PR was merged, this branch could not be automatically rebased onto the new \`main\`. Please rebase manually and re-queue:\n\`\`\`\ngit fetch origin && git rebase origin/main\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``)}`,
+              { encoding: "utf-8", timeout: 30000 },
+            );
+          } catch {
+            // Best effort
+          }
+        }
+      } catch (err) {
+        this.log.error("Error rebasing queued branch", { repo, branch: entry.branch, error: String(err) });
+      }
+    }
+  }
+
+  /** Fetch only the branch name for a PR without pulling the full diff. */
+  private fetchPRBranch(repo: string, prNumber: number): string {
+    try {
+      return execSync(
+        `gh pr view ${prNumber} --repo ${repo} --json headRefName -q .headRefName`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+    } catch {
+      return "unknown";
     }
   }
 

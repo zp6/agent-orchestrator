@@ -170,6 +170,9 @@ export class Daemon {
         await this.reviewPRs(time);
       }
 
+      // 4b. Process merge queue every cycle so approved PRs land promptly
+      await this.processMergeQueue(time);
+
       // 5. Redeploy agents with new code (only registered ones)
       await this.redeployStale(time, registeredAgents);
 
@@ -570,6 +573,17 @@ export class Daemon {
       }
     } catch (err) {
       console.error(`[${time}] PR review failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  private async processMergeQueue(time: string): Promise<void> {
+    try {
+      const queue = this.prReviewer.getMergeQueue();
+      if (queue.length === 0) return;
+      console.log(`[${time}] Merge queue: ${queue.length} PR(s) pending — processing...`);
+      await this.prReviewer.processMergeQueue();
+    } catch (err) {
+      console.error(`[${time}] Merge queue processing failed: ${err instanceof Error ? err.message : err}`);
     }
   }
 
