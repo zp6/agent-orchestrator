@@ -13,11 +13,15 @@
  *   await notify.send("PR #42 escalated: merge conflicts");
  *   await notify.escalation("owner/repo", 42, "Diff too large");
  *   await notify.taskRejected("task-id", "claude-proxy", 0.3, "Missing auth check");
+ *   await notify.notifyOperator("Deploy failed", "claude-proxy is down", "high");
  */
 
 import { createLogger } from "./service/logger.js";
 
 const log = createLogger("notify");
+
+/** Urgency level for operator notifications. */
+export type NotifyUrgency = "low" | "medium" | "high";
 
 export interface Notifier {
   /** Send a raw message to the configured chat. */
@@ -26,6 +30,12 @@ export interface Notifier {
   escalation(repo: string, prNumber: number, reason: string): Promise<void>;
   /** Send a structured task rejection alert. */
   taskRejected(taskId: string, agentName: string, score: number, notes: string): Promise<void>;
+  /**
+   * Send an operator notification with urgency level.
+   * Rate-limited to max 1 message per (title, urgency) type per 15 minutes.
+   * Returns true if the message was sent, false if suppressed by the rate limit.
+   */
+  notifyOperator(title: string, body: string, urgency: NotifyUrgency): Promise<boolean>;
   /** Returns true if the notifier is configured (has bot token + chat ID). */
   isConfigured(): boolean;
 }
@@ -67,13 +77,35 @@ async function sendTelegramMessage(
   }
 }
 
+/** Rate limit window for notifyOperator: 15 minutes in milliseconds. */
+const NOTIFY_RATE_LIMIT_MS = 15 * 60 * 1000;
+
+/** Urgency icons for notifyOperator messages. */
+const URGENCY_ICON: Record<NotifyUrgency, string> = {
+  low: "ℹ️",
+  medium: "⚠️",
+  high: "🚨",
+};
+
 /**
  * Create a notifier.
  *
  * @param config Optional explicit config (falls back to environment variables).
+ * @param opts.rateLimitMs Override the rate limit window (default: 15 minutes). Useful for tests.
  */
-export function createNotifier(config?: Partial<TelegramConfig>): Notifier {
+export function createNotifier(
+  config?: Partial<TelegramConfig>,
+  opts: { rateLimitMs?: number } = {},
+): Notifier {
   const resolved = resolveConfig(config);
+  const rateLimitMs = opts.rateLimitMs ?? NOTIFY_RATE_LIMIT_MS;
+
+  /**
+   * Rate-limit map for notifyOperator.
+   * Key: `${title}::${urgency}` — tracks the last timestamp a message of that
+   * type was sent so we suppress duplicates within the rate-limit window.
+   */
+  const lastSentAt = new Map<string, number>();
 
   return {
     isConfigured(): boolean {
@@ -123,6 +155,41 @@ export function createNotifier(config?: Partial<TelegramConfig>): Notifier {
         `*Notes:* ${notes.slice(0, 200)}`,
       ].join("\n");
       await this.send(text);
+    },
+
+    async notifyOperator(
+      title: string,
+      body: string,
+      urgency: NotifyUrgency,
+    ): Promise<boolean> {
+      if (!resolved) {
+        log.warn("Telegram notifier not configured — skipping notifyOperator", { title, urgency });
+        return false;
+      }
+
+      const rateKey = `${title}::${urgency}`;
+      const now = Date.now();
+      const last = lastSentAt.get(rateKey);
+
+      if (last !== undefined && now - last < rateLimitMs) {
+        log.info("notifyOperator suppressed by rate limit", {
+          title,
+          urgency,
+          nextAllowedIn: Math.ceil((rateLimitMs - (now - last)) / 1000),
+        });
+        return false;
+      }
+
+      const icon = URGENCY_ICON[urgency];
+      const text = [
+        `${icon} *${title}*`,
+        ``,
+        body.slice(0, 1000),
+      ].join("\n");
+
+      await this.send(text);
+      lastSentAt.set(rateKey, now);
+      return true;
     },
   };
 }

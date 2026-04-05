@@ -317,7 +317,7 @@ async function handleHealth(
   return lines.join("\n");
 }
 
-function handleQueue(store: IStateStore, repo?: string): string {
+function handleQueue(store: ITelegramStateStore, repo?: string): string {
   const entries = store.getMergeQueue(repo);
 
   if (entries.length === 0) {
