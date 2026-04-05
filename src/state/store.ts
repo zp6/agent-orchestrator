@@ -8,7 +8,7 @@
 
 import Database from "better-sqlite3";
 import type {
-  IStateStore,
+  ITelegramStateStore,
   Task,
   TaskStatus,
   MergeQueueEntry,
@@ -18,7 +18,7 @@ import type {
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
-export class StateStore implements IStateStore {
+export class StateStore implements ITelegramStateStore {
   private db: Database.Database;
 
   constructor(dbPath: string = process.env.STATE_DB_PATH ?? "state.db") {

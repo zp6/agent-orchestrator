@@ -83,9 +83,15 @@ export interface DispatchRequest {
 }
 
 /**
- * Minimal StateStore interface consumed by reviewer modules.
- * The orchestrator daemon injects its full StateStore — this interface
- * ensures reviewers only depend on what they actually use.
+ * Core StateStore interface consumed by reviewer modules.
+ *
+ * This is intentionally scoped to the methods the orchestrator's StateStore
+ * actually implements. Reviewer modules (verifier, supervisor, pr-reviewer)
+ * depend only on this interface so the orchestrator can inject its own
+ * StateStore without needing to add reviewer-only methods.
+ *
+ * DO NOT add methods here unless the orchestrator's StateStore implements them.
+ * Telegram-specific helpers live in ITelegramStateStore below.
  */
 export interface IStateStore {
   // Task operations
@@ -113,7 +119,19 @@ export interface IStateStore {
 
   // PR review history
   recordPRReview(repo: string, prNumber: number, decision: string): void;
+}
 
+/**
+ * Extended interface for the reviewer's own StateStore, which adds
+ * Telegram-specific operations (system flags, dispatch requests,
+ * task prioritization).
+ *
+ * These methods are NOT required from the orchestrator's StateStore.
+ * The TelegramCommandHandler and the reviewer's local StateStore use
+ * this interface; reviewer modules wired into the orchestrator use
+ * the narrower IStateStore above.
+ */
+export interface ITelegramStateStore extends IStateStore {
   // System flags (pause/resume, operator overrides)
   getSystemFlag(key: string): string | null;
   setSystemFlag(key: string, value: string): void;

@@ -18,7 +18,7 @@
  */
 
 import { createLogger } from "../service/logger.js";
-import type { IStateStore } from "../state/types.js";
+import type { ITelegramStateStore } from "../state/types.js";
 
 const log = createLogger("telegram-commands");
 
@@ -141,7 +141,7 @@ function parseCommand(update: TelegramUpdate): ParsedCommand | null {
 
 async function executeCommand(
   cmd: ParsedCommand,
-  store: IStateStore,
+  store: ITelegramStateStore,
   botToken: string,
 ): Promise<string> {
   switch (cmd.command) {
@@ -202,7 +202,7 @@ async function executeCommand(
   }
 }
 
-async function handleStatus(store: IStateStore): Promise<string> {
+async function handleStatus(store: ITelegramStateStore): Promise<string> {
   const active = store.listTasks({ status: "in_progress" });
   const dispatched = store.listTasks({ status: "dispatched" });
   const pendingVerification = store.getUnverified(5);
@@ -250,7 +250,7 @@ async function handleStatus(store: IStateStore): Promise<string> {
 }
 
 async function handleHealth(
-  store: IStateStore,
+  store: ITelegramStateStore,
   botToken: string,
 ): Promise<string> {
   const results: { label: string; ok: boolean; detail: string }[] = [];
@@ -371,13 +371,13 @@ function handleQueue(store: IStateStore, repo?: string): string {
 
 /**
  * Long-polls the Telegram Bot API for incoming operator commands and
- * dispatches them to the live state.db via the provided IStateStore.
+ * dispatches them to the live state.db via the provided ITelegramStateStore.
  */
 export class TelegramCommandHandler {
-  private store: IStateStore;
+  private store: ITelegramStateStore;
   private pollIntervalMs: number;
 
-  constructor(store: IStateStore, opts: { pollIntervalMs?: number } = {}) {
+  constructor(store: ITelegramStateStore, opts: { pollIntervalMs?: number } = {}) {
     this.store = store;
     this.pollIntervalMs = opts.pollIntervalMs ?? 1_000;
   }

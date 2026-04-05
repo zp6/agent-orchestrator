@@ -46,6 +46,7 @@ export type { ReviewerConfig, AgentConfig } from "./config.js";
 export { StateStore } from "./state/store.js";
 export type {
   IStateStore,
+  ITelegramStateStore,
   Task,
   MergeQueueEntry,
   AgentStats,
