@@ -70,6 +70,16 @@ export function checkDuplicate(
     };
   }
 
+  // Escalated task — block permanently.
+  if (task.status === "escalated") {
+    log.warn("Duplicate suppressed: source_ref is escalated", { sourceRef, taskId: task.id });
+    return {
+      isDuplicate: true,
+      reason: `escalated task ${task.id} — permanently escalated, requires human intervention`,
+      existingTask: task,
+    };
+  }
+
   // Terminal state (done / failed): allow re-dispatch if the task was
   // explicitly rejected by the verifier — the agent should revise the work.
   if (task.status === "done" || task.status === "failed") {

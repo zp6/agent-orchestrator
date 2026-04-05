@@ -850,3 +850,31 @@ describe("Dispatcher.retryTask — auto-escalation (issue #341)", () => {
     expect(mockReportEscalation).not.toHaveBeenCalled();
   });
 });
+
+describe("StateStore.countFailedTasksForSourceRef", () => {
+  it("returns 0 when no tasks", () => {
+    const store = new StateStore(":memory:");
+    expect(store.countFailedTasksForSourceRef("github", "owner/repo#1")).toBe(0);
+  });
+
+  it("counts failed and escalated tasks only", () => {
+    const store = new StateStore(":memory:");
+    const t1 = store.createTask({ title: "t1", source: "github", source_ref: "owner/repo#1" });
+    store.updateTask(t1.id, { status: "failed" });
+    const t2 = store.createTask({ title: "t2", source: "github", source_ref: "owner/repo#1" });
+    store.updateTask(t2.id, { status: "escalated" });
+    const t3 = store.createTask({ title: "t3", source: "github", source_ref: "owner/repo#1" });
+    store.updateTask(t3.id, { status: "done" });
+    expect(store.countFailedTasksForSourceRef("github", "owner/repo#1")).toBe(2);
+  });
+
+  it("does not cross-count different source_refs", () => {
+    const store = new StateStore(":memory:");
+    const t1 = store.createTask({ title: "t1", source: "github", source_ref: "owner/repo#1" });
+    store.updateTask(t1.id, { status: "failed" });
+    const t2 = store.createTask({ title: "t2", source: "github", source_ref: "owner/repo#2" });
+    store.updateTask(t2.id, { status: "failed" });
+    expect(store.countFailedTasksForSourceRef("github", "owner/repo#1")).toBe(1);
+    expect(store.countFailedTasksForSourceRef("github", "owner/repo#2")).toBe(1);
+  });
+});

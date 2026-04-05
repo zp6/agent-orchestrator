@@ -253,3 +253,24 @@ describe("result shape", () => {
     expect(result.reason).toBeTruthy();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Escalated tasks — permanently blocked (issue #341)
+// ---------------------------------------------------------------------------
+
+describe("escalated tasks", () => {
+  it("blocks an escalated task regardless of age", () => {
+    const store = makeStore(makeTask({ status: "escalated", updated_at: hoursAgo(100) }));
+    const result = checkDuplicate(store as StateStore, "github", "owner/repo#1");
+    expect(result.isDuplicate).toBe(true);
+    expect(result.reason).toContain("escalated");
+  });
+
+  it("includes existingTask when blocking escalated", () => {
+    const task = makeTask({ status: "escalated" });
+    const store = makeStore(task);
+    const result = checkDuplicate(store as StateStore, "github", "owner/repo#1");
+    expect(result.existingTask).toBeDefined();
+    expect(result.existingTask!.id).toBe(task.id);
+  });
+});

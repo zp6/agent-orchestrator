@@ -724,6 +724,24 @@ export class StateStore {
       .get(source, sourceRef) as Task | undefined;
   }
 
+
+  /**
+   * Count all top-level tasks for (source, sourceRef) that are in a terminal
+   * failure state ("failed" or "escalated").  Used by the dispatcher to decide
+   * when a source_ref has exceeded the configured auto-escalation threshold.
+   */
+  countFailedTasksForSourceRef(source: string, sourceRef: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS cnt FROM tasks
+         WHERE source = ? AND source_ref = ?
+           AND parent_task_id IS NULL
+           AND status IN ('failed', 'escalated')`,
+      )
+      .get(source, sourceRef) as { cnt: number } | undefined;
+    return row?.cnt ?? 0;
+  }
+
   updateTask(id: string, updates: Partial<Pick<Task, "status" | "agent_name" | "conversation_id" | "result" | "plan" | "verification_status" | "quality_score" | "verification_notes" | "retry_count" | "next_retry_at">>): Task | undefined {
     const fields: string[] = [];
     const params: unknown[] = [];
