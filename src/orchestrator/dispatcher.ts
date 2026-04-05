@@ -45,7 +45,7 @@ export class Dispatcher {
     private config: OrchestratorConfig,
     store: StateStore,
   ) {
-    this.client = new AgentClient(config);
+    this.client = new AgentClient(config, store);
     const llmRouter = new LLMRouter(config, store);
     this.router = new Router(config, llmRouter);
     this.store = store;

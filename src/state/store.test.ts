@@ -2104,4 +2104,54 @@ describe("StateStore", () => {
       expect(store.getStat("other_counter")).toBe(7);
     });
   });
+
+  describe("directives", () => {
+    it("returns empty list when no directives stored", () => {
+      expect(store.listDirectives()).toEqual([]);
+    });
+
+    it("adds and retrieves a directive", () => {
+      const d = store.addDirective("always use plain text");
+      expect(d.id).toBeTypeOf("number");
+      expect(d.text).toBe("always use plain text");
+      expect(d.created_at).toBeTruthy();
+
+      const list = store.listDirectives();
+      expect(list).toHaveLength(1);
+      expect(list[0].text).toBe("always use plain text");
+    });
+
+    it("trims whitespace from directive text", () => {
+      const d = store.addDirective("  trim me  ");
+      expect(d.text).toBe("trim me");
+    });
+
+    it("stores multiple directives and returns them oldest-first", () => {
+      store.addDirective("directive one");
+      store.addDirective("directive two");
+      store.addDirective("directive three");
+
+      const list = store.listDirectives();
+      expect(list).toHaveLength(3);
+      expect(list[0].text).toBe("directive one");
+      expect(list[2].text).toBe("directive three");
+    });
+
+    it("removes a directive by id", () => {
+      const d1 = store.addDirective("keep me");
+      const d2 = store.addDirective("remove me");
+
+      store.removeDirective(d2.id);
+
+      const list = store.listDirectives();
+      expect(list).toHaveLength(1);
+      expect(list[0].id).toBe(d1.id);
+    });
+
+    it("silently ignores removal of a non-existent id", () => {
+      store.addDirective("still here");
+      store.removeDirective(99999); // doesn't exist
+      expect(store.listDirectives()).toHaveLength(1);
+    });
+  });
 });

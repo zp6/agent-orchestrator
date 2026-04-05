@@ -379,6 +379,17 @@ export interface AgentHealthSummary {
 }
 
 /**
+ * A stored behavioral directive issued by the user.
+ * Directives are injected into the system prompt of every agent dispatch
+ * to ensure persistent behavioral corrections survive daemon restarts.
+ */
+export interface Directive {
+  id: number;
+  text: string;
+  created_at: string;
+}
+
+/**
  * Aggregated PR review metrics — cycle time and rejection rate.
  */
 export interface PRMetrics {
@@ -480,6 +491,7 @@ export class StateStore {
     this.runDaemonStatsMigration();
     this.runPRCreationRetryMigration();
     this.runProcessedTriggersCompletedAtMigration();
+    this.runDirectivesMigration();
   }
 
   private runPhase2Migration(): void {
@@ -2238,6 +2250,51 @@ export class StateStore {
       timed_out_tasks: r.timed_out_tasks,
       timeout_rate_pct: r.total_tasks > 0 ? (r.timed_out_tasks / r.total_tasks) * 100 : null,
     }));
+  }
+
+  // ── Directives ────────────────────────────────────────────────────────────
+
+  private runDirectivesMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS directives (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        text TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_directives_created ON directives(created_at);
+    `);
+  }
+
+  /**
+   * Persist a new behavioral directive. Returns the stored record.
+   */
+  addDirective(text: string): Directive {
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(
+      "INSERT INTO directives (text, created_at) VALUES (?, ?)",
+    );
+    const result = stmt.run(text.trim(), now);
+    return {
+      id: result.lastInsertRowid as number,
+      text: text.trim(),
+      created_at: now,
+    };
+  }
+
+  /**
+   * Remove a directive by id. Silently succeeds if the id doesn't exist.
+   */
+  removeDirective(id: number): void {
+    this.db.prepare("DELETE FROM directives WHERE id = ?").run(id);
+  }
+
+  /**
+   * Return all stored directives, oldest first.
+   */
+  listDirectives(): Directive[] {
+    return this.db
+      .prepare("SELECT * FROM directives ORDER BY created_at ASC")
+      .all() as Directive[];
   }
 
   close(): void {

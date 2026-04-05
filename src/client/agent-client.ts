@@ -3,6 +3,7 @@ import { createProxyClient } from "./proxy-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { getAgentDir, getAgentApiKey, getAgentBaseUrl } from "../config/schema.js";
 import type { TaskType } from "../state/store.js";
+import type { StateStore } from "../state/store.js";
 
 export interface AgentResponse {
   content: string;
@@ -132,7 +133,22 @@ function selectBasePrompt(agentName: string, githubRepo: string, taskType?: Task
 }
 
 export class AgentClient {
-  constructor(private config: OrchestratorConfig) {}
+  constructor(
+    private config: OrchestratorConfig,
+    private store?: StateStore,
+  ) {}
+
+  /**
+   * Build the directives suffix to append to every system prompt.
+   * Returns an empty string when no directives are stored.
+   */
+  private buildDirectivesSuffix(): string {
+    if (!this.store) return "";
+    const directives = this.store.listDirectives();
+    if (directives.length === 0) return "";
+    const items = directives.map((d) => `- ${d.text}`).join("\n");
+    return `\n\nPERSISTENT BEHAVIORAL DIRECTIVES (always follow these):\n${items}`;
+  }
 
   /**
    * Lightweight liveness check: does an HTTP request to the agent's base URL.
@@ -202,9 +218,10 @@ export class AgentClient {
 
     const githubRepo = this.config.agents[agentName]?.github ?? "";
     const basePrompt = selectBasePrompt(agentName, githubRepo, options?.taskType);
+    const directivesSuffix = this.buildDirectivesSuffix();
     const systemPrompt = options?.systemPrompt
-      ? `${basePrompt}\n\n${options.systemPrompt}`
-      : basePrompt;
+      ? `${basePrompt}\n\n${options.systemPrompt}${directivesSuffix}`
+      : `${basePrompt}${directivesSuffix}`;
 
     const response = await client.messages.create({
       model: options?.model ?? "claude-sonnet-4-6",
@@ -247,9 +264,10 @@ export class AgentClient {
 
     const githubRepo = this.config.agents[agentName]?.github ?? "";
     const basePrompt = selectBasePrompt(agentName, githubRepo, options?.taskType);
+    const directivesSuffix = this.buildDirectivesSuffix();
     const systemPrompt = options?.systemPrompt
-      ? `${basePrompt}\n\n${options.systemPrompt}`
-      : basePrompt;
+      ? `${basePrompt}\n\n${options.systemPrompt}${directivesSuffix}`
+      : `${basePrompt}${directivesSuffix}`;
 
     const stream = client.messages.stream({
       model: options?.model ?? "claude-sonnet-4-6",

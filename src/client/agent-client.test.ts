@@ -258,3 +258,57 @@ describe("buildResearchPrompt", () => {
     expect(prompt).not.toContain("gh pr create");
   });
 });
+
+// ── Directive injection tests ─────────────────────────────────────────────────
+
+describe("AgentClient directive injection", () => {
+  // A minimal mock store that implements only the listDirectives() method.
+  function makeStoreWithDirectives(directives: Array<{ id: number; text: string; created_at: string }>) {
+    return {
+      listDirectives: () => directives,
+    } as unknown as import("../state/store.js").StateStore;
+  }
+
+  function makeConfig(agentPort: number): OrchestratorConfig {
+    return {
+      proxy: { url: `http://localhost:${agentPort}`, manager_url: "http://localhost:3400", timeout_ms: 5000 },
+      base_dir: "/tmp",
+      orchestrator_dir: "/tmp",
+      agents: {
+        "test-agent": {
+          dir: "test-agent",
+          description: "Test",
+          capabilities: [],
+          owns_topics: [],
+          docker: { port: agentPort },
+        },
+      },
+    };
+  }
+
+  it("buildDirectivesSuffix is empty when no store is provided", () => {
+    const client = new AgentClient(makeConfig(9999));
+    // Access the private method via type cast for testing
+    const suffix = (client as unknown as { buildDirectivesSuffix(): string }).buildDirectivesSuffix();
+    expect(suffix).toBe("");
+  });
+
+  it("buildDirectivesSuffix is empty when store has no directives", () => {
+    const store = makeStoreWithDirectives([]);
+    const client = new AgentClient(makeConfig(9999), store);
+    const suffix = (client as unknown as { buildDirectivesSuffix(): string }).buildDirectivesSuffix();
+    expect(suffix).toBe("");
+  });
+
+  it("buildDirectivesSuffix includes all stored directives", () => {
+    const store = makeStoreWithDirectives([
+      { id: 1, text: "always use plain text", created_at: "2026-01-01T00:00:00.000Z" },
+      { id: 2, text: "never use backslashes", created_at: "2026-01-02T00:00:00.000Z" },
+    ]);
+    const client = new AgentClient(makeConfig(9999), store);
+    const suffix = (client as unknown as { buildDirectivesSuffix(): string }).buildDirectivesSuffix();
+    expect(suffix).toContain("PERSISTENT BEHAVIORAL DIRECTIVES");
+    expect(suffix).toContain("always use plain text");
+    expect(suffix).toContain("never use backslashes");
+  });
+});

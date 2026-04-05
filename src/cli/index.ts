@@ -19,6 +19,7 @@ import { registerPreflightCommand } from "./commands/preflight.js";
 import { registerAuditCommand } from "./commands/audit.js";
 import { registerDigestCommand } from "./commands/digest.js";
 import { registerTimeoutsCommand } from "./commands/timeouts.js";
+import { registerDirectivesCommand } from "./commands/directives.js";
 
 const program = new Command();
 
@@ -47,5 +48,6 @@ registerPreflightCommand(program);
 registerAuditCommand(program);
 registerDigestCommand(program);
 registerTimeoutsCommand(program);
+registerDirectivesCommand(program);
 
 program.parse();
