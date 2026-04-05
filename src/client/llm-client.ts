@@ -9,7 +9,7 @@ import { getAgentDir, getAgentBaseUrl } from "../config/schema.js";
  * so LLM calls (routing, reviewing, verifying, supervising) don't compete
  * with agent tasks.
  */
-const PREFERRED_LLM_AGENT = "claude-agent-orchestrator";
+const PREFERRED_LLM_AGENT = "claude-orchestrator-reviewer";
 
 /**
  * Get an Anthropic client for orchestrator LLM calls.
