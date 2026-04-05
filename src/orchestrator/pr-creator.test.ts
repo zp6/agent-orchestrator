@@ -597,7 +597,7 @@ describe("findOrphanBranches agentFilter", () => {
     mockExecSync
       .mockReturnValueOnce("") // gh pr list for agent-a → no PRs
       .mockReturnValueOnce("issue-305-fix\n") // gh api branches for agent-a
-      .mockReturnValueOnce("1\n"); // compare ahead_by = 1
+      .mockReturnValueOnce(JSON.stringify({ ahead_by: 1, behind_by: 0 })); // compare
 
     const orphans = findOrphanBranches(multiAgentConfig, "agent-a");
 
@@ -638,5 +638,181 @@ describe("findOrphanBranches agentFilter", () => {
     const callArgs = mockExecSync.mock.calls.map((c: unknown[]) => String(c[0]));
     expect(callArgs.every((a: string) => !a.includes("repo-b"))).toBe(true);
     expect(orphans).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findOrphanBranches — stale branch auto-deletion (issue #346)
+// ---------------------------------------------------------------------------
+
+import { STALE_BRANCH_BEHIND_THRESHOLD, deleteStaleOrphanBranches } from "./pr-creator.js";
+
+describe("findOrphanBranches — stale branch auto-deletion", () => {
+  const singleAgentConfig = {
+    proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 5000 },
+    orchestrator_dir: "/tmp",
+    base_dir: "/projects",
+    agents: {
+      "agent-a": {
+        dir: "agent-a",
+        description: "Agent A",
+        capabilities: [],
+        owns_topics: [],
+        github: "owner/repo-a",
+      },
+    },
+  } as unknown as OrchestratorConfig;
+
+  it("does not return a branch that is >STALE_BRANCH_BEHIND_THRESHOLD commits behind main", () => {
+    mockExecSync
+      .mockReturnValueOnce("") // gh pr list → no open PRs
+      .mockReturnValueOnce("stale-branch\n") // gh api branches
+      .mockReturnValueOnce(JSON.stringify({ ahead_by: 2, behind_by: STALE_BRANCH_BEHIND_THRESHOLD + 1 })) // compare
+      .mockReturnValueOnce(""); // DELETE ref succeeds
+
+    const orphans = findOrphanBranches(singleAgentConfig);
+    expect(orphans).toHaveLength(0);
+  });
+
+  it("deletes the remote branch when behind_by > threshold", () => {
+    mockExecSync
+      .mockReturnValueOnce("") // gh pr list → no open PRs
+      .mockReturnValueOnce("stale-branch\n") // gh api branches
+      .mockReturnValueOnce(JSON.stringify({ ahead_by: 2, behind_by: STALE_BRANCH_BEHIND_THRESHOLD + 5 })) // compare
+      .mockReturnValueOnce(""); // DELETE ref call
+
+    findOrphanBranches(singleAgentConfig);
+
+    const deleteCalls = mockExecSync.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(deleteCalls.some((c) => c.includes("DELETE") && c.includes("stale-branch"))).toBe(true);
+  });
+
+  it("returns a branch that is exactly at the threshold (not stale)", () => {
+    mockExecSync
+      .mockReturnValueOnce("") // gh pr list → no open PRs
+      .mockReturnValueOnce("fresh-enough\n") // gh api branches
+      .mockReturnValueOnce(JSON.stringify({ ahead_by: 3, behind_by: STALE_BRANCH_BEHIND_THRESHOLD })); // compare
+
+    const orphans = findOrphanBranches(singleAgentConfig);
+    expect(orphans).toHaveLength(1);
+    expect(orphans[0].branch).toBe("fresh-enough");
+  });
+
+  it("returns a branch that is below the threshold", () => {
+    mockExecSync
+      .mockReturnValueOnce("") // gh pr list → no open PRs
+      .mockReturnValueOnce("active-branch\n") // gh api branches
+      .mockReturnValueOnce(JSON.stringify({ ahead_by: 1, behind_by: 3 })); // compare
+
+    const orphans = findOrphanBranches(singleAgentConfig);
+    expect(orphans).toHaveLength(1);
+    expect(orphans[0].branch).toBe("active-branch");
+  });
+
+  it("does not delete a branch that already has an open PR (skipped before compare)", () => {
+    mockExecSync
+      .mockReturnValueOnce("already-has-pr\n") // gh pr list → branch has a PR
+      .mockReturnValueOnce("already-has-pr\n"); // gh api branches
+
+    const orphans = findOrphanBranches(singleAgentConfig);
+    expect(orphans).toHaveLength(0);
+
+    // No DELETE call should have been made
+    const deleteCalls = mockExecSync.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(deleteCalls.some((c) => c.includes("DELETE"))).toBe(false);
+  });
+
+  it("continues gracefully when branch deletion fails", () => {
+    mockExecSync
+      .mockReturnValueOnce("") // gh pr list → no open PRs
+      .mockReturnValueOnce("stale-branch\n") // gh api branches
+      .mockReturnValueOnce(JSON.stringify({ ahead_by: 1, behind_by: 50 })) // compare
+      .mockImplementationOnce(() => { throw new Error("API rate limited"); }); // DELETE fails
+
+    // Should not throw, just log a warning
+    expect(() => findOrphanBranches(singleAgentConfig)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// deleteStaleOrphanBranches — periodic cleanup
+// ---------------------------------------------------------------------------
+
+describe("deleteStaleOrphanBranches", () => {
+  const cleanupConfig = {
+    proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 5000 },
+    orchestrator_dir: "/tmp",
+    base_dir: "/projects",
+    agents: {
+      "agent-a": {
+        dir: "agent-a",
+        description: "Agent A",
+        capabilities: [],
+        owns_topics: [],
+        github: "owner/repo-a",
+      },
+    },
+  } as unknown as OrchestratorConfig;
+
+  it("deletes branches with no open PR that are behind main", () => {
+    mockExecSync
+      .mockReturnValueOnce("") // gh pr list open → no open PRs
+      .mockReturnValueOnce("merged-but-not-deleted\n") // gh api branches
+      .mockReturnValueOnce(`${STALE_BRANCH_BEHIND_THRESHOLD + 5}\n`) // behind_by for branch
+      .mockReturnValueOnce(""); // DELETE ref
+
+    const deleted = deleteStaleOrphanBranches(cleanupConfig);
+    expect(deleted).toBe(1);
+
+    const deleteCalls = mockExecSync.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(deleteCalls.some((c) => c.includes("DELETE") && c.includes("merged-but-not-deleted"))).toBe(true);
+  });
+
+  it("skips branches that have an open PR", () => {
+    mockExecSync
+      .mockReturnValueOnce("open-pr-branch\n") // gh pr list open → branch has open PR
+      .mockReturnValueOnce("open-pr-branch\n"); // gh api branches
+
+    const deleted = deleteStaleOrphanBranches(cleanupConfig);
+    expect(deleted).toBe(0);
+  });
+
+  it("skips main and master branches", () => {
+    mockExecSync
+      .mockReturnValueOnce("") // gh pr list open → no open PRs
+      .mockReturnValueOnce("main\nmaster\n"); // gh api branches
+
+    const deleted = deleteStaleOrphanBranches(cleanupConfig);
+    expect(deleted).toBe(0);
+    // No compare or delete calls should have been made
+    expect(mockExecSync.mock.calls.length).toBe(2);
+  });
+
+  it("does not delete branches that are <= threshold commits behind", () => {
+    mockExecSync
+      .mockReturnValueOnce("") // gh pr list open
+      .mockReturnValueOnce("recent-branch\n") // gh api branches
+      .mockReturnValueOnce("5\n"); // behind_by = 5 (≤ threshold)
+
+    const deleted = deleteStaleOrphanBranches(cleanupConfig);
+    expect(deleted).toBe(0);
+  });
+
+  it("returns 0 for agents without a github repo", () => {
+    const configNoGitHub = {
+      ...cleanupConfig,
+      agents: {
+        "no-gh": {
+          dir: "no-gh",
+          description: "No GH",
+          capabilities: [],
+          owns_topics: [],
+        },
+      },
+    } as unknown as OrchestratorConfig;
+
+    const deleted = deleteStaleOrphanBranches(configNoGitHub);
+    expect(deleted).toBe(0);
+    expect(mockExecSync).not.toHaveBeenCalled();
   });
 });

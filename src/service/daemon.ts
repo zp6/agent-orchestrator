@@ -7,7 +7,7 @@ import { IssueCreator } from "../orchestrator/issue-creator.js";
 import { Deployer } from "../orchestrator/deployer.js";
 import { Supervisor, isDecisionAlreadyResolved } from "../orchestrator/supervisor.js";
 import { PRReviewer } from "../orchestrator/pr-reviewer.js";
-import { findOrphanBranches, createPRForBranch } from "../orchestrator/pr-creator.js";
+import { findOrphanBranches, createPRForBranch, deleteStaleOrphanBranches, STALE_BRANCH_BEHIND_THRESHOLD } from "../orchestrator/pr-creator.js";
 import { PRCreationRetryQueue } from "../orchestrator/pr-creation-retry-queue.js";
 import { validateGhAuth } from "../triggers/github.js";
 import {
@@ -751,7 +751,17 @@ export class Daemon {
         }
       }
 
-      // 3. Detect new orphan branches and attempt PR creation.
+      // 3. Purge stale branches before scanning for new orphans.
+      // Any branch >STALE_BRANCH_BEHIND_THRESHOLD commits behind main with no
+      // open PR is deleted automatically — this avoids running expensive
+      // validation (tsc + vitest) on branches that would conflict anyway.
+      const deleted = deleteStaleOrphanBranches(this.config);
+      if (deleted > 0) {
+        console.log(`[${time}] Deleted ${deleted} stale orphan branch(es) (>${STALE_BRANCH_BEHIND_THRESHOLD} commits behind main)`);
+        this.log.info("Stale orphan branches deleted", { count: deleted });
+      }
+
+      // 4. Detect new orphan branches and attempt PR creation.
       const orphans = findOrphanBranches(this.config);
 
       // Pre-flight: verify gh is authenticated before attempting any PR creation.

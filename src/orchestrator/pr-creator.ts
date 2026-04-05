@@ -11,6 +11,13 @@ import { validateGhAuth } from "../triggers/github.js";
 export const PR_CREATE_MAX_RETRIES = 2;
 /** Base delay in ms between `gh pr create` retry attempts. */
 export const PR_CREATE_RETRY_DELAY_MS = 2_000;
+/**
+ * Branches more than this many commits behind main are considered permanently
+ * stale. They are auto-deleted without running validation or tests — any PR
+ * they produced would conflict anyway, and running `npx vitest run` on 34+
+ * stale branches was the #1 cause of long daemon cycle times.
+ */
+export const STALE_BRANCH_BEHIND_THRESHOLD = 10;
 
 const log = createLogger("pr-creator");
 
@@ -229,13 +236,44 @@ export function findOrphanBranches(config: OrchestratorConfig, agentFilter?: str
       for (const branch of branches) {
         if (prBranches.has(branch)) continue;
 
-        // Check if branch has commits ahead of main
+        // Check commits ahead/behind main in a single API call
         try {
-          const ahead = execSync(
-            `gh api "repos/${agent.github}/compare/main...${branch}" --jq '.ahead_by'`,
+          const raw = execSync(
+            `gh api "repos/${agent.github}/compare/main...${branch}" --jq '{ahead_by,behind_by}'`,
             { encoding: "utf-8", timeout: 10000 },
           ).trim();
-          if (parseInt(ahead, 10) > 0) {
+          const { ahead_by: aheadBy, behind_by: behindBy } = JSON.parse(raw) as {
+            ahead_by: number;
+            behind_by: number;
+          };
+
+          if (behindBy > STALE_BRANCH_BEHIND_THRESHOLD) {
+            // Branch is too far behind main — any PR would conflict.
+            // Auto-delete it to avoid running expensive validation (tests, tsc)
+            // on branches that are never going to merge cleanly.
+            log.info("Auto-deleting stale orphan branch (too far behind main)", {
+              repo: agent.github,
+              branch,
+              behindBy,
+              threshold: STALE_BRANCH_BEHIND_THRESHOLD,
+            });
+            try {
+              execSync(
+                `gh api --method DELETE "repos/${agent.github}/git/refs/heads/${branch}"`,
+                { encoding: "utf-8", timeout: 10000 },
+              );
+              log.info("Stale orphan branch deleted", { repo: agent.github, branch });
+            } catch (delErr) {
+              log.warn("Failed to delete stale orphan branch", {
+                repo: agent.github,
+                branch,
+                error: delErr instanceof Error ? delErr.message : String(delErr),
+              });
+            }
+            continue;
+          }
+
+          if (aheadBy > 0) {
             orphans.push({ repo: agent.github, branch, agentName });
           }
         } catch {
@@ -248,6 +286,75 @@ export function findOrphanBranches(config: OrchestratorConfig, agentFilter?: str
   }
 
   return orphans;
+}
+
+/**
+ * Delete remote branches across all agent repos that:
+ * - Have no open PR (merged/closed PRs are okay to clean up)
+ * - Are more than STALE_BRANCH_BEHIND_THRESHOLD commits behind main
+ *
+ * This is the periodic "lint pass" that catches branches from merged PRs where
+ * `--delete-branch` didn't fire (e.g. when the PR was merged manually or
+ * `gh pr merge` lost its connection mid-run).
+ *
+ * Returns the number of branches deleted.
+ */
+export function deleteStaleOrphanBranches(config: OrchestratorConfig): number {
+  let deleted = 0;
+
+  for (const [agentName, agent] of Object.entries(config.agents)) {
+    if (!agent.github) continue;
+
+    try {
+      // Only consider branches that have no open PR
+      const openPrBranchesRaw = execSync(
+        `gh pr list --repo ${agent.github} --state open --json headRefName --jq '.[].headRefName'`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+      const openPrBranches = new Set(openPrBranchesRaw ? openPrBranchesRaw.split("\n") : []);
+
+      const branchesRaw = execSync(
+        `gh api "repos/${agent.github}/branches" --jq '.[].name'`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+      if (!branchesRaw) continue;
+
+      const branches = branchesRaw.split("\n").filter((b) => b !== "main" && b !== "master");
+
+      for (const branch of branches) {
+        // Don't touch branches with an open PR — the pr-reviewer owns those
+        if (openPrBranches.has(branch)) continue;
+
+        try {
+          const raw = execSync(
+            `gh api "repos/${agent.github}/compare/main...${branch}" --jq '.behind_by'`,
+            { encoding: "utf-8", timeout: 10000 },
+          ).trim();
+          const behindBy = parseInt(raw, 10);
+
+          if (!isNaN(behindBy) && behindBy > STALE_BRANCH_BEHIND_THRESHOLD) {
+            log.info("Periodic cleanup: deleting stale branch with no open PR", {
+              repo: agent.github,
+              branch,
+              behindBy,
+              agentName,
+            });
+            execSync(
+              `gh api --method DELETE "repos/${agent.github}/git/refs/heads/${branch}"`,
+              { encoding: "utf-8", timeout: 10000 },
+            );
+            deleted++;
+          }
+        } catch {
+          // Branch may not be comparable or deletion may fail — skip
+        }
+      }
+    } catch {
+      // Skip repos we can't access
+    }
+  }
+
+  return deleted;
 }
 
 /**
