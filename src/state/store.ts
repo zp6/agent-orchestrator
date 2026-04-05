@@ -258,6 +258,52 @@ export interface AgentTimeoutRate {
   timeout_rate_pct: number | null;
 }
 
+/**
+ * Per-agent timeout analytics for a rolling time window.
+ * Includes p95 duration and a recommended timeout setting.
+ */
+export interface AgentTimeoutAnalytics {
+  agent_name: string;
+  /** Total top-level tasks dispatched in the window */
+  total_tasks: number;
+  /** Tasks that timed out at least once (retry_count > 0) in the window */
+  timed_out_tasks: number;
+  /** Percentage: timed_out_tasks / total_tasks * 100, or null if no tasks */
+  timeout_rate_pct: number | null;
+  /** Average ms from task creation to done for completed tasks in window */
+  avg_duration_ms: number | null;
+  /** 95th-percentile ms from task creation to done for completed tasks */
+  p95_duration_ms: number | null;
+  /**
+   * Recommended timeout_ms: p95 * 1.2 rounded up to the nearest minute,
+   * minimum 5 minutes. null when there are no completed tasks to measure.
+   */
+  suggested_timeout_ms: number | null;
+}
+
+/** A single task record that experienced a timeout (retry_count > 0). */
+export interface TimeoutTaskRecord {
+  id: string;
+  title: string;
+  agent_name: string;
+  retry_count: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  /** End-to-end duration from created_at to updated_at in ms */
+  duration_ms: number | null;
+}
+
+/** Full timeout analytics for a rolling time window. */
+export interface TimeoutAnalytics {
+  days: number;
+  per_agent: AgentTimeoutAnalytics[];
+  /** Individual tasks that timed out, newest first (max 50) */
+  timeout_tasks: TimeoutTaskRecord[];
+  total_timed_out: number;
+  total_tasks: number;
+}
+
 /** Aggregate telemetry across all PR creation attempts. */
 export interface PRCreationTelemetry {
   total_branches: number;
@@ -1962,6 +2008,132 @@ export class StateStore {
       success_rate: successRate,
       top_errors: errorRows,
     };
+  }
+
+  /**
+   * Compute full timeout analytics for the last `days` days.
+   *
+   * Returns per-agent stats (timeout rate, avg/p95 duration, suggested timeout),
+   * plus a list of individual tasks that timed out (retry_count > 0) in the window.
+   *
+   * The p95 duration is derived from completed (status='done') tasks using the
+   * ROW_NUMBER window function to find the 95th percentile value.
+   *
+   * Suggested timeout = ceil(p95 * 1.2) rounded up to the nearest minute,
+   * with a minimum of 5 minutes.
+   */
+  getTimeoutAnalytics(days: number): TimeoutAnalytics {
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+    // Per-agent stats joined with p95 duration from completed tasks
+    const agentRows = this.db
+      .prepare(
+        `WITH base AS (
+           SELECT
+             agent_name,
+             status,
+             retry_count,
+             (julianday(updated_at) - julianday(created_at)) * 86400000.0 AS duration_ms
+           FROM tasks
+           WHERE parent_task_id IS NULL
+             AND agent_name IS NOT NULL
+             AND created_at >= ?
+         ),
+         done_ranked AS (
+           SELECT
+             agent_name,
+             duration_ms,
+             ROW_NUMBER() OVER (PARTITION BY agent_name ORDER BY duration_ms ASC) AS rn,
+             COUNT(*) OVER (PARTITION BY agent_name) AS n
+           FROM base
+           WHERE status = 'done'
+         ),
+         p95_vals AS (
+           SELECT agent_name, duration_ms AS p95_duration_ms
+           FROM done_ranked
+           WHERE rn = CAST(CEIL(0.95 * CAST(n AS REAL)) AS INTEGER)
+         ),
+         agg AS (
+           SELECT
+             agent_name,
+             COUNT(*) AS total_tasks,
+             COALESCE(SUM(CASE WHEN retry_count > 0 THEN 1 ELSE 0 END), 0) AS timed_out_tasks,
+             AVG(CASE WHEN status = 'done' THEN duration_ms END) AS avg_duration_ms
+           FROM base
+           GROUP BY agent_name
+         )
+         SELECT a.agent_name, a.total_tasks, a.timed_out_tasks, a.avg_duration_ms,
+                p.p95_duration_ms
+         FROM agg a
+         LEFT JOIN p95_vals p ON a.agent_name = p.agent_name
+         ORDER BY a.timed_out_tasks DESC, a.total_tasks DESC`,
+      )
+      .all(since) as Array<{
+        agent_name: string;
+        total_tasks: number;
+        timed_out_tasks: number;
+        avg_duration_ms: number | null;
+        p95_duration_ms: number | null;
+      }>;
+
+    // Individual timed-out tasks in the window
+    const timedOutTasks = this.db
+      .prepare(
+        `SELECT id, title, agent_name, retry_count, status, created_at, updated_at,
+                (julianday(updated_at) - julianday(created_at)) * 86400000.0 AS duration_ms
+         FROM tasks
+         WHERE parent_task_id IS NULL
+           AND retry_count > 0
+           AND created_at >= ?
+         ORDER BY created_at DESC
+         LIMIT 50`,
+      )
+      .all(since) as Array<{
+        id: string;
+        title: string;
+        agent_name: string;
+        retry_count: number;
+        status: string;
+        created_at: string;
+        updated_at: string;
+        duration_ms: number | null;
+      }>;
+
+    const per_agent: AgentTimeoutAnalytics[] = agentRows.map((r) => {
+      const suggested =
+        r.p95_duration_ms !== null
+          ? Math.max(
+              Math.ceil((r.p95_duration_ms * 1.2) / 60000) * 60000,
+              5 * 60 * 1000,
+            )
+          : null;
+      return {
+        agent_name: r.agent_name,
+        total_tasks: r.total_tasks,
+        timed_out_tasks: r.timed_out_tasks,
+        timeout_rate_pct:
+          r.total_tasks > 0 ? (r.timed_out_tasks / r.total_tasks) * 100 : null,
+        avg_duration_ms: r.avg_duration_ms,
+        p95_duration_ms: r.p95_duration_ms,
+        suggested_timeout_ms: suggested,
+      };
+    });
+
+    const timeout_tasks: TimeoutTaskRecord[] = timedOutTasks.map((r) => ({
+      id: r.id,
+      title: r.title,
+      agent_name: r.agent_name,
+      retry_count: r.retry_count,
+      status: r.status,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+      duration_ms: r.duration_ms,
+    }));
+
+    const total_timed_out = per_agent.reduce((s, a) => s + a.timed_out_tasks, 0);
+    const total_tasks = per_agent.reduce((s, a) => s + a.total_tasks, 0);
+
+    return { days, per_agent, timeout_tasks, total_timed_out, total_tasks };
   }
 
   /**

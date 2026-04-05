@@ -18,6 +18,7 @@ import { registerMetricsCommand } from "./commands/metrics.js";
 import { registerPreflightCommand } from "./commands/preflight.js";
 import { registerAuditCommand } from "./commands/audit.js";
 import { registerDigestCommand } from "./commands/digest.js";
+import { registerTimeoutsCommand } from "./commands/timeouts.js";
 
 const program = new Command();
 
@@ -45,5 +46,6 @@ registerMetricsCommand(program);
 registerPreflightCommand(program);
 registerAuditCommand(program);
 registerDigestCommand(program);
+registerTimeoutsCommand(program);
 
 program.parse();
