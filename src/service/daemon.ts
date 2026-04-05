@@ -826,10 +826,22 @@ export class Daemon {
                   this.log.error("Failed to escalate PR at feedback ceiling", { repo, prNumber, error: String(err) });
                 });
               } else {
-                this.log.info("Dispatching PR feedback to agent", { repo, prNumber, agentName, feedbackRounds });
+                // Consolidate all prior completed feedback rounds into a single
+                // dispatch message so the agent can address everything in one push,
+                // reducing sequential revision cycles (issue #267).
+                const sourceRef = `${repo}#${prNumber}`;
+                const priorTasks = this.store.getPrFeedbackHistory(sourceRef)
+                  .filter((t) => t.status === "done" || t.status === "failed");
+                const priorDescriptions = priorTasks.map((t) => t.description ?? null);
+                const feedbackMessage = buildConsolidatedFeedbackMessage(
+                  repo, prNumber, result.comment, priorDescriptions,
+                );
+                this.log.info("Dispatching PR feedback to agent", {
+                  repo, prNumber, agentName, feedbackRounds, priorRoundsIncluded: priorDescriptions.length,
+                });
                 this.dispatcher.dispatch(
-                  `Your PR #${prNumber} on ${repo} was reviewed and needs changes. Work through every item in the checklist below before pushing:\n\n${result.comment}\n\nCheck off each item, commit, and push to the same branch. Do not push until all checklist items are addressed.`,
-                  { agentName, source: "pr-feedback", sourceRef: `${repo}#${prNumber}`, title: `[PR feedback] ${repo}#${prNumber}` },
+                  feedbackMessage,
+                  { agentName, source: "pr-feedback", sourceRef, title: `[PR feedback] ${repo}#${prNumber}` },
                 ).catch((err) => {
                   this.log.error("Failed to dispatch PR feedback", { repo, prNumber, error: String(err) });
                 });
@@ -1312,4 +1324,80 @@ export function extractClosedIssueNumbers(prBody: string): number[] {
     numbers.add(parseInt(match[1], 10));
   }
   return [...numbers];
+}
+
+/**
+ * Extract the checklist text from a PR feedback dispatch description.
+ *
+ * Handles two formats:
+ *   1. Simple (first round): "...before pushing:\n\n{CHECKLIST}\n\nCheck off each item..."
+ *   2. Consolidated (multi-round): "...**Latest review (round N):**\n{CHECKLIST}\n\n**Prior..."
+ *
+ * Returns null when the description is absent or extraction fails.
+ * Exported for unit testing.
+ */
+export function extractChecklistText(description: string | null | undefined): string | null {
+  if (!description) return null;
+
+  // Simple single-round format
+  const simpleMatch = description.match(/before pushing:\s*\n\n([\s\S]+?)\n\nCheck off each item/);
+  if (simpleMatch) return simpleMatch[1].trim();
+
+  // Consolidated multi-round format — grab the "Latest review" section
+  const consolidatedMatch = description.match(/\*\*Latest review.*?\*\*\n([\s\S]+?)\n\n\*\*Prior feedback/);
+  if (consolidatedMatch) return consolidatedMatch[1].trim();
+
+  // Fallback: return the first 600 chars so the agent has some context
+  return description.slice(0, 600).trim();
+}
+
+/**
+ * Build a consolidated feedback dispatch message for a PR.
+ *
+ * When `priorFeedbackDescriptions` is empty (first feedback round) the
+ * returned message uses the original single-round format so existing
+ * behaviour is unchanged.
+ *
+ * When prior rounds exist, all outstanding feedback is merged into one
+ * message so the agent can address everything in a single push, reducing
+ * sequential revision cycles.
+ *
+ * Exported for unit testing.
+ */
+export function buildConsolidatedFeedbackMessage(
+  repo: string,
+  prNumber: number,
+  currentFeedback: string,
+  priorFeedbackDescriptions: Array<string | null>,
+): string {
+  if (priorFeedbackDescriptions.length === 0) {
+    // First round — preserve the original format exactly
+    return (
+      `Your PR #${prNumber} on ${repo} was reviewed and needs changes. ` +
+      `Work through every item in the checklist below before pushing:\n\n` +
+      `${currentFeedback}\n\n` +
+      `Check off each item, commit, and push to the same branch. ` +
+      `Do not push until all checklist items are addressed.`
+    );
+  }
+
+  const roundNum = priorFeedbackDescriptions.length + 1;
+
+  const priorSections = priorFeedbackDescriptions
+    .map((desc, idx) => {
+      const checklist = extractChecklistText(desc);
+      const fallback = "(checklist unavailable — check the PR comments for details)";
+      return `**Round ${idx + 1} feedback (verify these items are fixed):**\n${checklist ?? fallback}`;
+    })
+    .join("\n\n");
+
+  return [
+    `Your PR #${prNumber} on ${repo} has received ${roundNum} rounds of review feedback.`,
+    `Address ALL outstanding items below in a single push — do not push until everything is fixed.\n`,
+    `**Latest review (round ${roundNum}):**`,
+    currentFeedback,
+    `\n**Prior feedback rounds — confirm these are also resolved:**`,
+    priorSections,
+    `\nFix every unchecked item above, commit, and push to the same branch.`,
+  ].join("\n");
 }

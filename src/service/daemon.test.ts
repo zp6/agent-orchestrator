@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING, IDLE_RECLAIM_THRESHOLD_CYCLES, ORPHAN_PR_CHECK_EVERY_N_CYCLES } from "./daemon.js";
+import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING, IDLE_RECLAIM_THRESHOLD_CYCLES, ORPHAN_PR_CHECK_EVERY_N_CYCLES, extractChecklistText, buildConsolidatedFeedbackMessage } from "./daemon.js";
 import { TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -456,5 +456,127 @@ describe("ORPHAN_PR_CHECK_EVERY_N_CYCLES", () => {
     for (const n of [1, 2, 3, 10, 100]) {
       expect(n % ORPHAN_PR_CHECK_EVERY_N_CYCLES).toBe(0);
     }
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// extractChecklistText — extract checklist from PR feedback description
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("extractChecklistText", () => {
+  it("returns null for null input", () => {
+    expect(extractChecklistText(null)).toBeNull();
+  });
+
+  it("returns null for undefined input", () => {
+    expect(extractChecklistText(undefined)).toBeNull();
+  });
+
+  it("extracts checklist from simple single-round format", () => {
+    const desc =
+      "Your PR #42 on owner/repo was reviewed and needs changes. Work through every item in the checklist below before pushing:\n\n" +
+      "1. Add `Closes #42` to the PR body\n2. Guard `parseInt` against empty string\n\n" +
+      "Check off each item, commit, and push to the same branch. Do not push until all checklist items are addressed.";
+    const result = extractChecklistText(desc);
+    expect(result).toBe("1. Add `Closes #42` to the PR body\n2. Guard `parseInt` against empty string");
+  });
+
+  it("extracts current review section from consolidated multi-round format", () => {
+    const desc =
+      "Your PR #5 on owner/repo has received 2 rounds of review feedback.\n\n" +
+      "**Latest review (round 2):**\n1. Fix the null pointer\n2. Add error handling\n\n" +
+      "**Prior feedback rounds — confirm these are also resolved:**\n" +
+      "**Round 1 feedback (verify these items are fixed):**\n1. Add unit tests\n\n" +
+      "Fix every unchecked item above, commit, and push to the same branch.";
+    const result = extractChecklistText(desc);
+    expect(result).toBe("1. Fix the null pointer\n2. Add error handling");
+  });
+
+  it("falls back to truncated description when format is unrecognised", () => {
+    const desc = "Some completely different format with no checklist markers at all.";
+    const result = extractChecklistText(desc);
+    expect(result).toBe(desc);
+  });
+
+  it("truncates unknown format descriptions to 600 chars", () => {
+    const longDesc = "x".repeat(700);
+    const result = extractChecklistText(longDesc);
+    expect(result?.length).toBe(600);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// buildConsolidatedFeedbackMessage — consolidate multi-round PR feedback
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("buildConsolidatedFeedbackMessage", () => {
+  const REPO = "owner/repo";
+  const PR = 42;
+  const CURRENT = "1. Fix the bug\n2. Add a test";
+
+  it("returns the original single-round format when no prior rounds exist", () => {
+    const msg = buildConsolidatedFeedbackMessage(REPO, PR, CURRENT, []);
+    expect(msg).toContain(`Your PR #${PR} on ${REPO} was reviewed and needs changes.`);
+    expect(msg).toContain("Work through every item in the checklist below before pushing:");
+    expect(msg).toContain(CURRENT);
+    expect(msg).toContain("Check off each item, commit, and push to the same branch.");
+    // Must NOT contain consolidated-format markers
+    expect(msg).not.toContain("rounds of review feedback");
+    expect(msg).not.toContain("Latest review");
+  });
+
+  it("uses consolidated format when prior rounds are present", () => {
+    const priorDesc =
+      `Your PR #${PR} on ${REPO} was reviewed and needs changes. Work through every item in the checklist below before pushing:\n\n` +
+      "1. Add Closes #N to PR body\n\n" +
+      "Check off each item, commit, and push to the same branch. Do not push until all checklist items are addressed.";
+
+    const msg = buildConsolidatedFeedbackMessage(REPO, PR, CURRENT, [priorDesc]);
+    expect(msg).toContain("2 rounds of review feedback");
+    expect(msg).toContain("**Latest review (round 2):**");
+    expect(msg).toContain(CURRENT);
+    expect(msg).toContain("**Prior feedback rounds");
+    expect(msg).toContain("**Round 1 feedback");
+    expect(msg).toContain("1. Add Closes #N to PR body");
+  });
+
+  it("includes all prior rounds when multiple exist", () => {
+    const makeSimpleDesc = (checklist: string) =>
+      `Your PR was reviewed and needs changes. Work through every item in the checklist below before pushing:\n\n${checklist}\n\nCheck off each item, commit, and push to the same branch. Do not push until all checklist items are addressed.`;
+
+    const prior1 = makeSimpleDesc("1. Fix round-1 issue");
+    const prior2 = makeSimpleDesc("1. Fix round-2 issue");
+
+    const msg = buildConsolidatedFeedbackMessage(REPO, PR, CURRENT, [prior1, prior2]);
+    expect(msg).toContain("3 rounds of review feedback");
+    expect(msg).toContain("**Latest review (round 3):**");
+    expect(msg).toContain("**Round 1 feedback");
+    expect(msg).toContain("**Round 2 feedback");
+    expect(msg).toContain("1. Fix round-1 issue");
+    expect(msg).toContain("1. Fix round-2 issue");
+  });
+
+  it("handles null prior descriptions gracefully (shows fallback text)", () => {
+    const msg = buildConsolidatedFeedbackMessage(REPO, PR, CURRENT, [null]);
+    expect(msg).toContain("2 rounds of review feedback");
+    expect(msg).toContain("checklist unavailable");
+  });
+
+  it("consolidated message always ends with instruction to fix and push", () => {
+    const priorDesc =
+      "Your PR was reviewed. Work through every item in the checklist below before pushing:\n\n1. item\n\nCheck off each item, commit, and push to the same branch. Do not push until all checklist items are addressed.";
+    const msg = buildConsolidatedFeedbackMessage(REPO, PR, CURRENT, [priorDesc]);
+    expect(msg).toContain("commit, and push to the same branch");
+  });
+
+  it("single-round message always references the correct repo and PR number", () => {
+    const msg = buildConsolidatedFeedbackMessage("acme/widget", 99, "1. Fix it", []);
+    expect(msg).toContain("PR #99 on acme/widget");
+  });
+
+  it("consolidated message always references the correct repo and PR number", () => {
+    const priorDesc = "Your PR was reviewed. Work through every item in the checklist below before pushing:\n\n1. item\n\nCheck off each item, commit, and push. Do not push until all checklist items are addressed.";
+    const msg = buildConsolidatedFeedbackMessage("acme/widget", 99, "1. Fix it", [priorDesc]);
+    expect(msg).toContain("PR #99 on acme/widget");
   });
 });
