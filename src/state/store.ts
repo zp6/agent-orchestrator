@@ -424,6 +424,20 @@ export interface PRMetrics {
   }>;
 }
 
+/**
+ * Per-agent health record for pool failover routing.
+ * Tracks consecutive dispatch failures so the dispatcher can route around
+ * unhealthy pool instances without waiting for the supervisor to intervene.
+ */
+export interface AgentHealth {
+  agent_name: string;
+  consecutive_failures: number;
+  last_error_at: string | null;
+  last_error_message: string | null;
+  last_success_at: string | null;
+  is_healthy: boolean;
+}
+
 const MIGRATIONS = `
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
@@ -492,6 +506,7 @@ export class StateStore {
     this.runPRCreationRetryMigration();
     this.runProcessedTriggersCompletedAtMigration();
     this.runDirectivesMigration();
+    this.runAgentHealthMigration();
   }
 
   private runPhase2Migration(): void {
@@ -2340,6 +2355,90 @@ export class StateStore {
     return this.db
       .prepare("SELECT * FROM directives ORDER BY created_at ASC")
       .all() as Directive[];
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Agent health tracking (pool failover routing — issue #385)
+  // ────────────────────────────────────────────────────────────────────────
+
+  private runAgentHealthMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_health (
+        agent_name TEXT PRIMARY KEY,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        last_error_at TEXT,
+        last_error_message TEXT,
+        last_success_at TEXT
+      );
+    `);
+  }
+
+  /**
+   * Record a successful dispatch for an agent, resetting its failure count.
+   */
+  recordAgentSuccess(agentName: string): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO agent_health (agent_name, consecutive_failures, last_error_at, last_error_message, last_success_at)
+      VALUES (?, 0, NULL, NULL, ?)
+      ON CONFLICT(agent_name) DO UPDATE SET
+        consecutive_failures = 0,
+        last_success_at = ?
+    `).run(agentName, now, now);
+  }
+
+  /**
+   * Record a dispatch failure for an agent, incrementing its consecutive failure count.
+   */
+  recordAgentFailure(agentName: string, errorMessage: string): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO agent_health (agent_name, consecutive_failures, last_error_at, last_error_message, last_success_at)
+      VALUES (?, 1, ?, ?, NULL)
+      ON CONFLICT(agent_name) DO UPDATE SET
+        consecutive_failures = consecutive_failures + 1,
+        last_error_at = ?,
+        last_error_message = ?
+    `).run(agentName, now, errorMessage, now, errorMessage);
+  }
+
+  /**
+   * Get health status for a specific agent. Returns a default healthy record
+   * if no health data exists (agent has never been dispatched to).
+   */
+  getAgentHealth(agentName: string): AgentHealth {
+    const row = this.db.prepare(
+      "SELECT * FROM agent_health WHERE agent_name = ?"
+    ).get(agentName) as {
+      agent_name: string;
+      consecutive_failures: number;
+      last_error_at: string | null;
+      last_error_message: string | null;
+      last_success_at: string | null;
+    } | undefined;
+
+    if (!row) {
+      return {
+        agent_name: agentName,
+        consecutive_failures: 0,
+        last_error_at: null,
+        last_error_message: null,
+        last_success_at: null,
+        is_healthy: true,
+      };
+    }
+
+    return {
+      ...row,
+      is_healthy: row.consecutive_failures < 3,
+    };
+  }
+
+  /**
+   * Get health status for multiple agents at once.
+   */
+  getAgentHealthBatch(agentNames: string[]): AgentHealth[] {
+    return agentNames.map((name) => this.getAgentHealth(name));
   }
 
   close(): void {

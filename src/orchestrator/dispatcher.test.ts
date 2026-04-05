@@ -8,9 +8,11 @@ import {
   MAX_CONNECTION_RETRIES,
   CONNECTION_ERROR_RETRY_DELAYS_MS,
   isConnectionError,
+  selectHealthiestPoolInstance,
   extractRepoFromSourceRef,
   buildTargetRepoHeader,
 } from "./dispatcher.js";
+import type { AgentHealth } from "../state/store.js";
 import { StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 
@@ -1350,5 +1352,406 @@ describe("Dispatcher — target-repo header injection (issue #338)", () => {
     const [, sentMessage] = mockSend.mock.calls[0];
     expect(sentMessage).toBe("A linear task");
     expect(sentMessage).not.toContain("Target repository");
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// selectHealthiestPoolInstance (issue #385)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("selectHealthiestPoolInstance", () => {
+  const makeHealth = (
+    name: string,
+    overrides?: Partial<AgentHealth>,
+  ): AgentHealth => ({
+    agent_name: name,
+    consecutive_failures: 0,
+    last_error_at: null,
+    last_error_message: null,
+    last_success_at: null,
+    is_healthy: true,
+    ...overrides,
+  });
+
+  const noActiveTask = () => false;
+
+  it("returns the only member when pool has a single instance", () => {
+    const result = selectHealthiestPoolInstance(
+      ["reviewer"],
+      [makeHealth("reviewer")],
+      noActiveTask,
+    );
+    expect(result).toBe("reviewer");
+  });
+
+  it("selects a healthy idle instance over an unhealthy one", () => {
+    const health = [
+      makeHealth("reviewer-1", { consecutive_failures: 5, is_healthy: false, last_error_at: "2026-04-05T21:30:00Z" }),
+      makeHealth("reviewer-2", { consecutive_failures: 0, is_healthy: true }),
+    ];
+    const result = selectHealthiestPoolInstance(
+      ["reviewer-1", "reviewer-2"],
+      health,
+      noActiveTask,
+    );
+    expect(result).toBe("reviewer-2");
+  });
+
+  it("prefers idle over busy even if busy is healthier", () => {
+    const health = [
+      makeHealth("reviewer-1", { consecutive_failures: 0 }),
+      makeHealth("reviewer-2", { consecutive_failures: 1, is_healthy: true }),
+    ];
+    const busySet = new Set(["reviewer-1"]);
+    const result = selectHealthiestPoolInstance(
+      ["reviewer-1", "reviewer-2"],
+      health,
+      (name) => busySet.has(name),
+    );
+    expect(result).toBe("reviewer-2");
+  });
+
+  it("falls back to least-recently-failed when all instances are unhealthy", () => {
+    const health = [
+      makeHealth("reviewer-1", {
+        consecutive_failures: 5,
+        is_healthy: false,
+        last_error_at: "2026-04-05T21:35:00Z", // more recent error
+      }),
+      makeHealth("reviewer-2", {
+        consecutive_failures: 3,
+        is_healthy: false,
+        last_error_at: "2026-04-05T21:25:00Z", // older error, fewer failures
+      }),
+      makeHealth("reviewer-3", {
+        consecutive_failures: 3,
+        is_healthy: false,
+        last_error_at: "2026-04-05T21:30:00Z", // older than reviewer-1
+      }),
+    ];
+    const result = selectHealthiestPoolInstance(
+      ["reviewer-1", "reviewer-2", "reviewer-3"],
+      health,
+      noActiveTask,
+    );
+    // reviewer-2 has fewest failures (3) AND oldest error
+    expect(result).toBe("reviewer-2");
+  });
+
+  it("when all healthy, picks the first idle member (stable ordering)", () => {
+    const health = [
+      makeHealth("reviewer-1"),
+      makeHealth("reviewer-2"),
+      makeHealth("reviewer-3"),
+    ];
+    const result = selectHealthiestPoolInstance(
+      ["reviewer-1", "reviewer-2", "reviewer-3"],
+      health,
+      noActiveTask,
+    );
+    expect(result).toBe("reviewer-1");
+  });
+
+  it("prefers instance with no errors over one with reset errors (same failure count)", () => {
+    const health = [
+      makeHealth("reviewer-1", {
+        consecutive_failures: 0,
+        last_error_at: "2026-04-05T21:00:00Z", // had an error before, now recovered
+      }),
+      makeHealth("reviewer-2", {
+        consecutive_failures: 0,
+        last_error_at: null, // never errored
+      }),
+    ];
+    const result = selectHealthiestPoolInstance(
+      ["reviewer-1", "reviewer-2"],
+      health,
+      noActiveTask,
+    );
+    expect(result).toBe("reviewer-2");
+  });
+
+  it("handles missing health records (treats as healthy)", () => {
+    // Only provide health for reviewer-1 (unhealthy), reviewer-2 has no record
+    const health = [
+      makeHealth("reviewer-1", { consecutive_failures: 5, is_healthy: false, last_error_at: "2026-04-05T21:30:00Z" }),
+    ];
+    const result = selectHealthiestPoolInstance(
+      ["reviewer-1", "reviewer-2"],
+      health,
+      noActiveTask,
+    );
+    expect(result).toBe("reviewer-2");
+  });
+
+  it("among equally unhealthy busy instances, picks the one with oldest error", () => {
+    const health = [
+      makeHealth("r1", { consecutive_failures: 3, is_healthy: false, last_error_at: "2026-04-05T21:35:00Z" }),
+      makeHealth("r2", { consecutive_failures: 3, is_healthy: false, last_error_at: "2026-04-05T21:20:00Z" }),
+    ];
+    const result = selectHealthiestPoolInstance(
+      ["r1", "r2"],
+      health,
+      () => true, // all busy
+    );
+    expect(result).toBe("r2");
+  });
+
+  it("throws on empty members list", () => {
+    expect(() => selectHealthiestPoolInstance([], [], noActiveTask)).toThrow(
+      "empty members list",
+    );
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Pool failover routing integration (issue #385)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("Dispatcher — pool failover routing integration", () => {
+  const makePoolConfig = (): OrchestratorConfig => ({
+    proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 5000 },
+    orchestrator_dir: "/tmp",
+    base_dir: "/projects",
+    agents: {
+      "reviewer": {
+        dir: "reviewer",
+        pool: "reviewer-pool",
+        description: "Primary reviewer",
+        capabilities: ["review"],
+        owns_topics: ["review"],
+        docker: { port: 3457, api_key: "secret" },
+      },
+      "reviewer-2": {
+        dir: "reviewer-2",
+        pool: "reviewer-pool",
+        description: "Reviewer pool instance 2",
+        capabilities: ["review"],
+        owns_topics: ["review"],
+        docker: { port: 3458, api_key: "secret" },
+      },
+      "reviewer-3": {
+        dir: "reviewer-3",
+        pool: "reviewer-pool",
+        description: "Reviewer pool instance 3",
+        capabilities: ["review"],
+        owns_topics: ["review"],
+        docker: { port: 3459, api_key: "secret" },
+      },
+    },
+  });
+
+  let store: StateStore;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+  });
+
+  it("routes to healthy pool member when primary is unhealthy", async () => {
+    // Mark primary reviewer as unhealthy (3 consecutive failures)
+    store.recordAgentFailure("reviewer", "503 Failed to spawn claude CLI");
+    store.recordAgentFailure("reviewer", "503 Failed to spawn claude CLI");
+    store.recordAgentFailure("reviewer", "503 Failed to spawn claude CLI");
+
+    const dispatcher = new Dispatcher(makePoolConfig(), store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    const result = await dispatcher.dispatch("review this PR", {
+      agentName: "reviewer",
+      source: "manual",
+    });
+
+    // Should have been routed to reviewer-2 or reviewer-3 (both healthy)
+    expect(result.agentName).not.toBe("reviewer");
+    expect(["reviewer-2", "reviewer-3"]).toContain(result.agentName);
+  });
+
+  it("resets health on successful dispatch", async () => {
+    // Mark reviewer as having some failures (still healthy at 2 < 3 threshold)
+    store.recordAgentFailure("reviewer", "503 error");
+    store.recordAgentFailure("reviewer", "503 error");
+
+    const dispatcher = new Dispatcher(makePoolConfig(), store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    const result = await dispatcher.dispatch("do something", {
+      agentName: "reviewer",
+      source: "manual",
+    });
+
+    // The routed agent should now have 0 consecutive failures
+    const health = store.getAgentHealth(result.agentName);
+    expect(health.consecutive_failures).toBe(0);
+    expect(health.last_success_at).not.toBeNull();
+    expect(health.is_healthy).toBe(true);
+  });
+
+  it("records failure on failed dispatch", async () => {
+    const dispatcher = new Dispatcher(makePoolConfig(), store);
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3457"));
+
+    await expect(
+      dispatcher.dispatch("do something", { agentName: "reviewer", source: "manual" }),
+    ).rejects.toThrow("ECONNREFUSED");
+
+    // Find which agent was actually routed to
+    const task = store.listTasks({ status: "failed" })[0];
+    const routedAgent = task.agent_name!;
+
+    const health = store.getAgentHealth(routedAgent);
+    expect(health.consecutive_failures).toBe(1);
+    expect(health.last_error_at).not.toBeNull();
+    expect(health.last_error_message).toContain("ECONNREFUSED");
+  });
+
+  it("routes around all unhealthy instances to the least-recently-failed", async () => {
+    // Make all 3 reviewers unhealthy, but with different failure counts/times
+    for (let i = 0; i < 5; i++) store.recordAgentFailure("reviewer", "503 error");
+    for (let i = 0; i < 3; i++) store.recordAgentFailure("reviewer-2", "503 error");
+    for (let i = 0; i < 4; i++) store.recordAgentFailure("reviewer-3", "503 error");
+
+    const dispatcher = new Dispatcher(makePoolConfig(), store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    const result = await dispatcher.dispatch("review this PR", {
+      agentName: "reviewer",
+      source: "manual",
+    });
+
+    // reviewer-2 has fewest failures (3), should be selected
+    expect(result.agentName).toBe("reviewer-2");
+  });
+
+  it("records failure for retryTask and updates agent health", async () => {
+    const dispatcher = new Dispatcher(makePoolConfig(), store);
+    // Create a task first — dispatch to reviewer pool, get routed to reviewer (first idle)
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    const result = await dispatcher.dispatch("do something", {
+      agentName: "reviewer",
+      source: "manual",
+    });
+
+    const routedAgent = result.agentName;
+
+    // Now simulate the task failing on retry
+    const task = store.getTask(result.taskId)!;
+    store.updateTask(task.id, { status: "failed", retry_count: 1, next_retry_at: new Date().toISOString() });
+
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3458"));
+    await dispatcher.retryTask(store.getTask(task.id)!);
+
+    const health = store.getAgentHealth(routedAgent);
+    // Dispatch success reset to 0, then retry failure incremented to 1
+    expect(health.consecutive_failures).toBe(1);
+    expect(health.last_error_message).toContain("ECONNREFUSED");
+  });
+
+  it("records success for retryTask and resets agent health", async () => {
+    const dispatcher = new Dispatcher(makePoolConfig(), store);
+
+    // Create a task via dispatch that fails (connection error)
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3458"));
+    await expect(
+      dispatcher.dispatch("do something", { agentName: "reviewer", source: "manual" }),
+    ).rejects.toThrow();
+
+    const task = store.listTasks({ status: "failed" })[0];
+    const routedAgent = task.agent_name!;
+    store.updateTask(task.id, { status: "dispatched", next_retry_at: null });
+
+    // Verify the agent has at least 1 failure recorded
+    expect(store.getAgentHealth(routedAgent).consecutive_failures).toBeGreaterThanOrEqual(1);
+
+    // Retry succeeds
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+    await dispatcher.retryTask(store.getTask(task.id)!);
+
+    const health = store.getAgentHealth(routedAgent);
+    expect(health.consecutive_failures).toBe(0);
+    expect(health.is_healthy).toBe(true);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// StateStore agent health methods (issue #385)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("StateStore — agent health tracking", () => {
+  let store: StateStore;
+
+  beforeEach(() => {
+    store = new StateStore(":memory:");
+  });
+
+  it("returns default healthy record for unknown agent", () => {
+    const health = store.getAgentHealth("unknown-agent");
+    expect(health.agent_name).toBe("unknown-agent");
+    expect(health.consecutive_failures).toBe(0);
+    expect(health.is_healthy).toBe(true);
+    expect(health.last_error_at).toBeNull();
+  });
+
+  it("records failure and increments consecutive count", () => {
+    store.recordAgentFailure("reviewer", "503 error");
+    let health = store.getAgentHealth("reviewer");
+    expect(health.consecutive_failures).toBe(1);
+    expect(health.is_healthy).toBe(true); // threshold is 3
+
+    store.recordAgentFailure("reviewer", "503 error again");
+    health = store.getAgentHealth("reviewer");
+    expect(health.consecutive_failures).toBe(2);
+    expect(health.is_healthy).toBe(true);
+
+    store.recordAgentFailure("reviewer", "still failing");
+    health = store.getAgentHealth("reviewer");
+    expect(health.consecutive_failures).toBe(3);
+    expect(health.is_healthy).toBe(false); // now unhealthy
+  });
+
+  it("records success and resets consecutive failures", () => {
+    store.recordAgentFailure("reviewer", "503 error");
+    store.recordAgentFailure("reviewer", "503 error");
+    store.recordAgentSuccess("reviewer");
+
+    const health = store.getAgentHealth("reviewer");
+    expect(health.consecutive_failures).toBe(0);
+    expect(health.is_healthy).toBe(true);
+    expect(health.last_success_at).not.toBeNull();
+  });
+
+  it("getAgentHealthBatch returns records for all requested agents", () => {
+    store.recordAgentFailure("reviewer", "error");
+    store.recordAgentSuccess("reviewer-2");
+
+    const batch = store.getAgentHealthBatch(["reviewer", "reviewer-2", "reviewer-3"]);
+    expect(batch).toHaveLength(3);
+    expect(batch.find((h) => h.agent_name === "reviewer")!.consecutive_failures).toBe(1);
+    expect(batch.find((h) => h.agent_name === "reviewer-2")!.consecutive_failures).toBe(0);
+    expect(batch.find((h) => h.agent_name === "reviewer-3")!.is_healthy).toBe(true); // default
+  });
+
+  it("last_error_message is updated on each failure", () => {
+    store.recordAgentFailure("reviewer", "first error");
+    store.recordAgentFailure("reviewer", "second error");
+
+    const health = store.getAgentHealth("reviewer");
+    expect(health.last_error_message).toBe("second error");
   });
 });

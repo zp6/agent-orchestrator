@@ -3,7 +3,7 @@ import { Router } from "./router.js";
 import { LLMRouter } from "./llm-router.js";
 import { Planner, type Plan } from "./planner.js";
 import { PlanExecutor, type ExecutionResult } from "./executor.js";
-import { StateStore, type Task, type TaskSource, type TaskType } from "../state/store.js";
+import { StateStore, type Task, type TaskSource, type TaskType, type AgentHealth } from "../state/store.js";
 import { type OrchestratorConfig, getPoolMembers } from "../config/schema.js";
 import { ulid } from "ulid";
 import { createLogger } from "../service/logger.js";
@@ -91,6 +91,67 @@ export function isConnectionError(err: unknown): boolean {
   }
 
   return false;
+}
+
+/**
+ * Select the healthiest pool instance from a list of pool members.
+ * Prefers instances that are:
+ *   1. Idle (no active task)
+ *   2. Healthy (fewer consecutive failures)
+ *   3. Least recently errored (longest time since last failure)
+ *
+ * When all instances are unhealthy, falls back to the one with the fewest
+ * consecutive failures and the oldest last_error_at timestamp (most likely
+ * to have recovered).
+ */
+export function selectHealthiestPoolInstance(
+  members: string[],
+  healthRecords: AgentHealth[],
+  hasActiveTask: (name: string) => boolean,
+): string {
+  if (members.length === 0) {
+    throw new Error("selectHealthiestPoolInstance: empty members list");
+  }
+  if (members.length === 1) return members[0];
+
+  const healthMap = new Map(healthRecords.map((h) => [h.agent_name, h]));
+
+  interface Candidate {
+    name: string;
+    idle: boolean;
+    health: AgentHealth;
+  }
+
+  const candidates: Candidate[] = members.map((name) => ({
+    name,
+    idle: !hasActiveTask(name),
+    health: healthMap.get(name) ?? {
+      agent_name: name,
+      consecutive_failures: 0,
+      last_error_at: null,
+      last_error_message: null,
+      last_success_at: null,
+      is_healthy: true,
+    },
+  }));
+
+  // Sort by: idle first → healthy first → fewest failures → oldest error
+  candidates.sort((a, b) => {
+    // Prefer idle
+    if (a.idle !== b.idle) return a.idle ? -1 : 1;
+    // Prefer healthy
+    if (a.health.is_healthy !== b.health.is_healthy) return a.health.is_healthy ? -1 : 1;
+    // Fewest consecutive failures
+    if (a.health.consecutive_failures !== b.health.consecutive_failures) {
+      return a.health.consecutive_failures - b.health.consecutive_failures;
+    }
+    // Oldest error (most likely recovered) — null errors sort first (no error ever)
+    const aErr = a.health.last_error_at ?? "";
+    const bErr = b.health.last_error_at ?? "";
+    return aErr.localeCompare(bErr);
+  });
+
+  return candidates[0].name;
 }
 
 /**
@@ -184,15 +245,24 @@ export class Dispatcher {
       this.log.info("Routed task", { agentName, reason: routeReason, confidence: matches[0].confidence });
     }
 
-    // Pool resolution: if the selected agent belongs to a pool, pick an idle member
+    // Pool resolution: if the selected agent belongs to a pool, pick the
+    // healthiest idle member instead of just the first idle one.  This prevents
+    // routing to an instance that is 503-ing (issue #385).
     const poolMembers = getPoolMembers(this.config, agentName);
     if (poolMembers.length > 1) {
-      const idle = poolMembers.find((name) => !this.store.hasActiveTask(name));
-      if (idle) {
-        this.log.info("Pool routing: picked idle member", { pool: this.config.agents[agentName]?.pool, selected: idle, from: agentName });
-        agentName = idle;
-      }
-      // If all busy, stick with the originally selected agent
+      const healthRecords = this.store.getAgentHealthBatch(poolMembers);
+      const selected = selectHealthiestPoolInstance(
+        poolMembers,
+        healthRecords,
+        (name) => this.store.hasActiveTask(name),
+      );
+      this.log.info("Pool routing: picked healthiest member", {
+        pool: this.config.agents[agentName]?.pool,
+        selected,
+        from: agentName,
+        health: healthRecords.find((h) => h.agent_name === selected),
+      });
+      agentName = selected;
     }
 
     // Validate agent exists
@@ -280,10 +350,16 @@ export class Dispatcher {
         result: response.content,
       });
 
+      // Record healthy dispatch for pool failover routing
+      this.store.recordAgentSuccess(agentName);
+
       return { taskId: task.id, agentName, response };
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       const newRetryCount = (task.retry_count ?? 0) + 1;
+
+      // Record failure for pool failover routing
+      this.store.recordAgentFailure(agentName, errorMsg);
 
       if (isConnectionError(err)) {
         // Connection errors are transient — retry with exponential backoff.
@@ -467,9 +543,15 @@ export class Dispatcher {
         result: response.content,
         next_retry_at: null,
       });
+
+      // Record healthy dispatch for pool failover routing
+      this.store.recordAgentSuccess(agentName);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       const newRetryCount = task.retry_count + 1;
+
+      // Record failure for pool failover routing
+      this.store.recordAgentFailure(agentName, errorMsg);
 
       if (isConnectionError(err)) {
         // Connection error during retry — apply connection-specific backoff policy.
