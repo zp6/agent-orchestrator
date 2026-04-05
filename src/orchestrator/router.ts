@@ -116,6 +116,15 @@ export class Router {
       reasons.push(`Capability match: ${capHits.join(", ")}`);
     }
 
+    // Integration phrasing: prefer destination agent over source agent.
+    // Patterns: "wire X into Y", "integrate X into/with Y", "plug X into Y",
+    //           "add X to Y", "consume X in Y", "use X in Y" (when X/Y are distinct system names)
+    const integrationBoost = this.scoreIntegrationDestination(taskLower, agentName, agent);
+    if (integrationBoost > 0) {
+      confidence += integrationBoost;
+      reasons.push(`Integration destination match (+${integrationBoost})`);
+    }
+
     // Cap at 1.0
     confidence = Math.min(confidence, 1.0);
 
@@ -123,5 +132,50 @@ export class Router {
       confidence,
       reason: reasons.join("; ") || "No match",
     };
+  }
+
+  /**
+   * Detects integration-phrasing patterns (e.g. "wire X into Y", "integrate X with Y")
+   * and returns +0.3 if this agent owns the DESTINATION system (Y).
+   *
+   * The destination is the system being modified to consume the source (X).
+   * Routing to the destination agent is correct because that's the repo getting changed.
+   */
+  private scoreIntegrationDestination(
+    taskLower: string,
+    agentName: string,
+    agent: AgentConfig,
+  ): number {
+    // Each pattern captures the destination portion after the preposition
+    const integrationPatterns: RegExp[] = [
+      /\bwire\b.+?\binto\b\s+(.+)/,
+      /\bintegrate\b.+?\binto\b\s+(.+)/,
+      /\bintegrate\b.+?\bwith\b\s+(.+)/,
+      /\bplug\b.+?\binto\b\s+(.+)/,
+      /\bconsume\b.+?\bin(?:to)?\b\s+(.+)/,
+      /\badd\b.+?\bpackage\b.+?\bto\b\s+(.+)/,
+    ];
+
+    for (const pattern of integrationPatterns) {
+      const match = taskLower.match(pattern);
+      if (!match) continue;
+
+      const destination = match[1];
+
+      // Agent name appears in destination portion
+      if (destination.includes(agentName.toLowerCase())) {
+        return 0.3;
+      }
+
+      // One of this agent's owned topics appears in destination portion
+      const topicInDestination = agent.owns_topics.some((t) =>
+        destination.includes(t.toLowerCase()),
+      );
+      if (topicInDestination) {
+        return 0.3;
+      }
+    }
+
+    return 0;
   }
 }

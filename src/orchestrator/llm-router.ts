@@ -54,6 +54,15 @@ export class LLMRouter {
 Available agents:
 ${agentList}
 
+ROUTING RULES:
+1. Match the agent whose capabilities and owned topics best fit the task.
+2. INTEGRATION TASKS: When a task uses integration phrasing such as "wire X into Y",
+   "integrate X with Y", "integrate X into Y", "plug X into Y", "use X in Y", or
+   "add X to Y" — route to the agent that OWNS THE DESTINATION SYSTEM (Y), not the
+   source system (X). The destination is the system being modified to consume or
+   integrate with the source. Example: "wire reviewer package into orchestrator daemon"
+   should route to the orchestrator agent (it owns the daemon), NOT the reviewer agent.
+
 Respond with ONLY a JSON object (no markdown, no code fences):
 {"agentName": "<name>", "confidence": <0.0-1.0>, "reason": "<brief reason>"}
 

@@ -50,3 +50,37 @@ describe("Router.routeToRepo", () => {
     expect(router.routeToRepo("unknown/repo")).toBeUndefined();
   });
 });
+
+describe("Router integration-phrasing destination routing", () => {
+  const router = new Router(config);
+
+  it('routes "wire reviewer into orchestrator daemon" to claude-agent-orchestrator', () => {
+    const matches = router.route("wire reviewer package into orchestrator daemon");
+    expect(matches[0].agentName).toBe("claude-agent-orchestrator");
+    expect(matches[0].reason).toMatch(/integration destination/i);
+  });
+
+  it('routes "integrate reviewer into orchestrator dispatcher" to claude-agent-orchestrator', () => {
+    const matches = router.route("integrate reviewer into orchestrator dispatcher");
+    expect(matches[0].agentName).toBe("claude-agent-orchestrator");
+    expect(matches[0].reason).toMatch(/integration destination/i);
+  });
+
+  it('routes "integrate reviewer with orchestrator daemon" to claude-agent-orchestrator', () => {
+    const matches = router.route("integrate reviewer with orchestrator daemon");
+    expect(matches[0].agentName).toBe("claude-agent-orchestrator");
+    expect(matches[0].reason).toMatch(/integration destination/i);
+  });
+
+  it('routes "plug reviewer notifications into orchestrator triggers" to claude-agent-orchestrator', () => {
+    const matches = router.route("plug reviewer notifications into orchestrator triggers");
+    expect(matches[0].agentName).toBe("claude-agent-orchestrator");
+    expect(matches[0].reason).toMatch(/integration destination/i);
+  });
+
+  it('routes "consume reviewer package in orchestrator daemon" to claude-agent-orchestrator', () => {
+    const matches = router.route("consume reviewer package in orchestrator daemon");
+    expect(matches[0].agentName).toBe("claude-agent-orchestrator");
+    expect(matches[0].reason).toMatch(/integration destination/i);
+  });
+});
