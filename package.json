@@ -16,7 +16,6 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
-    "claude-orchestrator-reviewer": "github:rapartlu/claude-orchestrator-reviewer",
     "@types/express": "^5.0.6",
     "better-sqlite3": "^11.0.0",
     "chalk": "^5.4.0",

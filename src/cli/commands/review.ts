@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { loadConfig } from "../../config/schema.js";
-import { PRReviewer } from "claude-orchestrator-reviewer";
+import { PRReviewer } from "../../orchestrator/pr-reviewer.js";
 import { StateStore, type MergeQueueEntry } from "../../state/store.js";
 import { execSync } from "node:child_process";
 
@@ -29,8 +29,7 @@ export function registerReviewCommand(program: Command): void {
         return;
       }
 
-      const store = new StateStore();
-      const reviewer = new PRReviewer(config, store);
+      const reviewer = new PRReviewer(config);
 
       if (repo && opts?.pr) {
         // Review a specific PR

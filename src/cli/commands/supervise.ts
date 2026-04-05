@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { loadConfig } from "../../config/schema.js";
 import { StateStore } from "../../state/store.js";
-import { Supervisor } from "claude-orchestrator-reviewer";
+import { Supervisor } from "../../orchestrator/supervisor.js";
 import { Dispatcher } from "../../orchestrator/dispatcher.js";
 
 const ACTION_COLORS: Record<string, (s: string) => string> = {
