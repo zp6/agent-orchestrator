@@ -42,7 +42,7 @@ function fireAndForget(
     // Report result back to source
     const task = store.getTask(result.taskId);
     if (task) {
-      reportResult(config, task).catch(() => {});
+      reportResult(config, task, store).catch(() => {});
     }
   }).catch((err) => {
     inFlightDispatches.delete(options.sourceRef);
