@@ -66,6 +66,22 @@ export interface AgentStats {
   avg_score?: number | null;
 }
 
+/** A key-value system flag persisted to state.db (e.g. paused=true). */
+export interface SystemFlag {
+  key: string;
+  value: string;
+  updated_at: string;
+}
+
+/** A dispatch request inserted by the Telegram /dispatch command. */
+export interface DispatchRequest {
+  id: string;
+  agent_name: string;
+  message: string;
+  status: "pending" | "dispatched" | "failed";
+  created_at: string;
+}
+
 /**
  * Minimal StateStore interface consumed by reviewer modules.
  * The orchestrator daemon injects its full StateStore — this interface
@@ -97,4 +113,16 @@ export interface IStateStore {
 
   // PR review history
   recordPRReview(repo: string, prNumber: number, decision: string): void;
+
+  // System flags (pause/resume, operator overrides)
+  getSystemFlag(key: string): string | null;
+  setSystemFlag(key: string, value: string): void;
+
+  // Dispatch requests from Telegram /dispatch command
+  createDispatchRequest(agentName: string, message: string): DispatchRequest;
+  getPendingDispatchRequests(): DispatchRequest[];
+
+  // Task prioritization from Telegram /prioritize command
+  /** Bump priority of the first task whose id starts with or title contains `titleOrId`. Returns true if a row was updated. */
+  prioritizeTask(titleOrId: string): boolean;
 }

@@ -14,6 +14,7 @@ import type {
   MergeQueueEntry,
   AgentStats,
   SupervisorDecisionRecord,
+  DispatchRequest,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -73,7 +74,28 @@ export class StateStore implements IStateStore {
         outcome TEXT NOT NULL DEFAULT 'pending',
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
+
+      CREATE TABLE IF NOT EXISTS system_flags (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS dispatch_requests (
+        id TEXT PRIMARY KEY,
+        agent_name TEXT NOT NULL,
+        message TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
     `);
+
+    // Add priority column to tasks if it doesn't exist yet (idempotent)
+    try {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0");
+    } catch {
+      // Column already exists — ignore
+    }
   }
 
   // ── Task operations ──────────────────────────────────────────────────────
@@ -223,5 +245,62 @@ export class StateStore implements IStateStore {
     this.db
       .prepare("INSERT INTO pr_reviews (id, repo, pr_number, decision) VALUES (?, ?, ?, ?)")
       .run(ulid(), repo, prNumber, decision);
+  }
+
+  // ── System flags (pause / resume / operator overrides) ───────────────────
+
+  getSystemFlag(key: string): string | null {
+    const row = this.db
+      .prepare("SELECT value FROM system_flags WHERE key = ?")
+      .get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  setSystemFlag(key: string, value: string): void {
+    this.db
+      .prepare(`
+        INSERT INTO system_flags (key, value, updated_at)
+        VALUES (?, ?, datetime('now'))
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+      `)
+      .run(key, value);
+  }
+
+  // ── Dispatch requests ─────────────────────────────────────────────────────
+
+  createDispatchRequest(agentName: string, message: string): DispatchRequest {
+    const id = ulid();
+    this.db
+      .prepare(
+        "INSERT INTO dispatch_requests (id, agent_name, message, status) VALUES (?, ?, ?, 'pending')",
+      )
+      .run(id, agentName, message);
+    return {
+      id,
+      agent_name: agentName,
+      message,
+      status: "pending",
+      created_at: new Date().toISOString(),
+    };
+  }
+
+  getPendingDispatchRequests(): DispatchRequest[] {
+    return this.db
+      .prepare("SELECT * FROM dispatch_requests WHERE status = 'pending' ORDER BY created_at ASC")
+      .all() as DispatchRequest[];
+  }
+
+  // ── Task prioritization ───────────────────────────────────────────────────
+
+  prioritizeTask(titleOrId: string): boolean {
+    // Try exact id prefix match first, then title substring
+    const byId = this.db
+      .prepare("UPDATE tasks SET priority = 100, updated_at = datetime('now') WHERE id LIKE ?")
+      .run(`${titleOrId}%`);
+    if (byId.changes > 0) return true;
+    const byTitle = this.db
+      .prepare("UPDATE tasks SET priority = 100, updated_at = datetime('now') WHERE title LIKE ?")
+      .run(`%${titleOrId}%`);
+    return byTitle.changes > 0;
   }
 }

@@ -36,12 +36,23 @@ export type { CreatedIssue } from "./reviewer/issue-creator.js";
 export { createNotifier } from "./notify.js";
 export type { Notifier } from "./notify.js";
 
+// Telegram command handler (two-way, wired to live state.db)
+export { TelegramCommandHandler } from "./telegram/command-handler.js";
+
 // Config types
 export type { ReviewerConfig, AgentConfig } from "./config.js";
 
 // State types and SQLite store
 export { StateStore } from "./state/store.js";
-export type { IStateStore, Task, MergeQueueEntry, AgentStats, SupervisorDecisionRecord } from "./state/types.js";
+export type {
+  IStateStore,
+  Task,
+  MergeQueueEntry,
+  AgentStats,
+  SupervisorDecisionRecord,
+  SystemFlag,
+  DispatchRequest,
+} from "./state/types.js";
 
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
