@@ -522,6 +522,65 @@ export class PRReviewer {
     await this.executeDecision(repo, prNumber, result);
   }
 
+  /**
+   * Fetch the most recent `[orchestrator] PR Review — Changes Requested` comment
+   * for a PR, extract the checklist items, and return a structured dispatch
+   * message the orchestrator can hand to the agent.
+   *
+   * Returns null if no change-request comment is found or the PR info cannot be
+   * fetched (caller should fall back to a plain feedback message).
+   */
+  async buildPRFeedbackTaskMessage(
+    repo: string,
+    prNumber: number,
+  ): Promise<string | null> {
+    let prInfo: PRInfo;
+    try {
+      prInfo = this.fetchPRInfo(repo, prNumber);
+    } catch (err) {
+      this.log.warn("buildPRFeedbackTaskMessage: could not fetch PR info", {
+        repo,
+        prNumber,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+
+    // Fetch the last change-request comment body
+    let reviewComment: string | null = null;
+    try {
+      const raw = execSync(
+        `gh api "repos/${repo}/issues/${prNumber}/comments?per_page=100" --jq '[.[] | select(.body | contains("[orchestrator] PR Review — Changes Requested"))] | last | .body'`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+      if (raw && raw !== "null") reviewComment = raw;
+    } catch {
+      // gh not available or API error — fall through to return null
+    }
+
+    if (!reviewComment) {
+      this.log.warn("buildPRFeedbackTaskMessage: no change-request comment found", {
+        repo,
+        prNumber,
+      });
+      return null;
+    }
+
+    // Strip the "**[orchestrator] PR Review — Changes Requested**\n\n" header
+    const stripped = reviewComment
+      .replace(/^\*\*\[orchestrator\] PR Review — Changes Requested\*\*\s*/i, "")
+      .trim();
+
+    return buildFeedbackTaskMessage({
+      repo,
+      prNumber,
+      prTitle: prInfo.title,
+      prBranch: prInfo.branch,
+      reviewComment: stripped,
+      diff: prInfo.diff,
+    });
+  }
+
   getConflictEscalationCount(repo: string, prNumber: number): number {
     return this.conflictEscalationCount.get(`${repo}#${prNumber}`) ?? 0;
   }
@@ -1096,6 +1155,101 @@ export class PRReviewer {
       reason: "Parse failure",
     };
   }
+}
+
+/**
+ * Extract individual checklist items from a change-request comment.
+ *
+ * Handles the output of enforceChecklist (numbered lines like "1. Fix X") as
+ * well as plain bullet lists ("- Fix X", "* Fix X") and bare sentences.
+ * Returns each item as a plain string (no prefix).
+ * Exported for testing.
+ */
+export function extractChecklistItems(comment: string): string[] {
+  const trimmed = comment.trim();
+  if (!trimmed) return [];
+
+  const lines = trimmed
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  // Numbered list: "1. item", "1) item"
+  const numberedLines = lines.filter((l) => /^\d+[.)]\s/.test(l));
+  if (numberedLines.length > 0) {
+    return numberedLines.map((l) => l.replace(/^\d+[.)]\s+/, "").trim());
+  }
+
+  // Bullet list: "- item", "* item", "• item"
+  const bulletLines = lines.filter((l) => /^[-*•]\s/.test(l));
+  if (bulletLines.length > 0) {
+    return bulletLines.map((l) => l.replace(/^[-*•]\s+/, "").trim());
+  }
+
+  // Single line — split on sentence boundaries
+  if (lines.length === 1) {
+    const sentences = trimmed
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (sentences.length > 1) return sentences;
+    return [trimmed];
+  }
+
+  // Multi-line paragraph — treat each line as an item
+  return lines;
+}
+
+/**
+ * Build a structured PR feedback dispatch message for an agent.
+ *
+ * Given the change-request review comment and the PR diff, returns a message
+ * that the orchestrator can dispatch as a task to the agent.  The message
+ * includes:
+ *   - A `- [ ] item` GitHub task-list checklist of every requested change
+ *   - Relevant diff context (capped to ~6 KB to stay readable)
+ *
+ * Exported for testing.
+ */
+export function buildFeedbackTaskMessage(opts: {
+  repo: string;
+  prNumber: number;
+  prTitle: string;
+  prBranch: string;
+  reviewComment: string;
+  diff: string;
+}): string {
+  const { repo, prNumber, prTitle, prBranch, reviewComment, diff } = opts;
+
+  const items = extractChecklistItems(reviewComment);
+  const checklist =
+    items.length > 0
+      ? items.map((item) => `- [ ] ${item}`).join("\n")
+      : `- [ ] ${reviewComment.trim() || "Address reviewer feedback"}`;
+
+  const MAX_DIFF_CHARS = 6_000;
+  const diffTrimmed =
+    diff.length > MAX_DIFF_CHARS
+      ? `${diff.slice(0, MAX_DIFF_CHARS)}\n... (diff truncated)`
+      : diff;
+
+  const lines: string[] = [
+    `PR #${prNumber} (${repo}) needs changes before it can merge.`,
+    `Branch: \`${prBranch}\`  Title: ${prTitle}`,
+    ``,
+    `## Requested changes`,
+    ``,
+    checklist,
+    ``,
+    `Address every item above, then push to the same branch (\`${prBranch}\`).`,
+    `The reviewer will pick up the updated PR automatically.`,
+  ];
+
+  if (diffTrimmed.trim()) {
+    lines.push(``, `## Diff context`, ``, `\`\`\`diff`, diffTrimmed, `\`\`\``);
+  }
+
+  return lines.join("\n");
 }
 
 /**
