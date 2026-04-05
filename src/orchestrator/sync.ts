@@ -89,6 +89,7 @@ function toProxyConfig(
   return {
     name,
     project: resolve(config.base_dir, agent.dir),
+    repo: agent.repo,
     port: agent.docker?.port ?? 3460,
     permissions: agent.docker?.permissions ?? "auto",
     session: agent.docker?.session ?? "fresh",
