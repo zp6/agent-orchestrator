@@ -47,6 +47,11 @@ IMPORTANT:
 - Never block on: code style, naming conventions, missing comments/docs, "could use a helper function", edge cases that are unlikely in practice, or suggestions for follow-up work.
 - If you have minor suggestions, include them in an approval comment — don't block the PR for them.
 
+CRITICAL — when decision is "request-changes", the "comment" field MUST be a numbered markdown checklist.
+Each item must be a concrete, self-contained action the agent can check off. No narrative prose.
+Example format:
+"1. Add \`Closes #N\` to the PR body\\n2. Guard \`parseInt\` against empty string input in \`src/foo.ts:42\`\\n3. Add unit test for the empty-array edge case in \`processItems()\`"
+
 Respond with ONLY a JSON object (no markdown, no code fences):
 {
   "decision": "approve|request-changes|escalate",
@@ -827,9 +832,10 @@ export class PRReviewer {
         const decision = ["approve", "request-changes", "escalate"].includes(parsed.decision)
           ? parsed.decision as PRReviewResult["decision"]
           : "escalate";
+        const comment = String(parsed.comment ?? "");
         return {
           decision,
-          comment: String(parsed.comment ?? ""),
+          comment: decision === "request-changes" ? enforceChecklist(comment) : comment,
           reason: String(parsed.reason ?? ""),
         };
       } catch {
@@ -839,6 +845,50 @@ export class PRReviewer {
 
     return { decision: "escalate", comment: "Could not parse review — escalating to human.", reason: "Parse failure" };
   }
+}
+
+/**
+ * Ensure a request-changes comment is a numbered markdown checklist.
+ * Exported for testing.
+ *
+ * When the LLM ignores the system prompt and returns narrative prose, this
+ * function converts it into numbered items so agents receive a concrete,
+ * checkable list rather than open-ended text.  The conversion is best-effort:
+ * if the comment already contains numbered items (e.g. "1. Fix X") it is
+ * returned unchanged.  Otherwise, each sentence / clause is turned into a
+ * numbered line.
+ */
+export function enforceChecklist(comment: string): string {
+  const trimmed = comment.trim();
+  if (!trimmed) return trimmed;
+
+  // Already has numbered checklist items (e.g. "1. …" or "1) …")
+  if (/^\d+[.)]\s/m.test(trimmed)) return trimmed;
+
+  // Split on newlines or sentence boundaries, filter blanks, re-number
+  const lines = trimmed
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  if (lines.length === 1) {
+    // Single paragraph — split on ". " sentence boundaries
+    const sentences = trimmed
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (sentences.length > 1) {
+      return sentences.map((s, i) => `${i + 1}. ${s}`).join("\n");
+    }
+    // Single sentence — wrap as item 1
+    return `1. ${trimmed}`;
+  }
+
+  return lines.map((line, i) => {
+    // Strip existing bullet markers (-, *, •) before re-numbering
+    const stripped = line.replace(/^[-*•]\s*/, "");
+    return `${i + 1}. ${stripped}`;
+  }).join("\n");
 }
 
 function shellEscape(s: string): string {

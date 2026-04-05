@@ -790,7 +790,7 @@ export class Daemon {
               } else {
                 this.log.info("Dispatching PR feedback to agent", { repo, prNumber, agentName, feedbackRounds });
                 this.dispatcher.dispatch(
-                  `Your PR #${prNumber} on ${repo} was reviewed and needs changes:\n\n${result.comment}\n\nPlease fix the issues, commit, and push to the same branch.`,
+                  `Your PR #${prNumber} on ${repo} was reviewed and needs changes. Work through every item in the checklist below before pushing:\n\n${result.comment}\n\nCheck off each item, commit, and push to the same branch. Do not push until all checklist items are addressed.`,
                   { agentName, source: "pr-feedback", sourceRef: `${repo}#${prNumber}`, title: `[PR feedback] ${repo}#${prNumber}` },
                 ).catch((err) => {
                   this.log.error("Failed to dispatch PR feedback", { repo, prNumber, error: String(err) });

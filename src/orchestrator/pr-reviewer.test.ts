@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { PRReviewer } from "./pr-reviewer.js";
+import { PRReviewer, enforceChecklist } from "./pr-reviewer.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 
 const mockCreate = vi.fn();
@@ -97,7 +97,7 @@ describe("PRReviewer", () => {
     expect(result.comment).toContain("looks good");
   });
 
-  it("requests changes on a bad PR", async () => {
+  it("requests changes on a bad PR and enforces checklist format", async () => {
     mockCreate.mockResolvedValueOnce({
       content: [{ type: "text", text: JSON.stringify({
         decision: "request-changes",
@@ -110,6 +110,25 @@ describe("PRReviewer", () => {
     const result = await reviewer.reviewPR("owner/repo", 9);
 
     expect(result.decision).toBe("request-changes");
+    // Prose should be converted to a numbered checklist item
+    expect(result.comment).toMatch(/^1\./);
+  });
+
+  it("preserves already-formatted checklist comment when requesting changes", async () => {
+    const checklist = "1. Add Closes #N to PR body\n2. Guard parseInt against empty string\n3. Add unit test for edge case";
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify({
+        decision: "request-changes",
+        comment: checklist,
+        reason: "Missing items",
+      })}],
+    });
+
+    const reviewer = new PRReviewer(config);
+    const result = await reviewer.reviewPR("owner/repo", 9);
+
+    expect(result.decision).toBe("request-changes");
+    expect(result.comment).toBe(checklist);
   });
 
   it("escalates uncertain PRs to human", async () => {
@@ -165,7 +184,8 @@ describe("PRReviewer", () => {
       const result = await reviewer.reviewPR("owner/repo", 9);
 
       expect(result.decision).toBe("request-changes");
-      expect(result.comment).toBe("Missing error handling.");
+      // enforceChecklist wraps single-sentence prose into a numbered item
+      expect(result.comment).toBe("1. Missing error handling.");
     });
 
     it("parses JSON with trailing commentary after closing brace (strategy 2: regex extract)", async () => {
@@ -1279,6 +1299,88 @@ describe("PRReviewer", () => {
 
       expect(results[0].prBranch).toBe("issue-9-branch");
       expect(results[1].prBranch).toBe("issue-10-branch");
+    });
+  });
+
+  describe("enforceChecklist", () => {
+    it("returns already-numbered checklist unchanged", () => {
+      const input = "1. Fix the bug\n2. Add a test\n3. Update docs";
+      expect(enforceChecklist(input)).toBe(input);
+    });
+
+    it("returns already-numbered checklist with ')' format unchanged", () => {
+      const input = "1) Fix the bug\n2) Add a test";
+      expect(enforceChecklist(input)).toBe(input);
+    });
+
+    it("converts multi-line prose (bullet list) to numbered checklist", () => {
+      const input = "- Fix the bug\n- Add a test\n- Update docs";
+      const result = enforceChecklist(input);
+      expect(result).toBe("1. Fix the bug\n2. Add a test\n3. Update docs");
+    });
+
+    it("converts multi-line prose (plain lines) to numbered checklist", () => {
+      const input = "Fix the bug\nAdd a test\nUpdate docs";
+      const result = enforceChecklist(input);
+      expect(result).toBe("1. Fix the bug\n2. Add a test\n3. Update docs");
+    });
+
+    it("converts single paragraph with multiple sentences to numbered checklist", () => {
+      const input = "Fix the null dereference in processItems(). Add a test for the empty array case. Update the README.";
+      const result = enforceChecklist(input);
+      expect(result).toMatch(/^1\./);
+      expect(result).toContain("2.");
+      expect(result).toContain("3.");
+    });
+
+    it("wraps a single sentence as item 1", () => {
+      const input = "Add Closes #N to the PR body";
+      expect(enforceChecklist(input)).toBe("1. Add Closes #N to the PR body");
+    });
+
+    it("returns empty string unchanged", () => {
+      expect(enforceChecklist("")).toBe("");
+    });
+
+    it("strips asterisk bullets before re-numbering", () => {
+      const input = "* Fix the bug\n* Add a test";
+      const result = enforceChecklist(input);
+      expect(result).toBe("1. Fix the bug\n2. Add a test");
+    });
+
+    it("does not apply checklist enforcement to approve decisions", async () => {
+      const proseyComment = "This looks great. The implementation is clean and well-tested.";
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({
+          decision: "approve",
+          comment: proseyComment,
+          reason: "All good",
+        })}],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("approve");
+      // Approval comments should NOT be converted to numbered lists
+      expect(result.comment).toBe(proseyComment);
+    });
+
+    it("does not apply checklist enforcement to escalate decisions", async () => {
+      const proseyComment = "This changes auth logic and needs human review.";
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({
+          decision: "escalate",
+          comment: proseyComment,
+          reason: "Security-sensitive",
+        })}],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("escalate");
+      expect(result.comment).toBe(proseyComment);
     });
   });
 });
