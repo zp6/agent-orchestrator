@@ -7,7 +7,7 @@ vi.mock("node:child_process", () => ({
 import { execSync } from "node:child_process";
 const mockExecSync = vi.mocked(execSync);
 
-import { reportResult } from "./reporters.js";
+import { reportResult, reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "./reporters.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore, Task } from "../state/store.js";
 
@@ -151,5 +151,122 @@ describe("reportResult", () => {
         expect.any(Object),
       );
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// reportEscalation (issue #341 — auto-escalation)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("reportEscalation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("DEFAULT_ESCALATION_RETRY_LIMIT is 3", () => {
+    expect(DEFAULT_ESCALATION_RETRY_LIMIT).toBe(3);
+  });
+
+  it("posts an escalation comment to GitHub for github-sourced tasks", () => {
+    // First call: hasExistingEscalationComment → return empty (no existing comment)
+    mockExecSync
+      .mockReturnValueOnce("" as ReturnType<typeof execSync>)   // list comments API call
+      .mockReturnValueOnce("" as ReturnType<typeof execSync>);  // issue comment call
+
+    const task = makeTask({
+      source: "github",
+      source_ref: "owner/repo#42",
+      status: "escalated",
+      result: "connection refused",
+      agent_name: "test-agent",
+    });
+
+    const result = reportEscalation(config, task, 3);
+
+    expect(result).toBe(true);
+    expect(mockExecSync).toHaveBeenCalledWith(
+      expect.stringContaining("gh issue comment 42 --repo owner/repo"),
+      expect.any(Object),
+    );
+  });
+
+  it("includes the escalation notice prefix in the comment body", () => {
+    mockExecSync
+      .mockReturnValueOnce("" as ReturnType<typeof execSync>)
+      .mockReturnValueOnce("" as ReturnType<typeof execSync>);
+
+    const task = makeTask({
+      source: "github",
+      source_ref: "owner/repo#55",
+      status: "escalated",
+      result: "timeout after 5 minutes",
+      agent_name: "my-agent",
+    });
+
+    reportEscalation(config, task, 3);
+
+    const commentCall = mockExecSync.mock.calls.find((call) =>
+      String(call[0]).includes("gh issue comment"),
+    );
+    expect(commentCall).toBeDefined();
+    expect(String(commentCall![0])).toContain("Auto-Escalation Notice");
+  });
+
+  it("returns false for linear-sourced tasks (agents handle their own reporting)", () => {
+    const task = makeTask({
+      source: "linear",
+      source_ref: "ENG-123",
+      status: "escalated",
+    });
+
+    const result = reportEscalation(config, task, 3);
+
+    expect(result).toBe(false);
+    expect(mockExecSync).not.toHaveBeenCalled();
+  });
+
+  it("returns false when source_ref is null", () => {
+    const task = makeTask({ source: "github", source_ref: null, status: "escalated" });
+
+    const result = reportEscalation(config, task, 3);
+
+    expect(result).toBe(false);
+    expect(mockExecSync).not.toHaveBeenCalled();
+  });
+
+  it("skips posting when an escalation comment already exists (idempotent)", () => {
+    // Simulate existing comment containing "Auto-Escalation Notice"
+    mockExecSync.mockReturnValueOnce(
+      "**[test-agent] Auto-Escalation Notice**" as ReturnType<typeof execSync>,
+    );
+
+    const task = makeTask({
+      source: "github",
+      source_ref: "owner/repo#77",
+      status: "escalated",
+    });
+
+    const result = reportEscalation(config, task, 3);
+
+    // Should return true (already done) without posting a new comment
+    expect(result).toBe(true);
+    // Only one execSync call (the check), not the post
+    expect(mockExecSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns false when execSync throws posting the comment", () => {
+    mockExecSync
+      .mockReturnValueOnce("" as ReturnType<typeof execSync>)  // no existing comment
+      .mockImplementationOnce(() => { throw new Error("gh: command failed"); });
+
+    const task = makeTask({
+      source: "github",
+      source_ref: "owner/repo#88",
+      status: "escalated",
+    });
+
+    const result = reportEscalation(config, task, 3);
+
+    expect(result).toBe(false);
   });
 });

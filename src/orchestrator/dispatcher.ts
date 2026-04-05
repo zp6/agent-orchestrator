@@ -8,6 +8,7 @@ import type { OrchestratorConfig } from "../config/schema.js";
 import { ulid } from "ulid";
 import { createLogger } from "../service/logger.js";
 import { validateGhAuth, GhAuthError } from "../triggers/github.js";
+import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
 
 /** Maximum number of retry attempts for a failed dispatch. */
 export const MAX_RETRIES = 3;
@@ -246,6 +247,38 @@ export class Dispatcher {
       }
     }
 
+    // Pre-retry escalation guard: if the cumulative failure count for this
+    // source_ref (across all task records) already meets or exceeds the
+    // configured escalation limit, escalate immediately rather than burning
+    // another retry slot and consuming more agent tokens.
+    if (task.source_ref) {
+      const escalationLimit = this.config.escalation?.retry_limit ?? DEFAULT_ESCALATION_RETRY_LIMIT;
+      if (escalationLimit > 0) {
+        const totalFailures = this.store.countFailuresForSourceRef(task.source_ref);
+        if (totalFailures >= escalationLimit) {
+          this.log.warn("Escalating task: retry limit for source_ref exceeded (pre-retry check)", {
+            taskId: task.id,
+            agentName,
+            sourceRef: task.source_ref,
+            totalFailures,
+            escalationLimit,
+          });
+          this.store.addLog({
+            task_id: task.id,
+            direction: "system",
+            content: `Escalated: source_ref "${task.source_ref}" has ${totalFailures} cumulative failure(s) — limit is ${escalationLimit}. No further retries will be attempted.`,
+          });
+          this.store.updateTask(task.id, {
+            status: "escalated",
+            result: `Escalated: exceeded ${escalationLimit} cumulative retry attempt(s) across all tasks for source_ref "${task.source_ref}". Manual intervention required.`,
+            next_retry_at: null,
+          });
+          reportEscalation(this.config, this.store.getTask(task.id) ?? task, escalationLimit);
+          return;
+        }
+      }
+    }
+
     const message = task.description ?? task.title;
     const conversationId = task.conversation_id ?? ulid();
 
@@ -284,25 +317,57 @@ export class Dispatcher {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       const newRetryCount = task.retry_count + 1;
-      const willRetry = newRetryCount < MAX_RETRIES;
+
+      // Determine whether to escalate, retry, or permanently fail.
+      const escalationLimit = this.config.escalation?.retry_limit ?? DEFAULT_ESCALATION_RETRY_LIMIT;
+      const shouldEscalate = escalationLimit > 0 && newRetryCount >= escalationLimit;
+      const willRetry = !shouldEscalate && newRetryCount < MAX_RETRIES;
       const nextRetryAt = willRetry
         ? new Date(Date.now() + (RETRY_DELAYS_MS[newRetryCount - 1] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1])).toISOString()
         : null;
 
-      this.log.error("Retry failed", { taskId: task.id, agentName, error: errorMsg, willRetry, retryCount: newRetryCount });
-      this.store.addLog({
-        task_id: task.id,
-        direction: "system",
-        content: willRetry
-          ? `Retry error: ${errorMsg} — retry ${newRetryCount}/${MAX_RETRIES} scheduled at ${nextRetryAt}`
-          : `Retry error: ${errorMsg} — max retries (${MAX_RETRIES}) exceeded, task permanently failed`,
+      this.log.error("Retry failed", {
+        taskId: task.id,
+        agentName,
+        error: errorMsg,
+        willRetry,
+        shouldEscalate,
+        retryCount: newRetryCount,
+        escalationLimit,
       });
-      this.store.updateTask(task.id, {
-        status: "failed",
-        result: errorMsg,
-        retry_count: newRetryCount,
-        next_retry_at: nextRetryAt,
-      });
+
+      if (shouldEscalate) {
+        const escalationMsg =
+          `Escalated after ${newRetryCount} retry attempt(s): ${errorMsg}. ` +
+          `Manual intervention required — orchestrator will no longer retry this task automatically.`;
+        this.store.addLog({
+          task_id: task.id,
+          direction: "system",
+          content: `Retry error: ${errorMsg} — escalation threshold (${escalationLimit}) reached after ${newRetryCount} attempt(s). Task escalated.`,
+        });
+        this.store.updateTask(task.id, {
+          status: "escalated",
+          result: escalationMsg,
+          retry_count: newRetryCount,
+          next_retry_at: null,
+        });
+        // Report escalation back to the source (e.g. GitHub issue comment).
+        reportEscalation(this.config, this.store.getTask(task.id) ?? { ...task, result: escalationMsg, retry_count: newRetryCount }, escalationLimit);
+      } else {
+        this.store.addLog({
+          task_id: task.id,
+          direction: "system",
+          content: willRetry
+            ? `Retry error: ${errorMsg} — retry ${newRetryCount}/${MAX_RETRIES} scheduled at ${nextRetryAt}`
+            : `Retry error: ${errorMsg} — max retries (${MAX_RETRIES}) exceeded, task permanently failed`,
+        });
+        this.store.updateTask(task.id, {
+          status: "failed",
+          result: errorMsg,
+          retry_count: newRetryCount,
+          next_retry_at: nextRetryAt,
+        });
+      }
     }
   }
 

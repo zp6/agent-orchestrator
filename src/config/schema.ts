@@ -96,12 +96,34 @@ export interface PRReviewConfig {
   conflict_close_threshold?: number;
 }
 
+export interface EscalationConfig {
+  /**
+   * Maximum number of cumulative retry attempts for a given source_ref before
+   * the task is automatically escalated.  When the retry_count on the current
+   * task reaches this threshold the task is marked 'escalated', all further
+   * retries are suppressed, and a GitHub issue comment is posted flagging the
+   * escalation.
+   *
+   * Defaults to 3 when omitted.  Set to 0 to disable automatic escalation.
+   */
+  retry_limit?: number;
+
+  /**
+   * Optional Slack channel or webhook URL to notify on escalation
+   * (e.g. "#oncall" or "https://hooks.slack.com/...").
+   * When omitted, escalation is only written to the log and posted as a
+   * GitHub issue comment (if the task's source is "github").
+   */
+  notify_channel?: string;
+}
+
 export interface OrchestratorConfig {
   proxy: ProxyConfig;
   base_dir: string;
   orchestrator_dir: string;
   verification?: VerificationConfig;
   pr_review?: PRReviewConfig;
+  escalation?: EscalationConfig;
   agents: Record<string, AgentConfig>;
 }
 

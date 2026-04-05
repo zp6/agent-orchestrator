@@ -2154,4 +2154,84 @@ describe("StateStore", () => {
       expect(store.listDirectives()).toHaveLength(1);
     });
   });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // countFailuresForSourceRef (issue #341 — auto-escalation)
+  // ──────────────────────────────────────────────────────────────────────────
+  describe("countFailuresForSourceRef", () => {
+    it("returns 0 when no tasks exist for the source_ref", () => {
+      expect(store.countFailuresForSourceRef("owner/repo#42")).toBe(0);
+    });
+
+    it("returns 0 for a pending task (not failed or escalated)", () => {
+      store.createTask({ title: "pending", source: "github", source_ref: "owner/repo#1" });
+      expect(store.countFailuresForSourceRef("owner/repo#1")).toBe(0);
+    });
+
+    it("returns 0 for a done task (not failed or escalated)", () => {
+      const task = store.createTask({ title: "done", source: "github", source_ref: "owner/repo#2" });
+      store.updateTask(task.id, { status: "done", retry_count: 0 });
+      expect(store.countFailuresForSourceRef("owner/repo#2")).toBe(0);
+    });
+
+    it("counts retry_count + 1 for a single failed task", () => {
+      const task = store.createTask({ title: "failing", source: "github", source_ref: "owner/repo#3" });
+      // retry_count=2 means 1 original dispatch + 2 retries = 3 total attempts
+      store.updateTask(task.id, { status: "failed", retry_count: 2 });
+      expect(store.countFailuresForSourceRef("owner/repo#3")).toBe(3);
+    });
+
+    it("counts retry_count + 1 for an escalated task", () => {
+      const task = store.createTask({ title: "escalated", source: "github", source_ref: "owner/repo#4" });
+      store.updateTask(task.id, { status: "escalated", retry_count: 3 });
+      expect(store.countFailuresForSourceRef("owner/repo#4")).toBe(4);
+    });
+
+    it("sums failures across multiple task records for the same source_ref", () => {
+      const t1 = store.createTask({ title: "first attempt", source: "github", source_ref: "owner/repo#5" });
+      store.updateTask(t1.id, { status: "failed", retry_count: 2 }); // 3 failures
+
+      const t2 = store.createTask({ title: "second attempt", source: "github", source_ref: "owner/repo#5" });
+      store.updateTask(t2.id, { status: "failed", retry_count: 1 }); // 2 failures
+
+      // Total: 3 + 2 = 5
+      expect(store.countFailuresForSourceRef("owner/repo#5")).toBe(5);
+    });
+
+    it("does not count sub-tasks (only top-level tasks)", () => {
+      const parent = store.createTask({ title: "parent", source: "github", source_ref: "owner/repo#6" });
+      store.updateTask(parent.id, { status: "failed", retry_count: 1 }); // 2 failures
+
+      // Sub-task with same source_ref-like parent — use createSubTask
+      const sub = store.createSubTask({
+        parent_task_id: parent.id,
+        step_id: "step-1",
+        title: "sub",
+        description: "sub",
+        source: "github",
+        agent_name: "test-agent",
+      });
+      store.updateTask(sub.id, { status: "failed", retry_count: 5 }); // should be excluded
+
+      // Only the parent (top-level) task counts
+      expect(store.countFailuresForSourceRef("owner/repo#6")).toBe(2);
+    });
+
+    it("does not count failures from different source_refs", () => {
+      const t1 = store.createTask({ title: "issue 7", source: "github", source_ref: "owner/repo#7" });
+      store.updateTask(t1.id, { status: "failed", retry_count: 2 });
+
+      const t2 = store.createTask({ title: "issue 8", source: "github", source_ref: "owner/repo#8" });
+      store.updateTask(t2.id, { status: "failed", retry_count: 3 });
+
+      expect(store.countFailuresForSourceRef("owner/repo#7")).toBe(3); // only t1
+      expect(store.countFailuresForSourceRef("owner/repo#8")).toBe(4); // only t2
+    });
+
+    it("returns 1 for a freshly-failed task (retry_count=0 means 1 attempt)", () => {
+      const task = store.createTask({ title: "first fail", source: "github", source_ref: "owner/repo#9" });
+      store.updateTask(task.id, { status: "failed", retry_count: 0 });
+      expect(store.countFailuresForSourceRef("owner/repo#9")).toBe(1);
+    });
+  });
 });

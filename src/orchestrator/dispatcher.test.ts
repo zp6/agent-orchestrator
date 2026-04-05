@@ -10,6 +10,15 @@ vi.mock("../triggers/github.js", async (importOriginal) => {
   return { ...actual, validateGhAuth: vi.fn().mockReturnValue({ ok: true }) };
 });
 
+// Mock reporters so tests don't shell out to gh CLI when escalation fires.
+vi.mock("../triggers/reporters.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../triggers/reporters.js")>();
+  return { ...actual, reportEscalation: vi.fn().mockReturnValue(false) };
+});
+
+import { reportEscalation } from "../triggers/reporters.js";
+const mockReportEscalation = vi.mocked(reportEscalation);
+
 import { validateGhAuth, GhAuthError } from "../triggers/github.js";
 const mockValidateGhAuth = vi.mocked(validateGhAuth);
 
@@ -450,18 +459,21 @@ describe("Dispatcher.retryTask", () => {
     expect(nextRetry).toBeGreaterThan(Date.now());
   });
 
-  it("final failure (retry_count reaches MAX_RETRIES): sets next_retry_at to null (permanently failed)", async () => {
-    mockSend.mockRejectedValueOnce(new Error("still broken"));
-    // Set retry_count to MAX_RETRIES - 1 so the next failure exhausts all retries
+  it("final failure (retry_count reaches escalation limit): escalates instead of permanently failing", async () => {
+    // With retry_count = MAX_RETRIES - 1 (= 2), countFailuresForSourceRef returns
+    // retry_count + 1 = 3, which equals the default escalation limit (3).
+    // The pre-retry guard fires before even calling mockSend.
     const task = makeFailedTask(MAX_RETRIES - 1);
 
     await dispatcher.retryTask(task);
 
     const updated = store.getTask(task.id)!;
-    expect(updated.status).toBe("failed");
-    expect(updated.retry_count).toBe(MAX_RETRIES);
-    // No more retries scheduled
+    expect(updated.status).toBe("escalated");
+    // retry_count unchanged — pre-retry escalation doesn't burn a retry slot
+    expect(updated.retry_count).toBe(MAX_RETRIES - 1);
     expect(updated.next_retry_at).toBeNull();
+    // Agent was not contacted — escalation fires before the send
+    expect(mockSend).not.toHaveBeenCalled();
   });
 
   it("skips retry when task has no agent_name", async () => {
@@ -663,5 +675,178 @@ describe("StateStore.getRetryableTasks — integration with dispatcher", () => {
     expect(results).toHaveLength(2);
     expect(results[0].id).toBe(t2.id); // earlier first
     expect(results[1].id).toBe(t1.id);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Auto-escalation on retry exhaustion (issue #341)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("Dispatcher.retryTask — auto-escalation (issue #341)", () => {
+  let store: StateStore;
+  let dispatcher: Dispatcher;
+
+  const makeConfigWithEscalation = (retryLimit = 3): OrchestratorConfig => ({
+    ...makeConfig(),
+    escalation: { retry_limit: retryLimit },
+  });
+
+  const makeFailedTaskWithRef = (retryCount: number, sourceRef = "owner/repo#42") => {
+    const task = store.createTask({
+      title: "failing task",
+      description: "implement the feature",
+      source: "github",
+      source_ref: sourceRef,
+      agent_name: "test-agent",
+    });
+    store.updateTask(task.id, {
+      status: "failed",
+      result: "connection refused",
+      retry_count: retryCount,
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    });
+    return store.getTask(task.id)!;
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+    dispatcher = new Dispatcher(makeConfigWithEscalation(3), store);
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+  });
+
+  it("escalates (pre-retry guard) when source_ref cumulative failures >= escalation limit", async () => {
+    // retry_count=2 → countFailuresForSourceRef returns 3 = limit
+    const task = makeFailedTaskWithRef(2);
+
+    await dispatcher.retryTask(task);
+
+    const updated = store.getTask(task.id)!;
+    expect(updated.status).toBe("escalated");
+    expect(updated.next_retry_at).toBeNull();
+    // Agent should NOT have been contacted
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it("calls reportEscalation when escalating via pre-retry guard", async () => {
+    const task = makeFailedTaskWithRef(2); // cumulative failures = 3 = limit
+
+    await dispatcher.retryTask(task);
+
+    expect(mockReportEscalation).toHaveBeenCalledOnce();
+    const [, calledTask, calledLimit] = mockReportEscalation.mock.calls[0];
+    expect(calledTask.status).toBe("escalated");
+    expect(calledLimit).toBe(3);
+  });
+
+  it("does NOT escalate when cumulative failures are below the limit", async () => {
+    // retry_count=1 → countFailuresForSourceRef returns 2 < 3
+    mockSend.mockRejectedValueOnce(new Error("still down"));
+    const task = makeFailedTaskWithRef(1);
+
+    await dispatcher.retryTask(task);
+
+    const updated = store.getTask(task.id)!;
+    // Should be re-scheduled for further retry, not escalated
+    expect(updated.status).toBe("failed");
+    expect(mockReportEscalation).not.toHaveBeenCalled();
+  });
+
+  it("escalates (post-failure catch block) when task has no source_ref and newRetryCount reaches the limit", async () => {
+    // Tasks with no source_ref skip the pre-retry guard entirely.
+    // With limit=2 and retry_count=1, newRetryCount=2 >= 2 → catch-block escalation.
+    dispatcher = new Dispatcher(makeConfigWithEscalation(2), store);
+    mockSend.mockRejectedValueOnce(new Error("agent error"));
+
+    const task = store.createTask({
+      title: "no source_ref task",
+      description: "implement it",
+      source: "manual",
+      source_ref: undefined, // no source_ref → pre-retry guard skipped
+      agent_name: "test-agent",
+    });
+    store.updateTask(task.id, {
+      status: "failed",
+      result: "prior error",
+      retry_count: 1,
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    });
+
+    await dispatcher.retryTask(store.getTask(task.id)!);
+
+    const updated = store.getTask(task.id)!;
+    expect(updated.status).toBe("escalated");
+    expect(updated.retry_count).toBe(2);
+    expect(updated.next_retry_at).toBeNull();
+    expect(mockReportEscalation).toHaveBeenCalledOnce();
+  });
+
+  it("does NOT escalate when escalation is disabled (retry_limit=0)", async () => {
+    dispatcher = new Dispatcher(makeConfigWithEscalation(0), store);
+    mockSend.mockRejectedValueOnce(new Error("still down"));
+    // retry_count=2 — without escalation this would normally be at the limit
+    const task = makeFailedTaskWithRef(2);
+
+    await dispatcher.retryTask(task);
+
+    const updated = store.getTask(task.id)!;
+    // With escalation disabled, should proceed normally (fail or retry)
+    expect(updated.status).not.toBe("escalated");
+    expect(mockReportEscalation).not.toHaveBeenCalled();
+  });
+
+  it("escalates across multiple task records for the same source_ref", async () => {
+    // Two older failed task records for the same source_ref with retry_count=1 each.
+    // Combined they have 2+2 = 4 cumulative failures which exceeds limit=3.
+    const t1 = makeFailedTaskWithRef(1, "owner/repo#100");
+    store.updateTask(t1.id, { status: "failed", retry_count: 1 });
+
+    // Create another failed task for the same source_ref
+    const t2 = store.createTask({
+      title: "second attempt",
+      description: "still broken",
+      source: "github",
+      source_ref: "owner/repo#100",
+      agent_name: "test-agent",
+    });
+    store.updateTask(t2.id, {
+      status: "failed",
+      result: "timeout",
+      retry_count: 1,
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    });
+
+    const task = store.getTask(t2.id)!;
+    // countFailuresForSourceRef: (1+1) + (1+1) = 4 >= 3 → escalate
+    await dispatcher.retryTask(task);
+
+    const updated = store.getTask(t2.id)!;
+    expect(updated.status).toBe("escalated");
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it("does not call reportEscalation for manual-sourced tasks (no source_ref escalation comment)", async () => {
+    const task = store.createTask({
+      title: "manual task",
+      description: "no source ref",
+      source: "manual",
+      agent_name: "test-agent",
+    });
+    store.updateTask(task.id, {
+      status: "failed",
+      result: "error",
+      retry_count: 1,
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    });
+    mockSend.mockRejectedValueOnce(new Error("still down"));
+    // no source_ref → no pre-retry guard, but catch-block escalation still fires
+    // with limit=3 and newRetryCount=2 < 3 → no escalation
+    const failedTask = store.getTask(task.id)!;
+
+    await dispatcher.retryTask(failedTask);
+
+    // No escalation at 2 retries with limit=3
+    expect(store.getTask(task.id)!.status).toBe("failed");
+    expect(mockReportEscalation).not.toHaveBeenCalled();
   });
 });

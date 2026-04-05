@@ -824,6 +824,33 @@ export class StateStore {
       .all(sourceRef) as Task[];
   }
 
+  /**
+   * Count the total number of failed dispatch attempts recorded for a given
+   * source_ref across ALL top-level task records.
+   *
+   * Each task record tracks its own `retry_count` (number of retries that
+   * were attempted after the initial dispatch).  Adding 1 per task converts
+   * that into the number of actual attempts made for that record, so the sum
+   * gives the grand total of failed attempts across the full lifetime of the
+   * trigger, including across daemon restarts or re-dispatches.
+   *
+   * Statuses counted: 'failed' and 'escalated' (both represent unsuccessful
+   * attempts).  Pending / dispatched / in-progress / done tasks are excluded
+   * because they haven't definitively failed yet.
+   */
+  countFailuresForSourceRef(sourceRef: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(retry_count + 1), 0) AS total
+         FROM tasks
+         WHERE source_ref = ?
+           AND parent_task_id IS NULL
+           AND status IN ('failed', 'escalated')`,
+      )
+      .get(sourceRef) as { total: number };
+    return row?.total ?? 0;
+  }
+
   getRecentActivity(limit = 50): TaskLog[] {
     return this.db.prepare(
       "SELECT * FROM task_logs ORDER BY created_at DESC LIMIT ?",
