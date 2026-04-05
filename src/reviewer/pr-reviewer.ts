@@ -14,9 +14,9 @@
  *     (no longer imported from pr-creator.ts)
  */
 
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { resolve } from "node:path";
-import { unlinkSync } from "node:fs";
+import { unlinkSync, readFileSync, writeFileSync } from "node:fs";
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
@@ -194,7 +194,7 @@ export class PRReviewer {
     if (pr.mergeable === "CONFLICTING") {
       const localPath = this.findLocalRepoPath(repo);
       if (localPath) {
-        const rebaseOutcome = this.tryAutoRebase(localPath, pr.branch);
+        const rebaseOutcome = await this.tryAutoRebase(localPath, pr.branch);
         if (rebaseOutcome === "success") {
           this.log.info("Auto-rebase succeeded — continuing with review", {
             repo,
@@ -243,7 +243,7 @@ export class PRReviewer {
       // Proactive rebase for stale branches (best-effort, review continues regardless)
       const localPath = this.findLocalRepoPath(repo);
       if (localPath) {
-        const rebaseOutcome = this.tryAutoRebase(localPath, pr.branch);
+        const rebaseOutcome = await this.tryAutoRebase(localPath, pr.branch);
         this.log.info("Proactive pre-review rebase", {
           repo,
           prNumber,
@@ -695,7 +695,7 @@ export class PRReviewer {
 
     for (const entry of remaining) {
       try {
-        const outcome = this.tryAutoRebase(localPath, entry.branch);
+        const outcome = await this.tryAutoRebase(localPath, entry.branch);
         this.log.info("Rebase of queued branch", {
           repo,
           branch: entry.branch,
@@ -788,7 +788,7 @@ export class PRReviewer {
     return null;
   }
 
-  private tryAutoRebase(localPath: string, branch: string): "success" | "up-to-date" | "failed" {
+  private async tryAutoRebase(localPath: string, branch: string): Promise<"success" | "up-to-date" | "failed"> {
     const env: Record<string, string> = { ...process.env } as Record<string, string>;
     if (this.config.ssh_key) {
       const sshKeyPath = this.config.ssh_key.replace(/^~/, process.env.HOME ?? "");
@@ -822,10 +822,13 @@ export class PRReviewer {
           return "up-to-date";
         }
       } catch {
-        try {
-          execSync("git rebase --abort", { ...opts, timeout: 10000 });
-        } catch { /* ignore */ }
-        return "failed";
+        // Try LLM-powered conflict resolution before giving up
+        const resolved = await this.resolveConflictsWithLLM(localPath, branch, opts);
+        if (!resolved) {
+          try { execSync("git rebase --abort", { ...opts, timeout: 10000 }); } catch { /* ignore */ }
+          return "failed";
+        }
+        // LLM resolved conflicts — fall through to push
       }
 
       try {
@@ -850,6 +853,116 @@ export class PRReviewer {
       try {
         execSync(`git checkout ${currentBranch}`, { ...opts, timeout: 10000 });
       } catch { /* ignore */ }
+    }
+  }
+
+  /**
+   * Attempt to resolve merge conflicts using an LLM.
+   * Returns true if all conflicts were resolved and the rebase completed,
+   * false if resolution failed (caller should abort the rebase).
+   */
+  private async resolveConflictsWithLLM(
+    localPath: string,
+    branchName: string,
+    opts: { cwd: string; encoding: "utf-8"; env: Record<string, string> },
+  ): Promise<boolean> {
+    const MAX_ROUNDS = 5;
+
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      // Collect files that still have conflict markers
+      const conflictingFiles = execSync(
+        "git diff --name-only --diff-filter=U",
+        { ...opts, timeout: 10000 },
+      )
+        .trim()
+        .split("\n")
+        .filter(Boolean);
+
+      if (conflictingFiles.length === 0) return true; // all conflicts resolved
+
+      const client = createLLMClient();
+
+      for (const file of conflictingFiles) {
+        const filePath = resolve(localPath, file);
+        let content: string;
+        try {
+          content = readFileSync(filePath, "utf-8");
+        } catch {
+          this.log.warn("resolveConflictsWithLLM: could not read conflicting file", { file });
+          return false;
+        }
+
+        // Skip binary files or files that somehow lack conflict markers
+        if (!content.includes("<<<<<<<")) continue;
+
+        this.log.info("resolveConflictsWithLLM: resolving conflict via LLM", { file, round });
+
+        let resolved: string;
+        try {
+          const response = await client.messages.create({
+            model: "claude-sonnet-4-6",
+            max_tokens: 8192,
+            messages: [
+              {
+                role: "user",
+                content:
+                  `Resolve this merge conflict. The branch name is: "${branchName}".\n\n` +
+                  `File: ${file}\n\n${content}\n\n` +
+                  `Return ONLY the resolved file content. No explanation, no code fences. ` +
+                  `Keep both sides' intent. Prefer the feature branch's changes when they ` +
+                  `don't contradict main.`,
+              },
+            ],
+          });
+
+          resolved = response.content
+            .filter((b) => b.type === "text")
+            .map((b) => (b as { type: "text"; text: string }).text)
+            .join("");
+        } catch (err) {
+          this.log.warn("resolveConflictsWithLLM: LLM call failed", {
+            file,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return false;
+        }
+
+        try {
+          if (resolved.includes("<<<<<<<")) {
+            this.log.warn("resolveConflictsWithLLM: LLM output still contains conflict markers", { file, round });
+            return false;
+          }
+          writeFileSync(filePath, resolved);
+          const addResult = spawnSync("git", ["add", "--", file], { ...opts, timeout: 5000 });
+          if (addResult.status !== 0) {
+            throw new Error(
+              `git add exited with status ${addResult.status}: ${String(addResult.stderr ?? "")}`,
+            );
+          }
+        } catch (err) {
+          this.log.warn("resolveConflictsWithLLM: failed to write/stage resolved file", {
+            file,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return false;
+        }
+      }
+
+      // Continue the rebase; more conflicts from the next commit will loop again
+      try {
+        execSync("git -c core.editor=true rebase --continue", { ...opts, timeout: 30000 });
+      } catch {
+        // Another conflict set from the next commit — the loop will handle it
+        continue;
+      }
+    }
+
+    // Check whether the rebase is still in progress (exceeded MAX_ROUNDS)
+    try {
+      execSync("git rebase --show-current-patch", { ...opts, timeout: 5000 });
+      return false; // still in rebase
+    } catch {
+      return true; // rebase completed
     }
   }
 
