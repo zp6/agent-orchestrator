@@ -243,6 +243,21 @@ export interface PRCreationAttempt {
   updated_at: string;
 }
 
+/**
+ * Per-agent timeout rate metrics for a rolling time window.
+ * Timeouts are identified by retry_count > 0 (tasks that triggered the
+ * automatic retry-with-backoff mechanism, which fires on exit-code-143 / SIGTERM).
+ */
+export interface AgentTimeoutRate {
+  agent_name: string;
+  /** Total top-level tasks dispatched to this agent whose created_at falls in the window */
+  total_tasks: number;
+  /** Tasks that timed out at least once (retry_count > 0) in the window */
+  timed_out_tasks: number;
+  /** Percentage: timed_out_tasks / total_tasks * 100, or null if no tasks */
+  timeout_rate_pct: number | null;
+}
+
 /** Aggregate telemetry across all PR creation attempts. */
 export interface PRCreationTelemetry {
   total_branches: number;
@@ -1947,6 +1962,49 @@ export class StateStore {
       success_rate: successRate,
       top_errors: errorRows,
     };
+  }
+
+  /**
+   * Return per-agent timeout rates for the last `hours` hours.
+   *
+   * A "timeout" is any task with retry_count > 0, which indicates the
+   * dispatcher's automatic retry-with-backoff mechanism fired (triggered by
+   * exit-code-143 / SIGTERM from the proxy).
+   *
+   * Only top-level tasks (parent_task_id IS NULL) with an assigned agent are
+   * counted. The denominator is all tasks whose created_at falls within the
+   * window so the rate reflects the actual dispatch period, not just retried tasks.
+   *
+   * Agents with zero tasks in the window are excluded from the result.
+   */
+  getTimeoutRates(hours: number): AgentTimeoutRate[] {
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+
+    const rows = this.db
+      .prepare(
+        `SELECT
+           agent_name,
+           COUNT(*) AS total_tasks,
+           COALESCE(SUM(CASE WHEN retry_count > 0 THEN 1 ELSE 0 END), 0) AS timed_out_tasks
+         FROM tasks
+         WHERE created_at >= ?
+           AND parent_task_id IS NULL
+           AND agent_name IS NOT NULL
+         GROUP BY agent_name
+         ORDER BY agent_name`,
+      )
+      .all(since) as Array<{
+        agent_name: string;
+        total_tasks: number;
+        timed_out_tasks: number;
+      }>;
+
+    return rows.map((r) => ({
+      agent_name: r.agent_name,
+      total_tasks: r.total_tasks,
+      timed_out_tasks: r.timed_out_tasks,
+      timeout_rate_pct: r.total_tasks > 0 ? (r.timed_out_tasks / r.total_tasks) * 100 : null,
+    }));
   }
 
   close(): void {
