@@ -51,6 +51,60 @@ describe("Router.routeToRepo", () => {
   });
 });
 
+describe("Router cross-repo destination routing", () => {
+  const router = new Router(config);
+
+  it("routes to destination agent when task from repo A mentions repo B by short name", () => {
+    // Task triggered from claude-proxy but explicitly targets claude-agent-orchestrator
+    const matches = router.route(
+      "update claude-agent-orchestrator to consume the new streaming API",
+      "rapartlu/claude-proxy",
+    );
+    expect(matches[0].agentName).toBe("claude-agent-orchestrator");
+    expect(matches[0].reason).toMatch(/cross-repo destination/i);
+  });
+
+  it("routes to destination agent when task mentions full repo path", () => {
+    const matches = router.route(
+      "in rapartlu/claude-agent-orchestrator, add support for X",
+      "rapartlu/claude-proxy",
+    );
+    expect(matches[0].agentName).toBe("claude-agent-orchestrator");
+    expect(matches[0].reason).toMatch(/cross-repo destination/i);
+  });
+
+  it("routes normally (to source agent) when task has no cross-repo mention", () => {
+    // Task from claude-proxy that doesn't mention any other agent
+    const matches = router.route(
+      "fix the docker container startup timeout",
+      "rapartlu/claude-proxy",
+    );
+    expect(matches[0].agentName).toBe("claude-proxy");
+  });
+
+  it("does not boost when source and destination are the same agent", () => {
+    // Task from claude-agent-orchestrator mentioning itself — no cross-repo boost needed
+    const matches = router.route(
+      "update claude-agent-orchestrator daemon loop interval",
+      "rapartlu/claude-agent-orchestrator",
+    );
+    // Should still route to claude-agent-orchestrator but via normal source-match path
+    expect(matches[0].agentName).toBe("claude-agent-orchestrator");
+    // Reason should NOT mention cross-repo destination (it's the source agent)
+    expect(matches[0].reason).not.toMatch(/cross-repo destination/i);
+  });
+
+  it("cross-repo mention in title beats same-agent topic match", () => {
+    // Task from claude-proxy repo but title clearly says "claude-agent-orchestrator"
+    const matches = router.route(
+      "claude-agent-orchestrator: add proxy health-check polling",
+      "rapartlu/claude-proxy",
+    );
+    expect(matches[0].agentName).toBe("claude-agent-orchestrator");
+    expect(matches[0].reason).toMatch(/cross-repo destination/i);
+  });
+});
+
 describe("Router integration-phrasing destination routing", () => {
   const router = new Router(config);
 

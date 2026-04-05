@@ -40,13 +40,26 @@ function fireAndForget(
   store: StateStore,
   config: OrchestratorConfig,
   message: string,
-  options: { agentName: string; source: "github" | "linear" | "slack"; sourceRef: string; title: string },
+  options: {
+    agentName?: string;
+    /**
+     * The GitHub repo that triggered this task (e.g. "rapartlu/claude-proxy").
+     * When provided (and `agentName` is omitted), the router uses this to
+     * activate cross-repo destination detection so tasks explicitly naming a
+     * different agent are routed to the correct destination rather than always
+     * staying with the source repo's agent.
+     */
+    sourceRepo?: string;
+    source: "github" | "linear" | "slack";
+    sourceRef: string;
+    title: string;
+  },
   onAgentCompleted?: (agentName: string) => Promise<void>,
 ): void {
   dispatcher.dispatch(message, options).then(async (result) => {
     inFlightDispatches.delete(options.sourceRef);
     store.markProcessed(options.source, options.sourceRef, result.taskId);
-    log.info("Fire-and-forget dispatch completed", { taskId: result.taskId, agentName: options.agentName });
+    log.info("Fire-and-forget dispatch completed", { taskId: result.taskId, agentName: result.agentName });
 
     // Report result back to source
     const task = store.getTask(result.taskId);
@@ -60,17 +73,17 @@ function fireAndForget(
     // up to one full poll interval later).
     if (onAgentCompleted) {
       try {
-        await onAgentCompleted(options.agentName);
+        await onAgentCompleted(result.agentName);
       } catch (err) {
         log.warn("Post-completion hook failed", {
-          agentName: options.agentName,
+          agentName: result.agentName,
           error: err instanceof Error ? err.message : String(err),
         });
       }
     }
   }).catch((err) => {
     inFlightDispatches.delete(options.sourceRef);
-    log.error("Fire-and-forget dispatch failed", { agentName: options.agentName, sourceRef: options.sourceRef, error: err instanceof Error ? err.message : String(err) });
+    log.error("Fire-and-forget dispatch failed", { agentName: options.agentName ?? options.sourceRef, sourceRef: options.sourceRef, error: err instanceof Error ? err.message : String(err) });
   });
 }
 
@@ -185,10 +198,14 @@ export async function dispatchGitHubIssues(
       inFlightDispatches.add(sourceRef);
 
       // Fire and forget — don't block the daemon cycle.
+      // Pass sourceRepo (not agentName) so the router can detect cross-repo
+      // destinations. For issues that target the owning agent the router still
+      // returns that agent (sourceRepo score = 1.0); for issues that explicitly
+      // name a different agent/repo the router overrides to the destination agent.
       // Pass the post-completion hook so the daemon is notified immediately
       // when this agent finishes and may have pushed a branch.
       fireAndForget(dispatcher, store, config, message, {
-        agentName,
+        sourceRepo: agent.github,
         source: "github",
         sourceRef,
         title: `[${issue.repo}#${issue.number}] ${issue.title}`,
@@ -345,8 +362,10 @@ export async function dispatchIdleAgentBacklog(
 
       inFlightDispatches.add(sourceRef);
 
+      // Pass sourceRepo instead of agentName so the router can detect cross-repo
+      // destinations (same rationale as dispatchGitHubIssues above).
       fireAndForget(dispatcher, store, config, message, {
-        agentName,
+        sourceRepo: agent.github,
         source: "github",
         sourceRef,
         title: `[${issue.repo}#${issue.number}] ${issue.title}`,

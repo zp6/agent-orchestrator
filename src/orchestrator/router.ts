@@ -54,7 +54,7 @@ export class Router {
       return matches;
     }
 
-    const llmResult = await this.llmRouter.route(task);
+    const llmResult = await this.llmRouter.route(task, sourceRepo);
     if (!llmResult) {
       return matches;
     }
@@ -83,12 +83,43 @@ export class Router {
     agent: AgentConfig,
     sourceRepo?: string,
   ): { confidence: number; reason: string } {
-    // Exact repo match — highest confidence
+    const taskLower = task.toLowerCase();
+
+    // Cross-repo destination detection: if the task explicitly mentions another
+    // agent's repo or name, prefer that destination agent over the source agent.
+    // This handles cases like: issue from claude-proxy saying "update
+    // claude-agent-orchestrator to consume X".
+    const destinationBoost = this.scoreCrossRepoDestination(
+      taskLower,
+      agentName,
+      agent,
+      sourceRepo,
+    );
+    if (destinationBoost > 0) {
+      return {
+        confidence: destinationBoost,
+        reason: `Cross-repo destination: task targets this agent's repo/name`,
+      };
+    }
+
+    // Exact repo match — high confidence for the source repo agent, BUT only
+    // when the task does NOT explicitly target a different agent's repo.
+    // If the task explicitly names another agent, suppress the source-repo
+    // default so the destination agent can win.
     if (sourceRepo && agent.github === sourceRepo) {
+      const taskTargetsDifferentAgent = this.taskMentionsOtherAgent(
+        taskLower,
+        agentName,
+        sourceRepo,
+      );
+      if (taskTargetsDifferentAgent) {
+        // Return a low-ish score so the destination agent (0.9) beats us,
+        // but keep some signal that this agent is involved in the issue.
+        return { confidence: 0.4, reason: `Source repo (${sourceRepo}), but task targets another agent` };
+      }
       return { confidence: 1.0, reason: `Owns repo ${sourceRepo}` };
     }
 
-    const taskLower = task.toLowerCase();
     let confidence = 0;
     const reasons: string[] = [];
 
@@ -132,6 +163,84 @@ export class Router {
       confidence,
       reason: reasons.join("; ") || "No match",
     };
+  }
+
+  /**
+   * Detects explicit cross-repo destination mentions in the task text.
+   *
+   * When a task is triggered from repo A but explicitly names repo B (or its
+   * agent name) in the title/description as the target, this returns a high
+   * confidence score for the agent that owns repo B.
+   *
+   * Examples:
+   *   - "update claude-agent-orchestrator to consume the new reviewer API"
+   *     → boosts claude-agent-orchestrator, not claude-proxy (the source repo)
+   *   - "rapartlu/claude-agent-orchestrator should handle X"
+   *     → boosts claude-agent-orchestrator
+   *
+   * Returns 0.9 if this agent is the explicit destination (to beat the source
+   * repo's default 1.0 only when the mention is strong), 0 otherwise.
+   *
+   * Note: only applies when a sourceRepo is provided AND the task mentions a
+   * DIFFERENT agent's identity than the source.
+   */
+  private scoreCrossRepoDestination(
+    taskLower: string,
+    agentName: string,
+    agent: AgentConfig,
+    sourceRepo?: string,
+  ): number {
+    // Only applies when there is a source repo context
+    if (!sourceRepo) return 0;
+
+    // If this agent IS the source repo owner, skip (handled by the default path)
+    if (agent.github === sourceRepo) return 0;
+
+    // Check if the task explicitly mentions this agent's GitHub repo (full or short form)
+    if (agent.github) {
+      const fullRepo = agent.github.toLowerCase(); // e.g. "rapartlu/claude-agent-orchestrator"
+      const shortRepo = fullRepo.split("/")[1]; // e.g. "claude-agent-orchestrator"
+
+      if (taskLower.includes(fullRepo) || taskLower.includes(shortRepo)) {
+        return 0.9;
+      }
+    }
+
+    // Check if the task explicitly mentions this agent's name
+    if (taskLower.includes(agentName.toLowerCase())) {
+      return 0.9;
+    }
+
+    return 0;
+  }
+
+  /**
+   * Returns true if the task text explicitly names a different agent's repo or
+   * agent name (not the current source agent). Used to suppress the default
+   * source-repo confidence boost when the task clearly targets a different agent.
+   */
+  private taskMentionsOtherAgent(
+    taskLower: string,
+    sourceAgentName: string,
+    sourceRepo: string,
+  ): boolean {
+    for (const [name, agent] of Object.entries(this.config.agents)) {
+      // Skip the source agent itself
+      if (name === sourceAgentName || agent.github === sourceRepo) continue;
+
+      if (agent.github) {
+        const fullRepo = agent.github.toLowerCase();
+        const shortRepo = fullRepo.split("/")[1];
+        if (taskLower.includes(fullRepo) || taskLower.includes(shortRepo)) {
+          return true;
+        }
+      }
+
+      if (taskLower.includes(name.toLowerCase())) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

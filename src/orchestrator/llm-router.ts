@@ -18,8 +18,8 @@ export class LLMRouter {
     }
   }
 
-  async route(task: string): Promise<LLMRouteResult | null> {
-    const registry = this.buildRegistryPrompt() + (this.learner?.buildRouterContext() ?? "");
+  async route(task: string, sourceRepo?: string): Promise<LLMRouteResult | null> {
+    const registry = this.buildRegistryPrompt(sourceRepo) + (this.learner?.buildRouterContext() ?? "");
     const client = createLLMClient(this.config
     );
 
@@ -42,18 +42,22 @@ export class LLMRouter {
     }
   }
 
-  private buildRegistryPrompt(): string {
+  private buildRegistryPrompt(sourceRepo?: string): string {
     const agentList = Object.entries(this.config.agents)
       .map(([name, agent]) =>
-        `- **${name}**: ${agent.description}\n  Capabilities: ${agent.capabilities.join(", ")}\n  Topics: ${agent.owns_topics.join(", ")}`,
+        `- **${name}** (repo: ${agent.github ?? "none"}): ${agent.description}\n  Capabilities: ${agent.capabilities.join(", ")}\n  Topics: ${agent.owns_topics.join(", ")}`,
       )
       .join("\n");
+
+    const sourceNote = sourceRepo
+      ? `\nThis task was triggered from the repo: ${sourceRepo}. The triggering repo is NOT necessarily the destination — read the task carefully.\n`
+      : "";
 
     return `You are a task router. Given a task description, pick the most appropriate agent to handle it.
 
 Available agents:
 ${agentList}
-
+${sourceNote}
 ROUTING RULES:
 1. Match the agent whose capabilities and owned topics best fit the task.
 2. INTEGRATION TASKS: When a task uses integration phrasing such as "wire X into Y",
@@ -62,6 +66,11 @@ ROUTING RULES:
    source system (X). The destination is the system being modified to consume or
    integrate with the source. Example: "wire reviewer package into orchestrator daemon"
    should route to the orchestrator agent (it owns the daemon), NOT the reviewer agent.
+3. CROSS-REPO TASKS: If the task description explicitly names a specific repo or agent
+   (e.g. "update claude-agent-orchestrator to...", "in rapartlu/claude-proxy, add..."),
+   route to the agent that OWNS THAT NAMED REPO, even if the task was triggered from a
+   different repo. The destination repo mentioned in the task body takes priority over
+   the triggering source repo.
 
 Respond with ONLY a JSON object (no markdown, no code fences):
 {"agentName": "<name>", "confidence": <0.0-1.0>, "reason": "<brief reason>"}

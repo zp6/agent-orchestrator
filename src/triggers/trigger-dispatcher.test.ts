@@ -87,7 +87,7 @@ describe("dispatchGitHubIssues", () => {
     expect(result.dispatched).toBe(1);
     expect(mockDispatcher.dispatch).toHaveBeenCalledWith(
       expect.stringContaining("Bug"),
-      expect.objectContaining({ agentName: "my-agent", source: "github", sourceRef: "owner/my-repo#1" }),
+      expect.objectContaining({ sourceRepo: "owner/my-repo", source: "github", sourceRef: "owner/my-repo#1" }),
     );
   });
 
@@ -263,7 +263,7 @@ describe("duplicate PR detection before dispatch", () => {
     expect(result.skipped).toBe(0);
     expect(mockDispatcher.dispatch).toHaveBeenCalledWith(
       expect.stringContaining("Bug"),
-      expect.objectContaining({ agentName: "my-agent" }),
+      expect.objectContaining({ sourceRepo: "owner/my-repo" }),
     );
   });
 
@@ -422,7 +422,7 @@ describe("idle agent pickup (post-completion dispatch)", () => {
     expect(result.dispatched).toBe(1);
     expect(mockDispatcher.dispatch).toHaveBeenCalledWith(
       expect.stringContaining("Next task"),
-      expect.objectContaining({ agentName: "my-agent", source: "github", sourceRef: "owner/my-repo#2" }),
+      expect.objectContaining({ sourceRepo: "owner/my-repo", source: "github", sourceRef: "owner/my-repo#2" }),
     );
   });
 
@@ -519,7 +519,7 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
     expect(result.dispatchedAgents).toContain("my-agent");
     expect(mockDispatcher.dispatch).toHaveBeenCalledWith(
       expect.stringContaining("Still open"),
-      expect.objectContaining({ agentName: "my-agent", sourceRef: "owner/my-repo#1" }),
+      expect.objectContaining({ sourceRepo: "owner/my-repo", sourceRef: "owner/my-repo#1" }),
     );
   });
 
@@ -730,7 +730,7 @@ describe("dispatchIdleAgentBacklog", () => {
     expect(result.dispatched).toBe(1);
     expect(mockDispatcher.dispatch).toHaveBeenCalledWith(
       expect.stringContaining("Oldest task"),
-      expect.objectContaining({ agentName: "my-agent", source: "github", sourceRef: "owner/my-repo#2" }),
+      expect.objectContaining({ sourceRepo: "owner/my-repo", source: "github", sourceRef: "owner/my-repo#2" }),
     );
   });
 

@@ -62,6 +62,14 @@ export class Dispatcher {
       taskType?: TaskType;
       /** Resume an existing CLI session by reusing a prior conversation ID. */
       conversationId?: string;
+      /**
+       * The GitHub repo that triggered this task (e.g. "rapartlu/claude-proxy").
+       * Passed to the router so cross-repo destination detection
+       * (`scoreCrossRepoDestination` / `taskMentionsOtherAgent`) can activate.
+       * Without this, both helpers return immediately and the deterministic
+       * cross-repo routing logic never fires.
+       */
+      sourceRepo?: string;
     },
   ): Promise<DispatchResult> {
     // Resolve agent
@@ -69,7 +77,7 @@ export class Dispatcher {
     let routeReason = "Explicitly specified";
 
     if (!agentName) {
-      const matches = await this.router.routeWithFallback(message);
+      const matches = await this.router.routeWithFallback(message, options?.sourceRepo);
       if (matches.length === 0) {
         throw new Error(
           "Could not determine which agent to route to. Specify --agent explicitly.",
