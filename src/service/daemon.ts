@@ -28,6 +28,7 @@ import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
+const AUTO_MERGE_SWEEP_EVERY_N_CYCLES = 3;  // ~15min — same cadence as PR review
 const SUPERVISOR_CHECK_EVERY_N_CYCLES = 3; // ~15min at default interval
 const BACKLOG_TRIAGE_EVERY_N_CYCLES = 60; // ~5h at default interval
 const CONTAINER_RESTART_EVERY_N_CYCLES = 100; // ~50min at 30s interval — prevents Docker stalls
@@ -232,7 +233,13 @@ export class Daemon {
         await this.reviewPRs(time);
       }
 
-      // 4b. Process merge queue every cycle so approved PRs land promptly
+      // 4b. Sweep approved-but-unqueued PRs into the merge queue, then process it.
+      //     The sweep runs at the same cadence as PR review (~15 min) so that
+      //     PRs approved in the previous review cycle are picked up promptly.
+      //     processMergeQueue runs every cycle so queued PRs land without delay.
+      if (this.cycleCount % AUTO_MERGE_SWEEP_EVERY_N_CYCLES === 0) {
+        await this.sweepAndMergeApprovedPRs(time);
+      }
       await this.processMergeQueue(time);
 
       // 5. Redeploy agents with new code (only registered ones)
@@ -957,6 +964,18 @@ export class Daemon {
       }
     } catch (err) {
       console.error(`[${time}] PR review failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  private async sweepAndMergeApprovedPRs(time: string): Promise<void> {
+    try {
+      const swept = await this.prReviewer.sweepApprovedPRsIntoQueue();
+      if (swept > 0) {
+        console.log(`[${time}] Auto-merge sweep: added ${swept} previously-approved PR(s) to merge queue`);
+        this.log.info("Auto-merge sweep completed", { swept });
+      }
+    } catch (err) {
+      console.error(`[${time}] Auto-merge sweep failed: ${err instanceof Error ? err.message : err}`);
     }
   }
 

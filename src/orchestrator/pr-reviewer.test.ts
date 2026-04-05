@@ -1384,3 +1384,185 @@ describe("PRReviewer", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// sweepApprovedPRsIntoQueue — auto-merge sweep (issue #365)
+// ---------------------------------------------------------------------------
+
+import { vi as vi2 } from "vitest";
+import type { StateStore } from "../state/store.js";
+
+describe("sweepApprovedPRsIntoQueue", () => {
+  const sweepConfig: OrchestratorConfig = {
+    proxy: { url: "http://localhost:3457", timeout_ms: 5000 },
+    orchestrator_dir: "/tmp/orchestrator",
+    base_dir: "/projects",
+    agents: {
+      "agent-a": {
+        dir: "a",
+        description: "A",
+        capabilities: [],
+        owns_topics: [],
+        github: "owner/repo",
+      },
+    },
+  };
+
+  function makeMockStore(overrides: Partial<StateStore> = {}): StateStore {
+    return {
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      queuePRForMerge: vi.fn().mockReturnValue({ position: 0, repo: "owner/repo", pr_number: 42, branch: "issue-42-fix", status: "queued", enqueued_at: new Date().toISOString() }),
+      getMergeQueue: vi.fn().mockReturnValue([]),
+      getMergeQueueEntry: vi.fn().mockReturnValue(undefined),
+      getNextQueuedPR: vi.fn().mockReturnValue(undefined),
+      markQueuedPRMerging: vi.fn(),
+      markQueuedPRMerged: vi.fn(),
+      markQueuedPRFailed: vi.fn(),
+      removeFromMergeQueue: vi.fn(),
+      recordPRReview: vi.fn(),
+      getPRMetrics: vi.fn().mockReturnValue([]),
+      recordCycleEnd: vi.fn(),
+      ...overrides,
+    } as unknown as StateStore;
+  }
+
+  it("adds an approved PR to the merge queue", async () => {
+    const mockExecSyncFn = vi.mocked(
+      (await import("node:child_process")).execSync,
+    );
+
+    mockExecSyncFn.mockImplementation((cmd: string) => {
+      if (cmd.includes("gh pr list") && cmd.includes("headRefName")) {
+        return JSON.stringify([
+          { number: 42, headRefName: "issue-42-fix", title: "Fix something", mergeable: "MERGEABLE" },
+        ]);
+      }
+      if (cmd.includes("gh pr view") && cmd.includes("comments")) {
+        return JSON.stringify("**[orchestrator] PR Review — Approved** ✅\n\nLooks good.");
+      }
+      return "";
+    });
+
+    const store = makeMockStore();
+    const reviewer = new PRReviewer(sweepConfig, store);
+    const count = await reviewer.sweepApprovedPRsIntoQueue();
+
+    expect(count).toBe(1);
+    expect(store.queuePRForMerge).toHaveBeenCalledWith("owner/repo", 42, "issue-42-fix");
+  });
+
+  it("skips PRs already in the merge queue", async () => {
+    const mockExecSyncFn = vi.mocked(
+      (await import("node:child_process")).execSync,
+    );
+
+    mockExecSyncFn.mockImplementation((cmd: string) => {
+      if (cmd.includes("gh pr list") && cmd.includes("headRefName")) {
+        return JSON.stringify([
+          { number: 42, headRefName: "issue-42-fix", title: "Fix", mergeable: "MERGEABLE" },
+        ]);
+      }
+      return "";
+    });
+
+    const store = makeMockStore({
+      isPRInMergeQueue: vi.fn().mockReturnValue(true),
+    });
+    const reviewer = new PRReviewer(sweepConfig, store);
+    const count = await reviewer.sweepApprovedPRsIntoQueue();
+
+    expect(count).toBe(0);
+    expect(store.queuePRForMerge).not.toHaveBeenCalled();
+  });
+
+  it("skips PRs whose latest orchestrator comment is a change request", async () => {
+    const mockExecSyncFn = vi.mocked(
+      (await import("node:child_process")).execSync,
+    );
+
+    mockExecSyncFn.mockImplementation((cmd: string) => {
+      if (cmd.includes("gh pr list") && cmd.includes("headRefName")) {
+        return JSON.stringify([
+          { number: 42, headRefName: "issue-42-fix", title: "Fix", mergeable: "MERGEABLE" },
+        ]);
+      }
+      if (cmd.includes("gh pr view") && cmd.includes("comments")) {
+        return JSON.stringify("**[orchestrator] PR Review — Changes Requested**\n\nPlease fix the tests.");
+      }
+      return "";
+    });
+
+    const store = makeMockStore();
+    const reviewer = new PRReviewer(sweepConfig, store);
+    const count = await reviewer.sweepApprovedPRsIntoQueue();
+
+    expect(count).toBe(0);
+    expect(store.queuePRForMerge).not.toHaveBeenCalled();
+  });
+
+  it("skips PRs with merge conflicts (CONFLICTING)", async () => {
+    const mockExecSyncFn = vi.mocked(
+      (await import("node:child_process")).execSync,
+    );
+
+    mockExecSyncFn.mockImplementation((cmd: string) => {
+      if (cmd.includes("gh pr list") && cmd.includes("headRefName")) {
+        return JSON.stringify([
+          { number: 42, headRefName: "issue-42-fix", title: "Fix", mergeable: "CONFLICTING" },
+        ]);
+      }
+      if (cmd.includes("gh pr view") && cmd.includes("comments")) {
+        return JSON.stringify("**[orchestrator] PR Review — Approved** ✅\n\nLooks good.");
+      }
+      return "";
+    });
+
+    const store = makeMockStore();
+    const reviewer = new PRReviewer(sweepConfig, store);
+    const count = await reviewer.sweepApprovedPRsIntoQueue();
+
+    expect(count).toBe(0);
+    expect(store.queuePRForMerge).not.toHaveBeenCalled();
+  });
+
+  it("skips PRs with no orchestrator review comment", async () => {
+    const mockExecSyncFn = vi.mocked(
+      (await import("node:child_process")).execSync,
+    );
+
+    mockExecSyncFn.mockImplementation((cmd: string) => {
+      if (cmd.includes("gh pr list") && cmd.includes("headRefName")) {
+        return JSON.stringify([
+          { number: 42, headRefName: "issue-42-fix", title: "Fix", mergeable: "MERGEABLE" },
+        ]);
+      }
+      if (cmd.includes("gh pr view") && cmd.includes("comments")) {
+        return "null"; // no orchestrator comment found
+      }
+      return "";
+    });
+
+    const store = makeMockStore();
+    const reviewer = new PRReviewer(sweepConfig, store);
+    const count = await reviewer.sweepApprovedPRsIntoQueue();
+
+    expect(count).toBe(0);
+    expect(store.queuePRForMerge).not.toHaveBeenCalled();
+  });
+
+  it("returns 0 for agents without a github repo", async () => {
+    const noGithubConfig: OrchestratorConfig = {
+      ...sweepConfig,
+      agents: {
+        "no-gh": { dir: "x", description: "X", capabilities: [], owns_topics: [] },
+      },
+    };
+
+    const store = makeMockStore();
+    const reviewer = new PRReviewer(noGithubConfig, store);
+    const count = await reviewer.sweepApprovedPRsIntoQueue();
+
+    expect(count).toBe(0);
+    expect(store.queuePRForMerge).not.toHaveBeenCalled();
+  });
+});

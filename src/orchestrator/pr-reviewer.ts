@@ -543,6 +543,101 @@ export class PRReviewer {
   }
 
   /**
+   * Sweep all open PRs across agent repos and add any that have an
+   * orchestrator approval comment (and no newer change-request comment)
+   * into the merge queue.
+   *
+   * This catches PRs approved in prior cycles that were never queued —
+   * e.g. because the merge queue was introduced after the approval, or
+   * because a transient error dropped the enqueue step.
+   *
+   * Skips PRs that are already queued, have an active change-request, or
+   * have merge conflicts.
+   *
+   * Returns the number of PRs newly added to the queue.
+   */
+  async sweepApprovedPRsIntoQueue(): Promise<number> {
+    let added = 0;
+
+    for (const [, agent] of Object.entries(this.config.agents)) {
+      if (!agent.github) continue;
+
+      let openPRs: Array<{ number: number; headRefName: string; title: string; mergeable: string }>;
+      try {
+        const raw = execSync(
+          `gh pr list --repo ${agent.github} --state open --json number,headRefName,title,mergeable`,
+          { encoding: "utf-8", timeout: 15000 },
+        );
+        openPRs = JSON.parse(raw.trim() || "[]") as typeof openPRs;
+      } catch {
+        continue;
+      }
+
+      for (const pr of openPRs) {
+        // Already handled by the queue — nothing to do
+        if (this.store.isPRInMergeQueue(agent.github, pr.number)) continue;
+
+        // Fetch the most recent orchestrator review comment on this PR
+        let latestReviewBody: string | null;
+        try {
+          const raw = execSync(
+            `gh pr view ${pr.number} --repo ${agent.github} --json comments ` +
+            `--jq '[.comments[] | select(.body | startswith("**[orchestrator] PR Review"))] | last | .body'`,
+            { encoding: "utf-8", timeout: 15000 },
+          );
+          const trimmed = raw.trim();
+          latestReviewBody = trimmed === "" || trimmed === "null" ? null : trimmed;
+        } catch {
+          continue;
+        }
+
+        if (!latestReviewBody) continue;
+
+        // Only enqueue when the latest orchestrator comment is an approval
+        // (not a change request or escalation)
+        const isApproved = latestReviewBody.includes("PR Review — Approved");
+        if (!isApproved) continue;
+
+        // Don't enqueue conflicting PRs — they need manual resolution first
+        if (pr.mergeable === "CONFLICTING") {
+          this.log.info("Sweep: approved PR has merge conflicts, skipping auto-queue", {
+            repo: agent.github,
+            prNumber: pr.number,
+          });
+          continue;
+        }
+
+        const entry = this.store.queuePRForMerge(agent.github, pr.number, pr.headRefName);
+        this.log.info("Sweep: approved PR added to merge queue", {
+          repo: agent.github,
+          prNumber: pr.number,
+          branch: pr.headRefName,
+          position: entry.position,
+        });
+
+        // Post a comment so the PR author knows it was picked up
+        try {
+          execSync(
+            `gh pr comment ${pr.number} --repo ${agent.github} --body ` +
+            shellEscape(
+              `**[orchestrator] Auto-merge sweep** 🔀\n\n` +
+              `This PR was previously approved and has been added to the merge queue ` +
+              `(position ${entry.position + 1}). It will be merged automatically.`,
+            ),
+            { encoding: "utf-8", timeout: 30000 },
+          );
+        } catch {
+          // Best-effort comment — don't fail the sweep
+        }
+
+        added++;
+      }
+    }
+
+    return added;
+  }
+
+  /**
    * Process the merge queue: dequeue one PR at a time, merge it, then rebase
    * remaining queued branches onto the new main so they don't conflict.
    *
