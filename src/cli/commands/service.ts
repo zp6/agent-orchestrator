@@ -185,6 +185,17 @@ export function registerServiceCommand(program: Command): void {
             console.log(chalk.dim(`  No idle-fill dispatches yet (agents may not have gone idle between cycles)`));
           }
 
+          // --- Supervisor pre-resolved skip stats ---
+          const supervisorPreResolvedSkips = store.getStat("supervisor_pre_resolved_skips");
+          console.log(chalk.bold("\nSupervisor Pre-Dispatch Resolution Check"));
+          const skipColor = supervisorPreResolvedSkips > 0 ? chalk.green : chalk.dim;
+          console.log(`  Pre-resolved skips: ${skipColor(String(supervisorPreResolvedSkips))}`);
+          if (supervisorPreResolvedSkips > 0) {
+            console.log(chalk.dim(`  ✓ Supervisor skipped ${supervisorPreResolvedSkips} follow-up(s) for issues/PRs already closed`));
+          } else {
+            console.log(chalk.dim(`  No pre-resolved skips yet`));
+          }
+
           // --- Improvement detection stats ---
           const count = qualified.length;
           const threshold = minScore.toFixed(2);

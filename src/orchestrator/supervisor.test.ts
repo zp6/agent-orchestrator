@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { Supervisor, isConcreteDispatch } from "./supervisor.js";
+import { Supervisor, isConcreteDispatch, extractIssueRefs, isDecisionAlreadyResolved } from "./supervisor.js";
 import { StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { tmpdir } from "node:os";
@@ -307,6 +307,111 @@ describe("Supervisor", () => {
       const matches = (prompt.match(/outcome: none/g) ?? []).length;
       expect(matches).toBe(10);
     });
+  });
+});
+
+describe("extractIssueRefs", () => {
+  it("extracts simple #N references", () => {
+    expect(extractIssueRefs("Fix issue #42 and #43")).toEqual([42, 43]);
+  });
+
+  it("deduplicates repeated references", () => {
+    expect(extractIssueRefs("Relates to #42 and also #42")).toEqual([42]);
+  });
+
+  it("extracts from combined message and reason text", () => {
+    expect(extractIssueRefs("Branch pushed for issue #220 in task")).toEqual([220]);
+  });
+
+  it("returns empty array when no refs present", () => {
+    expect(extractIssueRefs("No issue reference here")).toEqual([]);
+  });
+});
+
+describe("isDecisionAlreadyResolved", () => {
+  let execSyncMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    const cp = await import("node:child_process");
+    execSyncMock = vi.mocked(cp.execSync);
+    execSyncMock.mockReset();
+  });
+
+  it("returns false when no issue refs found in text", () => {
+    const result = isDecisionAlreadyResolved(
+      "Push your branch to remote",
+      "Branch not pushed",
+      "owner/repo",
+    );
+    expect(result).toBe(false);
+    expect(execSyncMock).not.toHaveBeenCalled();
+  });
+
+  it("returns true when all referenced issues are CLOSED", () => {
+    execSyncMock.mockReturnValue("CLOSED\n");
+    const result = isDecisionAlreadyResolved(
+      "Issue #42 needs attention",
+      "Issue #42 still open",
+      "owner/repo",
+    );
+    expect(result).toBe(true);
+  });
+
+  it("returns false when a referenced issue is OPEN", () => {
+    execSyncMock.mockReturnValue("OPEN\n");
+    const result = isDecisionAlreadyResolved(
+      "Issue #42 needs attention",
+      "Issue #42 still open",
+      "owner/repo",
+    );
+    expect(result).toBe(false);
+  });
+
+  it("returns true when all referenced PRs are MERGED", () => {
+    // First call (gh issue view) throws, second call (gh pr view) returns MERGED
+    execSyncMock
+      .mockImplementationOnce(() => { throw new Error("not an issue"); })
+      .mockReturnValue("MERGED\n");
+    const result = isDecisionAlreadyResolved(
+      "PR #99 needs review",
+      "PR still open",
+      "owner/repo",
+    );
+    expect(result).toBe(true);
+  });
+
+  it("returns false when one of multiple refs is OPEN", () => {
+    execSyncMock
+      .mockReturnValueOnce("CLOSED\n")  // #42 is closed
+      .mockReturnValueOnce("OPEN\n");   // #43 is open
+    const result = isDecisionAlreadyResolved(
+      "Issues #42 and #43 need attention",
+      "Multiple issues",
+      "owner/repo",
+    );
+    expect(result).toBe(false);
+  });
+
+  it("returns false when gh command fails unexpectedly", () => {
+    execSyncMock.mockImplementation(() => { throw new Error("gh auth failure"); });
+    const result = isDecisionAlreadyResolved(
+      "Issue #42 open",
+      "Need to fix #42",
+      "owner/repo",
+    );
+    // Can't determine state — safe default is false (don't skip)
+    expect(result).toBe(false);
+  });
+
+  it("returns false when no refs could be resolved (all gh calls fail)", () => {
+    // Both issue and PR views throw for every ref — checkedAny stays false
+    execSyncMock.mockImplementation(() => { throw new Error("not found"); });
+    const result = isDecisionAlreadyResolved(
+      "Issue #999 needs attention",
+      "Issue not found in repo",
+      "owner/repo",
+    );
+    expect(result).toBe(false);
   });
 });
 

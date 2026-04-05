@@ -5,7 +5,7 @@ import { Verifier } from "../orchestrator/verifier.js";
 import { ImprovementDetector } from "../orchestrator/improvement-detector.js";
 import { IssueCreator } from "../orchestrator/issue-creator.js";
 import { Deployer } from "../orchestrator/deployer.js";
-import { Supervisor } from "../orchestrator/supervisor.js";
+import { Supervisor, isDecisionAlreadyResolved } from "../orchestrator/supervisor.js";
 import { PRReviewer } from "../orchestrator/pr-reviewer.js";
 import { findOrphanBranches, createPRForBranch } from "../orchestrator/pr-creator.js";
 import {
@@ -741,6 +741,7 @@ export class Daemon {
       if (decisions.length === 0) return;
 
       console.log(`[${time}] Supervisor: ${decisions.length} decision(s)`);
+      let cycleSkipped = 0;
       for (const d of decisions) {
         if (d.action === "none") {
           this.store.addSupervisorDecision({
@@ -754,6 +755,28 @@ export class Daemon {
         }
 
         if ((d.action === "dispatch" || d.action === "follow-up") && d.agentName && d.message) {
+          // Pre-dispatch resolution check: if the referenced issue/PR is already
+          // closed or merged, skip this dispatch to avoid wasted round-trips.
+          const agentGithub = this.config.agents[d.agentName]?.github;
+          if (agentGithub && isDecisionAlreadyResolved(d.message, d.reason, agentGithub)) {
+            this.log.info("Supervisor dispatch skipped — already resolved", {
+              agentName: d.agentName,
+              reason: d.reason,
+              message: d.message.slice(0, 120),
+            });
+            console.log(`  ${d.action} → ${d.agentName} SKIPPED (already resolved): ${d.reason}`);
+            this.store.addSupervisorDecision({
+              action: d.action,
+              agent_name: d.agentName,
+              reason: d.reason,
+              message: d.message,
+              outcome: "skipped",
+            });
+            this.store.incrementStat("supervisor_pre_resolved_skips");
+            cycleSkipped++;
+            continue;
+          }
+
           if (this.store.hasActiveTask(d.agentName)) {
             this.log.info("Skipping supervisor dispatch: agent busy", { agentName: d.agentName, reason: d.reason });
             console.log(`  ${d.action} → ${d.agentName} SKIPPED (agent busy): ${d.reason}`);
@@ -816,6 +839,10 @@ export class Daemon {
             outcome: "unhandled",
           });
         }
+      }
+      if (cycleSkipped > 0) {
+        this.log.info("Supervisor cycle: pre-resolved skips", { cycleSkipped });
+        console.log(`[${time}] Supervisor: ${cycleSkipped} decision(s) skipped — already resolved`);
       }
     } catch (err) {
       console.error(`[${time}] Supervisor failed: ${err instanceof Error ? err.message : err}`);

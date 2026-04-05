@@ -57,6 +57,79 @@ Be specific and actionable. Only suggest actions that address real gaps. Return 
 /** Regex to detect issue references like #42 or owner/repo#42 */
 const ISSUE_REF_RE = /#\d+/;
 
+/**
+ * Extract all unique issue/PR numbers referenced in a text string.
+ * Matches patterns like #42, issue #42, PR #42, owner/repo#42.
+ */
+export function extractIssueRefs(text: string): number[] {
+  const refs = new Set<number>();
+  for (const match of text.matchAll(/#(\d+)/g)) {
+    refs.add(parseInt(match[1], 10));
+  }
+  return [...refs];
+}
+
+/**
+ * Check whether a supervisor decision's referenced issues/PRs are already
+ * resolved (closed or merged).  Returns `true` only if:
+ *   - At least one #N reference was found in the message/reason, AND
+ *   - Every reference that could be resolved via `gh` was non-OPEN.
+ *
+ * Returns `false` if any ref is still OPEN, or if we can't determine the
+ * state (safe default — don't skip work we're uncertain about).
+ *
+ * Exported for unit testing; call it directly rather than creating an instance.
+ */
+export function isDecisionAlreadyResolved(
+  message: string,
+  reason: string,
+  agentGithub: string,
+): boolean {
+  const refs = extractIssueRefs(`${message} ${reason}`);
+  if (refs.length === 0) return false; // No specific refs — can't confirm resolved
+
+  let checkedAny = false;
+
+  for (const num of refs) {
+    try {
+      // Try as a GitHub issue first; fall back to PR if the issue lookup fails
+      // (Issues and PRs share a number namespace but require separate gh commands.)
+      let state: string | null = null;
+
+      try {
+        state = execSync(
+          `gh issue view ${num} --repo ${agentGithub} --json state --jq '.state'`,
+          { encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"] },
+        ).trim().toUpperCase();
+      } catch {
+        // #N might be a PR, not an issue — try the pr command
+        try {
+          state = execSync(
+            `gh pr view ${num} --repo ${agentGithub} --json state --jq '.state'`,
+            { encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"] },
+          ).trim().toUpperCase();
+        } catch {
+          // Can't resolve this ref — skip it (don't count as checked)
+          continue;
+        }
+      }
+
+      if (!state) continue;
+      checkedAny = true;
+
+      if (state === "OPEN") {
+        return false; // At least one ref is still open — don't skip
+      }
+      // CLOSED / MERGED / any other non-OPEN state counts as resolved
+    } catch {
+      return false; // Unexpected error — safe default: don't skip
+    }
+  }
+
+  // Only signal "resolved" if we successfully verified at least one ref
+  return checkedAny;
+}
+
 /** Concrete artifact keywords that indicate a real deliverable */
 const ARTIFACT_KEYWORDS = [
   "create file",
