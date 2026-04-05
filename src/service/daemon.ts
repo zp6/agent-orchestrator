@@ -8,6 +8,7 @@ import { Deployer } from "../orchestrator/deployer.js";
 import { Supervisor, isDecisionAlreadyResolved } from "../orchestrator/supervisor.js";
 import { PRReviewer } from "../orchestrator/pr-reviewer.js";
 import { findOrphanBranches, createPRForBranch } from "../orchestrator/pr-creator.js";
+import { PRCreationRetryQueue } from "../orchestrator/pr-creation-retry-queue.js";
 import {
   dispatchGitHubIssues,
   dispatchIdleAgentBacklog,
@@ -40,6 +41,12 @@ const STALE_ISSUE_AGE_DAYS = 7;
  * push with no PR, an automated PR creation task is dispatched."
  */
 export const ORPHAN_PR_CHECK_EVERY_N_CYCLES = 1; // every cycle
+
+/**
+ * How often (in poll cycles) to log the PR creation failure telemetry summary.
+ * At the default 5-minute interval this is roughly every 50 minutes.
+ */
+export const PR_TELEMETRY_LOG_EVERY_N_CYCLES = 10;
 
 /**
  * After this many consecutive idle poll cycles with no dispatch for an agent
@@ -86,6 +93,7 @@ export class Daemon {
   private deployer: Deployer;
   private supervisor: Supervisor;
   private prReviewer: PRReviewer;
+  private prRetryQueue: PRCreationRetryQueue;
   private pollInterval: number;
   private cycleCount = 0;
   private log = createLogger("daemon");
@@ -108,6 +116,7 @@ export class Daemon {
     this.deployer = new Deployer(this.config);
     this.supervisor = new Supervisor(this.config, this.store);
     this.prReviewer = new PRReviewer(this.config, this.store);
+    this.prRetryQueue = new PRCreationRetryQueue(this.store);
     this.pollInterval = pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   }
 
@@ -621,11 +630,52 @@ export class Daemon {
 
   private async createOrphanPRs(time: string): Promise<void> {
     try {
+      // 1. Process any pending retries from prior failed attempts first.
+      const retried = await this.prRetryQueue.processPendingRetries(
+        async (repo, branch) => {
+          const agentName = Object.entries(this.config.agents)
+            .find(([, a]) => a.github === repo)?.[0] ?? "unknown";
+          const url = await createPRForBranch({ repo, branch, agentName }, this.config, this.store);
+          return url !== null;
+        },
+      );
+      if (retried > 0) {
+        console.log(`[${time}] PR creation retry queue: processed ${retried} pending retries`);
+      }
+
+      // 2. Periodically emit telemetry summary.
+      if (this.cycleCount % PR_TELEMETRY_LOG_EVERY_N_CYCLES === 0) {
+        const telemetry = this.prRetryQueue.getFailureTelemetry();
+        if (telemetry.total_branches > 0) {
+          this.log.info("PR creation retry telemetry", {
+            total_branches: telemetry.total_branches,
+            pending: telemetry.pending,
+            succeeded: telemetry.succeeded,
+            failed: telemetry.failed,
+            total_attempts: telemetry.total_attempts,
+            success_rate: telemetry.success_rate !== null
+              ? `${(telemetry.success_rate * 100).toFixed(1)}%`
+              : "n/a",
+            top_errors: telemetry.top_errors.slice(0, 3),
+          });
+        }
+      }
+
+      // 3. Detect new orphan branches and attempt PR creation.
       const orphans = findOrphanBranches(this.config);
       for (const orphan of orphans) {
         console.log(`[${time}] Orphan branch: ${orphan.repo}/${orphan.branch} — creating PR`);
         // Pass config (for issue resolution + local path detection) and store (for task_logs)
-        await createPRForBranch(orphan, this.config, this.store);
+        const url = await createPRForBranch(orphan, this.config, this.store);
+        if (url === null) {
+          // PR creation returned null (validation failed or gh CLI error).
+          // Enqueue for retry so the daemon will re-attempt with backoff.
+          this.prRetryQueue.enqueue(
+            orphan.repo,
+            orphan.branch,
+            "PR creation returned null (pre-submit validation failed or gh CLI error)",
+          );
+        }
       }
     } catch (err) {
       console.error(`[${time}] Orphan branch check failed: ${err instanceof Error ? err.message : err}`);

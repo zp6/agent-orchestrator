@@ -224,6 +224,36 @@ export interface SystemMetrics {
   pr_metrics: PRMetrics;
 }
 
+export type PRCreationAttemptStatus = "pending" | "succeeded" | "failed";
+
+/**
+ * A single entry in the PR creation retry queue.
+ * Tracks failed orphan-branch → PR creation attempts with exponential backoff.
+ */
+export interface PRCreationAttempt {
+  id: number;
+  repo: string;
+  branch: string;
+  attempt_count: number;
+  last_error: string | null;
+  last_attempted_at: string | null;
+  next_retry_at: string | null;
+  status: PRCreationAttemptStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Aggregate telemetry across all PR creation attempts. */
+export interface PRCreationTelemetry {
+  total_branches: number;
+  pending: number;
+  succeeded: number;
+  failed: number;
+  total_attempts: number;
+  success_rate: number | null;
+  top_errors: Array<{ error: string; count: number }>;
+}
+
 export type MergeQueueStatus = "queued" | "merging" | "merged" | "failed" | "skipped";
 
 /**
@@ -387,6 +417,7 @@ export class StateStore {
     this.runPRReviewsMigration();
     this.runMergeQueueMigration();
     this.runDaemonStatsMigration();
+    this.runPRCreationRetryMigration();
   }
 
   private runPhase2Migration(): void {
@@ -1765,6 +1796,157 @@ export class StateStore {
       .prepare("SELECT value_int FROM daemon_stats WHERE key = ?")
       .get(key) as { value_int: number } | undefined;
     return row?.value_int ?? 0;
+  }
+
+  // ── PR Creation Retry Queue ───────────────────────────────────────────────
+
+  private runPRCreationRetryMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pr_creation_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        last_attempted_at TEXT,
+        next_retry_at TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(repo, branch)
+      );
+      CREATE INDEX IF NOT EXISTS idx_pr_creation_attempts_status ON pr_creation_attempts(status);
+      CREATE INDEX IF NOT EXISTS idx_pr_creation_attempts_next_retry ON pr_creation_attempts(next_retry_at)
+        WHERE next_retry_at IS NOT NULL;
+    `);
+  }
+
+  /** Insert a new PR creation attempt record. */
+  insertPRCreationAttempt(params: {
+    repo: string;
+    branch: string;
+    attempt_count: number;
+    last_error: string | null;
+    last_attempted_at: string | null;
+    next_retry_at: string | null;
+    status: PRCreationAttemptStatus;
+  }): PRCreationAttempt {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO pr_creation_attempts
+           (repo, branch, attempt_count, last_error, last_attempted_at, next_retry_at, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(repo, branch) DO NOTHING`,
+      )
+      .run(
+        params.repo,
+        params.branch,
+        params.attempt_count,
+        params.last_error,
+        params.last_attempted_at,
+        params.next_retry_at,
+        params.status,
+        now,
+        now,
+      );
+    return this.getPRCreationAttempt(params.repo, params.branch)!;
+  }
+
+  /** Retrieve a single PR creation attempt by repo + branch. */
+  getPRCreationAttempt(repo: string, branch: string): PRCreationAttempt | undefined {
+    return this.db
+      .prepare("SELECT * FROM pr_creation_attempts WHERE repo = ? AND branch = ?")
+      .get(repo, branch) as PRCreationAttempt | undefined;
+  }
+
+  /** Update an existing PR creation attempt record. */
+  updatePRCreationAttempt(
+    repo: string,
+    branch: string,
+    updates: Partial<Pick<PRCreationAttempt, "attempt_count" | "last_error" | "last_attempted_at" | "next_retry_at" | "status">>,
+  ): void {
+    const fields: string[] = [];
+    const params: unknown[] = [];
+
+    for (const [key, value] of Object.entries(updates)) {
+      if (value !== undefined) {
+        fields.push(`${key} = ?`);
+        params.push(value);
+      }
+    }
+
+    if (fields.length === 0) return;
+
+    fields.push("updated_at = ?");
+    params.push(new Date().toISOString());
+    params.push(repo);
+    params.push(branch);
+
+    this.db
+      .prepare(`UPDATE pr_creation_attempts SET ${fields.join(", ")} WHERE repo = ? AND branch = ?`)
+      .run(...params);
+  }
+
+  /**
+   * Return all pending PR creation attempts whose `next_retry_at` has elapsed.
+   * These are ready to be retried this cycle.
+   */
+  getDuePRCreationAttempts(): PRCreationAttempt[] {
+    const now = new Date().toISOString();
+    return this.db
+      .prepare(
+        `SELECT * FROM pr_creation_attempts
+         WHERE status = 'pending'
+           AND next_retry_at IS NOT NULL
+           AND next_retry_at <= ?
+         ORDER BY next_retry_at ASC`,
+      )
+      .all(now) as PRCreationAttempt[];
+  }
+
+  /**
+   * Aggregate telemetry across all tracked PR creation attempts.
+   */
+  getPRCreationTelemetry(): PRCreationTelemetry {
+    const summary = this.db
+      .prepare(
+        `SELECT
+           COUNT(*) AS total_branches,
+           COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+           COALESCE(SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END), 0) AS succeeded,
+           COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+           COALESCE(SUM(attempt_count), 0) AS total_attempts
+         FROM pr_creation_attempts`,
+      )
+      .get() as {
+        total_branches: number;
+        pending: number;
+        succeeded: number;
+        failed: number;
+        total_attempts: number;
+      };
+
+    const successRate =
+      summary.total_branches > 0 ? summary.succeeded / summary.total_branches : null;
+
+    // Top error messages by frequency (non-null errors only)
+    const errorRows = this.db
+      .prepare(
+        `SELECT last_error AS error, COUNT(*) AS count
+         FROM pr_creation_attempts
+         WHERE last_error IS NOT NULL
+         GROUP BY last_error
+         ORDER BY count DESC
+         LIMIT 10`,
+      )
+      .all() as Array<{ error: string; count: number }>;
+
+    return {
+      ...summary,
+      success_rate: successRate,
+      top_errors: errorRows,
+    };
   }
 
   close(): void {

@@ -4,6 +4,8 @@ import { loadConfig } from "../../config/schema.js";
 import { PRLister } from "../../orchestrator/pr-lister.js";
 import type { PRRow, AgentHealthSummary } from "../../orchestrator/pr-lister.js";
 import { formatAge, formatStaleDays } from "../../orchestrator/pr-lister.js";
+import { StateStore } from "../../state/store.js";
+import type { PRCreationTelemetry } from "../../orchestrator/pr-creation-retry-queue.js";
 
 function formatMergeReady(mergeReady: PRRow["mergeReady"], width = 0): string {
   const labels: Record<PRRow["mergeReady"], string> = {
@@ -269,6 +271,49 @@ function printHealthTable(summaries: AgentHealthSummary[]): void {
   console.log(chalk.dim("\n" + parts.join(" · ")));
 }
 
+/**
+ * Print a human-readable summary of PR creation retry queue telemetry.
+ */
+function printRetryTelemetry(telemetry: PRCreationTelemetry): void {
+  console.log(chalk.bold("\nPR Creation Retry Queue — Telemetry\n"));
+
+  if (telemetry.total_branches === 0) {
+    console.log(chalk.dim("  No PR creation attempts recorded."));
+    return;
+  }
+
+  const successPct =
+    telemetry.success_rate !== null
+      ? `${(telemetry.success_rate * 100).toFixed(1)}%`
+      : "n/a";
+
+  const successColor =
+    telemetry.success_rate === null
+      ? chalk.dim
+      : telemetry.success_rate >= 0.8
+        ? chalk.green
+        : telemetry.success_rate >= 0.5
+          ? chalk.yellow
+          : chalk.red;
+
+  console.log(`  ${chalk.dim("Branches tracked:")}  ${telemetry.total_branches}`);
+  console.log(`  ${chalk.dim("Pending retries:")}   ${chalk.yellow(String(telemetry.pending))}`);
+  console.log(`  ${chalk.dim("Succeeded:")}         ${chalk.green(String(telemetry.succeeded))}`);
+  console.log(`  ${chalk.dim("Permanently failed:")} ${chalk.red(String(telemetry.failed))}`);
+  console.log(`  ${chalk.dim("Total attempts:")}    ${telemetry.total_attempts}`);
+  console.log(`  ${chalk.dim("Success rate:")}      ${successColor(successPct)}`);
+
+  if (telemetry.top_errors.length > 0) {
+    console.log(chalk.dim("\n  Top errors by frequency:"));
+    for (const { error, count } of telemetry.top_errors) {
+      const truncated = error.length > 80 ? `${error.slice(0, 80)}…` : error;
+      console.log(`  ${chalk.red(`×${count}`)}  ${truncated}`);
+    }
+  }
+
+  console.log();
+}
+
 export function registerPRsCommand(program: Command): void {
   program
     .command("prs")
@@ -286,6 +331,7 @@ export function registerPRsCommand(program: Command): void {
       "--needs-action",
       "Show only PRs requiring immediate attention: changes-requested, merge conflict, or escalated to human",
     )
+    .option("--retry-telemetry", "Show PR creation retry queue telemetry (failure counts, success rate, top errors)")
     .action(
       (opts: {
         health?: boolean;
@@ -298,9 +344,19 @@ export function registerPRsCommand(program: Command): void {
         agent?: string;
         blocked?: boolean;
         needsAction?: boolean;
+        retryTelemetry?: boolean;
       }) => {
         const config = loadConfig(program.opts().config);
         const lister = new PRLister(config);
+
+        // --retry-telemetry: show PR creation failure telemetry
+        if (opts.retryTelemetry) {
+          const store = new StateStore();
+          const telemetry = store.getPRCreationTelemetry();
+          store.close();
+          printRetryTelemetry(telemetry);
+          return;
+        }
 
         // --health: per-agent health summary view
         if (opts.health) {
