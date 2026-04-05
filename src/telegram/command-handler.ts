@@ -8,6 +8,7 @@
  *   /resume      → writes paused=false flag to system_flags
  *   /dispatch <agent> <instruction...>  → inserts dispatch_request row for orchestrator
  *   /prioritize <item>     → bumps priority on matching task row
+ *   /queue [repo]          → shows PR merge queue entries, optionally filtered by repo
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -39,7 +40,7 @@ interface TelegramGetUpdatesResponse {
 
 // ── Supported commands ────────────────────────────────────────────────────
 
-type CommandName = "status" | "health" | "pause" | "resume" | "dispatch" | "prioritize";
+type CommandName = "status" | "health" | "pause" | "resume" | "dispatch" | "prioritize" | "queue";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -48,6 +49,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "resume",
   "dispatch",
   "prioritize",
+  "queue",
 ]);
 
 interface ParsedCommand {
@@ -192,6 +194,11 @@ async function executeCommand(
       }
       return `❌ No task found matching \`${item}\`. Use an ID prefix or a word from the title.`;
     }
+
+    case "queue": {
+      const repo = cmd.args[0]?.trim() || undefined;
+      return handleQueue(store, repo);
+    }
   }
 }
 
@@ -306,6 +313,56 @@ async function handleHealth(
       (r) => `${r.ok ? "✅" : "❌"} *${r.label}*: ${r.detail}`,
     ),
   ];
+
+  return lines.join("\n");
+}
+
+function handleQueue(store: IStateStore, repo?: string): string {
+  const entries = store.getMergeQueue(repo);
+
+  if (entries.length === 0) {
+    const scope = repo ? `\`${repo}\`` : "any repo";
+    return `📭 *Merge Queue* — no entries for ${scope}.`;
+  }
+
+  // Group entries by repo
+  const byRepo = new Map<string, typeof entries>();
+  for (const entry of entries) {
+    const list = byRepo.get(entry.repo) ?? [];
+    list.push(entry);
+    byRepo.set(entry.repo, list);
+  }
+
+  const STATUS_ICON: Record<string, string> = {
+    queued: "🕐",
+    merging: "🔀",
+    merged: "✅",
+    failed: "❌",
+    skipped: "⏭",
+  };
+
+  const lines: string[] = [`🔢 *Merge Queue*`, ``];
+
+  for (const [repoName, repoEntries] of byRepo) {
+    lines.push(`*${repoName}* (${repoEntries.length} entr${repoEntries.length === 1 ? "y" : "ies"})`);
+    for (const e of repoEntries) {
+      const icon = STATUS_ICON[e.status] ?? "❓";
+      const enqueued = e.enqueued_at ?? e.created_at ?? "unknown";
+      // Format ISO timestamp to a shorter human-readable form: "2026-04-05 14:32"
+      const enqueuedShort = enqueued.replace("T", " ").slice(0, 16);
+      const posLabel = e.status === "queued" || e.status === "merging" ? ` · pos ${e.position}` : "";
+      lines.push(
+        `  ${icon} *PR #${e.pr_number}* \`${e.branch}\`${posLabel} · ${e.status} · enqueued ${enqueuedShort}`,
+      );
+      if (e.error) {
+        lines.push(`    ⚠️ ${e.error}`);
+      }
+    }
+    lines.push(``);
+  }
+
+  // Trim trailing blank line
+  if (lines[lines.length - 1] === "") lines.pop();
 
   return lines.join("\n");
 }
