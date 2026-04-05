@@ -893,3 +893,89 @@ describe("dispatchIdleAgentBacklog", () => {
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// dispatchGitHubIssues — onAgentCompleted post-dispatch hook (issue #305)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("dispatchGitHubIssues onAgentCompleted hook", () => {
+  let mockStore: StateStore;
+  let mockDispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+    mockIsIssueOpen.mockReturnValue(true);
+    mockStore = {
+      isProcessed: vi.fn().mockReturnValue(false),
+      markProcessed: vi.fn(),
+      getTask: vi.fn().mockReturnValue(null),
+      listTasks: vi.fn().mockReturnValue([]),
+      hasActiveTask: vi.fn().mockReturnValue(false),
+      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
+    } as unknown as StateStore;
+    mockDispatcher = {
+      dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
+    } as unknown as Dispatcher;
+  });
+
+  it("calls onAgentCompleted with the agent name after dispatch completes", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+
+    const completedAgents: string[] = [];
+    const onCompleted = vi.fn(async (name: string) => { completedAgents.push(name); });
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher, 1, undefined, onCompleted);
+
+    // Dispatch was fire-and-forget — wait for the Promise to resolve
+    await vi.runAllTimersAsync().catch(() => {});
+    // Allow microtasks to flush
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(mockDispatcher.dispatch).toHaveBeenCalledTimes(1);
+    // onCompleted should have been called once the dispatch resolved
+    expect(onCompleted).toHaveBeenCalledWith("my-agent");
+    expect(completedAgents).toContain("my-agent");
+  });
+
+  it("does not call onAgentCompleted when no issues are dispatched", async () => {
+    mockFetchIssues.mockReturnValue([]);
+
+    const onCompleted = vi.fn(async () => {});
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher, 1, undefined, onCompleted);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+    expect(onCompleted).not.toHaveBeenCalled();
+  });
+
+  it("works correctly without onAgentCompleted (backward compatible)", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Bug", body: "", url: "", labels: [] },
+    ]);
+
+    // Should not throw when callback is omitted
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+    expect(result.dispatched).toBe(1);
+  });
+
+  it("swallows errors thrown by onAgentCompleted so they do not break dispatch", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Bug", body: "", url: "", labels: [] },
+    ]);
+
+    const failingHook = vi.fn(async () => { throw new Error("orphan check failed"); });
+
+    // Should not throw even if the hook fails
+    await expect(
+      dispatchGitHubIssues(config, mockStore, mockDispatcher, 1, undefined, failingHook),
+    ).resolves.not.toThrow();
+
+    await new Promise((r) => setTimeout(r, 0));
+    // Hook was still called
+    expect(failingHook).toHaveBeenCalled();
+  });
+});

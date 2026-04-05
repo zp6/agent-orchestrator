@@ -369,7 +369,20 @@ export class Daemon {
   private async dispatchTriggers(time: string, registeredAgents: Set<string>): Promise<void> {
     try {
       const results = await Promise.allSettled([
-        dispatchGitHubIssues(this.config, this.store, this.dispatcher, 1, registeredAgents),
+        dispatchGitHubIssues(
+          this.config,
+          this.store,
+          this.dispatcher,
+          1,
+          registeredAgents,
+          // Post-dispatch orphan hook: triggered immediately when each agent
+          // finishes its task (asynchronously via fire-and-forget). This detects
+          // branches pushed by the agent right after completion rather than
+          // waiting up to one full poll interval for the scheduled createOrphanPRs
+          // sweep to run. Satisfies the acceptance criterion for issue #305:
+          // "orphan branches are resolved within one daemon cycle."
+          (agentName) => this.postDispatchOrphanCheck(agentName),
+        ),
         dispatchLinearChecks(this.config, this.store, this.dispatcher, registeredAgents),
         dispatchSlackChecks(this.config, this.store, this.dispatcher, registeredAgents),
       ]);
@@ -637,6 +650,60 @@ export class Daemon {
       } catch (err) {
         this.log.error("Preventive restart failed", { agentName: name, error: err instanceof Error ? err.message : String(err) });
       }
+    }
+  }
+
+  /**
+   * Post-dispatch orphan hook: called immediately from the fire-and-forget
+   * completion callback when an agent finishes its task. Scans only the
+   * specific agent's repo for branches without PRs and creates them inline —
+   * no waiting for the next scheduled createOrphanPRs sweep.
+   *
+   * This is the "hook into the branch-push detection path" from issue #305:
+   * because dispatch is fire-and-forget the branch push happens asynchronously,
+   * potentially between daemon cycles. Without this hook, the orphan branch
+   * could sit undetected for up to one full poll interval (5 min at default
+   * settings). With the hook, PR creation is attempted within seconds of the
+   * agent completing its work.
+   */
+  private async postDispatchOrphanCheck(agentName: string): Promise<void> {
+    const agent = this.config.agents[agentName];
+    if (!agent?.github) return;
+
+    const time = new Date().toLocaleTimeString();
+    this.log.info("Post-dispatch orphan check triggered", { agentName, repo: agent.github });
+
+    try {
+      // Auth pre-flight — same guard as the general sweep
+      const authStatus = validateGhAuth();
+      if (!authStatus.ok) {
+        this.log.warn("Post-dispatch orphan check: gh auth failed, skipping", {
+          agentName,
+          reason: authStatus.reason,
+        });
+        return;
+      }
+
+      // Targeted scan — only the agent that just completed
+      const orphans = findOrphanBranches(this.config, agentName);
+      for (const orphan of orphans) {
+        console.log(`[${time}] Post-dispatch orphan: ${orphan.repo}/${orphan.branch} — creating PR immediately`);
+        const url = await createPRForBranch(orphan, this.config, this.store);
+        if (url === null) {
+          this.prRetryQueue.enqueue(
+            orphan.repo,
+            orphan.branch,
+            "post-dispatch orphan PR creation returned null",
+          );
+        } else {
+          this.log.info("Post-dispatch orphan PR created", { agentName, repo: orphan.repo, branch: orphan.branch, url });
+        }
+      }
+    } catch (err) {
+      this.log.warn("Post-dispatch orphan check failed", {
+        agentName,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

@@ -197,11 +197,16 @@ export async function findMatchingIssueNumber(
 /**
  * Find branches that have been pushed, have commits ahead of main,
  * and don't have open PRs. Creates PRs for them.
+ *
+ * @param agentFilter - When provided, only check the specified agent's repo.
+ *   Used by the post-dispatch orphan hook to scan a single repo immediately
+ *   after its agent completes, rather than scanning all repos.
  */
-export function findOrphanBranches(config: OrchestratorConfig): OrphanBranch[] {
+export function findOrphanBranches(config: OrchestratorConfig, agentFilter?: string): OrphanBranch[] {
   const orphans: OrphanBranch[] = [];
 
   for (const [agentName, agent] of Object.entries(config.agents)) {
+    if (agentFilter !== undefined && agentName !== agentFilter) continue;
     if (!agent.github) continue;
 
     try {

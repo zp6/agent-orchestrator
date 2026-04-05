@@ -549,3 +549,94 @@ describe("createPRWithRetry", () => {
     expect(delays[1]).toBeGreaterThan(delays[0]);
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// findOrphanBranches — agentFilter parameter (post-dispatch orphan hook)
+// ────────────────────────────────────────────────────────────────────────────
+
+import { findOrphanBranches } from "./pr-creator.js";
+import type { OrchestratorConfig } from "../config/schema.js";
+
+describe("findOrphanBranches agentFilter", () => {
+  const multiAgentConfig = {
+    proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 5000 },
+    orchestrator_dir: "/tmp",
+    base_dir: "/projects",
+    agents: {
+      "agent-a": {
+        dir: "agent-a",
+        description: "Agent A",
+        capabilities: [],
+        owns_topics: [],
+        github: "owner/repo-a",
+      },
+      "agent-b": {
+        dir: "agent-b",
+        description: "Agent B",
+        capabilities: [],
+        owns_topics: [],
+        github: "owner/repo-b",
+      },
+    },
+  } as unknown as OrchestratorConfig;
+
+  it("without agentFilter scans all agents with github repos", () => {
+    // Both agents: gh pr list returns no PRs, gh api branches returns no branches
+    mockExecSync.mockReturnValue("");
+
+    const orphans = findOrphanBranches(multiAgentConfig);
+    // Should have called execSync for both repos (at least the pr list + branches call each)
+    const callArgs = mockExecSync.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(callArgs.some((a: string) => a.includes("repo-a"))).toBe(true);
+    expect(callArgs.some((a: string) => a.includes("repo-b"))).toBe(true);
+    expect(orphans).toHaveLength(0);
+  });
+
+  it("with agentFilter only scans the specified agent's repo", () => {
+    // agent-a: gh pr list returns no PRs, branches returns one branch ahead of main
+    mockExecSync
+      .mockReturnValueOnce("") // gh pr list for agent-a → no PRs
+      .mockReturnValueOnce("issue-305-fix\n") // gh api branches for agent-a
+      .mockReturnValueOnce("1\n"); // compare ahead_by = 1
+
+    const orphans = findOrphanBranches(multiAgentConfig, "agent-a");
+
+    // Should only have queried repo-a, not repo-b
+    const callArgs = mockExecSync.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(callArgs.some((a: string) => a.includes("repo-b"))).toBe(false);
+    expect(orphans).toHaveLength(1);
+    expect(orphans[0]).toMatchObject({ repo: "owner/repo-a", branch: "issue-305-fix", agentName: "agent-a" });
+  });
+
+  it("with agentFilter returns empty array when specified agent has no github repo", () => {
+    const configNoGitHub = {
+      ...multiAgentConfig,
+      agents: {
+        "no-github-agent": {
+          dir: "no-gh",
+          description: "No GitHub",
+          capabilities: [],
+          owns_topics: [],
+          // no github field
+        },
+      },
+    } as unknown as OrchestratorConfig;
+
+    const orphans = findOrphanBranches(configNoGitHub, "no-github-agent");
+    expect(orphans).toHaveLength(0);
+    expect(mockExecSync).not.toHaveBeenCalled();
+  });
+
+  it("with agentFilter skips agents not matching the filter even if they have orphan branches", () => {
+    // Only setup mock for agent-a (agent-b should not be called)
+    mockExecSync
+      .mockReturnValueOnce("") // gh pr list for agent-a
+      .mockReturnValueOnce(""); // gh api branches → empty
+
+    const orphans = findOrphanBranches(multiAgentConfig, "agent-a");
+
+    const callArgs = mockExecSync.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(callArgs.every((a: string) => !a.includes("repo-b"))).toBe(true);
+    expect(orphans).toHaveLength(0);
+  });
+});

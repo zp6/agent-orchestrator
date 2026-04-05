@@ -28,6 +28,12 @@ function hasInFlightTask(store: StateStore, agentName: string): boolean {
 /**
  * Fire-and-forget dispatch: starts the dispatch without blocking.
  * The daemon continues its cycle while the agent works.
+ *
+ * @param onAgentCompleted - Optional callback invoked immediately after the
+ *   agent's response is received (i.e., right when the agent finishes its
+ *   work and may have pushed a branch). Used by the daemon to hook orphan-PR
+ *   detection directly into the task-completion path rather than waiting for
+ *   the next scheduled createOrphanPRs sweep.
  */
 function fireAndForget(
   dispatcher: Dispatcher,
@@ -35,8 +41,9 @@ function fireAndForget(
   config: OrchestratorConfig,
   message: string,
   options: { agentName: string; source: "github" | "linear" | "slack"; sourceRef: string; title: string },
+  onAgentCompleted?: (agentName: string) => Promise<void>,
 ): void {
-  dispatcher.dispatch(message, options).then((result) => {
+  dispatcher.dispatch(message, options).then(async (result) => {
     inFlightDispatches.delete(options.sourceRef);
     store.markProcessed(options.source, options.sourceRef, result.taskId);
     log.info("Fire-and-forget dispatch completed", { taskId: result.taskId, agentName: options.agentName });
@@ -46,6 +53,21 @@ function fireAndForget(
     if (task) {
       reportResult(config, task, store).catch(() => {});
     }
+
+    // Post-completion hook: called immediately after agent response so the
+    // daemon can detect and create PRs for branches pushed by this agent
+    // without waiting for the next scheduled orphan-PR sweep (which could be
+    // up to one full poll interval later).
+    if (onAgentCompleted) {
+      try {
+        await onAgentCompleted(options.agentName);
+      } catch (err) {
+        log.warn("Post-completion hook failed", {
+          agentName: options.agentName,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }).catch((err) => {
     inFlightDispatches.delete(options.sourceRef);
     log.error("Fire-and-forget dispatch failed", { agentName: options.agentName, sourceRef: options.sourceRef, error: err instanceof Error ? err.message : String(err) });
@@ -54,6 +76,12 @@ function fireAndForget(
 
 /**
  * GitHub: fetch issues centrally via gh CLI, dispatch each to the owning agent.
+ *
+ * @param onAgentCompleted - Optional callback invoked immediately after each
+ *   agent's task completes (fire-and-forget completion). The daemon uses this
+ *   to trigger an immediate orphan-branch → PR creation check for the specific
+ *   agent that just finished, rather than waiting for the next scheduled
+ *   createOrphanPRs sweep (up to one full poll interval later).
  */
 export async function dispatchGitHubIssues(
   config: OrchestratorConfig,
@@ -61,6 +89,7 @@ export async function dispatchGitHubIssues(
   dispatcher: Dispatcher,
   maxPerAgent = 1,
   registeredAgents?: Set<string>,
+  onAgentCompleted?: (agentName: string) => Promise<void>,
 ): Promise<TriggerResult> {
   const result: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
 
@@ -155,13 +184,15 @@ export async function dispatchGitHubIssues(
       // Mark processed immediately to prevent duplicate dispatches
       inFlightDispatches.add(sourceRef);
 
-      // Fire and forget — don't block the daemon cycle
+      // Fire and forget — don't block the daemon cycle.
+      // Pass the post-completion hook so the daemon is notified immediately
+      // when this agent finishes and may have pushed a branch.
       fireAndForget(dispatcher, store, config, message, {
         agentName,
         source: "github",
         sourceRef,
         title: `[${issue.repo}#${issue.number}] ${issue.title}`,
-      });
+      }, onAgentCompleted);
 
       result.dispatched++;
       dispatchedForAgent++;
