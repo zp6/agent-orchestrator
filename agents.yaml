@@ -17,6 +17,7 @@ verification:
 agents:
   claude-agent-orchestrator:
     dir: "claude-agent-orchestrator"
+    repo: "git@github.com:rapartlu/claude-agent-orchestrator.git"
     description: "Core orchestration infrastructure: daemon loop, state store, task dispatching, trigger polling, agent deployment, and sync. Does NOT own dashboard/CLI UI or PR review/verification quality layer — those belong to the dashboard and reviewer agents."
     capabilities: ["typescript", "orchestration", "sqlite"]
     github: "rapartlu/claude-agent-orchestrator"
@@ -29,6 +30,7 @@ agents:
 
   claude-orchestrator-dashboard:
     dir: "claude-orchestrator-dashboard"
+    repo: "git@github.com:rapartlu/claude-orchestrator-dashboard.git"
     description: "Dashboard, CLI commands, and observability UI for the orchestrator. Owns all user-facing interfaces: web dashboard, status/health/metrics commands, activity views, escalation queue."
     capabilities: ["typescript", "html", "css", "express", "dashboard"]
     github: "rapartlu/claude-orchestrator-dashboard"
@@ -41,7 +43,8 @@ agents:
 
   claude-orchestrator-reviewer:
     dir: "claude-orchestrator-reviewer"
-    description: "Quality and oversight layer. PR reviewer, task verifier, supervisor, improvement detector, and escalation system (Telegram notifications)."
+    repo: "git@github.com:rapartlu/claude-orchestrator-reviewer.git"
+    description: "Quality and oversight layer. PR reviewer, task verifier, supervisor, improvement detector, and escalation system (Telegram notifications). Also serves as the LLM backend for all orchestrator operations."
     capabilities: ["typescript", "llm", "review", "verification"]
     github: "rapartlu/claude-orchestrator-reviewer"
     owns_topics: ["review", "verification", "supervisor", "improvement", "escalation", "telegram", "quality"]

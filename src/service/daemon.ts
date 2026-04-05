@@ -607,9 +607,17 @@ export class Daemon {
       const totalStale = staleLocal.length + staleRepo.length;
       if (totalStale === 0) return;
 
+      // Don't redeploy agents that are busy — wait until they finish
       const allStale = [...staleLocal, ...staleRepo];
-      console.log(`[${time}] Redeploying ${totalStale} agent(s): ${allStale.join(", ")}`);
-      const results = await this.deployer.redeployStale(registeredAgents);
+      const idle = allStale.filter((name) => !this.store.hasActiveTask(name));
+      const busy = allStale.filter((name) => this.store.hasActiveTask(name));
+      if (busy.length > 0) {
+        this.log.info("Deferring redeploy for busy agents", { busy, idle });
+      }
+      if (idle.length === 0) return;
+
+      console.log(`[${time}] Redeploying ${idle.length} agent(s): ${idle.join(", ")}${busy.length > 0 ? ` (deferred: ${busy.join(", ")})` : ""}`);
+      const results = await this.deployer.redeployStale(new Set(idle));
       for (const r of results) {
         if (r.action === "redeployed") {
           console.log(`  ${r.agentName}: redeployed`);
