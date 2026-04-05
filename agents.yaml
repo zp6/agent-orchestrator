@@ -43,7 +43,6 @@ agents:
 
   claude-orchestrator-reviewer:
     dir: "claude-orchestrator-reviewer"
-    repo: "git@github.com:rapartlu/claude-orchestrator-reviewer.git"
     pool: "reviewer"
     description: "Quality and oversight layer. PR reviewer, task verifier, supervisor, improvement detector, and escalation system (Telegram notifications). Also serves as the LLM backend for all orchestrator operations."
     capabilities: ["typescript", "llm", "review", "verification"]
