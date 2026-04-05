@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
-import { fetchOpenIssues, findExistingPRsForIssue, isIssueOpen } from "./github.js";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { fetchOpenIssues, findExistingPRsForIssue, isIssueOpen, validateGhAuth } from "./github.js";
 
 vi.mock("node:child_process", () => ({
   execSync: vi.fn(),
@@ -215,5 +215,75 @@ describe("findExistingPRsForIssue", () => {
     );
     const prs = findExistingPRsForIssue("owner/repo", 42);
     expect(prs).toHaveLength(0);
+  });
+});
+
+describe("validateGhAuth", () => {
+  const originalToken = process.env["GH_TOKEN"];
+
+  beforeEach(() => {
+    // Start each test with no GH_TOKEN so the exec path is exercised by default
+    delete process.env["GH_TOKEN"];
+  });
+
+  afterEach(() => {
+    // Restore original env
+    if (originalToken !== undefined) {
+      process.env["GH_TOKEN"] = originalToken;
+    } else {
+      delete process.env["GH_TOKEN"];
+    }
+  });
+
+  it("returns ok=true when GH_TOKEN is set and non-empty", () => {
+    process.env["GH_TOKEN"] = "ghp_testtoken123";
+    const mockExec = vi.fn();
+    const result = validateGhAuth(mockExec);
+    expect(result.ok).toBe(true);
+    // Should not even call execSync when the env var is present
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("returns ok=true when gh auth status succeeds", () => {
+    const mockExec = vi.fn().mockReturnValue("github.com\n  Logged in to github.com\n");
+    const result = validateGhAuth(mockExec);
+    expect(result.ok).toBe(true);
+    expect(mockExec).toHaveBeenCalledWith("gh auth status", expect.any(Object));
+  });
+
+  it("returns ok=false with a clear reason when gh auth status fails", () => {
+    const mockExec = vi.fn().mockImplementation(() => {
+      throw new Error("You are not logged into any GitHub hosts.");
+    });
+    const result = validateGhAuth(mockExec);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("gh CLI is not authenticated");
+    expect(result.reason).toContain("gh auth login");
+  });
+
+  it("returns ok=false when GH_TOKEN is set to an empty string", () => {
+    process.env["GH_TOKEN"] = "";
+    const mockExec = vi.fn().mockImplementation(() => {
+      throw new Error("You are not logged into any GitHub hosts.");
+    });
+    const result = validateGhAuth(mockExec);
+    expect(result.ok).toBe(false);
+  });
+
+  it("returns ok=false when GH_TOKEN is set to whitespace only", () => {
+    process.env["GH_TOKEN"] = "   ";
+    const mockExec = vi.fn().mockImplementation(() => {
+      throw new Error("not authenticated");
+    });
+    const result = validateGhAuth(mockExec);
+    expect(result.ok).toBe(false);
+  });
+
+  it("includes a hint about GH_TOKEN or gh auth login in the reason", () => {
+    const mockExec = vi.fn().mockImplementation(() => {
+      throw new Error("not authenticated");
+    });
+    const result = validateGhAuth(mockExec);
+    expect(result.reason).toMatch(/GH_TOKEN|gh auth login/);
   });
 });

@@ -9,6 +9,53 @@ export interface GitHubIssue {
   labels: string[];
 }
 
+export interface GhAuthStatus {
+  /** Whether `gh` is authenticated (token present and accepted). */
+  ok: boolean;
+  /** Human-readable reason when ok is false. */
+  reason?: string;
+}
+
+/**
+ * Validate that the `gh` CLI is authenticated before attempting any GitHub
+ * API calls.
+ *
+ * Checks in priority order:
+ *  1. `GH_TOKEN` environment variable — if set and non-empty, `gh` will use it
+ *     without needing a stored credential.
+ *  2. `gh auth status` — succeeds (exit 0) when a stored credential exists.
+ *
+ * Returns `{ ok: true }` when authenticated, or `{ ok: false, reason }` with a
+ * clear message describing the problem so callers can surface it instead of
+ * silently dispatching work that will fail inside the agent.
+ *
+ * @param execFn - optional override for unit tests
+ */
+export function validateGhAuth(
+  execFn: (cmd: string, opts: { encoding: "utf-8"; timeout: number }) => string = (cmd, opts) =>
+    execSync(cmd, opts),
+): GhAuthStatus {
+  // Fast path: GH_TOKEN env var is set and non-empty — gh will honour it.
+  const token = process.env["GH_TOKEN"];
+  if (token && token.trim().length > 0) {
+    return { ok: true };
+  }
+
+  // Slow path: run `gh auth status` to check stored credential.
+  try {
+    execFn("gh auth status", { encoding: "utf-8", timeout: 10000 });
+    return { ok: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const hint =
+      "Set the GH_TOKEN environment variable or run `gh auth login` to authenticate.";
+    return {
+      ok: false,
+      reason: `gh CLI is not authenticated: ${msg}. ${hint}`,
+    };
+  }
+}
+
 export interface LinkedPR {
   number: number;
   title: string;

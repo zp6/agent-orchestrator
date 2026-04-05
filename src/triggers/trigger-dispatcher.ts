@@ -1,4 +1,4 @@
-import { fetchOpenIssues, findExistingPRsForIssue, isIssueOpen, type GitHubIssue } from "./github.js";
+import { fetchOpenIssues, findExistingPRsForIssue, isIssueOpen, validateGhAuth, type GitHubIssue } from "./github.js";
 import { reportResult } from "./reporters.js";
 import { checkDuplicate } from "./duplicate-guard.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
@@ -63,6 +63,17 @@ export async function dispatchGitHubIssues(
   registeredAgents?: Set<string>,
 ): Promise<TriggerResult> {
   const result: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
+
+  // Pre-flight: verify gh is authenticated before attempting any API calls.
+  // Surfaces a clear error rather than silently dispatching work that will fail
+  // mid-task when the agent tries to create a PR (tasks 01KNEEEN, 01KNDFMP, 01KNDCBP).
+  const authStatus = validateGhAuth();
+  if (!authStatus.ok) {
+    const reason = authStatus.reason ?? "gh CLI is not authenticated";
+    log.error("GitHub dispatch aborted: gh auth pre-flight failed", { reason });
+    result.errors.push(`gh auth pre-flight failed: ${reason}`);
+    return result;
+  }
 
   for (const [agentName, agent] of Object.entries(config.agents)) {
     if (!agent.github) continue;
@@ -192,6 +203,15 @@ export async function dispatchIdleAgentBacklog(
   forceReclaimAgents?: Set<string>,
 ): Promise<TriggerResult> {
   const result: TriggerResult = { dispatched: 0, skipped: 0, errors: [], dispatchedAgents: [] };
+
+  // Pre-flight: verify gh is authenticated before attempting any API calls.
+  const authStatus = validateGhAuth();
+  if (!authStatus.ok) {
+    const reason = authStatus.reason ?? "gh CLI is not authenticated";
+    log.error("Idle agent backlog dispatch aborted: gh auth pre-flight failed", { reason });
+    result.errors.push(`gh auth pre-flight failed: ${reason}`);
+    return result;
+  }
 
   for (const [agentName, agent] of Object.entries(config.agents)) {
     if (!agent.github) continue;

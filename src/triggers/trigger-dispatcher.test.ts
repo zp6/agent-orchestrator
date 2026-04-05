@@ -8,16 +8,19 @@ vi.mock("./github.js", () => ({
   fetchOpenIssues: vi.fn(),
   findExistingPRsForIssue: vi.fn().mockReturnValue([]),
   isIssueOpen: vi.fn().mockReturnValue(true),
+  // Default: authenticated — tests that need unauthenticated state override this
+  validateGhAuth: vi.fn().mockReturnValue({ ok: true }),
 }));
 
 vi.mock("./reporters.js", () => ({
   reportResult: vi.fn(),
 }));
 
-import { fetchOpenIssues, findExistingPRsForIssue, isIssueOpen } from "./github.js";
+import { fetchOpenIssues, findExistingPRsForIssue, isIssueOpen, validateGhAuth } from "./github.js";
 const mockFetchIssues = vi.mocked(fetchOpenIssues);
 const mockFindExistingPRs = vi.mocked(findExistingPRsForIssue);
 const mockIsIssueOpen = vi.mocked(isIssueOpen);
+const mockValidateGhAuth = vi.mocked(validateGhAuth);
 
 const config: OrchestratorConfig = {
   proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 5000 },
@@ -129,6 +132,37 @@ describe("dispatchGitHubIssues", () => {
     const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher, 1);
     expect(result.dispatched).toBe(1);
     expect(result.skipped).toBe(0); // second issue not reached due to limit
+  });
+
+  it("aborts with an error when gh auth pre-flight fails", async () => {
+    mockValidateGhAuth.mockReturnValue({
+      ok: false,
+      reason: "gh CLI is not authenticated: You are not logged into any GitHub hosts. Set the GH_TOKEN environment variable or run `gh auth login` to authenticate.",
+    });
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("gh auth pre-flight failed");
+    // Verify no issues were fetched or dispatched
+    expect(mockFetchIssues).not.toHaveBeenCalled();
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("proceeds normally when gh auth pre-flight succeeds", async () => {
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+    expect(result.errors).toHaveLength(0);
   });
 });
 
@@ -839,5 +873,23 @@ describe("dispatchIdleAgentBacklog", () => {
     expect(result.dispatched).toBe(0);
     expect(result.skipped).toBe(0);
     expect(result.errors).toHaveLength(0);
+  });
+
+  it("aborts with an error when gh auth pre-flight fails", async () => {
+    mockValidateGhAuth.mockReturnValue({
+      ok: false,
+      reason: "gh CLI is not authenticated: You are not logged into any GitHub hosts. Set the GH_TOKEN environment variable or run `gh auth login` to authenticate.",
+    });
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("gh auth pre-flight failed");
+    expect(mockFetchIssues).not.toHaveBeenCalled();
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
   });
 });
