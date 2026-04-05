@@ -1,0 +1,47 @@
+/**
+ * claude-orchestrator-reviewer
+ *
+ * Quality and oversight layer for the Claude Agent Orchestrator.
+ * Provides PR review, task verification, supervision, and improvement detection.
+ *
+ * Usage (from the orchestrator daemon):
+ *
+ *   import { PRReviewer, Verifier, Supervisor, ImprovementDetector, IssueCreator, createNotifier } from 'claude-orchestrator-reviewer';
+ *
+ *   const reviewer = new PRReviewer(config, store, { onAgentRestart: async (repo) => deployer.restartAgentsForRepo(repo) });
+ *   const verifier = new Verifier(store);
+ *   const supervisor = new Supervisor(config, store);
+ *   const detector = new ImprovementDetector(config);
+ *   const issueCreator = new IssueCreator(config);
+ *   const notify = createNotifier();
+ */
+
+// Core reviewer modules
+export { PRReviewer, enforceChecklist } from "./reviewer/pr-reviewer.js";
+export type { PRInfo, PRReviewResult } from "./reviewer/pr-reviewer.js";
+
+export { Verifier } from "./reviewer/verifier.js";
+export type { VerificationResult } from "./reviewer/verifier.js";
+
+export { Supervisor, extractIssueRefs, isDecisionAlreadyResolved, isConcreteDispatch } from "./reviewer/supervisor.js";
+export type { SupervisorDecision } from "./reviewer/supervisor.js";
+
+export { ImprovementDetector } from "./reviewer/improvement-detector.js";
+export type { DetectedImprovement } from "./reviewer/improvement-detector.js";
+
+export { IssueCreator } from "./reviewer/issue-creator.js";
+export type { CreatedIssue } from "./reviewer/issue-creator.js";
+
+// Telegram notifications
+export { createNotifier } from "./notify.js";
+export type { Notifier } from "./notify.js";
+
+// Config types
+export type { ReviewerConfig, AgentConfig } from "./config.js";
+
+// State types and SQLite store
+export { StateStore } from "./state/store.js";
+export type { IStateStore, Task, MergeQueueEntry, AgentStats, SupervisorDecisionRecord } from "./state/types.js";
+
+// LLM client
+export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
