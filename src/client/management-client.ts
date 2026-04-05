@@ -4,6 +4,8 @@ export interface ProxyAgentConfig {
   name: string;
   project: string;
   repo?: string;
+  /** Git branch to clone / pull when `repo` is set. Defaults to main. */
+  branch?: string;
   port: number;
   apiKey?: string;
   permissions?: string;

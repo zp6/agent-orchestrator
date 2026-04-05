@@ -110,3 +110,148 @@ describe("planSync", () => {
     expect(types).toContain("old-agent:remove");
   });
 });
+
+// ---------------------------------------------------------------------------
+// toProxyConfig — repo / branch forwarding (issue: repo field was dropped)
+// ---------------------------------------------------------------------------
+import { toProxyConfig } from "./sync.js";
+
+describe("toProxyConfig — repo field forwarding", () => {
+  const minimalConfig: OrchestratorConfig = {
+    proxy: { url: "http://localhost:3457", timeout_ms: 300000 },
+    orchestrator_dir: "/projects/orchestrator",
+    base_dir: "/projects",
+    agents: {},
+  };
+
+  it("includes repo when set on the agent", () => {
+    const agent = {
+      dir: "my-agent",
+      repo: "git@github.com:org/my-agent.git",
+      description: "x",
+      capabilities: [],
+      owns_topics: [],
+      docker: { port: 3460 },
+    };
+    const result = toProxyConfig(minimalConfig, "my-agent", agent);
+    expect(result.repo).toBe("git@github.com:org/my-agent.git");
+  });
+
+  it("includes branch (from deploy_branch) when set on the agent", () => {
+    const agent = {
+      dir: "my-agent",
+      repo: "git@github.com:org/my-agent.git",
+      deploy_branch: "develop",
+      description: "x",
+      capabilities: [],
+      owns_topics: [],
+      docker: { port: 3460 },
+    };
+    const result = toProxyConfig(minimalConfig, "my-agent", agent);
+    expect(result.branch).toBe("develop");
+  });
+
+  it("omits repo when not set on the agent", () => {
+    const agent = {
+      dir: "my-agent",
+      description: "x",
+      capabilities: [],
+      owns_topics: [],
+      docker: { port: 3460 },
+    };
+    const result = toProxyConfig(minimalConfig, "my-agent", agent);
+    expect(result.repo).toBeUndefined();
+  });
+
+  it("omits branch when deploy_branch is not set", () => {
+    const agent = {
+      dir: "my-agent",
+      repo: "git@github.com:org/my-agent.git",
+      description: "x",
+      capabilities: [],
+      owns_topics: [],
+      docker: { port: 3460 },
+    };
+    const result = toProxyConfig(minimalConfig, "my-agent", agent);
+    expect(result.branch).toBeUndefined();
+  });
+});
+
+describe("planSync — repo/branch drift detection", () => {
+  const repoConfig: OrchestratorConfig = {
+    proxy: { url: "http://localhost:3457", timeout_ms: 300000 },
+    orchestrator_dir: "/projects/orchestrator",
+    base_dir: "/projects",
+    agents: {
+      "repo-agent": {
+        dir: "repo-agent",
+        repo: "git@github.com:org/repo-agent.git",
+        deploy_branch: "main",
+        description: "Agent with repo",
+        capabilities: [],
+        owns_topics: [],
+        docker: { port: 3460, permissions: "auto" },
+      },
+    },
+  };
+
+  it("detects drift when proxy has no repo but config does", () => {
+    const proxyAgents: ProxyAgentStatus[] = [
+      {
+        name: "repo-agent",
+        project: "/projects/repo-agent",
+        port: 3460,
+        permissions: "auto",
+        status: "running",
+        tunnel: false,
+        session: "fresh",
+        packages: [],
+        // no repo field — simulates a proxy that didn't receive repo during create
+      },
+    ];
+    const actions = planSync(repoConfig, proxyAgents);
+    const updateActions = actions.filter((a) => a.type === "update");
+    expect(updateActions).toHaveLength(1);
+    expect(updateActions[0].agentName).toBe("repo-agent");
+  });
+
+  it("detects drift when proxy has a different repo URL", () => {
+    const proxyAgents: ProxyAgentStatus[] = [
+      {
+        name: "repo-agent",
+        project: "/projects/repo-agent",
+        port: 3460,
+        permissions: "auto",
+        status: "running",
+        tunnel: false,
+        session: "fresh",
+        packages: [],
+        repo: "git@github.com:org/old-repo.git",
+        branch: "main",
+      },
+    ];
+    const actions = planSync(repoConfig, proxyAgents);
+    const updateActions = actions.filter((a) => a.type === "update");
+    expect(updateActions).toHaveLength(1);
+  });
+
+  it("skips when repo and branch match the proxy", () => {
+    const proxyAgents: ProxyAgentStatus[] = [
+      {
+        name: "repo-agent",
+        project: "/projects/repo-agent",
+        port: 3460,
+        permissions: "auto",
+        status: "running",
+        tunnel: false,
+        session: "fresh",
+        packages: [],
+        repo: "git@github.com:org/repo-agent.git",
+        branch: "main",
+      },
+    ];
+    const actions = planSync(repoConfig, proxyAgents);
+    const skipActions = actions.filter((a) => a.type === "skip");
+    expect(skipActions).toHaveLength(1);
+  });
+});

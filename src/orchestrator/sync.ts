@@ -78,10 +78,14 @@ function hasConfigDrift(
   if (proxy.project !== desiredProject) return true;
   if (agent.docker?.port && proxy.port !== agent.docker.port) return true;
   if (agent.docker?.permissions && proxy.permissions !== agent.docker.permissions) return true;
+  // Detect repo / branch drift so the proxy regenerates with the correct
+  // volume type (named volume for repo-based agents vs host bind-mount).
+  if ((agent.repo ?? "") !== (proxy.repo ?? "")) return true;
+  if ((agent.deploy_branch ?? "") !== (proxy.branch ?? "")) return true;
   return false;
 }
 
-function toProxyConfig(
+export function toProxyConfig(
   config: OrchestratorConfig,
   name: string,
   agent: AgentConfig,
@@ -89,7 +93,8 @@ function toProxyConfig(
   return {
     name,
     project: resolve(config.base_dir, agent.dir),
-    repo: agent.repo,
+    ...(agent.repo !== undefined && { repo: agent.repo }),
+    ...(agent.deploy_branch !== undefined && { branch: agent.deploy_branch }),
     port: agent.docker?.port ?? 3460,
     permissions: agent.docker?.permissions ?? "auto",
     session: agent.docker?.session ?? "fresh",
