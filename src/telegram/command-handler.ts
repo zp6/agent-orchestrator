@@ -10,6 +10,7 @@
  *   /prioritize <item>     → bumps priority on matching task row
  *   /queue [repo]          → shows PR merge queue entries, optionally filtered by repo
  *   /logs [n]    → last N supervisor decisions (default 10), newest first
+ *   /supervisor [n]  → last N supervisor decisions with full detail (default 10)
  *   /agents      → per-agent stats: total/done/failed/avg quality score
  *
  * Usage:
@@ -42,7 +43,7 @@ interface TelegramGetUpdatesResponse {
 
 // ── Supported commands ────────────────────────────────────────────────────
 
-type CommandName = "status" | "health" | "pause" | "resume" | "dispatch" | "prioritize" | "queue" | "logs" | "agents";
+type CommandName = "status" | "health" | "pause" | "resume" | "dispatch" | "prioritize" | "queue" | "logs" | "supervisor" | "agents";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -53,6 +54,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "prioritize",
   "queue",
   "logs",
+  "supervisor",
   "agents",
 ]);
 
@@ -208,6 +210,12 @@ async function executeCommand(
       const n = parseInt(cmd.args[0] ?? "10", 10);
       const limit = Number.isNaN(n) || n < 1 ? 10 : Math.min(n, 50);
       return handleLogs(store, limit);
+    }
+
+    case "supervisor": {
+      const n = parseInt(cmd.args[0] ?? "10", 10);
+      const limit = Number.isNaN(n) || n < 1 ? 10 : Math.min(n, 50);
+      return handleSupervisorLog(store, limit);
     }
 
     case "agents":
@@ -396,6 +404,43 @@ async function handleLogs(store: ITelegramStateStore, limit: number): Promise<st
     lines.push(`  Outcome: ${d.outcome}`);
     lines.push(`  Reason: ${d.reason.slice(0, 120)}${d.reason.length > 120 ? "…" : ""}`);
     lines.push(`  _${ts}_`);
+    lines.push(``);
+  }
+
+  return lines.join("\n").trimEnd();
+}
+
+function handleSupervisorLog(store: ITelegramStateStore, limit: number): string {
+  const decisions = store.getRecentSupervisorDecisions(limit);
+
+  if (decisions.length === 0) {
+    return "🤖 *Supervisor Decision Log*\n\nNo decisions recorded yet.";
+  }
+
+  const ACTION_ICON: Record<string, string> = {
+    dispatch: "🚀",
+    verify: "🔍",
+    redeploy: "🔄",
+    "create-issue": "📝",
+    "follow-up": "↩️",
+    none: "⏸",
+  };
+
+  const lines: string[] = [`🤖 *Supervisor Decision Log* (last ${decisions.length})`, ``];
+
+  for (const d of decisions) {
+    const ts = d.created_at
+      ? new Date(d.created_at).toISOString().replace("T", " ").slice(0, 16)
+      : "—";
+    const icon = ACTION_ICON[d.action] ?? "🤖";
+    const agent = d.agent_name ? ` → \`${d.agent_name}\`` : "";
+    const issueRef = d.issue_ref ? ` · ${d.issue_ref}` : "";
+    lines.push(`${icon} *${d.action}*${agent}${issueRef}`);
+    lines.push(`  _${ts}_ · outcome: ${d.outcome}`);
+    lines.push(`  ${d.reason.slice(0, 150)}${d.reason.length > 150 ? "…" : ""}`);
+    if (d.message) {
+      lines.push(`  💬 ${d.message.slice(0, 100)}${d.message.length > 100 ? "…" : ""}`);
+    }
     lines.push(``);
   }
 

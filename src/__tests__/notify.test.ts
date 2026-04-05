@@ -135,3 +135,48 @@ describe("notifyOperator — rate limiting", () => {
     expect(capturedBody).toContain("redis is unreachable");
   });
 });
+
+describe("supervisorDecision", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("silently skips 'none' action to avoid noise", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{}", { status: 200 }),
+    );
+
+    const notifier = createNotifier({ botToken: "tok", chatId: "42" });
+    await notifier.supervisorDecision("none", "Everything looks good");
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("sends a formatted message for dispatch action", async () => {
+    let capturedText = "";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      capturedText = JSON.parse(init?.body as string).text as string;
+      return new Response("{}", { status: 200 });
+    });
+
+    const notifier = createNotifier({ botToken: "tok", chatId: "42" });
+    await notifier.supervisorDecision("dispatch", "Agent is idle, issue #42 needs work", {
+      agentName: "claude-proxy",
+      issueRef: "#42",
+      message: "Implement issue #42 from rapartlu/claude-proxy",
+    });
+
+    expect(capturedText).toContain("🚀");
+    expect(capturedText).toContain("dispatch");
+    expect(capturedText).toContain("claude-proxy");
+    expect(capturedText).toContain("#42");
+    expect(capturedText).toContain("idle");
+  });
+
+  it("resolves without throwing when not configured", async () => {
+    const notifier = createNotifier(); // no config
+    await expect(
+      notifier.supervisorDecision("dispatch", "some reason", { agentName: "claude-proxy" }),
+    ).resolves.toBeUndefined();
+  });
+});

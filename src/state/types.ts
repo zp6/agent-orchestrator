@@ -37,10 +37,23 @@ export interface SupervisorDecisionRecord {
   action: string;
   agent_name?: string | null;
   task_id?: string | null;
+  issue_ref?: string | null;
   reason: string;
   message?: string | null;
   outcome: string;
   created_at: string;
+}
+
+/** Filter options for querying supervisor decisions. */
+export interface SupervisorDecisionQuery {
+  /** Return at most this many decisions (default 20, max 100). */
+  limit?: number;
+  /** Filter to a specific action type (e.g. "dispatch", "none"). */
+  action?: string;
+  /** Filter to decisions for a specific agent. */
+  agentName?: string;
+  /** Return only decisions created after this ISO-8601 timestamp. */
+  since?: string;
 }
 
 export interface MergeQueueEntry {
@@ -107,6 +120,8 @@ export interface IStateStore {
 
   // Supervisor memory
   getRecentSupervisorDecisions(limit: number): SupervisorDecisionRecord[];
+  querySupervisorDecisions(opts: SupervisorDecisionQuery): SupervisorDecisionRecord[];
+  pruneOldSupervisorDecisions(daysOld?: number): number;
 
   // PR merge queue
   queuePRForMerge(repo: string, prNumber: number, branch: string): MergeQueueEntry;

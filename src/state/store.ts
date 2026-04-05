@@ -14,6 +14,7 @@ import type {
   MergeQueueEntry,
   AgentStats,
   SupervisorDecisionRecord,
+  SupervisorDecisionQuery,
   DispatchRequest,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
@@ -96,6 +97,26 @@ export class StateStore implements ITelegramStateStore {
     } catch {
       // Column already exists — ignore
     }
+
+    // Add message column to supervisor_decisions (idempotent)
+    try {
+      this.db.exec("ALTER TABLE supervisor_decisions ADD COLUMN message TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+
+    // Add issue_ref column to supervisor_decisions (idempotent)
+    try {
+      this.db.exec("ALTER TABLE supervisor_decisions ADD COLUMN issue_ref TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+
+    // Create index for efficient time-ordered lookups (idempotent)
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_supervisor_decisions_created_at
+        ON supervisor_decisions (created_at DESC);
+    `);
   }
 
   // ── Task operations ──────────────────────────────────────────────────────
@@ -172,16 +193,59 @@ export class StateStore implements ITelegramStateStore {
       .all(limit) as SupervisorDecisionRecord[];
   }
 
+  querySupervisorDecisions(opts: SupervisorDecisionQuery): SupervisorDecisionRecord[] {
+    const conditions: string[] = [];
+    const params: Record<string, unknown> = {};
+
+    if (opts.action) {
+      conditions.push("action = @action");
+      params.action = opts.action;
+    }
+    if (opts.agentName) {
+      conditions.push("agent_name = @agentName");
+      params.agentName = opts.agentName;
+    }
+    if (opts.since) {
+      conditions.push("created_at > @since");
+      params.since = opts.since;
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limit = Math.min(opts.limit ?? 20, 100);
+
+    return this.db
+      .prepare(`SELECT * FROM supervisor_decisions ${where} ORDER BY created_at DESC LIMIT ${limit}`)
+      .all(params) as SupervisorDecisionRecord[];
+  }
+
+  pruneOldSupervisorDecisions(daysOld: number = 7): number {
+    const result = this.db
+      .prepare("DELETE FROM supervisor_decisions WHERE created_at < datetime('now', ?)")
+      .run(`-${daysOld} days`);
+    return result.changes;
+  }
+
   recordSupervisorDecision(
     action: string,
     reason: string,
-    opts: { agentName?: string; taskId?: string; outcome?: string } = {},
+    opts: { agentName?: string; taskId?: string; outcome?: string; message?: string; issueRef?: string } = {},
   ): void {
     this.db
       .prepare(
-        "INSERT INTO supervisor_decisions (id, action, agent_name, task_id, reason, outcome) VALUES (?, ?, ?, ?, ?, ?)",
+        `INSERT INTO supervisor_decisions
+           (id, action, agent_name, task_id, reason, outcome, message, issue_ref)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(ulid(), action, opts.agentName ?? null, opts.taskId ?? null, reason, opts.outcome ?? "pending");
+      .run(
+        ulid(),
+        action,
+        opts.agentName ?? null,
+        opts.taskId ?? null,
+        reason,
+        opts.outcome ?? "pending",
+        opts.message ?? null,
+        opts.issueRef ?? null,
+      );
   }
 
   // ── PR merge queue ────────────────────────────────────────────────────────

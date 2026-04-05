@@ -50,9 +50,13 @@ export type {
   MergeQueueEntry,
   AgentStats,
   SupervisorDecisionRecord,
+  SupervisorDecisionQuery,
   SystemFlag,
   DispatchRequest,
 } from "./state/types.js";
+
+// Supervisor decision log — queryable log for orch CLI and dashboard consumers
+export { querySupervisorLog, formatSupervisorLogForCLI } from "./supervisor-log.js";
 
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";

@@ -36,6 +36,15 @@ export interface Notifier {
    * Returns true if the message was sent, false if suppressed by the rate limit.
    */
   notifyOperator(title: string, body: string, urgency: NotifyUrgency): Promise<boolean>;
+  /**
+   * Post a supervisor decision to Telegram.
+   * Only posts for concrete actions (not "none") to avoid noise.
+   */
+  supervisorDecision(
+    action: string,
+    reason: string,
+    opts?: { agentName?: string; message?: string; issueRef?: string; outcome?: string },
+  ): Promise<void>;
   /** Returns true if the notifier is configured (has bot token + chat ID). */
   isConfigured(): boolean;
 }
@@ -155,6 +164,36 @@ export function createNotifier(
         `*Notes:* ${notes.slice(0, 200)}`,
       ].join("\n");
       await this.send(text);
+    },
+
+    async supervisorDecision(
+      action: string,
+      reason: string,
+      opts: { agentName?: string; message?: string; issueRef?: string; outcome?: string } = {},
+    ): Promise<void> {
+      // Skip "none" decisions — they would be pure noise
+      if (action === "none") return;
+
+      const ACTION_ICON: Record<string, string> = {
+        dispatch: "🚀",
+        verify: "🔍",
+        redeploy: "🔄",
+        "create-issue": "📝",
+        "follow-up": "↩️",
+      };
+      const icon = ACTION_ICON[action] ?? "🤖";
+
+      const lines: string[] = [
+        `${icon} *Supervisor: ${action}*`,
+        ``,
+      ];
+      if (opts.agentName) lines.push(`*Agent:* \`${opts.agentName}\``);
+      if (opts.issueRef) lines.push(`*Issue:* ${opts.issueRef}`);
+      lines.push(`*Reason:* ${reason.slice(0, 200)}${reason.length > 200 ? "…" : ""}`);
+      if (opts.message) lines.push(`*Message:* ${opts.message.slice(0, 200)}${opts.message.length > 200 ? "…" : ""}`);
+      if (opts.outcome && opts.outcome !== "pending") lines.push(`*Outcome:* ${opts.outcome}`);
+
+      await this.send(lines.join("\n"));
     },
 
     async notifyOperator(
