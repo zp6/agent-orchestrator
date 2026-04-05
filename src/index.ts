@@ -22,7 +22,7 @@ export type { PRInfo, PRReviewResult } from "./reviewer/pr-reviewer.js";
 export { Verifier } from "./reviewer/verifier.js";
 export type { VerificationResult } from "./reviewer/verifier.js";
 
-export { Supervisor, extractIssueRefs, isDecisionAlreadyResolved, isConcreteDispatch } from "./reviewer/supervisor.js";
+export { Supervisor, extractIssueRefs, isDecisionAlreadyResolved, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo } from "./reviewer/supervisor.js";
 export type { SupervisorDecision } from "./reviewer/supervisor.js";
 
 export { ImprovementDetector } from "./reviewer/improvement-detector.js";
@@ -49,6 +49,7 @@ export type {
   Task,
   MergeQueueEntry,
   AgentStats,
+  AgentHealth,
   SupervisorDecisionRecord,
   SupervisorDecisionQuery,
   SystemFlag,

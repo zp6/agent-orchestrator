@@ -14,7 +14,7 @@ import { execSync } from "node:child_process";
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
-import type { IStateStore, Task, SupervisorDecisionRecord } from "../state/types.js";
+import type { IStateStore, Task, AgentHealth, SupervisorDecisionRecord } from "../state/types.js";
 
 export interface SupervisorDecision {
   action: "dispatch" | "verify" | "redeploy" | "create-issue" | "follow-up" | "none";
@@ -49,6 +49,13 @@ IMPORTANT PRIORITIES:
 - Do NOT re-dispatch the same failed technical task more than once — if it failed twice, create an issue instead
 - Do NOT follow up on tasks that are just internal tooling or testing infrastructure
 - If an agent is idle, dispatch product-focused work from their open issues, not more tech debt fixes
+
+CRITICAL — AGENT HEALTH AWARENESS:
+- The "## Agent Health" section shows per-agent health status from recent dispatch history
+- Agents with consecutive failures are UNHEALTHY — avoid dispatching to them unless no healthy alternative exists
+- When multiple agents can handle a task, ALWAYS prefer healthy agents over unhealthy ones
+- If an agent has 3+ consecutive failures, consider a "redeploy" action instead of dispatching more work
+- "No dispatch history" means the agent has never been tracked — treat as healthy (new or recently deployed)
 
 CRITICAL — IDLE AGENT DISPATCH RULES (strictly enforced):
 - NEVER dispatch a vague "you are idle" or "check for work" message to an agent — these produce useless status reports that are immediately rejected
@@ -168,6 +175,66 @@ export function isConcreteDispatch(message: string): boolean {
   const lower = message.toLowerCase();
   if (ISSUE_REF_RE.test(message)) return true;
   return ARTIFACT_KEYWORDS.some((kw) => lower.includes(kw));
+}
+
+/**
+ * Format agent health records into human-readable lines for supervisor context.
+ *
+ * Agents with consecutive_failures > 0 are flagged; healthy agents show last
+ * success time; agents with no dispatch history are noted as such.
+ *
+ * Exported for unit testing.
+ */
+export function formatAgentHealthSection(
+  agentNames: string[],
+  healthRecords: AgentHealth[],
+): string[] {
+  const healthMap = new Map(healthRecords.map((h) => [h.agent_name, h]));
+  const lines: string[] = [];
+
+  for (const name of agentNames) {
+    const health = healthMap.get(name);
+    if (!health) {
+      lines.push(`- ${name}: healthy (no dispatch history)`);
+      continue;
+    }
+
+    if (health.consecutive_failures > 0) {
+      const ago = health.last_error_at ? formatTimeAgo(health.last_error_at) : "unknown";
+      const errSnippet = health.last_error_message
+        ? ` — ${health.last_error_message.slice(0, 80)}`
+        : "";
+      lines.push(
+        `- ${name}: ${health.consecutive_failures} consecutive failure(s) (last error: ${ago}${errSnippet})`,
+      );
+    } else {
+      const ago = health.last_success_at ? formatTimeAgo(health.last_success_at) : "unknown";
+      lines.push(`- ${name}: healthy (last success: ${ago})`);
+    }
+  }
+
+  return lines;
+}
+
+/**
+ * Format an ISO timestamp as a human-readable relative time (e.g. "2m ago", "1h ago").
+ * Exported for unit testing.
+ */
+export function formatTimeAgo(isoTimestamp: string): string {
+  const then = new Date(isoTimestamp).getTime();
+  const now = Date.now();
+  const diffMs = now - then;
+
+  if (Number.isNaN(diffMs) || diffMs < 0) return "just now";
+
+  const seconds = Math.floor(diffMs / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 
 export class Supervisor {
@@ -317,6 +384,14 @@ export class Supervisor {
       loadLines.push(`- ${name}: ${active.length} active task(s)`);
     }
     sections.push(`## Agent Load\n${loadLines.join("\n")}`);
+
+    // Agent health (from orchestrator's agent_health table)
+    const agentNames = Object.keys(this.config.agents);
+    const healthRecords = this.store.getAgentHealthBatch(agentNames);
+    const healthLines = formatAgentHealthSection(agentNames, healthRecords);
+    if (healthLines.length > 0) {
+      sections.push(`## Agent Health\n${healthLines.join("\n")}`);
+    }
 
     // Agent stats
     const stats = this.store.getAgentStats();

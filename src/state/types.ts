@@ -79,6 +79,20 @@ export interface AgentStats {
   avg_score?: number | null;
 }
 
+/**
+ * Per-agent health record from the `agent_health` table.
+ * Written by the orchestrator's dispatcher on dispatch success/failure;
+ * read here by the supervisor for context-building.
+ */
+export interface AgentHealth {
+  agent_name: string;
+  consecutive_failures: number;
+  last_error_at: string | null;
+  last_error_message: string | null;
+  last_success_at: string | null;
+  updated_at: string;
+}
+
 /** A key-value system flag persisted to state.db (e.g. paused=true). */
 export interface SystemFlag {
   key: string;
@@ -117,6 +131,9 @@ export interface IStateStore {
   getRecentCompleted(limit: number): Task[];
   getUnverified(limit: number): Task[];
   getAgentStats(): AgentStats[];
+
+  // Agent health (reads from orchestrator's agent_health table)
+  getAgentHealthBatch(agentNames: string[]): AgentHealth[];
 
   // Supervisor memory
   getRecentSupervisorDecisions(limit: number): SupervisorDecisionRecord[];

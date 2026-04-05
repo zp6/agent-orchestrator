@@ -13,6 +13,7 @@ import type {
   TaskStatus,
   MergeQueueEntry,
   AgentStats,
+  AgentHealth,
   SupervisorDecisionRecord,
   SupervisorDecisionQuery,
   DispatchRequest,
@@ -183,6 +184,25 @@ export class StateStore implements ITelegramStateStore {
         GROUP BY agent_name
       `)
       .all() as AgentStats[];
+  }
+
+  // ── Agent health (reads from orchestrator's agent_health table) ───────────
+
+  getAgentHealthBatch(agentNames: string[]): AgentHealth[] {
+    if (agentNames.length === 0) return [];
+    try {
+      const placeholders = agentNames.map(() => "?").join(", ");
+      return this.db
+        .prepare(
+          `SELECT agent_name, consecutive_failures, last_error_at, last_error_message, last_success_at, updated_at
+           FROM agent_health
+           WHERE agent_name IN (${placeholders})`,
+        )
+        .all(...agentNames) as AgentHealth[];
+    } catch {
+      // Table may not exist if orchestrator hasn't created it yet — graceful fallback
+      return [];
+    }
   }
 
   // ── Supervisor memory ─────────────────────────────────────────────────────
