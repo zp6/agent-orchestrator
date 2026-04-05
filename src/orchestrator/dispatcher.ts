@@ -30,6 +30,70 @@ export const TIMEOUT_RETRY_MAX = 2;
 export const TIMEOUT_RETRY_BACKOFF_MS = 2 * 60 * 1000; // 2 minutes
 
 /**
+ * Maximum number of automatic retry attempts for connection errors
+ * (ECONNREFUSED, ETIMEDOUT, HTTP 5xx, etc.) before the task is permanently
+ * failed with reason "connection-error-exhausted".
+ *
+ * Configurable via `retry.max_connection_retries` in agents.yaml.
+ */
+export const MAX_CONNECTION_RETRIES = 3;
+
+/**
+ * Default backoff delays for connection-error retries (30s → 60s → 120s).
+ * Unlike generic retry delays, these are short because connection errors are
+ * caused by transient container restarts or network blips — the container
+ * typically recovers within seconds.
+ *
+ * Configurable via `retry.connection_error_delays_ms` in agents.yaml.
+ */
+export const CONNECTION_ERROR_RETRY_DELAYS_MS = [30_000, 60_000, 120_000] as const;
+
+/**
+ * Detect whether an error is a transient connection failure that warrants an
+ * automatic retry.  Connection errors are categorically different from logic
+ * errors (bad agent output, invalid instructions) because they are caused by
+ * infrastructure problems — container restarts, network blips, proxy 5xx —
+ * not by the task content.
+ *
+ * Recognised patterns:
+ * - Node.js network error codes: ECONNREFUSED, ETIMEDOUT, ECONNRESET, ENOTFOUND
+ * - HTTP 5xx status codes (Anthropic SDK wraps these as errors with `.status`)
+ * - Generic "connection error" / "connection refused" phrases in the message
+ *
+ * Logic errors (bad output, wrong tool call, etc.) and timeout errors
+ * (exit code 143 / SIGTERM handled by the daemon watchdog) are NOT
+ * connection errors and must return false.
+ */
+export function isConnectionError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+
+  // Node.js network error codes
+  if (
+    msg.includes("econnrefused") ||
+    msg.includes("etimedout") ||
+    msg.includes("econnreset") ||
+    msg.includes("enotfound") ||
+    msg.includes("connection error") ||
+    msg.includes("connection refused") ||
+    msg.includes("network error") ||
+    msg.includes("socket hang up") ||
+    msg.includes("connect ehostunreach")
+  ) {
+    return true;
+  }
+
+  // HTTP 5xx status codes from the Anthropic SDK / proxy
+  if (err instanceof Error && "status" in err) {
+    const status = (err as Error & { status?: unknown }).status;
+    if (typeof status === "number" && status >= 500 && status < 600) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Extract the owner/repo portion from a source_ref string like "owner/repo#42".
  * Returns undefined when the ref has no "#" separator or does not look like a
  * GitHub repo ref (e.g. "linear-check:agentName:2026-01-01T00").
@@ -220,28 +284,68 @@ export class Dispatcher {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       const newRetryCount = (task.retry_count ?? 0) + 1;
-      // Use strict less-than so that once retry_count == MAX_RETRIES the task is
-      // permanently failed (next_retry_at = null).  getRetryableTasks() uses the
-      // same boundary (retry_count < maxRetries) so both sides stay consistent.
-      const willRetry = newRetryCount < MAX_RETRIES;
-      const nextRetryAt = willRetry
-        ? new Date(Date.now() + (RETRY_DELAYS_MS[newRetryCount - 1] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1])).toISOString()
-        : null;
 
-      this.log.error("Task failed", { taskId: task.id, agentName, error: errorMsg, willRetry, retryCount: newRetryCount });
-      this.store.addLog({
-        task_id: task.id,
-        direction: "system",
-        content: willRetry
-          ? `Error: ${errorMsg} — retry ${newRetryCount}/${MAX_RETRIES} scheduled at ${nextRetryAt}`
-          : `Error: ${errorMsg} — max retries (${MAX_RETRIES}) exceeded, task permanently failed`,
-      });
-      this.store.updateTask(task.id, {
-        status: "failed",
-        result: errorMsg,
-        retry_count: newRetryCount,
-        next_retry_at: nextRetryAt,
-      });
+      if (isConnectionError(err)) {
+        // Connection errors are transient — retry with exponential backoff.
+        const maxConnRetries =
+          this.config.retry?.max_connection_retries ?? MAX_CONNECTION_RETRIES;
+        const connDelays =
+          this.config.retry?.connection_error_delays_ms ?? CONNECTION_ERROR_RETRY_DELAYS_MS;
+
+        // Use strict less-than so that once retry_count == maxConnRetries the task
+        // is permanently failed (next_retry_at = null).
+        const willRetry = newRetryCount < maxConnRetries;
+        const nextRetryAt = willRetry
+          ? new Date(
+              Date.now() +
+                (connDelays[newRetryCount - 1] ?? connDelays[connDelays.length - 1]),
+            ).toISOString()
+          : null;
+        const exhaustedResult = `connection-error-exhausted: ${errorMsg}`;
+
+        this.log.error("Task failed (connection error)", {
+          taskId: task.id,
+          agentName,
+          error: errorMsg,
+          willRetry,
+          retryCount: newRetryCount,
+          maxConnRetries,
+        });
+        this.store.addLog({
+          task_id: task.id,
+          direction: "system",
+          content: willRetry
+            ? `Connection error: ${errorMsg} — retry ${newRetryCount}/${maxConnRetries} scheduled at ${nextRetryAt}`
+            : `Connection error: ${errorMsg} — max connection retries (${maxConnRetries}) exhausted, task permanently failed`,
+        });
+        this.store.updateTask(task.id, {
+          status: "failed",
+          result: willRetry ? errorMsg : exhaustedResult,
+          retry_count: newRetryCount,
+          next_retry_at: nextRetryAt,
+        });
+      } else {
+        // Logic errors are not transient — failing immediately without retry
+        // prevents wasting agent tokens re-running a task that will fail the
+        // same way each time.
+        this.log.error("Task failed (logic error, no retry)", {
+          taskId: task.id,
+          agentName,
+          error: errorMsg,
+          retryCount: newRetryCount,
+        });
+        this.store.addLog({
+          task_id: task.id,
+          direction: "system",
+          content: `Error: ${errorMsg} — logic/auth error, task permanently failed (no retry)`,
+        });
+        this.store.updateTask(task.id, {
+          status: "failed",
+          result: errorMsg,
+          retry_count: newRetryCount,
+          next_retry_at: null,
+        });
+      }
       throw err;
     }
   }
@@ -367,55 +471,136 @@ export class Dispatcher {
       const errorMsg = err instanceof Error ? err.message : String(err);
       const newRetryCount = task.retry_count + 1;
 
-      // Determine whether to escalate, retry, or permanently fail.
-      const escalationLimit = this.config.escalation?.retry_limit ?? DEFAULT_ESCALATION_RETRY_LIMIT;
-      const shouldEscalate = escalationLimit > 0 && newRetryCount >= escalationLimit;
-      const willRetry = !shouldEscalate && newRetryCount < MAX_RETRIES;
-      const nextRetryAt = willRetry
-        ? new Date(Date.now() + (RETRY_DELAYS_MS[newRetryCount - 1] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1])).toISOString()
-        : null;
+      if (isConnectionError(err)) {
+        // Connection error during retry — apply connection-specific backoff policy.
+        const maxConnRetries =
+          this.config.retry?.max_connection_retries ?? MAX_CONNECTION_RETRIES;
+        const connDelays =
+          this.config.retry?.connection_error_delays_ms ?? CONNECTION_ERROR_RETRY_DELAYS_MS;
 
-      this.log.error("Retry failed", {
-        taskId: task.id,
-        agentName,
-        error: errorMsg,
-        willRetry,
-        shouldEscalate,
-        retryCount: newRetryCount,
-        escalationLimit,
-      });
+        // Connection-error exhaustion takes priority over generic escalation:
+        // these are infrastructure failures, not logic problems, so we mark
+        // them as permanently failed rather than escalating to a human.
+        // Escalation only fires when NOT yet exhausted.
+        const connExhausted = newRetryCount >= maxConnRetries;
+        const escalationLimit =
+          this.config.escalation?.retry_limit ?? DEFAULT_ESCALATION_RETRY_LIMIT;
+        const shouldEscalate = !connExhausted && escalationLimit > 0 && newRetryCount >= escalationLimit;
+        const willRetry = !shouldEscalate && !connExhausted;
+        const nextRetryAt = willRetry
+          ? new Date(
+              Date.now() +
+                (connDelays[newRetryCount - 1] ?? connDelays[connDelays.length - 1]),
+            ).toISOString()
+          : null;
 
-      if (shouldEscalate) {
-        const escalationMsg =
-          `Escalated after ${newRetryCount} retry attempt(s): ${errorMsg}. ` +
-          `Manual intervention required — orchestrator will no longer retry this task automatically.`;
-        this.store.addLog({
-          task_id: task.id,
-          direction: "system",
-          content: `Retry error: ${errorMsg} — escalation threshold (${escalationLimit}) reached after ${newRetryCount} attempt(s). Task escalated.`,
+        this.log.error("Retry failed (connection error)", {
+          taskId: task.id,
+          agentName,
+          error: errorMsg,
+          willRetry,
+          shouldEscalate,
+          connExhausted,
+          retryCount: newRetryCount,
+          maxConnRetries,
+          escalationLimit,
         });
-        this.store.updateTask(task.id, {
-          status: "escalated",
-          result: escalationMsg,
-          retry_count: newRetryCount,
-          next_retry_at: null,
-        });
-        // Report escalation back to the source (e.g. GitHub issue comment).
-        reportEscalation(this.config, this.store.getTask(task.id) ?? { ...task, result: escalationMsg, retry_count: newRetryCount }, escalationLimit);
+
+        if (shouldEscalate) {
+          const escalationMsg =
+            `Escalated after ${newRetryCount} connection-error retry attempt(s): ${errorMsg}. ` +
+            `Manual intervention required — orchestrator will no longer retry this task automatically.`;
+          this.store.addLog({
+            task_id: task.id,
+            direction: "system",
+            content: `Connection error: ${errorMsg} — escalation threshold (${escalationLimit}) reached after ${newRetryCount} attempt(s). Task escalated.`,
+          });
+          this.store.updateTask(task.id, {
+            status: "escalated",
+            result: escalationMsg,
+            retry_count: newRetryCount,
+            next_retry_at: null,
+          });
+          reportEscalation(
+            this.config,
+            this.store.getTask(task.id) ?? { ...task, result: escalationMsg, retry_count: newRetryCount },
+            escalationLimit,
+          );
+        } else if (connExhausted) {
+          const exhaustedResult = `connection-error-exhausted: ${errorMsg}`;
+          this.store.addLog({
+            task_id: task.id,
+            direction: "system",
+            content: `Connection error: ${errorMsg} — max connection retries (${maxConnRetries}) exhausted, task permanently failed`,
+          });
+          this.store.updateTask(task.id, {
+            status: "failed",
+            result: exhaustedResult,
+            retry_count: newRetryCount,
+            next_retry_at: null,
+          });
+        } else {
+          this.store.addLog({
+            task_id: task.id,
+            direction: "system",
+            content: `Connection error: ${errorMsg} — retry ${newRetryCount}/${maxConnRetries} scheduled at ${nextRetryAt}`,
+          });
+          this.store.updateTask(task.id, {
+            status: "failed",
+            result: errorMsg,
+            retry_count: newRetryCount,
+            next_retry_at: nextRetryAt,
+          });
+        }
       } else {
-        this.store.addLog({
-          task_id: task.id,
-          direction: "system",
-          content: willRetry
-            ? `Retry error: ${errorMsg} — retry ${newRetryCount}/${MAX_RETRIES} scheduled at ${nextRetryAt}`
-            : `Retry error: ${errorMsg} — max retries (${MAX_RETRIES}) exceeded, task permanently failed`,
+        // Logic error during retry — determine whether to escalate or permanently fail.
+        // Logic errors are not retried again (no next_retry_at).
+        const escalationLimit =
+          this.config.escalation?.retry_limit ?? DEFAULT_ESCALATION_RETRY_LIMIT;
+        const shouldEscalate = escalationLimit > 0 && newRetryCount >= escalationLimit;
+
+        this.log.error("Retry failed (logic error, no further retry)", {
+          taskId: task.id,
+          agentName,
+          error: errorMsg,
+          shouldEscalate,
+          retryCount: newRetryCount,
+          escalationLimit,
         });
-        this.store.updateTask(task.id, {
-          status: "failed",
-          result: errorMsg,
-          retry_count: newRetryCount,
-          next_retry_at: nextRetryAt,
-        });
+
+        if (shouldEscalate) {
+          const escalationMsg =
+            `Escalated after ${newRetryCount} retry attempt(s): ${errorMsg}. ` +
+            `Manual intervention required — orchestrator will no longer retry this task automatically.`;
+          this.store.addLog({
+            task_id: task.id,
+            direction: "system",
+            content: `Retry error: ${errorMsg} — escalation threshold (${escalationLimit}) reached after ${newRetryCount} attempt(s). Task escalated.`,
+          });
+          this.store.updateTask(task.id, {
+            status: "escalated",
+            result: escalationMsg,
+            retry_count: newRetryCount,
+            next_retry_at: null,
+          });
+          reportEscalation(
+            this.config,
+            this.store.getTask(task.id) ?? { ...task, result: escalationMsg, retry_count: newRetryCount },
+            escalationLimit,
+          );
+        } else {
+          this.store.addLog({
+            task_id: task.id,
+            direction: "system",
+            content: `Retry error (logic error, no retry): ${errorMsg} — task permanently failed`,
+          });
+          this.store.updateTask(task.id, {
+            status: "failed",
+            result: errorMsg,
+            retry_count: newRetryCount,
+            next_retry_at: null,
+          });
+        }
       }
     }
   }

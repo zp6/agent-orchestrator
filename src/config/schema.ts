@@ -98,6 +98,23 @@ export interface PRReviewConfig {
   conflict_close_threshold?: number;
 }
 
+export interface RetryConfig {
+  /**
+   * Backoff delays in milliseconds for each connection-error retry attempt.
+   * Index 0 is the delay before the 1st retry, index 1 before the 2nd, etc.
+   * Defaults to [30000, 60000, 120000] (30s → 60s → 120s).
+   */
+  connection_error_delays_ms?: number[];
+
+  /**
+   * Maximum number of automatic retry attempts for connection errors
+   * (ECONNREFUSED, ETIMEDOUT, HTTP 5xx, etc.) before the task is permanently
+   * failed with reason "connection-error-exhausted".
+   * Defaults to 3.
+   */
+  max_connection_retries?: number;
+}
+
 export interface EscalationConfig {
   /**
    * Maximum number of cumulative retry attempts for a given source_ref before
@@ -146,6 +163,7 @@ export interface OrchestratorConfig {
   verification?: VerificationConfig;
   pr_review?: PRReviewConfig;
   escalation?: EscalationConfig;
+  retry?: RetryConfig;
   dashboard?: DashboardConfig;
   agents: Record<string, AgentConfig>;
 }

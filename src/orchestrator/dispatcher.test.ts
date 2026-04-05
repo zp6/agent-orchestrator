@@ -5,6 +5,9 @@ import {
   RETRY_DELAYS_MS,
   TIMEOUT_RETRY_MAX,
   TIMEOUT_RETRY_BACKOFF_MS,
+  MAX_CONNECTION_RETRIES,
+  CONNECTION_ERROR_RETRY_DELAYS_MS,
+  isConnectionError,
   extractRepoFromSourceRef,
   buildTargetRepoHeader,
 } from "./dispatcher.js";
@@ -120,6 +123,96 @@ describe("Dispatcher — retry constants", () => {
   it("TIMEOUT_RETRY_BACKOFF_MS is 2 minutes", () => {
     expect(TIMEOUT_RETRY_BACKOFF_MS).toBe(2 * 60 * 1000);
   });
+
+  it("MAX_CONNECTION_RETRIES is 3", () => {
+    expect(MAX_CONNECTION_RETRIES).toBe(3);
+  });
+
+  it("CONNECTION_ERROR_RETRY_DELAYS_MS has 3 entries: 30s → 60s → 120s", () => {
+    expect(CONNECTION_ERROR_RETRY_DELAYS_MS).toHaveLength(3);
+    const [a, b, c] = CONNECTION_ERROR_RETRY_DELAYS_MS;
+    expect(a).toBe(30_000);
+    expect(b).toBe(60_000);
+    expect(c).toBe(120_000);
+    expect(a).toBeLessThan(b);
+    expect(b).toBeLessThan(c);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// isConnectionError()
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("isConnectionError", () => {
+  it("returns true for ECONNREFUSED", () => {
+    expect(isConnectionError(new Error("connect ECONNREFUSED 127.0.0.1:3457"))).toBe(true);
+  });
+
+  it("returns true for ETIMEDOUT", () => {
+    expect(isConnectionError(new Error("connect ETIMEDOUT 10.0.0.1:3457"))).toBe(true);
+  });
+
+  it("returns true for ECONNRESET", () => {
+    expect(isConnectionError(new Error("read ECONNRESET"))).toBe(true);
+  });
+
+  it("returns true for ENOTFOUND", () => {
+    expect(isConnectionError(new Error("getaddrinfo ENOTFOUND localhost"))).toBe(true);
+  });
+
+  it("returns true for 'connection error' phrase", () => {
+    expect(isConnectionError(new Error("Connection error: proxy unavailable"))).toBe(true);
+  });
+
+  it("returns true for 'connection refused' phrase", () => {
+    expect(isConnectionError(new Error("Connection refused by remote host"))).toBe(true);
+  });
+
+  it("returns true for 'socket hang up'", () => {
+    expect(isConnectionError(new Error("socket hang up"))).toBe(true);
+  });
+
+  it("returns true for HTTP 503 status code on error object", () => {
+    const err = Object.assign(new Error("Service Unavailable"), { status: 503 });
+    expect(isConnectionError(err)).toBe(true);
+  });
+
+  it("returns true for HTTP 502 status code on error object", () => {
+    const err = Object.assign(new Error("Bad Gateway"), { status: 502 });
+    expect(isConnectionError(err)).toBe(true);
+  });
+
+  it("returns true for HTTP 500 status code on error object", () => {
+    const err = Object.assign(new Error("Internal Server Error"), { status: 500 });
+    expect(isConnectionError(err)).toBe(true);
+  });
+
+  it("returns false for a logic error message", () => {
+    expect(isConnectionError(new Error("agent returned invalid output"))).toBe(false);
+  });
+
+  it("returns false for a generic 'timeout' message (not network timeout)", () => {
+    expect(isConnectionError(new Error("timeout"))).toBe(false);
+  });
+
+  it("returns false for HTTP 4xx status code", () => {
+    const err = Object.assign(new Error("Not Found"), { status: 404 });
+    expect(isConnectionError(err)).toBe(false);
+  });
+
+  it("returns false for HTTP 401 status code", () => {
+    const err = Object.assign(new Error("Unauthorized"), { status: 401 });
+    expect(isConnectionError(err)).toBe(false);
+  });
+
+  it("returns false for non-Error values (string)", () => {
+    expect(isConnectionError("some string error")).toBe(false);
+  });
+
+  it("returns false for exit-code-143 timeout message", () => {
+    // exit 143 = SIGTERM from container timeout — handled by daemon watchdog, not here
+    expect(isConnectionError(new Error("Timed out: dispatched 10 minutes ago with no response (exit 143)"))).toBe(false);
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -169,9 +262,10 @@ describe("Dispatcher.dispatch — retry scheduling on failure", () => {
     expect(task?.next_retry_at).toBeNull();
   });
 
-  it("uses RETRY_DELAYS_MS[0] for the first retry delay", async () => {
+  it("uses CONNECTION_ERROR_RETRY_DELAYS_MS[0] for the first connection-error retry delay", async () => {
     const before = Date.now();
-    mockSend.mockRejectedValueOnce(new Error("timeout"));
+    // ECONNREFUSED is a connection error — should use connection-error backoff
+    mockSend.mockRejectedValueOnce(new Error("ECONNREFUSED 127.0.0.1:3457"));
 
     await expect(
       dispatcher.dispatch("task", { agentName: "test-agent", source: "manual" }),
@@ -179,25 +273,236 @@ describe("Dispatcher.dispatch — retry scheduling on failure", () => {
 
     const tasks = store.listTasks({ status: "failed" });
     const nextRetry = new Date(tasks[0].next_retry_at!).getTime();
-    const expectedRetry = before + RETRY_DELAYS_MS[0];
+    const expectedRetry = before + CONNECTION_ERROR_RETRY_DELAYS_MS[0];
 
     // Allow 1s clock drift
     expect(nextRetry).toBeGreaterThanOrEqual(expectedRetry - 1000);
     expect(nextRetry).toBeLessThanOrEqual(expectedRetry + 1000);
   });
 
-  it("when retry_count exceeds MAX_RETRIES: sets next_retry_at to null (permanently failed)", async () => {
-    mockSend.mockRejectedValue(new Error("always fails"));
+  it("logic error on first dispatch: sets next_retry_at to null (no retry)", async () => {
+    mockSend.mockRejectedValue(new Error("agent returned invalid output"));
 
-    // Dispatch fails — retry_count becomes 1, next_retry_at is set
     await expect(
       dispatcher.dispatch("task", { agentName: "test-agent", source: "manual" }),
     ).rejects.toThrow();
 
     const tasks = store.listTasks({ status: "failed" });
-    // First failure schedules a retry
     expect(tasks[0].retry_count).toBe(1);
+    // Logic errors are NOT retried — next_retry_at stays null
+    expect(tasks[0].next_retry_at).toBeNull();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Connection-error retry state machine (issue #367)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("Dispatcher — connection-error retry state machine (dispatch)", () => {
+  let store: StateStore;
+  let dispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+    dispatcher = new Dispatcher(makeConfig(), store);
+  });
+
+  it("connection error on first dispatch schedules retry with CONNECTION_ERROR_RETRY_DELAYS_MS[0]", async () => {
+    const before = Date.now();
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3457"));
+
+    await expect(
+      dispatcher.dispatch("do something", { agentName: "test-agent", source: "manual" }),
+    ).rejects.toThrow("ECONNREFUSED");
+
+    const tasks = store.listTasks({ status: "failed" });
+    expect(tasks).toHaveLength(1);
+    const task = tasks[0];
+
+    expect(task.retry_count).toBe(1);
+    expect(task.next_retry_at).not.toBeNull();
+
+    const nextRetry = new Date(task.next_retry_at!).getTime();
+    const expectedRetry = before + CONNECTION_ERROR_RETRY_DELAYS_MS[0];
+    expect(nextRetry).toBeGreaterThanOrEqual(expectedRetry - 1000);
+    expect(nextRetry).toBeLessThanOrEqual(expectedRetry + 1000);
+  });
+
+  it("connection error on second dispatch schedules retry with CONNECTION_ERROR_RETRY_DELAYS_MS[1]", async () => {
+    // Simulate a task that already has retry_count=1 (pre-set in store)
+    const before = Date.now();
+    mockSend.mockRejectedValueOnce(new Error("connect ETIMEDOUT 127.0.0.1:3457"));
+
+    await expect(
+      dispatcher.dispatch("do something", { agentName: "test-agent", source: "manual" }),
+    ).rejects.toThrow("ETIMEDOUT");
+
+    const tasks = store.listTasks({ status: "failed" });
+    const task = tasks[0];
+
+    // Manually bump retry_count to 1, re-dispatch to simulate second failure
+    store.updateTask(task.id, { retry_count: 1, status: "dispatched", next_retry_at: null });
+    mockSend.mockRejectedValueOnce(new Error("connect ETIMEDOUT 127.0.0.1:3457"));
+
+    // Use retryTask to simulate the second attempt
+    await dispatcher.retryTask(store.getTask(task.id)!);
+
+    const updatedTask = store.getTask(task.id)!;
+    expect(updatedTask.retry_count).toBe(2);
+    expect(updatedTask.next_retry_at).not.toBeNull();
+
+    const nextRetry = new Date(updatedTask.next_retry_at!).getTime();
+    const expectedRetry = before + CONNECTION_ERROR_RETRY_DELAYS_MS[1];
+    expect(nextRetry).toBeGreaterThanOrEqual(expectedRetry - 2000);
+    expect(nextRetry).toBeLessThanOrEqual(expectedRetry + 2000);
+  });
+
+  it("after MAX_CONNECTION_RETRIES connection errors: marks task failed with connection-error-exhausted", async () => {
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3457"));
+
+    await expect(
+      dispatcher.dispatch("do something", { agentName: "test-agent", source: "manual" }),
+    ).rejects.toThrow("ECONNREFUSED");
+
+    const tasks = store.listTasks({ status: "failed" });
+    const task = tasks[0];
+
+    // Simulate retry_count already at MAX_CONNECTION_RETRIES - 1
+    store.updateTask(task.id, {
+      retry_count: MAX_CONNECTION_RETRIES - 1,
+      status: "dispatched",
+      next_retry_at: null,
+    });
+
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3457"));
+
+    await dispatcher.retryTask(store.getTask(task.id)!);
+
+    const finalTask = store.getTask(task.id)!;
+    expect(finalTask.status).toBe("failed");
+    expect(finalTask.next_retry_at).toBeNull();
+    expect(finalTask.result).toContain("connection-error-exhausted");
+    expect(finalTask.retry_count).toBe(MAX_CONNECTION_RETRIES);
+  });
+
+  it("logic error on dispatch: next_retry_at is null (not retried)", async () => {
+    mockSend.mockRejectedValueOnce(new Error("agent produced no output"));
+
+    await expect(
+      dispatcher.dispatch("do something", { agentName: "test-agent", source: "manual" }),
+    ).rejects.toThrow("agent produced no output");
+
+    const tasks = store.listTasks({ status: "failed" });
+    expect(tasks[0].next_retry_at).toBeNull();
+    expect(tasks[0].result).not.toContain("connection-error-exhausted");
+  });
+
+  it("HTTP 503 from proxy is treated as connection error and retried", async () => {
+    const proxyErr = Object.assign(new Error("Service Unavailable"), { status: 503 });
+    mockSend.mockRejectedValueOnce(proxyErr);
+
+    await expect(
+      dispatcher.dispatch("do something", { agentName: "test-agent", source: "manual" }),
+    ).rejects.toThrow("Service Unavailable");
+
+    const tasks = store.listTasks({ status: "failed" });
     expect(tasks[0].next_retry_at).not.toBeNull();
+    expect(tasks[0].retry_count).toBe(1);
+  });
+
+  it("configurable connection_error_delays_ms overrides defaults", async () => {
+    const before = Date.now();
+    const customConfig = makeConfig();
+    customConfig.retry = { connection_error_delays_ms: [5_000, 10_000, 20_000], max_connection_retries: 3 };
+    const customDispatcher = new Dispatcher(customConfig, store);
+
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3457"));
+
+    await expect(
+      customDispatcher.dispatch("do something", { agentName: "test-agent", source: "manual" }),
+    ).rejects.toThrow("ECONNREFUSED");
+
+    const tasks = store.listTasks({ status: "failed" });
+    const nextRetry = new Date(tasks[0].next_retry_at!).getTime();
+    const expectedRetry = before + 5_000;
+    expect(nextRetry).toBeGreaterThanOrEqual(expectedRetry - 1000);
+    expect(nextRetry).toBeLessThanOrEqual(expectedRetry + 1000);
+  });
+});
+
+describe("Dispatcher — connection-error retry state machine (retryTask)", () => {
+  let store: StateStore;
+  let dispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+    dispatcher = new Dispatcher(makeConfig(), store);
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+  });
+
+  it("connection error in retryTask schedules next retry", async () => {
+    // Create a failed task that's been retried once
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3457"));
+    await expect(
+      dispatcher.dispatch("do something", { agentName: "test-agent", source: "manual" }),
+    ).rejects.toThrow();
+
+    const task = store.listTasks({ status: "failed" })[0];
+    // Manually set retry_count to 1, status back to dispatched
+    store.updateTask(task.id, { retry_count: 1, status: "dispatched", next_retry_at: null });
+
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3457"));
+    await dispatcher.retryTask(store.getTask(task.id)!);
+
+    const updated = store.getTask(task.id)!;
+    expect(updated.status).toBe("failed");
+    expect(updated.retry_count).toBe(2);
+    expect(updated.next_retry_at).not.toBeNull();
+  });
+
+  it("logic error in retryTask does NOT schedule further retry", async () => {
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3457"));
+    await expect(
+      dispatcher.dispatch("do something", { agentName: "test-agent", source: "manual" }),
+    ).rejects.toThrow();
+
+    const task = store.listTasks({ status: "failed" })[0];
+    store.updateTask(task.id, { retry_count: 1, status: "dispatched", next_retry_at: null });
+
+    // Now fail with a logic error (not a connection error)
+    mockSend.mockRejectedValueOnce(new Error("invalid instructions"));
+    await dispatcher.retryTask(store.getTask(task.id)!);
+
+    const updated = store.getTask(task.id)!;
+    expect(updated.status).toBe("failed");
+    expect(updated.next_retry_at).toBeNull();
+    expect(updated.result).not.toContain("connection-error-exhausted");
+  });
+
+  it("connection-error retryTask with exhausted retries marks result as connection-error-exhausted", async () => {
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3457"));
+    await expect(
+      dispatcher.dispatch("do something", { agentName: "test-agent", source: "manual" }),
+    ).rejects.toThrow();
+
+    const task = store.listTasks({ status: "failed" })[0];
+    // Set retry_count to just below exhaustion
+    store.updateTask(task.id, {
+      retry_count: MAX_CONNECTION_RETRIES - 1,
+      status: "dispatched",
+      next_retry_at: null,
+    });
+
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3457"));
+    await dispatcher.retryTask(store.getTask(task.id)!);
+
+    const final = store.getTask(task.id)!;
+    expect(final.status).toBe("failed");
+    expect(final.next_retry_at).toBeNull();
+    expect(final.result).toContain("connection-error-exhausted");
+    expect(final.retry_count).toBe(MAX_CONNECTION_RETRIES);
   });
 });
 
@@ -453,8 +758,9 @@ describe("Dispatcher.retryTask", () => {
     expect(updated.next_retry_at).toBeNull();
   });
 
-  it("failure during retry: increments retry_count and schedules next retry if within limit", async () => {
-    mockSend.mockRejectedValueOnce(new Error("still down"));
+  it("connection error during retry: increments retry_count and schedules next retry if within limit", async () => {
+    // Use a connection error so the retry system schedules the next attempt
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3457"));
     const task = makeFailedTask(1); // retry_count = 1 → after failure becomes 2
 
     await dispatcher.retryTask(task);
@@ -465,6 +771,18 @@ describe("Dispatcher.retryTask", () => {
     expect(updated.next_retry_at).not.toBeNull();
     const nextRetry = new Date(updated.next_retry_at!).getTime();
     expect(nextRetry).toBeGreaterThan(Date.now());
+  });
+
+  it("logic error during retry: does NOT schedule next retry (permanently failed)", async () => {
+    mockSend.mockRejectedValueOnce(new Error("still down — non-transient logic error"));
+    const task = makeFailedTask(1);
+
+    await dispatcher.retryTask(task);
+
+    const updated = store.getTask(task.id)!;
+    expect(updated.status).toBe("failed");
+    expect(updated.retry_count).toBe(2);
+    expect(updated.next_retry_at).toBeNull();
   });
 
   it("final failure (retry_count reaches escalation limit): escalates instead of permanently failing", async () => {
