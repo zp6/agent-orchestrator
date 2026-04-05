@@ -7,12 +7,11 @@
  * Usage (from the orchestrator daemon):
  *
  *   import { PRReviewer, Verifier, Supervisor, ImprovementDetector, IssueCreator, createNotifier } from 'claude-orchestrator-reviewer';
+ *   // or use the one-call factory:
+ *   import { createReviewerInstances } from 'claude-orchestrator-reviewer/integration';
  *
- *   const reviewer = new PRReviewer(config, store, { onAgentRestart: async (repo) => deployer.restartAgentsForRepo(repo) });
- *   const verifier = new Verifier(store);
- *   const supervisor = new Supervisor(config, store);
- *   const detector = new ImprovementDetector(config);
- *   const issueCreator = new IssueCreator(config);
+ *   const { reviewer, verifier, supervisor, detector, issueCreator } =
+ *     createReviewerInstances(config, store, { onAgentRestart: (repo) => deployer.restartAgentsForRepo(repo) });
  *   const notify = createNotifier();
  */
 
@@ -57,3 +56,7 @@ export type {
 
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
+
+// Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
+export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
+export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";

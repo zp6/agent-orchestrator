@@ -1,0 +1,66 @@
+/**
+ * Orchestrator adapter — one-call wiring for the orchestrator daemon.
+ *
+ * Provides `createReviewerInstances()` so the daemon can bootstrap all five
+ * reviewer modules with a single call, passing its own StateStore and config.
+ *
+ * Usage:
+ *
+ *   import { createReviewerInstances } from 'claude-orchestrator-reviewer/integration';
+ *
+ *   const { reviewer, verifier, supervisor, detector, issueCreator } =
+ *     createReviewerInstances(config, store, {
+ *       onAgentRestart: (repo) => deployer.restartAgentsForRepo(repo),
+ *     });
+ */
+
+import { PRReviewer } from "../reviewer/pr-reviewer.js";
+import { Verifier } from "../reviewer/verifier.js";
+import { Supervisor } from "../reviewer/supervisor.js";
+import { ImprovementDetector } from "../reviewer/improvement-detector.js";
+import { IssueCreator } from "../reviewer/issue-creator.js";
+import type { ReviewerConfig } from "../config.js";
+import type { IStateStore } from "../state/types.js";
+
+export interface ReviewerInstances {
+  /** Reviews open PRs, manages the merge queue, and auto-rebases stale branches. */
+  reviewer: PRReviewer;
+  /** Scores completed tasks and dispatches revisions when quality is insufficient. */
+  verifier: Verifier;
+  /** Strategic oversight — decides what needs attention across all agents. */
+  supervisor: Supervisor;
+  /** Analyses task patterns and surfaces improvement suggestions. */
+  detector: ImprovementDetector;
+  /** Creates GitHub issues on agent repos. */
+  issueCreator: IssueCreator;
+}
+
+export interface CreateReviewerOptions {
+  /**
+   * Called by PRReviewer when an agent needs a restart (e.g. after a bad
+   * merge or repeated failures).  Map this to `Deployer.restartAgentsForRepo`
+   * in the orchestrator daemon.
+   */
+  onAgentRestart?: (repo: string) => Promise<void>;
+}
+
+/**
+ * Construct all five reviewer modules in one call.
+ *
+ * @param config  - Reviewer config (a subset of OrchestratorConfig).
+ * @param store   - The orchestrator's StateStore instance (satisfies IStateStore).
+ * @param opts    - Optional callbacks (see CreateReviewerOptions).
+ */
+export function createReviewerInstances(
+  config: ReviewerConfig,
+  store: IStateStore,
+  opts: CreateReviewerOptions = {},
+): ReviewerInstances {
+  return {
+    reviewer: new PRReviewer(config, store, { onAgentRestart: opts.onAgentRestart }),
+    verifier: new Verifier(store),
+    supervisor: new Supervisor(config, store),
+    detector: new ImprovementDetector(config),
+    issueCreator: new IssueCreator(config),
+  };
+}

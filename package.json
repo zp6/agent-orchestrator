@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "prepublishOnly": "npm run build",
+    "prepare": "tsc",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -15,6 +15,10 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./integration": {
+      "import": "./dist/integration/orchestrator-adapter.js",
+      "types": "./dist/integration/orchestrator-adapter.d.ts"
     }
   },
   "files": [
