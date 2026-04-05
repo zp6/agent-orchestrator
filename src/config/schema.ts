@@ -200,6 +200,14 @@ export function getAgentDir(config: OrchestratorConfig, agentName: string): stri
   if (!agent) {
     throw new Error(`Unknown agent: ${agentName}`);
   }
+  // Agents with repo: get their code cloned inside the container at
+  // /home/claude/workspace/<repo-name>. The x-working-dir header must
+  // use this container path, not the host path.
+  // Agents without repo: use bind-mounted host directories.
+  if (agent.repo) {
+    const repoName = agent.repo.replace(/.*\//, "").replace(/\.git$/, "");
+    return `/home/claude/workspace/${repoName}`;
+  }
   return resolve(config.base_dir, agent.dir);
 }
 

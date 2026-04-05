@@ -74,11 +74,23 @@ describe("PRReviewConfig", () => {
 describe("getAgentDir", () => {
   const configPath = resolve(import.meta.dirname, "..", "..", "agents.yaml");
 
-  it("resolves agent directory path", () => {
+  it("returns container path for repo-based agents", () => {
     const config = loadConfig(configPath);
     const dir = getAgentDir(config, "claude-proxy");
-    // All agents use base_dir + dir for the host path sent to the proxy
+    // claude-proxy has repo: set → container path
+    expect(dir).toBe("/home/claude/workspace/claude-proxy");
+  });
+
+  it("returns host path for bind-mounted agents without repo", () => {
+    const config = loadConfig(configPath);
+    // Temporarily remove repo to test host path fallback
+    const agent = config.agents["claude-proxy"];
+    const savedRepo = agent.repo;
+    delete agent.repo;
+    const dir = getAgentDir(config, "claude-proxy");
     expect(dir).toContain("claude-proxy");
+    expect(dir).not.toContain("/home/claude");
+    agent.repo = savedRepo;
   });
 
   it("throws for unknown agent", () => {
