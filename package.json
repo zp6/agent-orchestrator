@@ -1,9 +1,11 @@
 {
   "name": "claude-orchestrator-reviewer",
   "version": "0.1.0",
+  "description": "Quality and oversight layer for the Claude Agent Orchestrator — PR review, task verification, supervision, and improvement detection.",
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -14,6 +16,18 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rapartlu/claude-orchestrator-reviewer.git"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

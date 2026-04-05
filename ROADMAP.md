@@ -9,7 +9,7 @@
 ## Planned
 
 - **#2 — Telegram two-way communication**: Operator commands via bot — approve/reject tasks, trigger reruns, escalate to human — all wired to live state.
-- **#9 — Publish package to npm registry**: Versioned releases so the orchestrator can pin `claude-orchestrator-reviewer@x.y.z` in `package.json` instead of a GitHub ref.
+- ~~**#9 — Publish package to npm registry**~~ ✅ Done — workflow added in PR for issue #9.
 - **Improvement detector scheduling**: Run `ImprovementDetector.analyze()` on a cron cadence (e.g. every 6 hours) and auto-file GitHub issues for patterns found.
 - **Supervisor dry-run mode**: A `--dry-run` flag that logs decisions without writing to state.db — useful for debugging the supervision loop.
 
