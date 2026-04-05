@@ -254,6 +254,28 @@ export interface PRReviewRecord {
 }
 
 /**
+ * Per-agent reliability health summary for `orch agents --health`.
+ * Derived entirely from existing task data — no new infrastructure.
+ */
+export interface AgentHealthSummary {
+  agent_name: string;
+  /** Success rate over last 30 top-level tasks (done / total), null if no tasks */
+  success_rate: number | null;
+  /** Total tasks in the last 30 */
+  total: number;
+  /** Done tasks in the last 30 */
+  done: number;
+  /** Failed tasks in the last 30 */
+  failed: number;
+  /** Number of consecutive failed tasks at the head of the task history */
+  consecutive_failures: number;
+  /** First 120 chars of the result field from the most recent failed task */
+  last_failure_reason: string | null;
+  /** Timestamp of the most recent done task */
+  last_success_at: string | null;
+}
+
+/**
  * Aggregated PR review metrics — cycle time and rejection rate.
  */
 export interface PRMetrics {
@@ -1179,6 +1201,100 @@ export class StateStore {
          ORDER BY failed DESC`,
       )
       .all(since, threshold) as Array<{ agent_name: string; failed: number }>;
+  }
+
+  /**
+   * Return per-agent reliability health summary.
+   *
+   * For each agent computes over their last 30 top-level tasks:
+   *  - success rate (done / total)
+   *  - consecutive failure streak (most recent tasks first)
+   *  - last failure reason (first 120 chars of result)
+   *  - last success timestamp
+   *
+   * If `agentNames` is provided, only those agents are included (useful when the
+   * config lists agents that may not yet have any tasks).
+   */
+  getAgentHealthSummary(agentNames?: string[]): AgentHealthSummary[] {
+    // One query per agent is fine for the small fleet sizes we have.
+    // If the fleet grows large, this can be batched.
+    const names =
+      agentNames ??
+      (
+        this.db
+          .prepare(
+            `SELECT DISTINCT agent_name FROM tasks
+             WHERE agent_name IS NOT NULL AND parent_task_id IS NULL`,
+          )
+          .all() as Array<{ agent_name: string }>
+      ).map((r) => r.agent_name);
+
+    return names.map((agentName): AgentHealthSummary => {
+      // Last 30 top-level tasks for this agent, newest first
+      const recent = this.db
+        .prepare(
+          `SELECT id, status, result, updated_at
+           FROM tasks
+           WHERE agent_name = ? AND parent_task_id IS NULL
+           ORDER BY rowid DESC
+           LIMIT 30`,
+        )
+        .all(agentName) as Array<{
+        id: string;
+        status: string;
+        result: string | null;
+        updated_at: string;
+      }>;
+
+      if (recent.length === 0) {
+        return {
+          agent_name: agentName,
+          success_rate: null,
+          total: 0,
+          done: 0,
+          failed: 0,
+          consecutive_failures: 0,
+          last_failure_reason: null,
+          last_success_at: null,
+        };
+      }
+
+      const total = recent.length;
+      const done = recent.filter((t) => t.status === "done").length;
+      const failed = recent.filter((t) => t.status === "failed").length;
+      const success_rate = total > 0 ? done / total : null;
+
+      // Consecutive failures: walk from newest until we hit a non-failed task
+      let consecutive_failures = 0;
+      for (const task of recent) {
+        if (task.status === "failed") {
+          consecutive_failures++;
+        } else {
+          break;
+        }
+      }
+
+      // Most recent failed task result (first 120 chars, strip newlines)
+      const lastFailed = recent.find((t) => t.status === "failed");
+      const last_failure_reason = lastFailed?.result
+        ? lastFailed.result.replace(/\n+/g, " ").slice(0, 120)
+        : null;
+
+      // Most recent done task
+      const lastSuccess = recent.find((t) => t.status === "done");
+      const last_success_at = lastSuccess?.updated_at ?? null;
+
+      return {
+        agent_name: agentName,
+        success_rate,
+        total,
+        done,
+        failed,
+        consecutive_failures,
+        last_failure_reason,
+        last_success_at,
+      };
+    });
   }
 
   /**

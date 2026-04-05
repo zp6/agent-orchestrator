@@ -1737,6 +1737,94 @@ describe("StateStore", () => {
     });
   });
 
+  describe("getAgentHealthSummary", () => {
+    function makeTask(agentName: string, status: "done" | "failed", result?: string) {
+      const task = store.createTask({ title: "t", source: "manual", agent_name: agentName });
+      store.updateTask(task.id, { status, result: result ?? null });
+      return task;
+    }
+
+    it("returns null success_rate and zero streak for agent with no tasks", () => {
+      const summaries = store.getAgentHealthSummary(["ghost-agent"]);
+      expect(summaries).toHaveLength(1);
+      const s = summaries[0];
+      expect(s.agent_name).toBe("ghost-agent");
+      expect(s.success_rate).toBeNull();
+      expect(s.total).toBe(0);
+      expect(s.consecutive_failures).toBe(0);
+      expect(s.last_failure_reason).toBeNull();
+      expect(s.last_success_at).toBeNull();
+    });
+
+    it("computes correct success rate", () => {
+      makeTask("agent-a", "done");
+      makeTask("agent-a", "done");
+      makeTask("agent-a", "failed", "something broke");
+      makeTask("agent-a", "done");
+
+      const [s] = store.getAgentHealthSummary(["agent-a"]);
+      expect(s.total).toBe(4);
+      expect(s.done).toBe(3);
+      expect(s.failed).toBe(1);
+      expect(s.success_rate).toBeCloseTo(0.75, 2);
+    });
+
+    it("detects consecutive failure streak from most recent tasks", () => {
+      // Tasks are ordered newest-first; the newest are the first created after older ones.
+      // SQLite orders by created_at DESC. We need newest to be failures.
+      makeTask("agent-b", "done"); // oldest
+      makeTask("agent-b", "done");
+      makeTask("agent-b", "failed", "err1"); // newer
+      makeTask("agent-b", "failed", "err2"); // newest
+
+      const [s] = store.getAgentHealthSummary(["agent-b"]);
+      expect(s.consecutive_failures).toBe(2);
+    });
+
+    it("reports 0 streak when the most recent task succeeded", () => {
+      makeTask("agent-c", "failed", "old error");
+      makeTask("agent-c", "done"); // newest — streak resets
+
+      const [s] = store.getAgentHealthSummary(["agent-c"]);
+      expect(s.consecutive_failures).toBe(0);
+    });
+
+    it("captures last_failure_reason from most recent failed task", () => {
+      makeTask("agent-d", "done");
+      makeTask("agent-d", "failed", "auth token expired");
+      makeTask("agent-d", "failed", "JSON parse error: unexpected token");
+
+      const [s] = store.getAgentHealthSummary(["agent-d"]);
+      expect(s.last_failure_reason).toContain("JSON parse error");
+    });
+
+    it("truncates long failure reasons to 120 chars", () => {
+      const longResult = "x".repeat(200);
+      makeTask("agent-e", "failed", longResult);
+
+      const [s] = store.getAgentHealthSummary(["agent-e"]);
+      expect(s.last_failure_reason).not.toBeNull();
+      expect(s.last_failure_reason!.length).toBeLessThanOrEqual(120);
+    });
+
+    it("returns summaries for all agents in config list, even those with no tasks", () => {
+      makeTask("agent-f", "done");
+      const summaries = store.getAgentHealthSummary(["agent-f", "agent-g"]);
+      expect(summaries).toHaveLength(2);
+      const ghost = summaries.find((s) => s.agent_name === "agent-g");
+      expect(ghost?.total).toBe(0);
+    });
+
+    it("discovers agents from DB when no names list provided", () => {
+      makeTask("agent-h", "done");
+      makeTask("agent-i", "failed", "boom");
+      const summaries = store.getAgentHealthSummary();
+      const names = summaries.map((s) => s.agent_name);
+      expect(names).toContain("agent-h");
+      expect(names).toContain("agent-i");
+    });
+  });
+
   describe("daemon stats (incrementStat / getStat)", () => {
     it("returns 0 for an unknown key", () => {
       expect(store.getStat("idle_fill_dispatches")).toBe(0);

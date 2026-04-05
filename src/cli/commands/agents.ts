@@ -5,6 +5,7 @@ import { ManagementClient, type ProxyAgentStatus } from "../../client/management
 import { AgentClient } from "../../client/agent-client.js";
 import { planSync, executeSync } from "../../orchestrator/sync.js";
 import { Deployer } from "../../orchestrator/deployer.js";
+import { StateStore, type AgentHealthSummary } from "../../state/store.js";
 
 const STATUS_COLORS: Record<string, (s: string) => string> = {
   running: chalk.green,
@@ -80,6 +81,79 @@ async function fetchLiveStatus(
   }
 }
 
+function formatSuccessRate(rate: number | null): string {
+  if (rate === null) return chalk.dim("  n/a");
+  const pct = Math.round(rate * 100);
+  const label = `${pct}%`.padStart(4);
+  if (pct >= 80) return chalk.green(label);
+  if (pct >= 50) return chalk.yellow(label);
+  return chalk.red(label);
+}
+
+function formatStreak(streak: number): string {
+  if (streak === 0) return chalk.dim("  —");
+  if (streak <= 2) return chalk.yellow(` ${streak}✗`);
+  return chalk.red(` ${streak}✗`) + chalk.red(" ⚠");
+}
+
+function formatLastSuccess(ts: string | null): string {
+  if (!ts) return chalk.dim("never");
+  const diff = Date.now() - new Date(ts).getTime();
+  const h = Math.floor(diff / 3600000);
+  const d = Math.floor(h / 24);
+  if (d >= 1) return chalk.dim(`${d}d ago`);
+  if (h >= 1) return chalk.dim(`${h}h ago`);
+  return chalk.green("recent");
+}
+
+function renderHealthTable(summaries: AgentHealthSummary[]): void {
+  // Sort: agents with most consecutive failures first, then by success rate asc
+  const sorted = [...summaries].sort((a, b) => {
+    if (b.consecutive_failures !== a.consecutive_failures)
+      return b.consecutive_failures - a.consecutive_failures;
+    const ra = a.success_rate ?? 1;
+    const rb = b.success_rate ?? 1;
+    return ra - rb;
+  });
+
+  const nameLen = Math.max(12, ...sorted.map((s) => s.agent_name.length));
+
+  // Header
+  console.log(
+    chalk.bold(
+      `  ${"AGENT".padEnd(nameLen + 2)} ${"RATE".padStart(4)}  ${"TASKS".padEnd(12)} ${"STREAK".padEnd(8)} ${"LAST OK".padEnd(10)} LAST FAILURE`,
+    ),
+  );
+  console.log(chalk.dim("  " + "─".repeat(nameLen + 2 + 4 + 2 + 12 + 8 + 10 + 30)));
+
+  for (const s of sorted) {
+    const flagged = s.consecutive_failures > 2;
+    const name = flagged
+      ? chalk.red(s.agent_name.padEnd(nameLen + 2))
+      : chalk.cyan(s.agent_name.padEnd(nameLen + 2));
+    const rate = formatSuccessRate(s.success_rate);
+    const tasks = chalk.dim(`${s.done}/${s.total}`).padEnd(12);
+    const streak = formatStreak(s.consecutive_failures).padEnd(8);
+    const lastOk = formatLastSuccess(s.last_success_at).padEnd(10);
+    const reason = s.last_failure_reason
+      ? chalk.dim(s.last_failure_reason.slice(0, 50))
+      : chalk.dim("—");
+
+    console.log(`  ${name} ${rate}  ${tasks} ${streak} ${lastOk} ${reason}`);
+  }
+
+  const degraded = sorted.filter((s) => s.consecutive_failures > 2);
+  console.log();
+  if (degraded.length > 0) {
+    console.log(
+      chalk.red(`⚠  ${degraded.length} agent(s) degraded (>2 consecutive failures): `) +
+        degraded.map((s) => chalk.red(s.agent_name)).join(", "),
+    );
+  } else {
+    console.log(chalk.green("✓  All agents within normal failure tolerances."));
+  }
+}
+
 export function registerAgentsCommand(program: Command): void {
   const agentsCmd = program
     .command("agents")
@@ -88,7 +162,19 @@ export function registerAgentsCommand(program: Command): void {
   // Default action: list or detail
   agentsCmd
     .argument("[name]", "Agent name for detailed view")
-    .action(async (name?: string) => {
+    .option("--health", "Show per-agent reliability dashboard (success rate, failure streak, last failure)")
+    .action(async (name?: string, opts?: { health?: boolean }) => {
+      if (opts?.health) {
+        const configPath = program.opts().config;
+        const config = loadConfig(configPath);
+        const store = new StateStore();
+        const agentNames = Object.keys(config.agents);
+        const summaries = store.getAgentHealthSummary(agentNames);
+        console.log(chalk.bold("\nAgent Reliability Dashboard") + chalk.dim("  (last 30 tasks per agent)\n"));
+        renderHealthTable(summaries);
+        console.log();
+        return;
+      }
       const configPath = program.opts().config;
       const config = loadConfig(configPath);
       const management = new ManagementClient(config.proxy);
