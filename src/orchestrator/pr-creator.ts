@@ -90,16 +90,24 @@ async function llmPickIssue(
     const client = createLLMClient(config);
     const issueList = candidates.map((c) => `#${c.number}: ${c.title}`).join("\n");
 
-    const response = await client.messages.create({
-      model: "claude-haiku-4-5",
-      max_tokens: 64,
-      messages: [
-        {
-          role: "user",
-          content: `Which GitHub issue does the branch "${branch}" most likely implement? Pick exactly one from this list, or respond "none" if none fit.\n\n${issueList}\n\nRespond with ONLY the issue number (e.g. "42") or "none".`,
-        },
-      ],
-    });
+    const LLM_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes hard timeout
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
+    let response;
+    try {
+      response = await client.messages.create({
+        model: "claude-haiku-4-5",
+        max_tokens: 64,
+        messages: [
+          {
+            role: "user",
+            content: `Which GitHub issue does the branch "${branch}" most likely implement? Pick exactly one from this list, or respond "none" if none fit.\n\n${issueList}\n\nRespond with ONLY the issue number (e.g. "42") or "none".`,
+          },
+        ],
+      }, { signal: abortController.signal });
+    } finally {
+      clearTimeout(timer);
+    }
 
     const text = response.content
       .filter((b) => b.type === "text")

@@ -243,13 +243,21 @@ export class PRReviewer {
 
     const prompt = `## PR #${pr.number}: ${pr.title}\n**Repo:** ${pr.repo}\n**Author:** ${pr.author}\n**Branch:** ${pr.branch}\n**Files changed:** ${pr.files_changed}${diffWarning}\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${truncatedDiff}\n\`\`\``;
 
+    const LLM_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes hard timeout
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
     try {
-      const response = await client.messages.create({
-        model: "claude-sonnet-4-6",
-        max_tokens: 2048,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: prompt }],
-      });
+      let response;
+      try {
+        response = await client.messages.create({
+          model: "claude-sonnet-4-6",
+          max_tokens: 2048,
+          system: SYSTEM_PROMPT,
+          messages: [{ role: "user", content: prompt }],
+        }, { signal: abortController.signal });
+      } finally {
+        clearTimeout(timer);
+      }
 
       const text = response.content
         .filter((b) => b.type === "text")

@@ -41,6 +41,32 @@ If something needs attention — fix it or dispatch work. Flag issues to the use
 /loop 3m Check daemon status, recent logs, and task progress. Fix issues or dispatch work.
 ```
 
+### Monitoring Loop Protocol
+
+Each monitoring iteration MUST perform substantive checks — not just confirm the daemon PID. Responding "Daemon running" without checking logs defeats the purpose.
+
+**Every iteration:**
+1. Check daemon PID + cycle age (`orch service status`). Restart if >12 min since last cycle.
+
+**Every 2nd iteration (alternate cycles):**
+2. Tail the last 10-15 log lines for errors, new merges, task completions, or failure patterns.
+
+**Every 3rd iteration:**
+3. Check open PRs across repos, recent merge count, and verification backlog.
+4. Flag any escalated PRs or stale issues that need human attention.
+
+**Reporting rules:**
+- If nothing changed since last check AND last check was <3 min ago: one-line status is fine.
+- If new merges, errors, task completions, or dispatches happened: summarize them.
+- If daemon is stuck (>12 min): restart immediately and report.
+- If agents are idle with open issues: note it.
+
+**Known failure modes to watch for:**
+- Daemon hangs when deployer restarts agent container mid-cycle (Docker API stalls)
+- PR review LLM calls can hang — AbortController timeout at 5 min should catch these
+- `generate.sh` SSH key validation errors block agent re-registration (non-blocking for running agents)
+- Proxy containers occasionally get SIGTERM (code 143) — supervisor retries these
+
 ## CRITICAL: Long-Running Processes Must Run in Background
 
 **When starting the daemon, dashboard, or any long-running process, ALWAYS use `run_in_background: true` on the Bash tool.** Never let them block the conversation or require the user to manually background them.

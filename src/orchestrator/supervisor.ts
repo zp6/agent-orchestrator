@@ -174,13 +174,21 @@ export class Supervisor {
     const client = createLLMClient(this.config
     );
 
+    const LLM_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes hard timeout
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
     try {
-      const response = await client.messages.create({
-        model: "claude-sonnet-4-6",
-        max_tokens: 4096,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: context }],
-      });
+      let response;
+      try {
+        response = await client.messages.create({
+          model: "claude-sonnet-4-6",
+          max_tokens: 4096,
+          system: SYSTEM_PROMPT,
+          messages: [{ role: "user", content: context }],
+        }, { signal: abortController.signal });
+      } finally {
+        clearTimeout(timer);
+      }
 
       const text = response.content
         .filter((b) => b.type === "text")
