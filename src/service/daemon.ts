@@ -28,6 +28,19 @@ const BACKLOG_TRIAGE_EVERY_N_CYCLES = 60; // ~5h at default interval
 const STALE_ISSUE_AGE_DAYS = 7;
 
 /**
+ * How often (in poll cycles) to run the orphan-branch → PR creation check.
+ * Set to 1 so the check runs every cycle, ensuring that within a single poll
+ * interval of a branch being pushed the orchestrator creates the PR.
+ *
+ * Previously this ran every SUPERVISOR_CHECK_EVERY_N_CYCLES (~15 min at the
+ * default interval), causing a recurring failure mode where branches sat
+ * unnoticed until the supervisor manually intervened.  Running every cycle
+ * satisfies the acceptance criterion of "within 2 daemon cycles of a branch
+ * push with no PR, an automated PR creation task is dispatched."
+ */
+export const ORPHAN_PR_CHECK_EVERY_N_CYCLES = 1; // every cycle
+
+/**
  * After this many consecutive idle poll cycles with no dispatch for an agent
  * that has open GitHub issues, switch to force-reclaim mode: bypass the
  * duplicate-guard recency window so the oldest open issue is re-dispatched
@@ -176,14 +189,23 @@ export class Daemon {
       //     filled this gap with manual "agent is idle" dispatches.
       await this.pickupIdleAgents(time, registeredAgents);
 
-      // 3. Periodically detect improvements and create issues
+      // 3. Create PRs for any branches pushed since the last cycle.
+      //    Runs every cycle (ORPHAN_PR_CHECK_EVERY_N_CYCLES = 1) so that a
+      //    pushed branch is picked up within a single poll interval.  This
+      //    prevents the supervisor-intervention failure mode seen in tasks
+      //    01KNDFMP, 01KNDAVJ, and 01KNDB9C where branches sat without PRs
+      //    for multiple cycles.
+      if (this.cycleCount % ORPHAN_PR_CHECK_EVERY_N_CYCLES === 0) {
+        await this.createOrphanPRs(time);
+      }
+
+      // 3b. Periodically detect improvements and create issues
       if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
         await this.detectImprovements(time);
       }
 
-      // 4. Create PRs for orphan branches + review open PRs
+      // 4. Review open PRs (kept at a slower cadence — review is more expensive)
       if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
-        await this.createOrphanPRs(time);
         await this.reviewPRs(time);
       }
 

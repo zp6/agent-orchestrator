@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING, IDLE_RECLAIM_THRESHOLD_CYCLES } from "./daemon.js";
+import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING, IDLE_RECLAIM_THRESHOLD_CYCLES, ORPHAN_PR_CHECK_EVERY_N_CYCLES } from "./daemon.js";
 import { TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -434,5 +434,27 @@ describe("IDLE_RECLAIM_THRESHOLD_CYCLES", () => {
   it("is a positive integer", () => {
     expect(IDLE_RECLAIM_THRESHOLD_CYCLES).toBeGreaterThan(0);
     expect(Number.isInteger(IDLE_RECLAIM_THRESHOLD_CYCLES)).toBe(true);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// ORPHAN_PR_CHECK_EVERY_N_CYCLES — ensures orphan PR creation runs every cycle
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("ORPHAN_PR_CHECK_EVERY_N_CYCLES", () => {
+  it("is 1 (runs every poll cycle for minimum time-to-PR)", () => {
+    expect(ORPHAN_PR_CHECK_EVERY_N_CYCLES).toBe(1);
+  });
+
+  it("is a positive integer", () => {
+    expect(ORPHAN_PR_CHECK_EVERY_N_CYCLES).toBeGreaterThan(0);
+    expect(Number.isInteger(ORPHAN_PR_CHECK_EVERY_N_CYCLES)).toBe(true);
+  });
+
+  it("triggers on every cycle count (cycleCount % ORPHAN_PR_CHECK_EVERY_N_CYCLES === 0)", () => {
+    // With ORPHAN_PR_CHECK_EVERY_N_CYCLES = 1 every positive integer satisfies the condition.
+    for (const n of [1, 2, 3, 10, 100]) {
+      expect(n % ORPHAN_PR_CHECK_EVERY_N_CYCLES).toBe(0);
+    }
   });
 });
