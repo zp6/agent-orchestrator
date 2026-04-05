@@ -23,6 +23,13 @@ export interface PRReviewResult {
   decision: "approve" | "request-changes" | "escalate";
   comment: string;
   reason: string;
+  /**
+   * Set to true when the escalation is specifically due to unresolvable merge
+   * conflicts (auto-rebase failed or no local repo for rebase).  The daemon
+   * uses this flag to decide when to auto-close a persistently conflicting PR
+   * and re-dispatch the linked issue from a clean state.
+   */
+  conflictEscalation?: boolean;
 }
 
 const SYSTEM_PROMPT = `You are a code reviewer for a multi-agent system. Your job is to catch real bugs and security issues, NOT to enforce style preferences.
@@ -50,6 +57,15 @@ export class PRReviewer {
   private log = createLogger("pr-reviewer");
   private deployer: Deployer;
   private store: StateStore;
+
+  /**
+   * In-memory counter tracking how many times each PR has been escalated due
+   * to unresolvable merge conflicts (auto-rebase failed or no local repo).
+   * Key: "repo#prNumber", value: consecutive conflict escalation count.
+   * Resets on daemon restart — acceptable since a few extra cycles before
+   * re-hitting the threshold is harmless.
+   */
+  private conflictEscalationCount = new Map<string, number>();
 
   constructor(private config: OrchestratorConfig, store?: StateStore) {
     this.deployer = new Deployer(config);
@@ -85,29 +101,39 @@ export class PRReviewer {
           // Fall through to normal review — the branch is now rebased onto main
         } else {
           // Rebase failed — escalate instead of dispatching a rebase task to the agent
+          const conflictKey = `${repo}#${prNumber}`;
+          const conflictCount = (this.conflictEscalationCount.get(conflictKey) ?? 0) + 1;
+          this.conflictEscalationCount.set(conflictKey, conflictCount);
           const result: PRReviewResult = {
             decision: "escalate",
             comment: `This PR has merge conflicts and auto-rebase onto \`origin/main\` failed (real conflicts need manual resolution).\n\n\`\`\`\ngit fetch origin\ngit rebase origin/main\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``,
             reason: "Merge conflict — auto-rebase failed, escalating to human",
+            conflictEscalation: true,
           };
           this.log.warn("Auto-rebase failed, escalating PR to human", {
             repo,
             prNumber,
             branch: pr.branch,
+            conflictEscalationCount: conflictCount,
           });
           await this.executeDecision(repo, prNumber, result);
           return result;
         }
       } else {
         // No local repo path found — escalate rather than dispatch a rebase task
+        const conflictKey = `${repo}#${prNumber}`;
+        const conflictCount = (this.conflictEscalationCount.get(conflictKey) ?? 0) + 1;
+        this.conflictEscalationCount.set(conflictKey, conflictCount);
         const result: PRReviewResult = {
           decision: "escalate",
           comment: `This PR has merge conflicts. No local repository found for auto-rebase. Please rebase manually:\n\n\`\`\`\ngit fetch origin\ngit rebase origin/main\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``,
           reason: "Merge conflict — no local repo for auto-rebase, escalating to human",
+          conflictEscalation: true,
         };
         this.log.info("PR has merge conflicts and no local repo found, escalating", {
           repo,
           prNumber,
+          conflictEscalationCount: conflictCount,
         });
         await this.executeDecision(repo, prNumber, result);
         return result;
@@ -243,14 +269,14 @@ export class PRReviewer {
     }
   }
 
-  async reviewOpenPRs(repo: string): Promise<Array<{ prNumber: number; result: PRReviewResult; prBody: string }>> {
-    const results: Array<{ prNumber: number; result: PRReviewResult; prBody: string }> = [];
+  async reviewOpenPRs(repo: string): Promise<Array<{ prNumber: number; result: PRReviewResult; prBody: string; prBranch: string }>> {
+    const results: Array<{ prNumber: number; result: PRReviewResult; prBody: string; prBranch: string }> = [];
 
     const prs = this.fetchOpenPRs(repo);
     for (const pr of prs) {
       try {
         const result = await this.reviewPR(repo, pr.number);
-        results.push({ prNumber: pr.number, result, prBody: pr.body });
+        results.push({ prNumber: pr.number, result, prBody: pr.body, prBranch: pr.branch });
       } catch {
         // Continue reviewing other PRs
       }
@@ -348,6 +374,73 @@ export class PRReviewer {
     };
     this.log.info("Escalating PR via public escalatePR()", { repo, prNumber, reason });
     await this.executeDecision(repo, prNumber, result);
+  }
+
+  /**
+   * Returns the number of consecutive conflict escalations recorded for a PR
+   * (in-memory — resets on daemon restart).
+   */
+  getConflictEscalationCount(repo: string, prNumber: number): number {
+    return this.conflictEscalationCount.get(`${repo}#${prNumber}`) ?? 0;
+  }
+
+  /**
+   * Clears the conflict escalation counter for a PR (called after auto-close
+   * so the same branch/issue pair doesn't immediately re-trigger).
+   */
+  resetConflictEscalation(repo: string, prNumber: number): void {
+    this.conflictEscalationCount.delete(`${repo}#${prNumber}`);
+  }
+
+  /**
+   * Auto-close a persistently conflicting PR and delete its branch.
+   * Posts an explanatory comment before closing so the history is clear.
+   * Returns true on success, false if any step failed.
+   */
+  autoCloseConflictingPR(repo: string, prNumber: number, branch: string, conflictCount: number): boolean {
+    const comment = [
+      `**[orchestrator] Auto-closed due to persistent merge conflicts**`,
+      ``,
+      `This PR has been in a conflict state for ${conflictCount} consecutive review cycles and auto-rebase has failed each time. Rather than continuing to escalate, the orchestrator is closing this PR and will re-dispatch the original issue so the agent can start fresh from \`main\`.`,
+      ``,
+      `The branch \`${branch}\` will be deleted to prevent the orphan-branch detector from recreating this PR.`,
+      ``,
+      `The linked issue will be re-opened automatically and dispatched to the agent.`,
+    ].join("\n");
+
+    try {
+      execSync(
+        `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(comment)}`,
+        { encoding: "utf-8", timeout: 30000 },
+      );
+    } catch (err) {
+      this.log.error("Failed to post auto-close comment on conflicting PR", { repo, prNumber, error: String(err) });
+      // Continue — still try to close
+    }
+
+    try {
+      execSync(
+        `gh pr close ${prNumber} --repo ${repo} --delete-branch`,
+        { encoding: "utf-8", timeout: 30000 },
+      );
+      this.log.info("Auto-closed persistently conflicting PR and deleted branch", { repo, prNumber, branch, conflictCount });
+      this.store.recordPRReview(repo, prNumber, "escalate"); // Record close as escalate for metrics
+      return true;
+    } catch (err) {
+      this.log.error("Failed to auto-close conflicting PR", { repo, prNumber, branch, error: String(err) });
+      // Branch deletion may have failed independently — try explicitly
+      try {
+        execSync(
+          `gh api repos/${repo}/git/refs/heads/${branch} -X DELETE`,
+          { encoding: "utf-8", timeout: 15000 },
+        );
+        this.log.info("Deleted conflicting branch via API after PR close failed", { repo, branch });
+      } catch {
+        // Best-effort — log and move on
+        this.log.warn("Could not delete conflicting branch", { repo, branch });
+      }
+      return false;
+    }
   }
 
   private countPriorReviews(repo: string, prNumber: number): number {
@@ -677,13 +770,13 @@ export class PRReviewer {
     };
   }
 
-  private fetchOpenPRs(repo: string): Array<{ number: number; title: string; body: string }> {
+  private fetchOpenPRs(repo: string): Array<{ number: number; title: string; body: string; branch: string }> {
     const output = execSync(
-      `gh pr list --repo ${repo} --state open --json number,title,body`,
+      `gh pr list --repo ${repo} --state open --json number,title,body,headRefName`,
       { encoding: "utf-8", timeout: 30000 },
     );
-    const prs = JSON.parse(output) as Array<{ number: number; title: string; body?: string }>;
-    return prs.map((pr) => ({ ...pr, body: pr.body ?? "" }));
+    const prs = JSON.parse(output) as Array<{ number: number; title: string; body?: string; headRefName?: string }>;
+    return prs.map((pr) => ({ ...pr, body: pr.body ?? "", branch: pr.headRefName ?? "" }));
   }
 
   private parseResponse(text: string): PRReviewResult {

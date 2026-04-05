@@ -512,8 +512,56 @@ export class Daemon {
     try {
       for (const [repo, agentName] of agentsByRepo) {
         const results = await this.prReviewer.reviewOpenPRs(repo);
-        for (const { prNumber, result, prBody } of results) {
+        for (const { prNumber, result, prBody, prBranch } of results) {
           console.log(`[${time}] PR review: ${repo}#${prNumber} → ${result.decision} (${result.reason})`);
+
+          // Auto-close persistently conflicting PRs and re-dispatch the linked issue.
+          // After conflict_close_threshold consecutive conflict escalations the PR is
+          // beyond automated recovery — close it and start fresh from main.
+          if (result.conflictEscalation) {
+            const threshold = this.config.pr_review?.conflict_close_threshold ?? 2;
+            const conflictCount = this.prReviewer.getConflictEscalationCount(repo, prNumber);
+            if (threshold > 0 && conflictCount >= threshold) {
+              this.log.warn("Conflict escalation threshold reached — auto-closing PR and re-dispatching issue", {
+                repo,
+                prNumber,
+                prBranch,
+                agentName,
+                conflictCount,
+                threshold,
+              });
+              console.log(`[${time}] PR #${prNumber} on ${repo}: conflict threshold (${conflictCount}/${threshold}) — auto-closing and re-dispatching`);
+
+              const closed = this.prReviewer.autoCloseConflictingPR(repo, prNumber, prBranch, conflictCount);
+              this.prReviewer.resetConflictEscalation(repo, prNumber);
+
+              if (closed) {
+                // Re-dispatch the original issue so the agent starts fresh from main.
+                const issueNumbers = extractClosedIssueNumbers(prBody);
+                if (issueNumbers.length > 0 && !this.store.hasActiveTask(agentName)) {
+                  const issueNum = issueNumbers[0];
+                  this.log.info("Re-dispatching linked issue after auto-close of conflicting PR", { repo, prNumber, issueNum, agentName });
+                  this.dispatcher.dispatch(
+                    `Issue #${issueNum} on ${repo} needs to be re-implemented. The previous PR #${prNumber} was auto-closed because it had persistent merge conflicts that could not be resolved automatically. Please start fresh from the latest \`main\` branch, create a new feature branch, implement the issue, and open a new PR with "Closes #${issueNum}" in the body.`,
+                    {
+                      agentName,
+                      source: "github",
+                      sourceRef: `${repo}#${issueNum}`,
+                      title: `[re-dispatch] ${repo}#${issueNum} (conflict recovery)`,
+                    },
+                  ).catch((err) => {
+                    this.log.error("Failed to re-dispatch issue after conflict auto-close", { repo, prNumber, issueNum, error: String(err) });
+                  });
+                } else if (issueNumbers.length === 0) {
+                  this.log.warn("Auto-closed conflicting PR but could not find linked issue to re-dispatch", { repo, prNumber, prBranch });
+                } else {
+                  this.log.info("Auto-closed conflicting PR but agent is busy — issue re-dispatch skipped", { agentName, repo, prNumber });
+                }
+              }
+              // Skip other decision handling for this PR — it's already closed
+              continue;
+            }
+          }
 
           // Dispatch feedback to agent when changes are requested (skip if agent busy or duplicate)
           if (result.decision === "request-changes") {

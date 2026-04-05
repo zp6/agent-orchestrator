@@ -85,6 +85,15 @@ export interface PRReviewConfig {
    * reviewer's GitHub-comment counting.  Defaults to 3 when omitted.
    */
   feedback_ceiling?: number;
+
+  /**
+   * Number of consecutive conflict escalations before the daemon auto-closes
+   * a persistently conflicting PR and re-dispatches the linked issue to the
+   * agent from a clean state.  Defaults to 2 when omitted.
+   *
+   * Set to 0 to disable auto-close entirely.
+   */
+  conflict_close_threshold?: number;
 }
 
 export interface OrchestratorConfig {

@@ -1067,4 +1067,218 @@ describe("PRReviewer", () => {
       expect(commentCall).toBeDefined();
     });
   });
+
+  describe("conflict escalation tracking", () => {
+    it("sets conflictEscalation: true when auto-rebase fails", async () => {
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "Test PR",
+        body: "Description\n\nCloses #1",
+        author: { login: "agent" },
+        headRefName: "feature-branch",
+        changedFiles: 2,
+        mergeable: "CONFLICTING",
+      });
+
+      const { execSync: mockExecSync } = await import("node:child_process");
+      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+        if (typeof cmd === "string" && cmd.includes("git rebase origin/main")) {
+          throw new Error("CONFLICT (content): Merge conflict in src/index.ts");
+        }
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
+        if (cmd.includes("gh pr view")) return mockPRViewResponse;
+        if (cmd.includes("gh pr diff")) return mockDiffResponse;
+        if (cmd.includes("gh issue list")) return mockIssueListResponse;
+        if (cmd.includes("gh pr list")) return JSON.stringify([]);
+        return "";
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("escalate");
+      expect(result.conflictEscalation).toBe(true);
+    });
+
+    it("sets conflictEscalation: true when no local repo is found for a conflicting PR", async () => {
+      mockPRViewResponse = JSON.stringify({
+        number: 42,
+        title: "External PR",
+        body: "Description\n\nCloses #1",
+        author: { login: "agent" },
+        headRefName: "feature-branch",
+        changedFiles: 2,
+        mergeable: "CONFLICTING",
+      });
+
+      const reviewer = new PRReviewer(config);
+      // "unknown/repo" has no local path in config
+      const result = await reviewer.reviewPR("unknown/repo", 42);
+
+      expect(result.decision).toBe("escalate");
+      expect(result.conflictEscalation).toBe(true);
+    });
+
+    it("does not set conflictEscalation on regular LLM escalations", async () => {
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({
+          decision: "escalate",
+          comment: "Security-sensitive change.",
+          reason: "Auth changes need human review",
+        })}],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      expect(result.decision).toBe("escalate");
+      expect(result.conflictEscalation).toBeUndefined();
+    });
+
+    it("increments conflict escalation count on each conflict escalation", async () => {
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "Test PR",
+        body: "Description\n\nCloses #1",
+        author: { login: "agent" },
+        headRefName: "feature-branch",
+        changedFiles: 2,
+        mergeable: "CONFLICTING",
+      });
+
+      const { execSync: mockExecSync } = await import("node:child_process");
+      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+        if (typeof cmd === "string" && cmd.includes("git rebase origin/main")) {
+          throw new Error("CONFLICT: Merge conflict");
+        }
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
+        if (cmd.includes("gh pr view")) return mockPRViewResponse;
+        if (cmd.includes("gh pr diff")) return mockDiffResponse;
+        if (cmd.includes("gh issue list")) return mockIssueListResponse;
+        if (cmd.includes("gh pr list")) return JSON.stringify([]);
+        return "";
+      });
+
+      const reviewer = new PRReviewer(config);
+
+      expect(reviewer.getConflictEscalationCount("owner/repo", 9)).toBe(0);
+
+      await reviewer.reviewPR("owner/repo", 9);
+      expect(reviewer.getConflictEscalationCount("owner/repo", 9)).toBe(1);
+
+      await reviewer.reviewPR("owner/repo", 9);
+      expect(reviewer.getConflictEscalationCount("owner/repo", 9)).toBe(2);
+    });
+
+    it("resetConflictEscalation clears the counter", async () => {
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "Test PR",
+        body: "Description\n\nCloses #1",
+        author: { login: "agent" },
+        headRefName: "feature-branch",
+        changedFiles: 2,
+        mergeable: "CONFLICTING",
+      });
+
+      const { execSync: mockExecSync } = await import("node:child_process");
+      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+        if (typeof cmd === "string" && cmd.includes("git rebase origin/main")) {
+          throw new Error("CONFLICT: Merge conflict");
+        }
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
+        if (cmd.includes("gh pr view")) return mockPRViewResponse;
+        if (cmd.includes("gh pr diff")) return mockDiffResponse;
+        if (cmd.includes("gh issue list")) return mockIssueListResponse;
+        if (cmd.includes("gh pr list")) return JSON.stringify([]);
+        return "";
+      });
+
+      const reviewer = new PRReviewer(config);
+      await reviewer.reviewPR("owner/repo", 9);
+      await reviewer.reviewPR("owner/repo", 9);
+
+      expect(reviewer.getConflictEscalationCount("owner/repo", 9)).toBe(2);
+      reviewer.resetConflictEscalation("owner/repo", 9);
+      expect(reviewer.getConflictEscalationCount("owner/repo", 9)).toBe(0);
+    });
+
+    it("autoCloseConflictingPR posts a comment and closes the PR with --delete-branch", async () => {
+      const { execSync: mockExecSync } = await import("node:child_process");
+      const execSyncMock = vi.mocked(mockExecSync);
+      execSyncMock.mockImplementation(() => "");
+
+      const reviewer = new PRReviewer(config);
+      const closed = reviewer.autoCloseConflictingPR("owner/repo", 9, "feature-branch", 2);
+
+      expect(closed).toBe(true);
+
+      // Should have posted an explanatory comment
+      const commentCall = execSyncMock.mock.calls.find(
+        (args) => typeof args[0] === "string" && args[0].includes("gh pr comment") && args[0].includes("Auto-closed due to persistent merge conflicts"),
+      );
+      expect(commentCall).toBeDefined();
+
+      // Should have closed the PR with --delete-branch
+      const closeCall = execSyncMock.mock.calls.find(
+        (args) => typeof args[0] === "string" && args[0].includes("gh pr close") && args[0].includes("--delete-branch"),
+      );
+      expect(closeCall).toBeDefined();
+    });
+
+    it("autoCloseConflictingPR returns false and tries branch API deletion when PR close fails", async () => {
+      const { execSync: mockExecSync } = await import("node:child_process");
+      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+        if (cmd.includes("gh pr close")) throw new Error("PR close failed");
+        return ""; // comment succeeds, branch API succeeds
+      });
+
+      const reviewer = new PRReviewer(config);
+      const closed = reviewer.autoCloseConflictingPR("owner/repo", 9, "feature-branch", 2);
+
+      expect(closed).toBe(false);
+
+      // Should have attempted branch deletion via API as fallback
+      const branchDeleteCall = vi.mocked(mockExecSync).mock.calls.find(
+        (args) => typeof args[0] === "string" && args[0].includes("gh api") && args[0].includes("DELETE") && args[0].includes("feature-branch"),
+      );
+      expect(branchDeleteCall).toBeDefined();
+    });
+
+    it("reviewOpenPRs includes prBranch in each result entry", async () => {
+      mockCreate
+        .mockResolvedValueOnce({
+          content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Good", reason: "Clean" }) }],
+        })
+        .mockResolvedValueOnce({
+          content: [{ type: "text", text: JSON.stringify({ decision: "approve", comment: "Good", reason: "Clean" }) }],
+        });
+
+      const { execSync: mockExecSync } = await import("node:child_process");
+      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+        if (cmd.includes("gh pr list")) {
+          return JSON.stringify([
+            { number: 9, title: "PR One", body: "Closes #9", headRefName: "issue-9-branch" },
+            { number: 10, title: "PR Two", body: "Closes #10", headRefName: "issue-10-branch" },
+          ]);
+        }
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return "OPEN";
+        if (cmd.includes("gh pr view")) return JSON.stringify({
+          number: 9, title: "PR One", body: "Closes #9",
+          author: { login: "agent" }, headRefName: "issue-9-branch",
+          changedFiles: 1, mergeable: "MERGEABLE",
+        });
+        if (cmd.includes("gh pr diff")) return "+added";
+        if (cmd.includes("gh api") && cmd.includes("comments")) return "0\n";
+        if (cmd.includes("gh issue list")) return "[]";
+        return "";
+      });
+
+      const reviewer = new PRReviewer(config);
+      const results = await reviewer.reviewOpenPRs("owner/repo");
+
+      expect(results[0].prBranch).toBe("issue-9-branch");
+      expect(results[1].prBranch).toBe("issue-10-branch");
+    });
+  });
 });
