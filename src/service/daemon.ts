@@ -7,11 +7,11 @@ import { ImprovementDetector } from "../orchestrator/improvement-detector.js";
 import { ResearchLinker } from "../orchestrator/research-linker.js";
 import { IssueCreator } from "../orchestrator/issue-creator.js";
 import { Deployer } from "../orchestrator/deployer.js";
-import { Supervisor, isDecisionAlreadyResolved } from "../orchestrator/supervisor.js";
+import { Supervisor, isDecisionAlreadyResolved, extractIssueRefs } from "../orchestrator/supervisor.js";
 import { PRReviewer } from "../orchestrator/pr-reviewer.js";
 import { findOrphanBranches, createPRForBranch, deleteStaleOrphanBranches, STALE_BRANCH_BEHIND_THRESHOLD } from "../orchestrator/pr-creator.js";
 import { PRCreationRetryQueue } from "../orchestrator/pr-creation-retry-queue.js";
-import { validateGhAuth, isIssueOpen } from "../triggers/github.js";
+import { validateGhAuth, isIssueOpen, findExistingPRsForIssue } from "../triggers/github.js";
 import {
   dispatchGitHubIssues,
   dispatchIdleAgentBacklog,
@@ -1283,6 +1283,52 @@ export class Daemon {
             this.store.incrementStat("supervisor_pre_resolved_skips");
             cycleSkipped++;
             continue;
+          }
+
+          // Live issue-state re-validation (issue #446): the supervisor builds
+          // decisions from cached issue lists that may be stale by the time we
+          // dispatch.  Re-check every referenced issue right before committing
+          // to a task so we never dispatch work for closed or already-in-progress
+          // issues.
+          if (agentGithub) {
+            const issueRefs = extractIssueRefs(`${d.message} ${d.reason}`);
+            let skipReason: string | null = null;
+
+            for (const issueNum of issueRefs) {
+              // 1. Skip if the issue has been closed since the supervisor polled
+              if (!isIssueOpen(agentGithub, issueNum)) {
+                skipReason = `issue #${issueNum} is now closed`;
+                break;
+              }
+
+              // 2. Skip if a non-draft open PR already targets this issue
+              const linkedPRs = findExistingPRsForIssue(agentGithub, issueNum);
+              const openNonDraft = linkedPRs.find((pr) => pr.state === "open" && !pr.isDraft);
+              if (openNonDraft) {
+                skipReason = `open PR #${openNonDraft.number} already exists for issue #${issueNum}`;
+                break;
+              }
+            }
+
+            if (skipReason) {
+              this.log.info("Supervisor dispatch skipped — live re-validation", {
+                agentName: d.agentName,
+                reason: d.reason,
+                skipReason,
+              });
+              console.log(`  ${d.action} → ${d.agentName} SKIPPED (${skipReason}): ${d.reason}`);
+              this.store.addSupervisorDecision({
+                action: d.action,
+                agent_name: d.agentName,
+                reason: d.reason,
+                message: d.message,
+                rationale: d.rationale,
+                outcome: "skipped",
+              });
+              this.store.incrementStat("supervisor_live_revalidation_skips");
+              cycleSkipped++;
+              continue;
+            }
           }
 
           if (this.store.hasActiveTask(d.agentName)) {
