@@ -93,7 +93,7 @@ async function handleCommand(text: string, ctx: TelegramContext): Promise<string
 
   // Summary — the main command
   if (cmd === "summary" || cmd === "/summary" || cmd === "s") {
-    return buildSummary(ctx);
+    return await buildSummary(ctx);
   }
 
   // Status — quick agent status
@@ -191,61 +191,103 @@ help — this message`;
   return `📨 Forwarding as directive...`;
 }
 
-function buildSummary(ctx: TelegramContext): string {
+async function buildSummary(ctx: TelegramContext): Promise<string> {
   const agents = Object.keys(ctx.config.agents);
-
-  // Agent status
-  const agentLines = agents.map((name) => {
-    const busy = ctx.store.hasActiveTask(name);
-    const tasks = ctx.store.listTasks({ agent_name: name, limit: 1 });
-    const current = busy && tasks[0] ? tasks[0].title?.slice(0, 45) : null;
-    return `${busy ? "🔵" : "⚪"} ${name}${current ? `: ${current}` : ""}`;
-  });
-
-  // Recent completions (last 5)
-  const recent = ctx.store.listTasks({ status: "done", limit: 5 });
-  const recentLines = recent.map((t) => {
-    const score = t.quality_score !== null ? ` (${t.quality_score.toFixed(1)})` : "";
-    const icon = t.verification_status === "approved" ? "✅" : t.verification_status === "rejected" ? "❌" : "⏳";
-    return `${icon}${score} ${t.title?.slice(0, 45)}`;
-  });
-
-  // Recent failures (last 3)
-  const failures = ctx.store.listTasks({ status: "failed", limit: 3 });
-  const failLines = failures.length > 0
-    ? failures.map((t) => `❌ ${t.title?.slice(0, 45)}`).join("\n")
-    : "None";
-
-  // Open PRs count
   const repos = [...new Set(Object.values(ctx.config.agents).map((a) => a.github).filter(Boolean))] as string[];
-  let prCount = 0;
-  for (const repo of repos) {
-    const raw = gh(`gh pr list --repo ${repo} --state open --json number -q length`);
-    prCount += parseInt(raw) || 0;
+
+  // 1. Health — are all agents up?
+  const healthChecks = await Promise.all(agents.map(async (name) => {
+    const port = ctx.config.agents[name].docker?.port;
+    if (!port) return { name, ok: false };
+    try {
+      const res = await fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(3000) });
+      return { name, ok: res.ok };
+    } catch {
+      return { name, ok: false };
+    }
+  }));
+  const downAgents = healthChecks.filter((h) => !h.ok);
+  const healthLine = downAgents.length === 0
+    ? "🟢 All systems green"
+    : `🔴 ${downAgents.length} agent(s) down: ${downAgents.map((h) => h.name).join(", ")}`;
+
+  // 2. Shipped — recently merged PRs
+  const mergedResults = await Promise.all(repos.map(async (repo) => {
+    const raw = await ghAsync(`gh pr list --repo ${repo} --state merged --json number,title,mergedAt -L 10`);
+    if (!raw) return [];
+    try {
+      const prs = JSON.parse(raw) as Array<{ number: number; title: string; mergedAt: string }>;
+      const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+      return prs
+        .filter((pr) => new Date(pr.mergedAt).getTime() > cutoff)
+        .map((pr) => ({ repo: repo.split("/")[1], ...pr }));
+    } catch { return []; }
+  }));
+  const recentMerges = mergedResults.flat().sort((a, b) =>
+    new Date(b.mergedAt).getTime() - new Date(a.mergedAt).getTime(),
+  );
+  let shippedSection: string;
+  if (recentMerges.length === 0) {
+    shippedSection = "No merges in last 2h";
+  } else {
+    const shown = recentMerges.slice(0, 5);
+    const lines = shown.map((pr) => `  • #${pr.number} ${pr.title.slice(0, 45)}`);
+    if (recentMerges.length > 5) lines.push(`  ${recentMerges.length - 5} more...`);
+    shippedSection = lines.join("\n");
   }
 
-  // Stats
+  // 3. Needs attention — stuck tasks, down agents, recent failures
+  const attentionItems: string[] = [];
+  const dispatched = ctx.store.listTasks({ status: "dispatched", limit: 10 });
+  for (const t of dispatched) {
+    const ageMin = (Date.now() - new Date(t.created_at).getTime()) / 60000;
+    if (ageMin > 10) attentionItems.push(`Stuck: ${t.title?.slice(0, 40)} (${Math.round(ageMin)}m)`);
+  }
+  for (const h of downAgents) attentionItems.push(`${h.name} unreachable`);
+  const failures = ctx.store.listTasks({ status: "failed", limit: 3 });
+  for (const t of failures) {
+    const ageH = (Date.now() - new Date(t.updated_at).getTime()) / 3600000;
+    if (ageH < 2) attentionItems.push(`Failed: ${t.title?.slice(0, 40)}`);
+  }
+  const attentionSection = attentionItems.length === 0
+    ? "Nothing — all clear"
+    : attentionItems.map((i) => `  • ${i}`).join("\n");
+
+  // 4. Working now
+  const working = agents
+    .filter((name) => ctx.store.hasActiveTask(name))
+    .map((name) => {
+      const tasks = ctx.store.listTasks({ agent_name: name, status: "dispatched", limit: 1 });
+      const title = tasks[0]?.title?.slice(0, 35) || "?";
+      return `  ${name.replace("claude-orchestrator-", "").replace("claude-", "")}: ${title}`;
+    });
+  const workingSection = working.length > 0 ? working.join("\n") : "  All idle";
+
+  // 5. Stats
   const stats = ctx.store.getAgentStats();
   const totalDone = stats.reduce((s, a) => s + a.done, 0);
   const totalFailed = stats.reduce((s, a) => s + a.failed, 0);
   const successRate = totalDone + totalFailed > 0
     ? Math.round((totalDone / (totalDone + totalFailed)) * 100)
     : 0;
+  const prCounts = await Promise.all(repos.map(async (repo) => {
+    const raw = await ghAsync(`gh pr list --repo ${repo} --state open --json number -q length`);
+    return parseInt(raw) || 0;
+  }));
+  const openPRs = prCounts.reduce((a, b) => a + b, 0);
 
-  return `📋 *Summary*
+  return `${healthLine}
 
-*Agents*
-${agentLines.join("\n")}
+🚀 *Shipped (last 2h)*
+${shippedSection}
 
-*Recent*
-${recentLines.join("\n")}
+⚠️ *Needs attention*
+${attentionSection}
 
-*Failures*
-${failLines}
+🔄 *Working now*
+${workingSection}
 
-*Stats*
-Done: ${totalDone} | Failed: ${totalFailed} | Success: ${successRate}%
-Open PRs: ${prCount}`;
+📊 ${totalDone} done | ${successRate}% success | ${openPRs} open PRs | ${recentMerges.length} merged (2h)`;
 }
 
 /**
