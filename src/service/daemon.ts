@@ -1420,6 +1420,9 @@ export class Daemon {
   }
 
   private cleanupStaleIssues(time: string): void {
+    // Collect all merged PR bodies across repos for cross-repo closure
+    const allMergedPRBodies: Array<{ prRepo: string; prNumber: number; body: string }> = [];
+
     for (const [_agentName, agent] of Object.entries(this.config.agents)) {
       if (!agent.github) continue;
 
@@ -1441,6 +1444,13 @@ export class Daemon {
         const mergedPRs = prsRaw
           ? (JSON.parse(prsRaw) as Array<{ number: number; title: string; body: string }>)
           : [];
+
+        // Collect PR bodies for cross-repo scanning later
+        for (const pr of mergedPRs) {
+          if (pr.body) {
+            allMergedPRBodies.push({ prRepo: agent.github, prNumber: pr.number, body: pr.body });
+          }
+        }
 
         // Phase 1: Body scan — extract issue numbers referenced in merged PR bodies
         const closedByBody = new Set<number>();
@@ -1475,6 +1485,55 @@ export class Daemon {
         }
       } catch {
         // Skip repos we can't access
+      }
+    }
+
+    // Cross-repo closure: scan all merged PR bodies for references to issues in other repos
+    // e.g., a claude-proxy PR containing "Closes rapartlu/claude-agent-orchestrator#424"
+    this.closeCrossRepoIssues(time, allMergedPRBodies);
+  }
+
+  /**
+   * Scan merged PR bodies for cross-repo issue references (e.g. "Closes owner/repo#123")
+   * and explicitly close those issues via the GitHub API.
+   *
+   * GitHub only auto-closes issues in the same repo as the PR. When agents open PRs
+   * in one repo that reference issues in another (common in our multi-repo architecture),
+   * those issues remain open. This method bridges that gap.
+   */
+  private closeCrossRepoIssues(
+    time: string,
+    mergedPRBodies: Array<{ prRepo: string; prNumber: number; body: string }>,
+  ): void {
+    for (const { prRepo, prNumber, body } of mergedPRBodies) {
+      const crossRefs = extractCrossRepoIssueRefs(body);
+      for (const ref of crossRefs) {
+        const targetRepo = `${ref.owner}/${ref.repo}`;
+        // Skip same-repo refs — GitHub handles those natively
+        if (targetRepo === prRepo) continue;
+
+        try {
+          // Check if the issue is still open before trying to close it
+          const stateRaw = execSync(
+            `gh issue view ${ref.number} --repo ${targetRepo} --json state -q .state`,
+            { encoding: "utf-8", timeout: 10000 },
+          ).trim();
+          if (stateRaw !== "OPEN") continue;
+
+          const comment = `Auto-closed by orchestrator: referenced in merged PR ${prRepo}#${prNumber}.`;
+          execSync(
+            `gh issue close ${ref.number} --repo ${targetRepo} --comment "${comment}"`,
+            { encoding: "utf-8", timeout: 10000 },
+          );
+          console.log(`[${time}] Cross-repo close: ${targetRepo}#${ref.number} (from ${prRepo}#${prNumber})`);
+          this.log.info("Cross-repo issue closed", {
+            targetRepo,
+            issueNumber: ref.number,
+            sourcePR: `${prRepo}#${prNumber}`,
+          });
+        } catch {
+          // Best effort — target repo may not be accessible
+        }
       }
     }
   }
@@ -1711,6 +1770,34 @@ export function extractClosedIssueNumbers(prBody: string): number[] {
     numbers.add(parseInt(match[1], 10));
   }
   return [...numbers];
+}
+
+/**
+ * Extract cross-repo issue references from a PR body.
+ *
+ * Matches patterns like:
+ *   - "Closes rapartlu/claude-agent-orchestrator#424"
+ *   - "Fixes owner/repo#123"
+ *   - "Resolves owner/repo#42"
+ *
+ * Returns an array of { owner, repo, number } objects (deduplicated).
+ */
+export function extractCrossRepoIssueRefs(prBody: string): Array<{ owner: string; repo: string; number: number }> {
+  const pattern = /(?:closes|fixes|resolves)\s+([\w.-]+)\/([\w.-]+)#(\d+)/gi;
+  const seen = new Set<string>();
+  const refs: Array<{ owner: string; repo: string; number: number }> = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(prBody)) !== null) {
+    const owner = match[1];
+    const repo = match[2];
+    const num = parseInt(match[3], 10);
+    const key = `${owner}/${repo}#${num}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      refs.push({ owner, repo, number: num });
+    }
+  }
+  return refs;
 }
 
 /**

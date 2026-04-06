@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { extractClosedIssueNumbers, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING, IDLE_RECLAIM_THRESHOLD_CYCLES, ORPHAN_PR_CHECK_EVERY_N_CYCLES, extractChecklistText, buildConsolidatedFeedbackMessage, buildFeedbackPreDeclarationChecklist, resolveConversationIdForPR, extractFlaggedFilesFromChecklist, buildDiffContextForFeedback, buildAuditChecklist } from "./daemon.js";
+import { extractClosedIssueNumbers, extractCrossRepoIssueRefs, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING, IDLE_RECLAIM_THRESHOLD_CYCLES, ORPHAN_PR_CHECK_EVERY_N_CYCLES, extractChecklistText, buildConsolidatedFeedbackMessage, buildFeedbackPreDeclarationChecklist, resolveConversationIdForPR, extractFlaggedFilesFromChecklist, buildDiffContextForFeedback, buildAuditChecklist } from "./daemon.js";
 import { TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
 import { StateStore } from "../state/store.js";
 
@@ -99,6 +99,67 @@ describe("extractClosedIssueNumbers", () => {
 
   it("handles refs inline with other text", () => {
     expect(extractClosedIssueNumbers("This PR closes #42 and fixes #43.")).toEqual([42, 43]);
+  });
+});
+
+describe("extractCrossRepoIssueRefs", () => {
+  it("extracts Closes owner/repo#N", () => {
+    expect(extractCrossRepoIssueRefs("Closes rapartlu/claude-agent-orchestrator#424")).toEqual([
+      { owner: "rapartlu", repo: "claude-agent-orchestrator", number: 424 },
+    ]);
+  });
+
+  it("extracts Fixes owner/repo#N", () => {
+    expect(extractCrossRepoIssueRefs("Fixes rapartlu/claude-proxy#10")).toEqual([
+      { owner: "rapartlu", repo: "claude-proxy", number: 10 },
+    ]);
+  });
+
+  it("extracts Resolves owner/repo#N", () => {
+    expect(extractCrossRepoIssueRefs("Resolves org/my-repo#99")).toEqual([
+      { owner: "org", repo: "my-repo", number: 99 },
+    ]);
+  });
+
+  it("is case-insensitive", () => {
+    const refs = extractCrossRepoIssueRefs("closes owner/repo#1\nFIXES owner/repo2#2");
+    expect(refs).toEqual([
+      { owner: "owner", repo: "repo", number: 1 },
+      { owner: "owner", repo: "repo2", number: 2 },
+    ]);
+  });
+
+  it("extracts multiple cross-repo refs", () => {
+    const body = "Closes rapartlu/repo-a#10\nAlso fixes rapartlu/repo-b#20";
+    expect(extractCrossRepoIssueRefs(body)).toEqual([
+      { owner: "rapartlu", repo: "repo-a", number: 10 },
+      { owner: "rapartlu", repo: "repo-b", number: 20 },
+    ]);
+  });
+
+  it("deduplicates identical refs", () => {
+    const body = "Closes owner/repo#5\nAlso closes owner/repo#5";
+    expect(extractCrossRepoIssueRefs(body)).toEqual([
+      { owner: "owner", repo: "repo", number: 5 },
+    ]);
+  });
+
+  it("does not match bare #N refs (same-repo)", () => {
+    expect(extractCrossRepoIssueRefs("Closes #42")).toEqual([]);
+  });
+
+  it("returns empty array for empty string", () => {
+    expect(extractCrossRepoIssueRefs("")).toEqual([]);
+  });
+
+  it("returns empty array when no refs", () => {
+    expect(extractCrossRepoIssueRefs("No cross-repo references here")).toEqual([]);
+  });
+
+  it("handles repos with dots and hyphens in names", () => {
+    expect(extractCrossRepoIssueRefs("Closes my.org/my-cool.repo#7")).toEqual([
+      { owner: "my.org", repo: "my-cool.repo", number: 7 },
+    ]);
   });
 });
 

@@ -8,6 +8,7 @@ import { StateStore, type MergeQueueEntry } from "../state/store.js";
 import { Deployer } from "./deployer.js";
 import { extractIssueNumberFromBranch, findMatchingIssueNumber } from "./pr-creator.js";
 import { notifyOperator } from "../service/notify.js";
+import { extractCrossRepoIssueRefs } from "../service/daemon.js";
 
 export interface PRInfo {
   number: number;
@@ -677,6 +678,7 @@ export class PRReviewer {
           // It's been merged (or closed) — mark completed and continue
           this.store.markQueuedPRMerged(repo, merging.pr_number);
           this.log.info("Queued PR merge completed (detected closed)", { repo, prNumber: merging.pr_number });
+          this.closeCrossRepoIssuesForPR(repo, merging.pr_number);
           await this.rebaseRemainingQueue(repo, merging.branch);
           await this.restartAgentsForRepo(repo);
         } else {
@@ -708,6 +710,9 @@ export class PRReviewer {
         this.store.markQueuedPRMerged(repo, next.pr_number);
         this.log.info("Merge queue: PR merged successfully", { repo, prNumber: next.pr_number });
 
+        // Close cross-repo issues referenced in the merged PR body
+        this.closeCrossRepoIssuesForPR(repo, next.pr_number);
+
         // Rebase remaining queued branches now that main has advanced
         await this.rebaseRemainingQueue(repo, next.branch);
         await this.restartAgentsForRepo(repo);
@@ -725,6 +730,54 @@ export class PRReviewer {
           // Best effort
         }
       }
+    }
+  }
+
+  /**
+   * After a PR is merged, fetch its body and close any cross-repo issue references.
+   *
+   * GitHub only auto-closes issues within the same repo. When an agent's PR in
+   * repo A contains "Closes owner/repoB#123", that issue stays open. This method
+   * detects those references and explicitly closes them via the GitHub API.
+   */
+  private closeCrossRepoIssuesForPR(prRepo: string, prNumber: number): void {
+    try {
+      const prBodyRaw = execSync(
+        `gh pr view ${prNumber} --repo ${prRepo} --json body -q .body`,
+        { encoding: "utf-8", timeout: 15000 },
+      ).trim();
+      if (!prBodyRaw) return;
+
+      const crossRefs = extractCrossRepoIssueRefs(prBodyRaw);
+      for (const ref of crossRefs) {
+        const targetRepo = `${ref.owner}/${ref.repo}`;
+        // Skip same-repo refs — GitHub handles those natively
+        if (targetRepo === prRepo) continue;
+
+        try {
+          // Verify the issue is still open
+          const state = execSync(
+            `gh issue view ${ref.number} --repo ${targetRepo} --json state -q .state`,
+            { encoding: "utf-8", timeout: 10000 },
+          ).trim();
+          if (state !== "OPEN") continue;
+
+          const comment = `Auto-closed by orchestrator: referenced in merged PR ${prRepo}#${prNumber}.`;
+          execSync(
+            `gh issue close ${ref.number} --repo ${targetRepo} --comment "${comment}"`,
+            { encoding: "utf-8", timeout: 10000 },
+          );
+          this.log.info("Cross-repo issue closed post-merge", {
+            targetRepo,
+            issueNumber: ref.number,
+            sourcePR: `${prRepo}#${prNumber}`,
+          });
+        } catch {
+          // Best effort — target repo may not be accessible
+        }
+      }
+    } catch {
+      // Best effort — PR may no longer be fetchable
     }
   }
 
