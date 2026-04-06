@@ -6,6 +6,17 @@ import { loadConfig, type OrchestratorConfig } from "../../config/schema.js";
 import { findExistingPRsForIssue, type LinkedPR } from "../../triggers/github.js";
 
 /**
+ * A similar open issue found via keyword overlap matching.
+ */
+export interface SimilarIssue {
+  number: number;
+  title: string;
+  url: string;
+  /** Keyword overlap score in range [0, 1] */
+  overlapScore: number;
+}
+
+/**
  * Result of `orch issue status <N>` — a consolidated view of a GitHub issue's
  * dispatch state, linked PRs, and task history.
  *
@@ -33,6 +44,8 @@ export interface IssueStatusResult {
   }>;
   /** Summary line for quick display */
   summary: string;
+  /** Other open issues that share >60% keyword overlap — potential duplicates */
+  similarIssues: SimilarIssue[];
 }
 
 /**
@@ -46,17 +59,19 @@ export async function getIssueStatus(
   issueNumber: number,
   store: StateStore,
 ): Promise<IssueStatusResult> {
-  // 1. Fetch issue state from GitHub
+  // 1. Fetch issue state from GitHub (title + body for overlap detection)
   let issueState: "open" | "closed" | "unknown" = "unknown";
   let issueTitle: string | null = null;
+  let issueBody: string | null = null;
   try {
     const raw = execSync(
-      `gh issue view ${issueNumber} --repo ${repo} --json state,title -q '{state: .state, title: .title}'`,
+      `gh issue view ${issueNumber} --repo ${repo} --json state,title,body`,
       { encoding: "utf-8", timeout: 15000 },
     );
-    const parsed = JSON.parse(raw.trim()) as { state: string; title: string };
+    const parsed = JSON.parse(raw.trim()) as { state: string; title: string; body: string };
     issueState = parsed.state.toLowerCase() === "open" ? "open" : "closed";
     issueTitle = parsed.title;
+    issueBody = parsed.body ?? null;
   } catch {
     // If gh fails, continue with unknown state
   }
@@ -80,7 +95,13 @@ export async function getIssueStatus(
     updatedAt: t.updated_at,
   }));
 
-  // 4. Build summary line
+  // 4. Find similar open issues via keyword overlap (only when issue is open)
+  const similarIssues: SimilarIssue[] =
+    issueState === "open"
+      ? findSimilarIssues(repo, issueNumber, issueTitle ?? "", issueBody ?? "")
+      : [];
+
+  // 5. Build summary line
   const summary = buildSummaryLine(issueState, issueTitle, linkedPRs, allTasks);
 
   return {
@@ -91,7 +112,102 @@ export async function getIssueStatus(
     linkedPRs,
     tasks,
     summary,
+    similarIssues,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Keyword overlap / similar issue detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Common English stop words to exclude from keyword matching.
+ * Keeping this list tight to avoid stripping domain-relevant words.
+ */
+const STOP_WORDS = new Set([
+  "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+  "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+  "being", "have", "has", "had", "do", "does", "did", "will", "would",
+  "should", "could", "may", "might", "shall", "can", "it", "its", "this",
+  "that", "these", "those", "i", "we", "you", "he", "she", "they", "not",
+  "as", "if", "so", "than", "then", "when", "where", "how", "what", "which",
+  "who", "all", "each", "more", "also", "into", "up", "out", "about",
+]);
+
+/**
+ * Tokenise text into a set of meaningful keywords.
+ * Lowercases, strips punctuation, and removes stop words + short tokens.
+ */
+function tokenise(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length >= 3 && !STOP_WORDS.has(w)),
+  );
+}
+
+/**
+ * Compute Jaccard similarity between two keyword sets.
+ * Returns a value in [0, 1].
+ */
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 0;
+  let intersection = 0;
+  for (const token of a) {
+    if (b.has(token)) intersection++;
+  }
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+/**
+ * Fetch other open issues from GitHub and return any that share >60% keyword
+ * overlap with the given issue (title + body combined).
+ *
+ * Exported for testing.
+ */
+export function findSimilarIssues(
+  repo: string,
+  targetIssueNumber: number,
+  targetTitle: string,
+  targetBody: string,
+  overlapThreshold = 0.6,
+): SimilarIssue[] {
+  const targetTokens = tokenise(`${targetTitle} ${targetBody}`);
+  if (targetTokens.size === 0) return [];
+
+  let openIssues: Array<{ number: number; title: string; body: string }> = [];
+  try {
+    const raw = execSync(
+      `gh issue list --repo ${repo} --state open --json number,title,body --limit 200`,
+      { encoding: "utf-8", timeout: 20000 },
+    );
+    openIssues = JSON.parse(raw.trim()) as typeof openIssues;
+  } catch {
+    // If gh fails, skip similar-issue detection silently
+    return [];
+  }
+
+  const similar: SimilarIssue[] = [];
+  for (const issue of openIssues) {
+    if (issue.number === targetIssueNumber) continue;
+    const candidateTokens = tokenise(`${issue.title} ${issue.body ?? ""}`);
+    const score = jaccardSimilarity(targetTokens, candidateTokens);
+    if (score >= overlapThreshold) {
+      similar.push({
+        number: issue.number,
+        title: issue.title,
+        url: `https://github.com/${repo}/issues/${issue.number}`,
+        overlapScore: score,
+      });
+    }
+  }
+
+  // Sort by overlap score descending
+  similar.sort((a, b) => b.overlapScore - a.overlapScore);
+  return similar;
 }
 
 function buildSummaryLine(
@@ -212,6 +328,23 @@ function printIssueStatus(result: IssueStatusResult): void {
     console.log(chalk.dim("  No tasks dispatched for this issue.\n"));
   }
 
+  // Similar open issues warning
+  if (result.similarIssues.length > 0) {
+    console.log(
+      chalk.bold.yellow(
+        `  ⚠️  Similar open issues (potential duplicates):`,
+      ),
+    );
+    for (const sim of result.similarIssues) {
+      const pct = Math.round(sim.overlapScore * 100);
+      console.log(
+        `    #${sim.number}  ${chalk.yellow(`${pct}% overlap`)}  ${sim.title.slice(0, 60)}`,
+      );
+      console.log(`    ${chalk.dim(sim.url)}`);
+    }
+    console.log();
+  }
+
   // Summary
   console.log(`  ${chalk.bold("Summary:")} ${result.summary}\n`);
 }
@@ -263,6 +396,16 @@ export function formatIssueStatusTelegram(result: IssueStatusResult): string {
     }
     if (result.tasks.length > 5) {
       lines.push(`  ... and ${result.tasks.length - 5} more`);
+    }
+    lines.push("");
+  }
+
+  if (result.similarIssues.length > 0) {
+    lines.push("⚠️ *Similar open issues (potential duplicates):*");
+    for (const sim of result.similarIssues) {
+      const pct = Math.round(sim.overlapScore * 100);
+      lines.push(`  • #${sim.number} (${pct}% overlap) ${sim.title.slice(0, 50)}`);
+      lines.push(`    ${sim.url}`);
     }
     lines.push("");
   }
