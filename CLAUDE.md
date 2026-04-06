@@ -30,6 +30,11 @@ The orchestrator has been split into specialized repos. This repo owns **core in
 
 If you discover an improvement that belongs to another repo, create the issue on that repo instead (`gh issue create --repo rapartlu/claude-orchestrator-dashboard`).
 
+> **Upcoming rename:** All `claude-*` repos will be renamed to provider-agnostic names once
+> multi-provider support lands (see [#402](https://github.com/rapartlu/claude-agent-orchestrator/issues/402)
+> and [`docs/rename-migration.md`](docs/rename-migration.md)). Plan: `claude-agent-orchestrator` →
+> `agent-orchestrator`, `claude-orchestrator-dashboard` → `agent-dashboard`, etc.
+
 ## CRITICAL: Daemon Must Always Be Running
 
 **The daemon is the heartbeat of the orchestrator. It MUST be running at all times.**

@@ -8,6 +8,12 @@ proxy:
 base_dir: "/Users/paultarr/Documents/Git"
 orchestrator_dir: "/Users/paultarr/Documents/Git/claude-agent-orchestrator"
 
+# PLANNED: agent key names below will be renamed to remove the 'claude-' prefix
+# once multi-provider support is stable. See docs/rename-migration.md for the
+# full checklist. Current → Future: claude-agent-orchestrator → agent-orchestrator,
+# claude-orchestrator-dashboard → agent-dashboard, claude-orchestrator-reviewer →
+# agent-reviewer, claude-proxy → agent-proxy, claude-research-agent → research-agent.
+
 verification:
   enabled: true
   sources: ["github", "linear"]
