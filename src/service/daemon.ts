@@ -8,12 +8,12 @@ import { ImprovementDetector } from "../orchestrator/improvement-detector.js";
 import { ResearchLinker } from "../orchestrator/research-linker.js";
 import { IssueCreator } from "../orchestrator/issue-creator.js";
 import { Deployer } from "../orchestrator/deployer.js";
-import { Supervisor, isDecisionAlreadyResolved, extractIssueRefs } from "../orchestrator/supervisor.js";
+import { Supervisor, type GateResult } from "../orchestrator/supervisor.js";
 import { PRReviewer } from "../orchestrator/pr-reviewer.js";
 import { findOrphanBranches, createPRForBranch, deleteStaleOrphanBranches, STALE_BRANCH_BEHIND_THRESHOLD } from "../orchestrator/pr-creator.js";
 import { PRCreationRetryQueue } from "../orchestrator/pr-creation-retry-queue.js";
 import { validateGhAuth } from "../triggers/github.js";
-import { cachedIsIssueOpen, cachedGetIssueState, logCacheMetrics } from "../triggers/issue-state-bridge.js";
+import { cachedIsIssueOpen, logCacheMetrics } from "../triggers/issue-state-bridge.js";
 import {
   dispatchGitHubIssues,
   dispatchIdleAgentBacklog,
@@ -1267,8 +1267,36 @@ export class Daemon {
       if (decisions.length === 0) return;
 
       console.log(`[${time}] Supervisor: ${decisions.length} decision(s)`);
+
+      // Hard gate (issue #507): block dispatch to already-resolved issues.
+      // Uses live (cache-bypassing) GitHub checks at the supervisor decision
+      // layer — the authoritative point before any dispatch is committed.
+      // This replaces the previous two-layer cached check (issues #444, #446,
+      // #458) which could serve stale data within the 60s TTL window.
+      const gateResult: GateResult = this.supervisor.gateResolvedIssues(decisions);
+
+      // Record blocked decisions as "skipped — already resolved"
       let cycleSkipped = 0;
-      for (const d of decisions) {
+      for (const { decision: bd, skipReason } of gateResult.blocked) {
+        this.log.info("Supervisor hard gate: dispatch blocked", {
+          agentName: bd.agentName,
+          reason: bd.reason,
+          skipReason,
+        });
+        console.log(`  ${bd.action} → ${bd.agentName} SKIPPED (already resolved: ${skipReason}): ${bd.reason}`);
+        this.store.addSupervisorDecision({
+          action: bd.action,
+          agent_name: bd.agentName,
+          reason: bd.reason,
+          message: bd.message,
+          rationale: bd.rationale,
+          outcome: "skipped",
+        });
+        this.store.incrementStat("supervisor_hard_gate_blocks");
+        cycleSkipped++;
+      }
+
+      for (const d of gateResult.passed) {
         if (d.action === "none") {
           this.store.addSupervisorDecision({
             action: d.action,
@@ -1282,83 +1310,6 @@ export class Daemon {
         }
 
         if ((d.action === "dispatch" || d.action === "follow-up") && d.agentName && d.message) {
-          // Pre-dispatch resolution check: if the referenced issue/PR is already
-          // closed or merged, skip this dispatch to avoid wasted round-trips.
-          const agentGithub = this.config.agents[d.agentName]?.github;
-          if (agentGithub && isDecisionAlreadyResolved(d.message, d.reason, agentGithub)) {
-            this.log.info("Supervisor dispatch skipped — already resolved", {
-              agentName: d.agentName,
-              reason: d.reason,
-              message: d.message.slice(0, 120),
-            });
-            console.log(`  ${d.action} → ${d.agentName} SKIPPED (already resolved): ${d.reason}`);
-            this.store.addSupervisorDecision({
-              action: d.action,
-              agent_name: d.agentName,
-              reason: d.reason,
-              message: d.message,
-              rationale: d.rationale,
-              outcome: "skipped",
-            });
-            this.store.incrementStat("supervisor_pre_resolved_skips");
-            cycleSkipped++;
-            continue;
-          }
-
-          // Live issue-state re-validation (issue #446): the supervisor builds
-          // decisions from cached issue lists that may be stale by the time we
-          // dispatch.  Re-check every referenced issue right before committing
-          // to a task so we never dispatch work for closed or already-in-progress
-          // issues.
-          if (agentGithub) {
-            const issueRefs = extractIssueRefs(`${d.message} ${d.reason}`);
-            let skipReason: string | null = null;
-
-            for (const issueNum of issueRefs) {
-              // Re-validate via issue state cache (issue #458): single cached
-              // lookup replaces two separate gh API calls per issue reference.
-              const state = cachedGetIssueState(agentGithub, issueNum);
-
-              // 1. Skip if the issue has been closed since the supervisor polled
-              if (state.state === "closed") {
-                skipReason = `issue #${issueNum} is now closed`;
-                break;
-              }
-
-              // 2. Skip if issue already has a merged PR
-              if (state.hasMergedPR) {
-                skipReason = `issue #${issueNum} already has a merged PR`;
-                break;
-              }
-
-              // 3. Skip if a non-draft open PR already targets this issue
-              if (state.hasOpenPR) {
-                skipReason = `open PR already exists for issue #${issueNum}`;
-                break;
-              }
-            }
-
-            if (skipReason) {
-              this.log.info("Supervisor dispatch skipped — live re-validation", {
-                agentName: d.agentName,
-                reason: d.reason,
-                skipReason,
-              });
-              console.log(`  ${d.action} → ${d.agentName} SKIPPED (${skipReason}): ${d.reason}`);
-              this.store.addSupervisorDecision({
-                action: d.action,
-                agent_name: d.agentName,
-                reason: d.reason,
-                message: d.message,
-                rationale: d.rationale,
-                outcome: "skipped",
-              });
-              this.store.incrementStat("supervisor_live_revalidation_skips");
-              cycleSkipped++;
-              continue;
-            }
-          }
-
           if (this.store.hasActiveTask(d.agentName)) {
             this.log.info("Skipping supervisor dispatch: agent busy", { agentName: d.agentName, reason: d.reason });
             console.log(`  ${d.action} → ${d.agentName} SKIPPED (agent busy): ${d.reason}`);
@@ -1439,8 +1390,8 @@ export class Daemon {
         }
       }
       if (cycleSkipped > 0) {
-        this.log.info("Supervisor cycle: pre-resolved skips", { cycleSkipped });
-        console.log(`[${time}] Supervisor: ${cycleSkipped} decision(s) skipped — already resolved`);
+        this.log.info("Supervisor hard gate: blocked resolved-issue dispatches", { cycleSkipped });
+        console.log(`[${time}] Supervisor: ${cycleSkipped} decision(s) blocked by hard gate — already resolved`);
       }
     } catch (err) {
       console.error(`[${time}] Supervisor failed: ${err instanceof Error ? err.message : err}`);

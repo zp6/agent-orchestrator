@@ -20,11 +20,14 @@ vi.mock("node:child_process", () => ({
 }));
 
 // Mock issue-state-bridge so isDecisionAlreadyResolved falls through to execSync
+// and gateResolvedIssues can be tested with controlled responses
+const mockLiveValidateForDispatch = vi.fn().mockReturnValue(null);
 vi.mock("../triggers/issue-state-bridge.js", async (importOriginal) => {
   const actual = await importOriginal() as Record<string, unknown>;
   return {
     ...actual,
     cachedGetIssueState: vi.fn().mockImplementation(() => { throw new Error("cache miss"); }),
+    liveValidateForDispatch: (...args: unknown[]) => mockLiveValidateForDispatch(...args),
   };
 });
 
@@ -596,6 +599,182 @@ describe("isDecisionAlreadyResolved", () => {
       "owner/repo",
     );
     expect(result).toBe(false);
+  });
+});
+
+describe("gateResolvedIssues (issue #507)", () => {
+  let store: StateStore;
+  let dbPath: string;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockLiveValidateForDispatch.mockReturnValue(null);
+    dbPath = join(tmpdir(), `orch-gate-test-${Date.now()}.db`);
+    store = new StateStore(dbPath);
+  });
+
+  afterEach(() => {
+    store.close();
+    try { unlinkSync(dbPath); } catch {}
+  });
+
+  it("passes dispatch decisions when issues are open", () => {
+    const supervisor = new Supervisor(config, store);
+    const decisions = [
+      { action: "dispatch" as const, agentName: "agent-a", message: "Fix issue #42", reason: "Issue open" },
+    ];
+
+    const result = supervisor.gateResolvedIssues(decisions);
+
+    expect(result.passed).toHaveLength(1);
+    expect(result.blocked).toHaveLength(0);
+    expect(mockLiveValidateForDispatch).toHaveBeenCalledWith("owner/a", 42);
+  });
+
+  it("blocks dispatch when issue is closed", () => {
+    mockLiveValidateForDispatch.mockReturnValue("issue owner/a#42 is closed");
+
+    const supervisor = new Supervisor(config, store);
+    const decisions = [
+      { action: "dispatch" as const, agentName: "agent-a", message: "Fix issue #42", reason: "Issue open" },
+    ];
+
+    const result = supervisor.gateResolvedIssues(decisions);
+
+    expect(result.passed).toHaveLength(0);
+    expect(result.blocked).toHaveLength(1);
+    expect(result.blocked[0].skipReason).toBe("issue owner/a#42 is closed");
+  });
+
+  it("blocks dispatch when issue has merged PR", () => {
+    mockLiveValidateForDispatch.mockReturnValue("issue owner/a#42 has a merged PR");
+
+    const supervisor = new Supervisor(config, store);
+    const decisions = [
+      { action: "dispatch" as const, agentName: "agent-a", message: "Fix issue #42", reason: "Needs work" },
+    ];
+
+    const result = supervisor.gateResolvedIssues(decisions);
+
+    expect(result.passed).toHaveLength(0);
+    expect(result.blocked).toHaveLength(1);
+    expect(result.blocked[0].skipReason).toContain("merged PR");
+  });
+
+  it("blocks dispatch when issue has open PR", () => {
+    mockLiveValidateForDispatch.mockReturnValue("issue owner/a#42 already has an open PR");
+
+    const supervisor = new Supervisor(config, store);
+    const decisions = [
+      { action: "follow-up" as const, agentName: "agent-a", message: "Continue on #42", reason: "Follow up" },
+    ];
+
+    const result = supervisor.gateResolvedIssues(decisions);
+
+    expect(result.passed).toHaveLength(0);
+    expect(result.blocked).toHaveLength(1);
+  });
+
+  it("passes non-dispatch actions through without checking", () => {
+    const supervisor = new Supervisor(config, store);
+    const decisions = [
+      { action: "none" as const, reason: "All good" },
+      { action: "verify" as const, reason: "Needs check" },
+      { action: "redeploy" as const, agentName: "agent-a", reason: "Stale" },
+    ];
+
+    const result = supervisor.gateResolvedIssues(decisions);
+
+    expect(result.passed).toHaveLength(3);
+    expect(result.blocked).toHaveLength(0);
+    expect(mockLiveValidateForDispatch).not.toHaveBeenCalled();
+  });
+
+  it("passes dispatch to agent without github config", () => {
+    const supervisor = new Supervisor(config, store);
+    const decisions = [
+      { action: "dispatch" as const, agentName: "agent-b", message: "Fix issue #42", reason: "Needs work" },
+    ];
+
+    const result = supervisor.gateResolvedIssues(decisions);
+
+    // agent-b has no github config, so can't validate — passes through
+    expect(result.passed).toHaveLength(1);
+    expect(result.blocked).toHaveLength(0);
+    expect(mockLiveValidateForDispatch).not.toHaveBeenCalled();
+  });
+
+  it("passes dispatch with no issue references", () => {
+    const supervisor = new Supervisor(config, store);
+    const decisions = [
+      { action: "dispatch" as const, agentName: "agent-a", message: "Create ROADMAP.md", reason: "Missing file" },
+    ];
+
+    const result = supervisor.gateResolvedIssues(decisions);
+
+    expect(result.passed).toHaveLength(1);
+    expect(result.blocked).toHaveLength(0);
+    expect(mockLiveValidateForDispatch).not.toHaveBeenCalled();
+  });
+
+  it("handles mixed decisions — some blocked, some passed", () => {
+    mockLiveValidateForDispatch
+      .mockReturnValueOnce("issue owner/a#42 is closed")  // first issue check
+      .mockReturnValueOnce(null);                          // second issue check
+
+    const supervisor = new Supervisor(config, store);
+    const decisions = [
+      { action: "dispatch" as const, agentName: "agent-a", message: "Fix issue #42", reason: "Issue open" },
+      { action: "dispatch" as const, agentName: "agent-a", message: "Fix issue #99", reason: "Issue open" },
+      { action: "none" as const, reason: "All good" },
+    ];
+
+    const result = supervisor.gateResolvedIssues(decisions);
+
+    expect(result.passed).toHaveLength(2); // #99 dispatch + none
+    expect(result.blocked).toHaveLength(1); // #42 dispatch
+  });
+
+  it("allows dispatch when GitHub API check throws (safe default)", () => {
+    mockLiveValidateForDispatch.mockImplementation(() => { throw new Error("gh timeout"); });
+
+    const supervisor = new Supervisor(config, store);
+    const decisions = [
+      { action: "dispatch" as const, agentName: "agent-a", message: "Fix issue #42", reason: "Issue open" },
+    ];
+
+    const result = supervisor.gateResolvedIssues(decisions);
+
+    // API error — safe default is to allow dispatch (don't skip uncertain work)
+    expect(result.passed).toHaveLength(1);
+    expect(result.blocked).toHaveLength(0);
+  });
+
+  it("checks all issue refs — blocks if any is resolved", () => {
+    mockLiveValidateForDispatch
+      .mockReturnValueOnce(null)                                  // #42 is open
+      .mockReturnValueOnce("issue owner/a#43 has a merged PR");   // #43 is resolved
+
+    const supervisor = new Supervisor(config, store);
+    const decisions = [
+      { action: "dispatch" as const, agentName: "agent-a", message: "Fix #42 and #43", reason: "Both need work" },
+    ];
+
+    const result = supervisor.gateResolvedIssues(decisions);
+
+    expect(result.passed).toHaveLength(0);
+    expect(result.blocked).toHaveLength(1);
+    expect(result.blocked[0].skipReason).toContain("#43");
+  });
+
+  it("uses live (cache-bypassing) validation, not cached", () => {
+    const supervisor = new Supervisor(config, store);
+    supervisor.gateResolvedIssues([
+      { action: "dispatch" as const, agentName: "agent-a", message: "Fix #42", reason: "Open" },
+    ]);
+
+    // Verify liveValidateForDispatch was called (not cachedValidateForDispatch)
+    expect(mockLiveValidateForDispatch).toHaveBeenCalledWith("owner/a", 42);
   });
 });
 

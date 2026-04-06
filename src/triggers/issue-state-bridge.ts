@@ -67,6 +67,32 @@ export function cachedValidateForDispatch(repo: string, issueNumber: number): st
 }
 
 /**
+ * Live (cache-bypassing) issue state fetch.
+ * Invalidates the cached entry first, then fetches fresh state from GitHub.
+ *
+ * Use this when stale data is unacceptable — e.g. the supervisor hard gate
+ * that must never dispatch to a resolved issue (issue #507).
+ */
+export function liveGetIssueState(repo: string, issueNumber: number): CachedIssueState {
+  getIssueStateCache().invalidate(repo, issueNumber);
+  return getIssueStateCache().getOrFetch(repo, issueNumber, gitHubFetcher);
+}
+
+/**
+ * Live (cache-bypassing) pre-dispatch validation.
+ * Invalidates the cached entry first, then validates fresh state.
+ *
+ * Returns a skip-reason string if dispatch should be blocked, or null if OK.
+ * Unlike `cachedValidateForDispatch`, this always hits the GitHub API.
+ *
+ * @see https://github.com/rapartlu/agent-orchestrator/issues/507
+ */
+export function liveValidateForDispatch(repo: string, issueNumber: number): string | null {
+  getIssueStateCache().invalidate(repo, issueNumber);
+  return getIssueStateCache().validateForDispatch(repo, issueNumber, gitHubFetcher);
+}
+
+/**
  * Invalidate a single issue's cached state.
  * Call this after events that change issue state (PR merge, issue close, etc.).
  */

@@ -10,7 +10,7 @@ import { ReviewerClient } from "../client/reviewer-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore, Task, SupervisorDecisionRecord } from "../state/store.js";
 import { createLogger } from "../service/logger.js";
-import { cachedGetIssueState } from "../triggers/issue-state-bridge.js";
+import { cachedGetIssueState, liveValidateForDispatch } from "../triggers/issue-state-bridge.js";
 
 export type { SupervisorDecision } from "../client/reviewer-client.js";
 import type { SupervisorDecision } from "../client/reviewer-client.js";
@@ -136,6 +136,12 @@ export function isConcreteDispatch(message: string): boolean {
   return ARTIFACT_KEYWORDS.some((kw) => lower.includes(kw));
 }
 
+/** Result of the hard gate: decisions split into passed and blocked */
+export interface GateResult {
+  passed: SupervisorDecision[];
+  blocked: Array<{ decision: SupervisorDecision; skipReason: string }>;
+}
+
 export class Supervisor {
   private log = createLogger("supervisor");
   private reviewerClient: ReviewerClient;
@@ -146,6 +152,89 @@ export class Supervisor {
     reviewerClient?: ReviewerClient,
   ) {
     this.reviewerClient = reviewerClient ?? new ReviewerClient(config);
+  }
+
+  /**
+   * Hard gate: block dispatch to already-resolved issues (issue #507).
+   *
+   * For every dispatch/follow-up decision that references a GitHub issue,
+   * performs a **live** (cache-bypassing) GitHub check.  If any referenced
+   * issue is closed, has a merged PR, or already has an open PR, the
+   * decision is blocked and a skip reason is returned.
+   *
+   * This runs at the supervisor decision layer — the authoritative point
+   * before any dispatch is committed — so no resolved issue can leak
+   * through to the dispatcher regardless of cache staleness.
+   */
+  gateResolvedIssues(decisions: SupervisorDecision[]): GateResult {
+    const passed: SupervisorDecision[] = [];
+    const blocked: GateResult["blocked"] = [];
+
+    for (const d of decisions) {
+      // Only gate dispatch/follow-up actions — others pass through
+      if (d.action !== "dispatch" && d.action !== "follow-up") {
+        passed.push(d);
+        continue;
+      }
+
+      const agentGithub = d.agentName
+        ? this.config.agents[d.agentName]?.github
+        : undefined;
+
+      if (!agentGithub) {
+        // No GitHub repo configured — can't validate, let it through
+        passed.push(d);
+        continue;
+      }
+
+      const issueRefs = extractIssueRefs(`${d.message ?? ""} ${d.reason ?? ""}`);
+      if (issueRefs.length === 0) {
+        // No issue refs to validate — let it through
+        passed.push(d);
+        continue;
+      }
+
+      let skipReason: string | null = null;
+
+      for (const issueNum of issueRefs) {
+        try {
+          skipReason = liveValidateForDispatch(agentGithub, issueNum);
+          if (skipReason) {
+            this.log.warn("Supervisor hard gate: dispatch blocked", {
+              agentName: d.agentName,
+              issueNum,
+              skipReason,
+              reason: d.reason,
+            });
+            break;
+          }
+        } catch (err) {
+          // GitHub API error — log but don't block (safe default)
+          this.log.warn("Supervisor hard gate: GitHub check failed, allowing dispatch", {
+            agentName: d.agentName,
+            issueNum,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      if (skipReason) {
+        blocked.push({ decision: d, skipReason });
+      } else {
+        passed.push(d);
+      }
+    }
+
+    if (blocked.length > 0) {
+      this.log.info("Supervisor hard gate summary", {
+        total: decisions.length,
+        passed: passed.length,
+        blocked: blocked.length,
+        blockedReasons: blocked.map((b) => b.skipReason),
+      });
+    }
+
+    return { passed, blocked };
   }
 
   async review(): Promise<SupervisorDecision[]> {
