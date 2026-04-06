@@ -26,6 +26,9 @@ vi.mock("../triggers/github.js", async (importOriginal) => {
     // Default: issues are open so retryTask proceeds normally.
     // Individual tests can override via mockIsIssueOpen.
     isIssueOpen: vi.fn().mockReturnValue(true),
+    // Default: no existing PRs for issue.
+    // Individual tests can override via mockFindExistingPRsForIssue.
+    findExistingPRsForIssue: vi.fn().mockReturnValue([]),
   };
 });
 
@@ -46,9 +49,10 @@ const mockReportEscalation = vi.mocked(reportEscalation);
 import { notifyOperator } from "../service/notify.js";
 const mockNotifyOperator = vi.mocked(notifyOperator);
 
-import { validateGhAuth, GhAuthError, isIssueOpen } from "../triggers/github.js";
+import { validateGhAuth, GhAuthError, isIssueOpen, findExistingPRsForIssue } from "../triggers/github.js";
 const mockValidateGhAuth = vi.mocked(validateGhAuth);
 const mockIsIssueOpen = vi.mocked(isIssueOpen);
+const mockFindExistingPRsForIssue = vi.mocked(findExistingPRsForIssue);
 
 // Track the last mockSend across beforeEach
 let mockSend: ReturnType<typeof vi.fn>;
@@ -918,6 +922,101 @@ describe("Dispatcher.dispatch — closed-issue guard (issue #444)", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
+// dispatch() — already-resolved guard (issue #457)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("Dispatcher.dispatch — already-resolved guard (issue #457)", () => {
+  let store: StateStore;
+  let dispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+    dispatcher = new Dispatcher(makeConfig(), store);
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+    // Issue is open (not caught by closed-issue guard)
+    mockIsIssueOpen.mockReturnValue(true);
+  });
+
+  it("skips dispatch when issue has a merged PR", async () => {
+    mockFindExistingPRsForIssue.mockReturnValueOnce([
+      { number: 42, title: "Fix it", url: "https://github.com/owner/repo/pull/42", state: "merged", isDraft: false },
+    ]);
+
+    const result = await dispatcher.dispatch("fix the bug", {
+      agentName: "test-agent",
+      source: "github",
+      sourceRef: "owner/repo#99",
+    });
+
+    // Should NOT have called agent send
+    expect(mockSend).not.toHaveBeenCalled();
+
+    // No task should have been created
+    const tasks = store.listTasks({});
+    expect(tasks).toHaveLength(0);
+
+    // Should return a skip result with merged PR info
+    expect(result.taskId).toBe("");
+    expect(result.agentName).toBe("test-agent");
+    expect(result.response.stop_reason).toBe("skipped");
+    expect(result.response.content).toContain("already resolved");
+    expect(result.response.content).toContain("#42");
+  });
+
+  it("proceeds with dispatch when no merged PR exists", async () => {
+    mockFindExistingPRsForIssue.mockReturnValueOnce([
+      { number: 10, title: "WIP", url: "https://github.com/owner/repo/pull/10", state: "open", isDraft: true },
+    ]);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 5 },
+    });
+
+    const result = await dispatcher.dispatch("fix the bug", {
+      agentName: "test-agent",
+      source: "github",
+      sourceRef: "owner/repo#99",
+    });
+
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(result.taskId).not.toBe("");
+  });
+
+  it("proceeds with dispatch when findExistingPRsForIssue returns empty", async () => {
+    mockFindExistingPRsForIssue.mockReturnValueOnce([]);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 5 },
+    });
+
+    const result = await dispatcher.dispatch("fix the bug", {
+      agentName: "test-agent",
+      source: "github",
+      sourceRef: "owner/repo#99",
+    });
+
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(result.taskId).not.toBe("");
+  });
+
+  it("does not check merged PRs for non-github sources", async () => {
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 5 },
+    });
+
+    await dispatcher.dispatch("do the thing", {
+      agentName: "test-agent",
+      source: "manual",
+    });
+
+    expect(mockFindExistingPRsForIssue).not.toHaveBeenCalled();
+    expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
 // retryTask() — closed-issue guard (issue #431)
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -1015,6 +1114,82 @@ describe("Dispatcher.retryTask — closed-issue guard (issue #431)", () => {
     // isIssueOpen should NOT have been called for non-github tasks
     expect(mockIsIssueOpen).not.toHaveBeenCalled();
     expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// retryTask() — already-resolved guard (issue #457)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("Dispatcher.retryTask — already-resolved guard (issue #457)", () => {
+  let store: StateStore;
+  let dispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+    dispatcher = new Dispatcher(makeConfig(), store);
+    // Issue is open (not caught by closed-issue guard)
+    mockIsIssueOpen.mockReturnValue(true);
+  });
+
+  it("skips retry when issue has a merged PR", async () => {
+    const task = store.createTask({
+      title: "Fix bug",
+      description: "Fix the bug",
+      source: "github",
+      source_ref: "owner/repo#99",
+      agent_name: "test-agent",
+    });
+    store.updateTask(task.id, {
+      status: "failed",
+      result: "connection refused",
+      retry_count: 1,
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    });
+
+    mockFindExistingPRsForIssue.mockReturnValueOnce([
+      { number: 42, title: "Fix it", url: "https://github.com/owner/repo/pull/42", state: "merged", isDraft: false },
+    ]);
+
+    await dispatcher.retryTask(store.getTask(task.id)!);
+
+    // Should NOT have called send
+    expect(mockSend).not.toHaveBeenCalled();
+
+    // Task should be failed with resolved-externally message
+    const updated = store.getTask(task.id)!;
+    expect(updated.status).toBe("failed");
+    expect(updated.result).toContain("merged PR #42");
+    expect(updated.next_retry_at).toBeNull();
+  });
+
+  it("proceeds with retry when no merged PR exists", async () => {
+    const task = store.createTask({
+      title: "Fix bug",
+      description: "Fix the bug",
+      source: "github",
+      source_ref: "owner/repo#99",
+      agent_name: "test-agent",
+    });
+    store.updateTask(task.id, {
+      status: "failed",
+      result: "connection refused",
+      retry_count: 1,
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    });
+
+    mockFindExistingPRsForIssue.mockReturnValueOnce([]);
+    mockSend.mockResolvedValueOnce({
+      content: "retry succeeded",
+      usage: { input_tokens: 5, output_tokens: 5 },
+    });
+
+    await dispatcher.retryTask(store.getTask(task.id)!);
+
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    const updated = store.getTask(task.id)!;
+    expect(updated.status).toBe("done");
   });
 });
 

@@ -7,7 +7,7 @@ import { StateStore, type Task, type TaskSource, type TaskType, type AgentHealth
 import { type OrchestratorConfig, getPoolMembers } from "../config/schema.js";
 import { ulid } from "ulid";
 import { createLogger } from "../service/logger.js";
-import { validateGhAuth, GhAuthError, isIssueOpen } from "../triggers/github.js";
+import { validateGhAuth, GhAuthError, isIssueOpen, findExistingPRsForIssue } from "../triggers/github.js";
 import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
 import { buildRejectionHistoryBlock } from "./rejection-history.js";
 import { notifyOperator } from "../service/notify.js";
@@ -356,6 +356,34 @@ export class Dispatcher {
             },
           };
         }
+
+        // Pre-dispatch already-resolved guard (issue #457): even if the issue is
+        // still open, check whether a merged PR already addresses it.  GitHub's
+        // auto-close is eventually consistent — the issue may remain open for a
+        // few seconds after the PR merges.  This catches supervisor dispatches,
+        // manual dispatches, and other paths that bypass trigger-level guards.
+        const existingPRs = findExistingPRsForIssue(repo, issueNumber);
+        const mergedPR = existingPRs.find((pr) => pr.state === "merged");
+        if (mergedPR) {
+          this.log.warn("Dispatch skipped: issue already resolved by merged PR", {
+            agentName,
+            sourceRef: options.sourceRef,
+            repo,
+            issueNumber,
+            mergedPR: mergedPR.number,
+            mergedPRUrl: mergedPR.url,
+          });
+          return {
+            taskId: "",
+            agentName,
+            response: {
+              content: `Skipped: issue ${options.sourceRef} is already resolved by merged PR #${mergedPR.number}`,
+              model: "",
+              usage: { input_tokens: 0, output_tokens: 0 },
+              stop_reason: "skipped",
+            },
+          };
+        }
       }
     }
 
@@ -579,6 +607,32 @@ export class Dispatcher {
           this.store.updateTask(task.id, {
             status: "failed",
             result: `Resolved externally: source issue ${task.source_ref} was closed before retry.`,
+            next_retry_at: null,
+          });
+          return;
+        }
+
+        // Pre-retry already-resolved guard (issue #457): even if the issue is
+        // still open, a merged PR may already address it.  Skip the retry to
+        // avoid wasting an agent cycle on already-resolved work.
+        const existingPRs = findExistingPRsForIssue(repo, issueNumber);
+        const mergedPR = existingPRs.find((pr) => pr.state === "merged");
+        if (mergedPR) {
+          this.log.info("Retry skipped: issue already resolved by merged PR", {
+            taskId: task.id,
+            agentName,
+            sourceRef: task.source_ref,
+            issueNumber,
+            mergedPR: mergedPR.number,
+          });
+          this.store.addLog({
+            task_id: task.id,
+            direction: "system",
+            content: `Resolved externally: issue ${task.source_ref} already addressed by merged PR #${mergedPR.number} — retry cancelled.`,
+          });
+          this.store.updateTask(task.id, {
+            status: "failed",
+            result: `Resolved externally: issue ${task.source_ref} already addressed by merged PR #${mergedPR.number}.`,
             next_retry_at: null,
           });
           return;
