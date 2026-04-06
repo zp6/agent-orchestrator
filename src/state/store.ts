@@ -948,6 +948,17 @@ export class StateStore {
       .get(sourceRef) as Task | undefined;
   }
 
+  /** Return all top-level tasks with a given status. */
+  getTasksByStatus(status: string): Task[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE status = ? AND parent_task_id IS NULL
+         ORDER BY created_at DESC`,
+      )
+      .all(status) as Task[];
+  }
+
   /**
    * Return all currently escalated top-level tasks, most recent first.
    * Used by `orch status` to surface escalated tasks with de-escalation hints.

@@ -22,10 +22,51 @@ export function registerDeescalateCommand(program: Command): void {
   program
     .command("deescalate")
     .description("Unblock an escalated source_ref so the daemon can re-dispatch it")
-    .argument("<source_ref>", "The source ref to de-escalate (e.g. rapartlu/agent-proxy#145)")
+    .argument("[source_ref]", "The source ref to de-escalate (e.g. rapartlu/agent-proxy#145)")
     .option("--reason <reason>", "Reason for de-escalation (logged for audit)")
-    .action((rawRef: string, opts: { reason?: string }) => {
+    .option("--all", "De-escalate ALL escalated tasks at once")
+    .action((rawRef: string | undefined, opts: { reason?: string; all?: boolean }) => {
       const store = new StateStore();
+
+      if (opts.all) {
+        try {
+          const reason = opts.reason ?? "bulk de-escalation";
+          const escalated = store.getTasksByStatus("escalated");
+          if (escalated.length === 0) {
+            console.log(chalk.yellow("No escalated tasks found."));
+            return;
+          }
+
+          let count = 0;
+          for (const task of escalated) {
+            store.updateTask(task.id, {
+              status: "failed",
+              retry_count: 0,
+              next_retry_at: null,
+            });
+            if (task.source_ref) {
+              store.removeProcessedTrigger(task.source ?? "github", task.source_ref);
+            }
+            store.addLog({
+              task_id: task.id,
+              direction: "system",
+              content: `De-escalated by operator (bulk): ${reason}`,
+            });
+            count++;
+          }
+
+          console.log(chalk.green(`✓ De-escalated ${count} task(s)\n`));
+          console.log(chalk.dim("The daemon will re-dispatch eligible source_refs on its next poll cycle."));
+          return;
+        } finally {
+          store.close();
+        }
+      }
+
+      if (!rawRef) {
+        console.error(chalk.red("Provide a source_ref or use --all to de-escalate all tasks."));
+        process.exit(1);
+      }
 
       try {
         const sourceRef = normaliseSourceRef(rawRef);
