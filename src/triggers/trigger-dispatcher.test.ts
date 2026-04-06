@@ -18,13 +18,22 @@ vi.mock("./reporters.js", () => ({
   reportResult: vi.fn(),
 }));
 
+// Mock issue-state-bridge: default = issue is open, no PRs
+vi.mock("./issue-state-bridge.js", () => ({
+  cachedIsIssueOpen: vi.fn().mockReturnValue(true),
+  cachedGetIssueState: vi.fn().mockReturnValue({ state: "open", hasOpenPR: false, hasMergedPR: false }),
+  logCacheMetrics: vi.fn(),
+}));
+
 import { fetchOpenIssues, findApprovedPRForIssue, findBranchForIssue, findExistingPRsForIssue, isIssueOpen, validateGhAuth } from "./github.js";
+import { cachedGetIssueState } from "./issue-state-bridge.js";
 const mockFetchIssues = vi.mocked(fetchOpenIssues);
 const mockFindApprovedPR = vi.mocked(findApprovedPRForIssue);
 const mockFindBranchForIssue = vi.mocked(findBranchForIssue);
 const mockFindExistingPRs = vi.mocked(findExistingPRsForIssue);
 const mockIsIssueOpen = vi.mocked(isIssueOpen);
 const mockValidateGhAuth = vi.mocked(validateGhAuth);
+const mockCachedGetIssueState = vi.mocked(cachedGetIssueState);
 
 const config: OrchestratorConfig = {
   proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 5000 },
@@ -81,7 +90,7 @@ describe("dispatchGitHubIssues", () => {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
     } as unknown as Dispatcher;
     // Default: issues are open (pre-dispatch validation passes)
-    mockIsIssueOpen.mockReturnValue(true);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: false, hasMergedPR: false });
   });
 
   it("dispatches new issues to owning agent", async () => {
@@ -216,7 +225,7 @@ describe("pre-dispatch issue state validation", () => {
     } as unknown as Dispatcher;
     mockFindExistingPRs.mockReturnValue([]);
     // Default: issues are open
-    mockIsIssueOpen.mockReturnValue(true);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: false, hasMergedPR: false });
   });
 
   it("skips dispatch when issue has been closed (race condition guard)", async () => {
@@ -224,7 +233,7 @@ describe("pre-dispatch issue state validation", () => {
       { repo: "owner/my-repo", number: 42, title: "Stale issue", body: "Already done", url: "https://...", labels: [] },
     ]);
     // Issue was fetched as open but has since been closed
-    mockIsIssueOpen.mockReturnValue(false);
+    mockCachedGetIssueState.mockReturnValue({ state: "closed", hasOpenPR: false, hasMergedPR: false });
 
     const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
@@ -239,7 +248,7 @@ describe("pre-dispatch issue state validation", () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Live issue", body: "Needs work", url: "https://...", labels: [] },
     ]);
-    mockIsIssueOpen.mockReturnValue(true);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: false, hasMergedPR: false });
 
     const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
@@ -252,7 +261,7 @@ describe("pre-dispatch issue state validation", () => {
       { repo: "owner/my-repo", number: 42, title: "Issue", body: "Needs work", url: "https://...", labels: [] },
     ]);
     // isIssueOpen returns true on error (fail-open) — dispatch should proceed
-    mockIsIssueOpen.mockReturnValue(true);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: false, hasMergedPR: false });
 
     const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
@@ -280,7 +289,7 @@ describe("duplicate PR detection before dispatch", () => {
     } as unknown as Dispatcher;
     // Default: no existing PRs, issues are open
     mockFindExistingPRs.mockReturnValue([]);
-    mockIsIssueOpen.mockReturnValue(true);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: false, hasMergedPR: false });
   });
 
   it("dispatches normally when no existing PRs are found", async () => {
@@ -303,6 +312,8 @@ describe("duplicate PR detection before dispatch", () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
     ]);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: false, hasMergedPR: true });
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([
       { number: 10, title: "Fix bug", url: "https://github.com/owner/my-repo/pull/10", state: "merged", isDraft: false },
     ]);
@@ -320,6 +331,8 @@ describe("duplicate PR detection before dispatch", () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
     ]);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([
       { number: 7, title: "WIP fix", url: "https://github.com/owner/my-repo/pull/7", state: "open", isDraft: false },
     ]);
@@ -339,6 +352,7 @@ describe("duplicate PR detection before dispatch", () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
     ]);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([
       { number: 7, title: "WIP fix", url: "https://github.com/owner/my-repo/pull/7", state: "open", isDraft: true },
     ]);
@@ -359,6 +373,7 @@ describe("duplicate PR detection before dispatch", () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
     ]);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([
       { number: 7, title: "WIP fix", url: "https://github.com/owner/my-repo/pull/7", state: "open", isDraft: true },
     ]);
@@ -393,6 +408,7 @@ describe("duplicate PR detection before dispatch", () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
     ]);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([
       { number: 8, title: "Draft fix", url: "https://github.com/owner/my-repo/pull/8", state: "open", isDraft: true },
     ]);
@@ -409,6 +425,7 @@ describe("duplicate PR detection before dispatch", () => {
       { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
     ]);
     // Both a merged and an open PR exist (edge case)
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([
       { number: 5, title: "Merged PR", url: "url1", state: "merged", isDraft: false },
       { number: 6, title: "Open PR", url: "url2", state: "open", isDraft: false },
@@ -425,6 +442,7 @@ describe("duplicate PR detection before dispatch", () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 123, title: "Task", body: "Do work", url: "https://...", labels: [] },
     ]);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
 
     await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
@@ -435,6 +453,7 @@ describe("duplicate PR detection before dispatch", () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
     ]);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([]);
 
     const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
@@ -462,7 +481,7 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
     } as unknown as Dispatcher;
     // Default: issues are open
-    mockIsIssueOpen.mockReturnValue(true);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: false, hasMergedPR: false });
   });
 
   it("skips agent while a task is in-flight (first call in cycle)", async () => {
@@ -564,7 +583,8 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
     } as unknown as Dispatcher;
-    mockIsIssueOpen.mockReturnValue(true);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: false, hasMergedPR: false });
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([]);
   });
 
@@ -697,6 +717,7 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
     ]);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([
       { number: 9, title: "Open fix", url: "https://github.com/owner/my-repo/pull/9", state: "open", isDraft: false },
     ]);
@@ -712,6 +733,7 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
     ]);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([
       { number: 9, title: "Draft fix", url: "https://github.com/owner/my-repo/pull/9", state: "open", isDraft: true },
     ]);
@@ -879,7 +901,7 @@ describe("dispatchIdleAgentBacklog", () => {
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
     } as unknown as Dispatcher;
-    mockIsIssueOpen.mockReturnValue(true);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: false, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([]);
   });
 
@@ -985,6 +1007,7 @@ describe("dispatchIdleAgentBacklog", () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 1, title: "Already fixed", body: "", url: "https://...", labels: [] },
     ]);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([
       { number: 5, title: "Fix", url: "url", state: "merged", isDraft: false },
     ]);
@@ -1002,7 +1025,7 @@ describe("dispatchIdleAgentBacklog", () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 1, title: "Closed issue", body: "", url: "https://...", labels: [] },
     ]);
-    mockIsIssueOpen.mockReturnValue(false);
+    mockCachedGetIssueState.mockReturnValue({ state: "closed", hasOpenPR: false, hasMergedPR: false });
 
     const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
 
@@ -1018,6 +1041,7 @@ describe("dispatchIdleAgentBacklog", () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 3, title: "PR in progress", body: "Do work", url: "https://...", labels: [] },
     ]);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([
       { number: 7, title: "WIP", url: "https://github.com/owner/my-repo/pull/7", state: "open", isDraft: false },
     ]);
@@ -1033,6 +1057,7 @@ describe("dispatchIdleAgentBacklog", () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 3, title: "PR in progress", body: "Do work", url: "https://...", labels: [] },
     ]);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([
       { number: 7, title: "WIP", url: "https://github.com/owner/my-repo/pull/7", state: "open", isDraft: true },
     ]);
@@ -1100,7 +1125,7 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockValidateGhAuth.mockReturnValue({ ok: true });
-    mockIsIssueOpen.mockReturnValue(true);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: false, hasMergedPR: false });
     mockStore = {
       isProcessed: vi.fn().mockReturnValue(false),
       markProcessed: vi.fn(),
@@ -1207,7 +1232,7 @@ describe("in-flight branch detection", () => {
 
   beforeEach(() => {
     mockFetchIssues.mockReturnValue([baseIssue]);
-    mockIsIssueOpen.mockReturnValue(true);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: false, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([]);
     mockFindBranchForIssue.mockReturnValue(null);
   });
@@ -1275,6 +1300,7 @@ describe("in-flight branch detection", () => {
   });
 
   it("skips dispatch entirely when a non-draft open PR exists (open PR takes precedence over branch)", async () => {
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([
       { number: 10, title: "PR", url: "https://github.com/owner/my-repo/pull/10", state: "open", isDraft: false },
     ]);
@@ -1359,7 +1385,8 @@ describe("approved PR skip logic", () => {
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
     } as unknown as Dispatcher;
-    mockIsIssueOpen.mockReturnValue(true);
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: false, hasMergedPR: false });
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([]);
     // Default: no approved PR
     mockFindApprovedPR.mockReturnValue(null);
