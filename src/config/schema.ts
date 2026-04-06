@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execSync } from "node:child_process";
 import { parse as parseYaml } from "yaml";
 
 export interface ProviderConfig {
@@ -218,9 +219,33 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
     parsed.orchestrator_dir = dirname(path);
   }
 
-  // Fall back to GH_TOKEN env var for proxy.gh_token
+  // Resolve GH_TOKEN: agents.yaml → env var → ~/.claude-orchestrator/.env → `gh auth token` CLI
   if (!parsed.proxy.gh_token && process.env.GH_TOKEN) {
     parsed.proxy.gh_token = process.env.GH_TOKEN;
+  }
+  if (!parsed.proxy.gh_token) {
+    // Read from persistent .env file (set during setup)
+    const envPath = resolve(process.env.HOME ?? "", ".claude-orchestrator", ".env");
+    try {
+      const envContent = readFileSync(envPath, "utf-8");
+      const match = envContent.match(/^GH_TOKEN=(.+)$/m);
+      if (match?.[1]) {
+        parsed.proxy.gh_token = match[1].trim();
+      }
+    } catch {
+      // .env file doesn't exist
+    }
+  }
+  if (!parsed.proxy.gh_token) {
+    // Last resort: ask gh CLI
+    try {
+      const token = execSync("gh auth token", { encoding: "utf-8", timeout: 5000 }).trim();
+      if (token) {
+        parsed.proxy.gh_token = token;
+      }
+    } catch {
+      // gh CLI not available or not logged in
+    }
   }
 
   return parsed;
