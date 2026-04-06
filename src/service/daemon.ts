@@ -164,8 +164,8 @@ export class Daemon {
     console.log();
 
     // Ensure all agents from agents.yaml are registered with the proxy.
-    // The management API loses agent state on proxy restart, so we sync on every daemon start.
-    await this.syncAgents();
+    // Force token refresh on startup — proxy loses credentials on restart.
+    await this.syncAgents({ forceTokenRefresh: true });
 
     // Check that agents have GH_TOKEN configured — without it, `gh pr create` will fail
     // inside agent containers, causing tasks to require human escalation.
@@ -301,11 +301,11 @@ export class Daemon {
 
   }
 
-  private async syncAgents(): Promise<void> {
+  private async syncAgents(options?: { forceTokenRefresh?: boolean }): Promise<void> {
     try {
       const management = new ManagementClient(this.config.proxy);
       const proxyAgents = await management.listAgents();
-      const actions = planSync(this.config, proxyAgents);
+      const actions = planSync(this.config, proxyAgents, options);
       const needsWork = actions.filter((a) => a.type !== "skip");
       if (needsWork.length === 0) {
         this.log.info("Agent sync: all agents registered");

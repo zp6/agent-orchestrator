@@ -16,6 +16,7 @@ export interface SyncResult {
 export function planSync(
   config: OrchestratorConfig,
   proxyAgents: ProxyAgentStatus[],
+  options?: { forceTokenRefresh?: boolean },
 ): SyncAction[] {
   const actions: SyncAction[] = [];
   const proxyMap = new Map(proxyAgents.map((a) => [a.name, a]));
@@ -47,6 +48,13 @@ export function planSync(
         reason: ghTokenDrift
           ? "GH_TOKEN differs from desired state"
           : "Config differs from desired state",
+      });
+    } else if (options?.forceTokenRefresh && needsTokenRefresh(config)) {
+      // No config drift, but push tokens — proxy loses them on restart
+      actions.push({
+        type: "update",
+        agentName: name,
+        reason: "Token refresh (ensuring credentials are current)",
       });
     } else {
       actions.push({
@@ -87,6 +95,8 @@ function hasConfigDrift(
   if ((agent.deploy_branch ?? "") !== (proxy.branch ?? "")) return true;
   // Detect ghToken drift so agents don't lose `gh` CLI auth after proxy restart
   if (hasGhTokenDrift(config, proxy)) return true;
+  // Session mode drift
+  if (agent.docker?.session && proxy.session !== agent.docker.session) return true;
   return false;
 }
 
@@ -97,6 +107,13 @@ function hasGhTokenDrift(
   const desired = config.proxy.gh_token ?? "";
   const actual = proxy.ghToken ?? "";
   return desired !== "" && desired !== actual;
+}
+
+/**
+ * Check if running agents need a token refresh.
+ */
+export function needsTokenRefresh(config: OrchestratorConfig): boolean {
+  return !!(config.proxy.gh_token || config.proxy.ssh_key);
 }
 
 export function toProxyConfig(
