@@ -494,7 +494,12 @@ function buildTokenStats(ctx: TelegramContext): string {
     const icon = pct !== null && pct >= 80 ? "🔴" : pct !== null && pct >= 50 ? "🟡" : "🟢";
 
     lines.push(`  ${icon} ${usage.provider}: ${windows.join(" | ")}`);
-    lines.push(`    ${usage.request_count} requests`);
+    // Show cache stats — helps explain why Claude input tokens are low
+    const cacheTotal = usage.cache_read_tokens + usage.cache_creation_tokens;
+    const cacheStr = cacheTotal > 0
+      ? ` | cache: ${Math.round(usage.cache_read_tokens / 1000)}K read, ${Math.round(usage.cache_creation_tokens / 1000)}K create`
+      : "";
+    lines.push(`    ${usage.request_count} requests${cacheStr}`);
   }
 
   // Per-agent top consumers

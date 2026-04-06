@@ -564,6 +564,7 @@ export class StateStore {
     this.runAgentHealthMigration();
     this.runRevisionCountMigration();
     this.runTokenUsageMigration();
+    this.runTokenUsageCacheMigration();
   }
 
   private runPhase2Migration(): void {
@@ -1587,11 +1588,18 @@ export class StateStore {
     this.db.prepare("UPDATE tasks SET reported = 1 WHERE id = ?").run(taskId);
   }
 
-  recordTokenUsage(provider: string, agentName: string | null, tokensIn: number, tokensOut: number): void {
+  recordTokenUsage(
+    provider: string,
+    agentName: string | null,
+    tokensIn: number,
+    tokensOut: number,
+    cacheReadTokens = 0,
+    cacheCreationTokens = 0,
+  ): void {
     this.db.prepare(`
-      INSERT INTO token_usage (provider, agent_name, tokens_in, tokens_out, recorded_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(provider, agentName, tokensIn, tokensOut, new Date().toISOString());
+      INSERT INTO token_usage (provider, agent_name, tokens_in, tokens_out, cache_read_tokens, cache_creation_tokens, recorded_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(provider, agentName, tokensIn, tokensOut, cacheReadTokens, cacheCreationTokens, new Date().toISOString());
   }
 
   /**
@@ -2830,21 +2838,46 @@ export class StateStore {
     `);
   }
 
+  private runTokenUsageCacheMigration(): void {
+    const cols = this.db.prepare("PRAGMA table_info(token_usage)").all() as Array<{ name: string }>;
+    const colNames = new Set(cols.map((c) => c.name));
+    if (!colNames.has("cache_read_tokens")) {
+      this.db.exec(`
+        ALTER TABLE token_usage ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE token_usage ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
+      `);
+    }
+  }
+
   /**
    * Aggregate token usage per provider over a rolling time window.
    * Returns one row per provider, sorted by total descending.
    */
-  getTokenUsageByProvider(windowHours: number): Array<{ provider: string; total: number; request_count: number }> {
+  getTokenUsageByProvider(windowHours: number): Array<{
+    provider: string;
+    total: number;
+    request_count: number;
+    cache_read_tokens: number;
+    cache_creation_tokens: number;
+  }> {
     return this.db.prepare(`
       SELECT
         provider,
         COALESCE(SUM(tokens_in + tokens_out), 0) AS total,
-        COUNT(*) AS request_count
+        COUNT(*) AS request_count,
+        COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+        COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens
       FROM token_usage
       WHERE recorded_at >= datetime('now', '-' || ? || ' hours')
       GROUP BY provider
       ORDER BY total DESC
-    `).all(windowHours) as Array<{ provider: string; total: number; request_count: number }>;
+    `).all(windowHours) as Array<{
+      provider: string;
+      total: number;
+      request_count: number;
+      cache_read_tokens: number;
+      cache_creation_tokens: number;
+    }>;
   }
 
   /**

@@ -79,6 +79,8 @@ export type LLMUsageRecorder = (
   agentName: string,
   tokensIn: number,
   tokensOut: number,
+  cacheReadTokens?: number,
+  cacheCreationTokens?: number,
 ) => void;
 
 let usageRecorder: LLMUsageRecorder | null = null;
@@ -114,7 +116,10 @@ function wrapClientWithUsageTracking(
     try {
       const usage = (response as Anthropic.Message).usage;
       if (usage && usageRecorder) {
-        usageRecorder(provider, agentName, usage.input_tokens, usage.output_tokens);
+        const u = usage as unknown as Record<string, number | null>;
+        const cacheRead = u.cache_read_input_tokens ?? 0;
+        const cacheCreate = u.cache_creation_input_tokens ?? 0;
+        usageRecorder(provider, agentName, usage.input_tokens, usage.output_tokens, cacheRead, cacheCreate);
       }
     } catch (err) {
       log.warn("Failed to record LLM token usage", {
