@@ -29,11 +29,10 @@ export class Planner {
 
   async plan(task: string): Promise<Plan> {
     const registry = this.buildRegistryPrompt() + (this.learner?.buildPlannerContext() ?? "");
-    const client = createLLMClient(this.config
-    );
+    const { client, model } = createLLMClient(this.config);
 
     const response = await client.messages.create({
-      model: getLLMModel(this.config, "planner"),
+      model: getLLMModel(this.config, "planner") ?? model,
       max_tokens: 4096,
       system: registry,
       messages: [{ role: "user", content: task }],

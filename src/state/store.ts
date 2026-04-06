@@ -2795,6 +2795,8 @@ export class StateStore {
     }
   }
 
+  // ── Token usage table (provider-level tracking) ────────────────────────
+
   private runTokenUsageMigration(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS token_usage (
@@ -2807,7 +2809,43 @@ export class StateStore {
       );
       CREATE INDEX IF NOT EXISTS idx_token_usage_recorded_at ON token_usage(recorded_at);
       CREATE INDEX IF NOT EXISTS idx_token_usage_agent_name ON token_usage(agent_name);
+      CREATE INDEX IF NOT EXISTS idx_token_usage_provider ON token_usage(provider, recorded_at);
     `);
+  }
+
+  /**
+   * Aggregate token usage per provider over a rolling time window.
+   * Returns one row per provider, sorted by total descending.
+   */
+  getTokenUsageByProvider(windowHours: number): Array<{ provider: string; total: number; request_count: number }> {
+    return this.db.prepare(`
+      SELECT
+        provider,
+        COALESCE(SUM(tokens_in + tokens_out), 0) AS total,
+        COUNT(*) AS request_count
+      FROM token_usage
+      WHERE recorded_at >= datetime('now', '-' || ? || ' hours')
+      GROUP BY provider
+      ORDER BY total DESC
+    `).all(windowHours) as Array<{ provider: string; total: number; request_count: number }>;
+  }
+
+  /**
+   * Aggregate token usage per agent over a rolling time window (from token_usage table).
+   * Returns one row per agent, sorted by total descending.
+   */
+  getTokenUsageByAgent(windowHours: number): Array<{ agent_name: string; provider: string; total: number }> {
+    return this.db.prepare(`
+      SELECT
+        agent_name,
+        provider,
+        COALESCE(SUM(tokens_in + tokens_out), 0) AS total
+      FROM token_usage
+      WHERE agent_name IS NOT NULL
+        AND recorded_at >= datetime('now', '-' || ? || ' hours')
+      GROUP BY agent_name, provider
+      ORDER BY total DESC
+    `).all(windowHours) as Array<{ agent_name: string; provider: string; total: number }>;
   }
 
   // ── Stuck issues ─────────────────────────────────────────────────────────

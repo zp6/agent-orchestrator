@@ -30,9 +30,12 @@ vi.mock("../service/logger.js", () => ({
 // Mock LLM client — tests will override when needed
 vi.mock("../client/llm-client.js", () => ({
   createLLMClient: () => ({
-    messages: {
-      create: vi.fn().mockResolvedValue({ content: [{ type: "text", text: "none" }] }),
+    client: {
+      messages: {
+        create: vi.fn().mockResolvedValue({ content: [{ type: "text", text: "none" }] }),
+      },
     },
+    model: "test-model",
   }),
 }));
 

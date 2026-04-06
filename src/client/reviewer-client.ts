@@ -258,7 +258,7 @@ export class ReviewerClient {
    * Sends the task description + result to the reviewer pool for assessment.
    */
   async verifyTask(task: Task): Promise<VerificationResult> {
-    const client = createLLMClient(this.config);
+    const { client, model } = createLLMClient(this.config);
 
     const isResearch = task.task_type === "research";
     const prompt = isResearch
@@ -271,7 +271,7 @@ export class ReviewerClient {
       let response;
       try {
         response = await client.messages.create({
-          model: getLLMModel(this.config, "verifier"),
+          model: getLLMModel(this.config, "verifier") ?? model,
           max_tokens: 1024,
           system: isResearch ? VERIFY_RESEARCH_SYSTEM_PROMPT : VERIFY_SYSTEM_PROMPT,
           messages: [{ role: "user", content: prompt }],
@@ -300,7 +300,7 @@ export class ReviewerClient {
    * Sends PR metadata + diff to the reviewer pool for code review.
    */
   async reviewPRDiff(prompt: string): Promise<PRReviewResult> {
-    const client = createLLMClient(this.config);
+    const { client, model } = createLLMClient(this.config);
 
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), PR_REVIEW_LLM_TIMEOUT_MS);
@@ -308,7 +308,7 @@ export class ReviewerClient {
       let response;
       try {
         response = await client.messages.create({
-          model: getLLMModel(this.config, "reviewer"),
+          model: getLLMModel(this.config, "reviewer") ?? model,
           max_tokens: 2048,
           system: PR_REVIEW_SYSTEM_PROMPT,
           messages: [{ role: "user", content: prompt }],
@@ -336,7 +336,7 @@ export class ReviewerClient {
    * Sends the current system context to the reviewer pool for strategic analysis.
    */
   async supervisorReview(context: string): Promise<SupervisorDecision[]> {
-    const client = createLLMClient(this.config);
+    const { client, model } = createLLMClient(this.config);
 
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), DEFAULT_LLM_TIMEOUT_MS);
@@ -344,7 +344,7 @@ export class ReviewerClient {
       let response;
       try {
         response = await client.messages.create({
-          model: getLLMModel(this.config, "supervisor"),
+          model: getLLMModel(this.config, "supervisor") ?? model,
           max_tokens: 4096,
           system: SUPERVISOR_SYSTEM_PROMPT,
           messages: [{ role: "user", content: context }],
@@ -375,7 +375,7 @@ export class ReviewerClient {
     const implTasks = tasks.filter((t) => t.task_type !== "research");
     if (implTasks.length === 0) return [];
 
-    const client = createLLMClient(this.config);
+    const { client, model } = createLLMClient(this.config);
 
     const taskSummaries = implTasks.map((t) => ({
       id: t.id.slice(0, 8),
@@ -396,7 +396,7 @@ export class ReviewerClient {
       let response;
       try {
         response = await client.messages.create({
-          model: getLLMModel(this.config, "improvement"),
+          model: getLLMModel(this.config, "improvement") ?? model,
           max_tokens: 4096,
           system: IMPROVEMENT_SYSTEM_PROMPT,
           messages: [{ role: "user", content: prompt }],

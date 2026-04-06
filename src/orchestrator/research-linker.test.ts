@@ -7,7 +7,8 @@ const mockCreate = vi.fn();
 
 vi.mock("../client/llm-client.js", () => ({
   createLLMClient: () => ({
-    messages: { create: mockCreate },
+    client: { messages: { create: mockCreate } },
+    model: "test-model",
   }),
 }));
 

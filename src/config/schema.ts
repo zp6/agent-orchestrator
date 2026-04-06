@@ -4,10 +4,17 @@ import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import { parse as parseYaml } from "yaml";
 
+export interface ProviderLimits {
+  hourly?: number;
+  daily?: number;
+  weekly?: number;
+}
+
 export interface ProviderConfig {
   model: string;
   api_key_env?: string;
-  daily_token_limit?: number;
+  daily_token_limit?: number;  // deprecated — use limits.daily
+  limits?: ProviderLimits;
 }
 
 export interface AgentDockerConfig {

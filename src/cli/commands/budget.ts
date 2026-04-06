@@ -84,16 +84,14 @@ export function resolveAgentBudget(
   const tb: TokenBudgetConfig | undefined = agentCfg?.token_budget;
   const globalBudget = config.dashboard?.budget;
 
-  // Budget: per-agent override → provider-level daily_token_limit (daily only)
+  // Budget: per-agent override → provider limits → deprecated daily_token_limit
   let budget: number | null = null;
+  const providerName = agentCfg?.provider ?? "claude";
+  const providerCfg = config.providers?.[providerName];
   if (period === "daily") {
-    budget = tb?.daily ?? null;
-    if (budget === null) {
-      const providerName = agentCfg?.provider ?? "claude";
-      budget = config.providers?.[providerName]?.daily_token_limit ?? null;
-    }
+    budget = tb?.daily ?? providerCfg?.limits?.daily ?? providerCfg?.daily_token_limit ?? null;
   } else {
-    budget = tb?.weekly ?? null;
+    budget = tb?.weekly ?? providerCfg?.limits?.weekly ?? null;
   }
 
   const warnPct = tb?.warning_pct ?? globalBudget?.warning_pct ?? DEFAULT_WARNING_PCT;

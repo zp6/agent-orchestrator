@@ -131,7 +131,7 @@ export class ResearchLinker {
    * Use an LLM to extract implementation gaps from a research task's findings.
    */
   async analyzeForGaps(task: Task): Promise<ImplementationGap[]> {
-    const client = createLLMClient(this.config);
+    const { client, model } = createLLMClient(this.config);
 
     // Build list of known repos so the LLM can target the right one
     const knownRepos = Object.entries(this.config.agents)
@@ -160,7 +160,7 @@ Analyze the research findings above and identify specific implementation tasks t
       try {
         response = await client.messages.create(
           {
-            model: "claude-sonnet-4-6",
+            model,
             max_tokens: 4096,
             system: SYSTEM_PROMPT,
             messages: [{ role: "user", content: prompt }],

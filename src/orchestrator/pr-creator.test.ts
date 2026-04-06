@@ -33,9 +33,12 @@ vi.mock("../triggers/github.js", () => ({
 // Mock LLM client — tests that exercise LLM disambiguation will override this
 vi.mock("../client/llm-client.js", () => ({
   createLLMClient: () => ({
-    messages: {
-      create: vi.fn().mockResolvedValue({ content: [{ type: "text", text: "none" }] }),
+    client: {
+      messages: {
+        create: vi.fn().mockResolvedValue({ content: [{ type: "text", text: "none" }] }),
+      },
     },
+    model: "test-model",
   }),
 }));
 

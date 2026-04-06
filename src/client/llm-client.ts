@@ -44,25 +44,44 @@ function getPreferredLLMAgents(config: OrchestratorConfig): string[] {
   );
 }
 
-export function getLLMModel(config: OrchestratorConfig, task: LLMTaskKind): string {
+/**
+ * Get the model for a given LLM task kind.
+ * Priority: config.llm.models[task] → config.llm.default_model → built-in defaults.
+ * When no explicit override is configured, returns undefined so callers
+ * can fall back to the pool member's model.
+ */
+export function getLLMModel(config: OrchestratorConfig, task: LLMTaskKind): string | undefined {
   return (
     config.llm?.models?.[task] ??
     config.llm?.default_model ??
-    DEFAULT_MODEL_BY_TASK[task]
+    undefined
   );
 }
 
+/** Default model when no agent config or LLM override is available. */
+const DEFAULT_MODEL = "claude-sonnet-4-6";
+
 /** Round-robin counter for pool-based LLM routing. */
 let rrIndex = 0;
+
+/** Return type for createLLMClient — includes the selected agent's model. */
+export interface LLMClientResult {
+  client: Anthropic;
+  /** The model configured for the selected pool member (provider-aware). */
+  model: string;
+}
 
 /**
  * Get an Anthropic client for orchestrator LLM calls.
  * Prefers a dedicated reviewer-style container to avoid blocking on
  * busy agent containers. If the preferred reviewer belongs to a pool,
- * round-robins across pool members. Falls back to the first available
- * agent with a Docker port + API key.
+ * round-robins across pool members so LLM calls are distributed across
+ * providers (Claude, Codex, etc.).
+ *
+ * Returns both the client and the selected agent's model so callers
+ * don't need to hardcode model strings.
  */
-export function createLLMClient(config: OrchestratorConfig): Anthropic {
+export function createLLMClient(config: OrchestratorConfig): LLMClientResult {
   for (const agentName of getPreferredLLMAgents(config)) {
     const candidates = getPoolMembers(config, agentName)
       .filter((name) => {
@@ -76,10 +95,14 @@ export function createLLMClient(config: OrchestratorConfig): Anthropic {
       const preferred = config.agents[selected];
       const baseUrl = getAgentBaseUrl(config, selected);
       const workingDir = getAgentDir(config, selected);
-      return createProxyClient(config.proxy, workingDir, {
-        apiKey: preferred.docker!.api_key!,
-        baseUrl,
-      });
+      const model = preferred.model ?? DEFAULT_MODEL;
+      return {
+        client: createProxyClient(config.proxy, workingDir, {
+          apiKey: preferred.docker!.api_key!,
+          baseUrl,
+        }),
+        model,
+      };
     }
   }
 
@@ -88,13 +111,19 @@ export function createLLMClient(config: OrchestratorConfig): Anthropic {
     if (agent.docker?.port && agent.docker?.api_key) {
       const baseUrl = getAgentBaseUrl(config, name);
       const workingDir = getAgentDir(config, name);
-      return createProxyClient(config.proxy, workingDir, {
-        apiKey: agent.docker.api_key,
-        baseUrl,
-      });
+      return {
+        client: createProxyClient(config.proxy, workingDir, {
+          apiKey: agent.docker.api_key,
+          baseUrl,
+        }),
+        model: agent.model ?? DEFAULT_MODEL,
+      };
     }
   }
 
   // Last resort: use proxy URL directly
-  return createProxyClient(config.proxy, config.orchestrator_dir, {});
+  return {
+    client: createProxyClient(config.proxy, config.orchestrator_dir, {}),
+    model: DEFAULT_MODEL,
+  };
 }

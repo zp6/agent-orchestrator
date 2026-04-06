@@ -100,7 +100,7 @@ async function llmPickIssue(
   config: OrchestratorConfig,
 ): Promise<number | null> {
   try {
-    const client = createLLMClient(config);
+    const { client, model } = createLLMClient(config);
     const issueList = candidates.map((c) => `#${c.number}: ${c.title}`).join("\n");
 
     const LLM_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes hard timeout
@@ -109,7 +109,7 @@ async function llmPickIssue(
     let response;
     try {
       response = await client.messages.create({
-        model: getLLMModel(config, "issue_matcher"),
+        model: getLLMModel(config, "issue_matcher") ?? model,
         max_tokens: 64,
         messages: [
           {

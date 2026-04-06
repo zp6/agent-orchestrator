@@ -428,7 +428,62 @@ ${wipLines.length > 0 ? wipLines.join("\n") : "  All agents idle"}
 *Verification*
   ${unverified.length} pending | ${totalDone} done (24h) | ${successRate}% success
 
-${buildPoolStats(ctx, agentStats)}`;
+${buildPoolStats(ctx, agentStats)}
+
+${buildTokenStats(ctx)}`;
+}
+
+function buildTokenStats(ctx: TelegramContext): string {
+  const providerUsage = ctx.store.getTokenUsageByProvider(24);
+  if (providerUsage.length === 0) return "";
+
+  const providers = ctx.config.providers ?? {};
+  const lines: string[] = ["*Token Usage*"];
+
+  for (const usage of providerUsage) {
+    const prov = providers[usage.provider];
+    const limits = prov?.limits;
+    const totalK = Math.round(usage.total / 1000);
+
+    // Show usage against each limit window
+    const windows: string[] = [];
+    if (limits?.hourly) {
+      const hourUsage = ctx.store.getTokenUsageByProvider(1).find((u) => u.provider === usage.provider);
+      const hourTotal = hourUsage?.total ?? 0;
+      const hourPct = Math.round((hourTotal / limits.hourly) * 100);
+      windows.push(`${Math.round(hourTotal / 1000)}K/${Math.round(limits.hourly / 1000)}K/h (${hourPct}%)`);
+    }
+    if (limits?.daily) {
+      const dayPct = Math.round((usage.total / limits.daily) * 100);
+      windows.push(`${totalK}K/${Math.round(limits.daily / 1000)}K/d (${dayPct}%)`);
+    }
+    if (limits?.weekly) {
+      const weekUsage = ctx.store.getTokenUsageByProvider(168).find((u) => u.provider === usage.provider);
+      const weekTotal = weekUsage?.total ?? 0;
+      const weekPct = Math.round((weekTotal / limits.weekly) * 100);
+      windows.push(`${Math.round(weekTotal / 1000)}K/${Math.round(limits.weekly / 1000)}K/w (${weekPct}%)`);
+    }
+
+    // Overall status icon based on highest usage %
+    const dayLimit = limits?.daily ?? prov?.daily_token_limit;
+    const pct = dayLimit ? Math.round((usage.total / dayLimit) * 100) : null;
+    const icon = pct !== null && pct >= 80 ? "🔴" : pct !== null && pct >= 50 ? "🟡" : "🟢";
+
+    lines.push(`  ${icon} ${usage.provider}: ${windows.join(" | ")}`);
+    lines.push(`    ${usage.request_count} requests`);
+  }
+
+  // Per-agent top consumers
+  const agentUsage = ctx.store.getTokenUsageByAgent(24);
+  if (agentUsage.length > 0) {
+    lines.push("  Top agents:");
+    for (const a of agentUsage.slice(0, 5)) {
+      const name = a.agent_name.replace("claude-", "").replace("codex-", "⚡");
+      lines.push(`    ${name}: ${Math.round(a.total / 1000)}K (${a.provider})`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 function buildPoolStats(

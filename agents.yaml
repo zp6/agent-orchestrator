@@ -11,10 +11,16 @@ orchestrator_dir: "/Users/paultarr/Documents/Git/claude-agent-orchestrator"
 providers:
   claude:
     model: "claude-opus-4-6"
-    daily_token_limit: 5000000
+    limits:
+      hourly: 1000000       # ~1M tokens/hour
+      daily: 5000000        # ~5M tokens/day
+      weekly: 25000000      # ~25M tokens/week
   openai:
     model: "gpt-5.4"
-    daily_token_limit: 10000000
+    limits:
+      hourly: 2000000
+      daily: 10000000
+      weekly: 50000000
   gemini:
     model: "gemini-2.5-pro"
     api_key_env: "GEMINI_API_KEY"
