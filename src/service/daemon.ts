@@ -1416,6 +1416,8 @@ export function buildHousekeepingMessage(agentName: string, githubRepo: string):
 
 4. **Check for orphan PRs** — ensure every open PR has an issue linked via "Closes #N". If a PR is missing one, either create the issue or add the reference to the PR body.
 
+5. **Update documentation** — review CLAUDE.md and ensure it accurately reflects the current state of your repo. Update architecture, commands, APIs, and scope sections. If anything is outdated, fix it and include the changes in your triage PR.
+
 Be concise and systematic. Use \`gh issue list --repo ${githubRepo} --state open -L 50\` to get a full picture before acting. After completing the triage, briefly summarise what you closed or updated.`;
 }
 

@@ -167,6 +167,12 @@ describe("buildHousekeepingMessage", () => {
     expect(msg.toLowerCase()).toContain("orphan");
   });
 
+  it("instructs updating CLAUDE.md documentation", () => {
+    const msg = buildHousekeepingMessage(agentName, githubRepo);
+    expect(msg).toContain("CLAUDE.md");
+    expect(msg.toLowerCase()).toContain("update documentation");
+  });
+
   it("includes gh issue list command referencing the repo", () => {
     const msg = buildHousekeepingMessage(agentName, githubRepo);
     expect(msg).toContain(`gh issue list --repo ${githubRepo}`);

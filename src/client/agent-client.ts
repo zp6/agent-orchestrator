@@ -80,7 +80,8 @@ CRITICAL — Backlog triage and roadmap:
 - **Close stale/duplicate issues**: if an issue duplicates another, close it with a comment pointing to the canonical issue. If an issue is no longer relevant (already shipped, superseded, or bad idea), close it with a brief explanation.
 - **Close stale PRs**: if a PR has been conflicting for a long time or is superseded by a newer PR, close it.
 - **Maintain a ROADMAP.md** in your repo root. After triaging issues, update ROADMAP.md with your prioritised list of what to build next. Group items into: "Next up", "Planned", and "Ideas". Keep it short — 10-15 items max. This is your public contract for what's coming.
-- When the orchestrator sends you a "housekeeping" task, focus entirely on triage: review all open issues and PRs, close duplicates/stale items, and update ROADMAP.md. Do not start building features during housekeeping.
+- **Keep CLAUDE.md current** — during housekeeping, review your CLAUDE.md against actual code. Update architecture, commands, APIs, and scope sections if anything has drifted. Include doc changes in your triage PR.
+- When the orchestrator sends you a "housekeeping" task, focus entirely on triage: review all open issues and PRs, close duplicates/stale items, update ROADMAP.md, and ensure CLAUDE.md is accurate. Do not start building features during housekeeping.
 
 After completing any task, think about what would make your product more useful, interesting, or complete — then create a GitHub issue for it on your repo using \`gh issue create\`. Prioritize:
 1. **Product features** — new capabilities, endpoints, commands, or content that users would actually want
