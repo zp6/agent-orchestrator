@@ -22,6 +22,7 @@ import { registerDirectivesCommand } from "./commands/directives.js";
 import { registerDeescalateCommand } from "./commands/deescalate.js";
 import { registerDecisionsCommand } from "./commands/decisions.js";
 import { registerBudgetCommand } from "./commands/budget.js";
+import { registerIssueStatusCommand } from "./commands/issue-status.js";
 
 const program = new Command();
 
@@ -53,5 +54,6 @@ registerDirectivesCommand(program);
 registerDeescalateCommand(program);
 registerDecisionsCommand(program);
 registerBudgetCommand(program);
+registerIssueStatusCommand(program);
 
 program.parse();

@@ -197,6 +197,29 @@ async function handleCommand(text: string, ctx: TelegramContext): Promise<string
     return await buildStats(ctx);
   }
 
+  // Issue status — pre-dispatch inspection by issue number
+  // Matches: "issue 123", "issue status 123", "/issue 123", "/issue status 123"
+  {
+    const issueStatusMatch = text.trim().match(/^\/?\s*issue\s+(?:status\s+)?(\d+)\s*$/i);
+    if (issueStatusMatch) {
+      const issueNumber = parseInt(issueStatusMatch[1], 10);
+      const repos = [...new Set(Object.values(ctx.config.agents).map((a) => a.github).filter(Boolean))] as string[];
+      // Try each repo to find the issue
+      let foundRepo: string | null = null;
+      for (const repo of repos) {
+        const raw = await ghAsync(`gh issue view ${issueNumber} --repo ${repo} --json number -q .number`);
+        if (raw && raw.trim() === String(issueNumber)) {
+          foundRepo = repo;
+          break;
+        }
+      }
+      if (!foundRepo) return `❌ Issue #${issueNumber} not found in any configured repo.`;
+      const { getIssueStatus, formatIssueStatusTelegram } = await import("../cli/commands/issue-status.js");
+      const result = await getIssueStatus(foundRepo, issueNumber, ctx.store);
+      return formatIssueStatusTelegram(result);
+    }
+  }
+
   // Issue creation — rough idea → agent fleshes out and creates GitHub issue
   if (cmd.startsWith("issue ") || cmd.startsWith("/issue ")) {
     const rest = text.trim().slice(text.trim().indexOf(" ") + 1);
@@ -322,6 +345,7 @@ issues — open issues
 prs — open PRs
 chat <agent> <msg> — talk to agent (persistent)
 newchat <agent> — reset conversation
+issue <N> — pre-dispatch issue inspection
 issue <idea> — create issue from rough idea
 dispatch <agent> <msg> — send task
 help — this message`;
