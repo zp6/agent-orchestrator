@@ -329,6 +329,36 @@ export class Dispatcher {
       }
     }
 
+    // Pre-dispatch closed-issue guard (issue #444): if the task targets a GitHub
+    // issue that has already been closed, skip the dispatch entirely.  This catches
+    // cases where an issue closes between triage/trigger and the actual dispatch
+    // call (e.g. supervisor dispatch, daemon re-dispatch after conflict recovery).
+    if (options?.source === "github" && options?.sourceRef) {
+      const repo = extractRepoFromSourceRef(options.sourceRef);
+      const issueMatch = options.sourceRef.match(/#(\d+)$/);
+      if (repo && issueMatch) {
+        const issueNumber = parseInt(issueMatch[1], 10);
+        if (!isIssueOpen(repo, issueNumber)) {
+          this.log.warn("Dispatch skipped: source issue already closed", {
+            agentName,
+            sourceRef: options.sourceRef,
+            repo,
+            issueNumber,
+          });
+          return {
+            taskId: "",
+            agentName,
+            response: {
+              content: `Skipped: issue ${options.sourceRef} is already closed`,
+              model: "",
+              usage: { input_tokens: 0, output_tokens: 0 },
+              stop_reason: "skipped",
+            },
+          };
+        }
+      }
+    }
+
     // Create task — reuse the caller's conversationId when provided (e.g. PR
     // feedback or revision tasks that should resume the agent's prior session).
     const conversationId = options?.conversationId ?? ulid();

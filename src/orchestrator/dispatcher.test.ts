@@ -831,6 +831,93 @@ describe("Dispatcher.retryTask — GH auth pre-flight", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
+// dispatch() — closed-issue guard (issue #444)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("Dispatcher.dispatch — closed-issue guard (issue #444)", () => {
+  let store: StateStore;
+  let dispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+    dispatcher = new Dispatcher(makeConfig(), store);
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+  });
+
+  it("skips dispatch and returns skip result when source issue is closed", async () => {
+    mockIsIssueOpen.mockReturnValueOnce(false);
+
+    const result = await dispatcher.dispatch("fix the bug", {
+      agentName: "test-agent",
+      source: "github",
+      sourceRef: "owner/repo#99",
+    });
+
+    // Should NOT have called agent send
+    expect(mockSend).not.toHaveBeenCalled();
+
+    // No task should have been created
+    const tasks = store.listTasks({});
+    expect(tasks).toHaveLength(0);
+
+    // Should return a skip result with empty taskId
+    expect(result.taskId).toBe("");
+    expect(result.agentName).toBe("test-agent");
+    expect(result.response.stop_reason).toBe("skipped");
+    expect(result.response.content).toContain("already closed");
+  });
+
+  it("proceeds with dispatch when source issue is open", async () => {
+    mockIsIssueOpen.mockReturnValueOnce(true);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 5 },
+    });
+
+    const result = await dispatcher.dispatch("fix the bug", {
+      agentName: "test-agent",
+      source: "github",
+      sourceRef: "owner/repo#99",
+    });
+
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(result.taskId).not.toBe("");
+  });
+
+  it("does not check issue state for non-github sources", async () => {
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 5 },
+    });
+
+    await dispatcher.dispatch("do the thing", {
+      agentName: "test-agent",
+      source: "manual",
+    });
+
+    expect(mockIsIssueOpen).not.toHaveBeenCalled();
+    expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not check issue state when sourceRef has no issue number", async () => {
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 5 },
+    });
+
+    await dispatcher.dispatch("do the thing", {
+      agentName: "test-agent",
+      source: "github",
+      sourceRef: "owner/repo",
+    });
+
+    expect(mockIsIssueOpen).not.toHaveBeenCalled();
+    expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
 // retryTask() — closed-issue guard (issue #431)
 // ────────────────────────────────────────────────────────────────────────────
 
