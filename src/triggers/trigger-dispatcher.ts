@@ -225,16 +225,31 @@ export async function dispatchGitHubIssues(
         continue;
       }
 
-      let message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}`;
-
-      if (openPR) {
-        log.info("Existing open PR found for issue — injecting PR context", {
+      // Open-PR dispatch guard (issue #445): skip dispatch when a non-draft open
+      // PR already exists for this issue. Re-dispatching in this state causes
+      // duplicate agent work (#413). The PRReviewer flow (daemon.reviewPRs) picks
+      // up the open PR in its own cycle — no additional dispatch is needed here.
+      if (openPR && !openPR.isDraft) {
+        log.info("Skipping dispatch: redirected to review — open PR already exists for issue", {
           sourceRef,
           prNumber: openPR.number,
           prUrl: openPR.url,
-          isDraft: openPR.isDraft,
+          reason: `redirected to review: PR #${openPR.number} already open for issue #${issue.number}`,
         });
-        message += `\n\n⚠️ This issue already has an open PR: #${openPR.number} (${openPR.url})${openPR.isDraft ? " [DRAFT]" : ""}. Do NOT create a new branch or open another PR. Instead, review the existing PR, make any needed fixes, and push to its branch.`;
+        result.skipped++;
+        continue;
+      }
+
+      let message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}`;
+
+      if (openPR) {
+        // Draft PR: inject context so the agent can continue on the existing branch
+        log.info("Draft open PR found for issue — injecting PR context", {
+          sourceRef,
+          prNumber: openPR.number,
+          prUrl: openPR.url,
+        });
+        message += `\n\n⚠️ This issue already has an open draft PR: #${openPR.number} (${openPR.url}). Do NOT create a new branch or open another PR. Instead, review the existing PR, make any needed fixes, and push to its branch.`;
         message += buildExistingPRReviewChecklist(openPR.number, openPR.url);
         message += `\n\n---\nWhen done: commit your changes and push to the existing PR branch. Do NOT run \`gh pr create\`.`;
       } else {
@@ -420,15 +435,29 @@ export async function dispatchIdleAgentBacklog(
         continue;
       }
 
+      // Open-PR dispatch guard (issue #445): skip dispatch when a non-draft open
+      // PR already exists for this issue — same guard as dispatchGitHubIssues.
+      if (openPR && !openPR.isDraft) {
+        log.info("Idle pickup: skipping dispatch — redirected to review, open PR already exists for issue", {
+          sourceRef,
+          prNumber: openPR.number,
+          prUrl: openPR.url,
+          reason: `redirected to review: PR #${openPR.number} already open for issue #${issue.number}`,
+        });
+        result.skipped++;
+        continue;
+      }
+
       let message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}`;
 
       if (openPR) {
-        log.info("Idle pickup: existing open PR found — injecting PR context", {
+        // Draft PR: inject context so the agent can continue on the existing branch
+        log.info("Idle pickup: draft open PR found — injecting PR context", {
           sourceRef,
           prNumber: openPR.number,
-          isDraft: openPR.isDraft,
+          prUrl: openPR.url,
         });
-        message += `\n\n⚠️ This issue already has an open PR: #${openPR.number} (${openPR.url})${openPR.isDraft ? " [DRAFT]" : ""}. Do NOT create a new branch or open another PR. Instead, review the existing PR, make any needed fixes, and push to its branch.`;
+        message += `\n\n⚠️ This issue already has an open draft PR: #${openPR.number} (${openPR.url}). Do NOT create a new branch or open another PR. Instead, review the existing PR, make any needed fixes, and push to its branch.`;
         message += buildExistingPRReviewChecklist(openPR.number, openPR.url);
         message += `\n\n---\nWhen done: commit your changes and push to the existing PR branch. Do NOT run \`gh pr create\`.`;
       } else {

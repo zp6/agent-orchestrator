@@ -288,7 +288,7 @@ describe("duplicate PR detection before dispatch", () => {
     expect(mockStore.markProcessed).toHaveBeenCalledWith("github", "owner/my-repo#42", expect.stringContaining("merged-pr-10"));
   });
 
-  it("dispatches with PR context injected when an open PR already exists", async () => {
+  it("skips dispatch when a non-draft open PR already exists (open-PR dispatch guard)", async () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
     ]);
@@ -298,23 +298,41 @@ describe("duplicate PR detection before dispatch", () => {
 
     const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
+    // Must NOT dispatch when a ready (non-draft) open PR already exists
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+    // Must NOT mark processed — the issue should be re-evaluated on the next cycle
+    // in case the PR is closed/rejected and needs re-dispatch
+    expect(mockStore.markProcessed).not.toHaveBeenCalled();
+  });
+
+  it("dispatches with draft PR context injected when only a draft PR exists", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 7, title: "WIP fix", url: "https://github.com/owner/my-repo/pull/7", state: "open", isDraft: true },
+    ]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // Draft PRs still need the agent to continue — dispatch with context
     expect(result.dispatched).toBe(1);
     const dispatchedMessage = (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
     expect(dispatchedMessage).toContain("#7");
     expect(dispatchedMessage).toContain("https://github.com/owner/my-repo/pull/7");
     expect(dispatchedMessage).toContain("Do NOT create a new branch");
-    // Bug 1: must NOT include the "create a branch ... gh pr create" workflow when an open PR exists
     expect(dispatchedMessage).not.toContain("create a branch, commit, push, and open a PR");
-    // Must include push-only instructions instead
     expect(dispatchedMessage).toContain("push to the existing PR branch");
   });
 
-  it("injects structured review checklist when an open PR already exists", async () => {
+  it("injects structured review checklist when a draft PR exists (dispatch still fires)", async () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
     ]);
     mockFindExistingPRs.mockReturnValue([
-      { number: 7, title: "WIP fix", url: "https://github.com/owner/my-repo/pull/7", state: "open", isDraft: false },
+      { number: 7, title: "WIP fix", url: "https://github.com/owner/my-repo/pull/7", state: "open", isDraft: true },
     ]);
 
     await dispatchGitHubIssues(config, mockStore, mockDispatcher);
@@ -343,7 +361,7 @@ describe("duplicate PR detection before dispatch", () => {
     expect(dispatchedMessage).not.toContain("Mandatory pre-declaration checklist");
   });
 
-  it("marks draft PRs as [DRAFT] in injected context", async () => {
+  it("identifies draft PRs in the injected context message", async () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
     ]);
@@ -354,7 +372,8 @@ describe("duplicate PR detection before dispatch", () => {
     await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
     const dispatchedMessage = (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(dispatchedMessage).toContain("[DRAFT]");
+    // Draft PR context must mention it's a draft
+    expect(dispatchedMessage).toContain("draft PR");
   });
 
   it("prefers merged PR check over open PR (merged takes priority)", async () => {
@@ -644,12 +663,27 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
     expect(result.dispatchedAgents).toEqual([]);
   });
 
-  it("injects structured review checklist into idle pickup message when open PR exists", async () => {
+  it("skips dispatch when a non-draft open PR exists in idle pickup (open-PR dispatch guard)", async () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
     ]);
     mockFindExistingPRs.mockReturnValue([
       { number: 9, title: "Open fix", url: "https://github.com/owner/my-repo/pull/9", state: "open", isDraft: false },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("injects structured review checklist into idle pickup message when only a draft PR exists", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 9, title: "Draft fix", url: "https://github.com/owner/my-repo/pull/9", state: "open", isDraft: true },
     ]);
 
     const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
@@ -947,12 +981,27 @@ describe("dispatchIdleAgentBacklog", () => {
     );
   });
 
-  it("injects open-PR context into message when an open PR already exists", async () => {
+  it("skips dispatch when a non-draft open PR already exists in idle backlog", async () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 3, title: "PR in progress", body: "Do work", url: "https://...", labels: [] },
     ]);
     mockFindExistingPRs.mockReturnValue([
       { number: 7, title: "WIP", url: "https://github.com/owner/my-repo/pull/7", state: "open", isDraft: false },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("injects open-draft-PR context into message when only a draft PR exists", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 3, title: "PR in progress", body: "Do work", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 7, title: "WIP", url: "https://github.com/owner/my-repo/pull/7", state: "open", isDraft: true },
     ]);
 
     await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
@@ -1174,11 +1223,11 @@ describe("in-flight branch detection", () => {
     expect(dispatched[0]).not.toContain("Do NOT create a new branch");
   });
 
-  it("skips branch check when issue already has an open PR", async () => {
+  it("skips dispatch entirely when a non-draft open PR exists (open PR takes precedence over branch)", async () => {
     mockFindExistingPRs.mockReturnValue([
       { number: 10, title: "PR", url: "https://github.com/owner/my-repo/pull/10", state: "open", isDraft: false },
     ]);
-    // Even if a branch exists, the open PR takes precedence
+    // Even if a branch exists, the non-draft open PR should cause a skip
     mockFindBranchForIssue.mockReturnValue("issue-42-fix-something");
 
     const dispatched: string[] = [];
@@ -1198,13 +1247,12 @@ describe("in-flight branch detection", () => {
       findTaskBySourceRef: vi.fn().mockReturnValue(null),
     } as unknown as StateStore;
 
-    await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
-    await new Promise((r) => setTimeout(r, 10));
+    const result = await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
 
-    expect(dispatched).toHaveLength(1);
-    // Should inject PR context (PR takes precedence over branch)
-    expect(dispatched[0]).toContain("already has an open PR");
-    expect(dispatched[0]).not.toContain("A branch for this issue already exists");
+    // Must skip (not dispatch) when a non-draft open PR exists
+    expect(dispatched).toHaveLength(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
   });
 
   it("idle pickup: injects branch context when in-flight branch found", async () => {
