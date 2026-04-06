@@ -2213,6 +2213,28 @@ export class StateStore {
   }
 
   /**
+   * Reset permanently-failed PR creation attempts whose last error indicates
+   * a GH auth failure back to "pending" so they are retried when auth recovers.
+   *
+   * Returns the number of entries reset.
+   */
+  resetAuthFailedPRCreationAttempts(): number {
+    const backoffMs = 60_000; // 1 minute — short, since auth just recovered
+    const nextRetryAt = new Date(Date.now() + backoffMs).toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE pr_creation_attempts
+         SET status = 'pending',
+             attempt_count = 0,
+             next_retry_at = ?
+         WHERE status = 'failed'
+           AND last_error LIKE '%gh-auth-failed%'`,
+      )
+      .run(nextRetryAt);
+    return result.changes;
+  }
+
+  /**
    * Aggregate telemetry across all tracked PR creation attempts.
    */
   getPRCreationTelemetry(): PRCreationTelemetry {

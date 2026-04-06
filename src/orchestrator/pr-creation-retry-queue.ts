@@ -173,6 +173,24 @@ export class PRCreationRetryQueue {
   }
 
   /**
+   * Reset permanently-failed entries whose last error was "gh-auth-failed" back
+   * to pending so they are retried now that auth has recovered.
+   *
+   * Called by the daemon's `checkAuthRecovery()` when quarantined agents are
+   * un-quarantined — the same auth issue that quarantined agents also caused
+   * PR creation failures, and both should recover together.
+   *
+   * Returns the number of entries reset.
+   */
+  resetAuthFailures(): number {
+    const count = this.store.resetAuthFailedPRCreationAttempts();
+    if (count > 0) {
+      log.info("Reset auth-failed PR creation entries for retry", { count });
+    }
+    return count;
+  }
+
+  /**
    * Aggregate telemetry across all tracked PR creation attempts.
    */
   getFailureTelemetry(): PRCreationTelemetry {

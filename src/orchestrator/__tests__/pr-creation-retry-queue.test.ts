@@ -381,4 +381,78 @@ describe("PRCreationRetryQueue", () => {
       expect(t.success_rate).toBe(1);
     });
   });
+
+  describe("resetAuthFailures (issue #427)", () => {
+    it("resets permanently-failed auth entries back to pending", () => {
+      // Exhaust retries with auth-failed errors
+      for (let i = 0; i < PR_CREATION_MAX_RETRIES; i++) {
+        queue.enqueue("owner/repo", "auth-failed-branch", "gh-auth-failed: gh CLI is not authenticated");
+      }
+      const before = store.getPRCreationAttempt("owner/repo", "auth-failed-branch");
+      expect(before!.status).toBe("failed");
+
+      const resetCount = queue.resetAuthFailures();
+      expect(resetCount).toBe(1);
+
+      const after = store.getPRCreationAttempt("owner/repo", "auth-failed-branch");
+      expect(after!.status).toBe("pending");
+      expect(after!.attempt_count).toBe(0);
+      expect(after!.next_retry_at).not.toBeNull();
+    });
+
+    it("does not reset entries that failed for non-auth reasons", () => {
+      for (let i = 0; i < PR_CREATION_MAX_RETRIES; i++) {
+        queue.enqueue("owner/repo", "logic-failed-branch", "pre-submit validation failed: merge conflicts");
+      }
+      const before = store.getPRCreationAttempt("owner/repo", "logic-failed-branch");
+      expect(before!.status).toBe("failed");
+
+      const resetCount = queue.resetAuthFailures();
+      expect(resetCount).toBe(0);
+
+      const after = store.getPRCreationAttempt("owner/repo", "logic-failed-branch");
+      expect(after!.status).toBe("failed");
+    });
+
+    it("only resets failed entries, not succeeded or pending", () => {
+      // Create a succeeded entry with auth-failed in its last_error (edge case)
+      store.insertPRCreationAttempt({
+        repo: "owner/repo",
+        branch: "succeeded-auth-branch",
+        attempt_count: 2,
+        last_error: "gh-auth-failed: old error",
+        last_attempted_at: new Date().toISOString(),
+        next_retry_at: null,
+        status: "succeeded",
+      });
+
+      const resetCount = queue.resetAuthFailures();
+      expect(resetCount).toBe(0);
+
+      const after = store.getPRCreationAttempt("owner/repo", "succeeded-auth-branch");
+      expect(after!.status).toBe("succeeded");
+    });
+
+    it("resets multiple auth-failed branches at once", () => {
+      for (const branch of ["branch-a", "branch-b", "branch-c"]) {
+        for (let i = 0; i < PR_CREATION_MAX_RETRIES; i++) {
+          queue.enqueue("owner/repo", branch, "gh-auth-failed: token expired");
+        }
+      }
+
+      const resetCount = queue.resetAuthFailures();
+      expect(resetCount).toBe(3);
+
+      for (const branch of ["branch-a", "branch-b", "branch-c"]) {
+        const attempt = store.getPRCreationAttempt("owner/repo", branch);
+        expect(attempt!.status).toBe("pending");
+        expect(attempt!.attempt_count).toBe(0);
+      }
+    });
+
+    it("returns 0 when no auth-failed entries exist", () => {
+      const resetCount = queue.resetAuthFailures();
+      expect(resetCount).toBe(0);
+    });
+  });
 });

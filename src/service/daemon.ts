@@ -437,10 +437,20 @@ export class Daemon {
     if (recovered.length > 0) {
       this.log.info("Auth recovery: agents un-quarantined", { recovered });
       console.log(`✅ Auth recovered for ${recovered.length} agent(s): ${recovered.join(", ")}`);
+
+      // Auth recovery also means PR creation retries that failed due to
+      // "gh-auth-failed" should be re-attempted.  Reset them back to pending
+      // so the retry queue picks them up next cycle (issue #427).
+      const resetCount = this.prRetryQueue.resetAuthFailures();
+      if (resetCount > 0) {
+        console.log(`✅ Reset ${resetCount} auth-failed PR creation(s) for retry`);
+      }
+
       notifyOperator(
         "Agents recovered from auth-degraded",
         `${recovered.length} agent(s) restored to full operation: ${recovered.join(", ")}. ` +
-        `GH_TOKEN is now valid — implementation tasks will be dispatched normally.`,
+        `GH_TOKEN is now valid — implementation tasks will be dispatched normally.` +
+        (resetCount > 0 ? ` Also reset ${resetCount} failed PR creation(s) for retry.` : ""),
         "info",
         "auth-recovery",
       );
