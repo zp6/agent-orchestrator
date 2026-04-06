@@ -20,6 +20,7 @@ import { registerDigestCommand } from "./commands/digest.js";
 import { registerTimeoutsCommand } from "./commands/timeouts.js";
 import { registerDirectivesCommand } from "./commands/directives.js";
 import { registerDeescalateCommand } from "./commands/deescalate.js";
+import { registerDecisionsCommand } from "./commands/decisions.js";
 
 const program = new Command();
 
@@ -49,5 +50,6 @@ registerDigestCommand(program);
 registerTimeoutsCommand(program);
 registerDirectivesCommand(program);
 registerDeescalateCommand(program);
+registerDecisionsCommand(program);
 
 program.parse();
