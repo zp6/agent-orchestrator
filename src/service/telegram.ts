@@ -6,6 +6,7 @@ import { execSync } from "node:child_process";
 import type { StateStore } from "../state/store.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { OrchestratorConfig } from "../config/schema.js";
+import { AgentClient } from "../client/agent-client.js";
 
 const log = createLogger("telegram");
 
@@ -22,6 +23,7 @@ interface TelegramContext {
   config: OrchestratorConfig;
   store: StateStore;
   dispatcher: Dispatcher;
+  agentClient?: AgentClient;
 }
 
 let lastUpdateId = 0;
@@ -47,28 +49,44 @@ function loadConfig(): boolean {
   }
 }
 
-async function sendReply(text: string): Promise<void> {
-  if (!botToken || !chatId) return;
-  // Telegram has a 4096 char limit — truncate if needed
+async function sendReply(text: string): Promise<number | null> {
+  if (!botToken || !chatId) return null;
   const truncated = text.length > 4000 ? text.slice(0, 4000) + "\n\n...(truncated)" : text;
   try {
-    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, text: truncated, parse_mode: "Markdown" }),
     });
-  } catch (err) {
-    // Retry without markdown if parse fails
+    const data = await res.json() as { ok: boolean; result?: { message_id: number } };
+    return data.result?.message_id ?? null;
+  } catch {
+    // Retry without markdown
     try {
-      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chat_id: chatId, text: truncated }),
       });
-    } catch {
+      const data = await res.json() as { ok: boolean; result?: { message_id: number } };
+      return data.result?.message_id ?? null;
+    } catch (err) {
       log.error("Failed to send reply", { error: err instanceof Error ? err.message : String(err) });
+      return null;
     }
   }
+}
+
+async function editMessage(messageId: number, text: string): Promise<void> {
+  if (!botToken || !chatId) return;
+  const truncated = text.length > 4000 ? text.slice(0, 4000) + "\n\n...(truncated)" : text;
+  try {
+    await fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text: truncated }),
+    });
+  } catch { /* best effort */ }
 }
 
 function gh(cmd: string): string {
@@ -210,6 +228,40 @@ Steps:
     return `📝 Creating issue on ${target.repo}...`;
   }
 
+  // Chat — direct real-time conversation with an agent
+  if (cmd.startsWith("chat ") || cmd.startsWith("/chat ")) {
+    const parts = text.trim().split(/\s+/);
+    const agentName = parts[1];
+    const message = parts.slice(2).join(" ");
+    if (!agentName || !message) return "Usage: chat <agent> <message>\nExample: chat claude-proxy what issues are you working on?";
+    if (!ctx.config.agents[agentName]) return `❌ Unknown agent. Available: ${Object.keys(ctx.config.agents).join(", ")}`;
+
+    const client = ctx.agentClient ?? new AgentClient(ctx.config);
+
+    // Send "thinking..." then edit with response
+    const thinkingId = await sendReply(`💭 ${agentName} is thinking...`);
+
+    client.send(agentName, message)
+      .then(async (response) => {
+        const reply = response.content.slice(0, 3900);
+        if (thinkingId) {
+          await editMessage(thinkingId, `🤖 *${agentName}*\n\n${reply}`);
+        } else {
+          await sendReply(`🤖 *${agentName}*\n\n${reply}`);
+        }
+      })
+      .catch(async (err) => {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (thinkingId) {
+          await editMessage(thinkingId, `❌ ${agentName} error: ${errMsg.slice(0, 200)}`);
+        } else {
+          await sendReply(`❌ ${agentName} error: ${errMsg.slice(0, 200)}`);
+        }
+      });
+
+    return ""; // Don't send another reply — "thinking..." is already sent
+  }
+
   // Dispatch (fire-and-forget — reply immediately, don't block polling)
   if (cmd.startsWith("dispatch ") || cmd.startsWith("/dispatch ")) {
     const parts = text.trim().split(/\s+/);
@@ -233,6 +285,7 @@ status — agent status
 health — ping containers
 issues — open issues
 prs — open PRs
+chat <agent> <msg> — talk to agent directly
 issue <idea> — create issue from rough idea
 dispatch <agent> <msg> — send task
 help — this message`;
@@ -454,7 +507,7 @@ export function startTelegramPolling(ctx: TelegramContext): void {
 
         log.info("Telegram command", { text: msg.text });
         const reply = await handleCommand(msg.text, ctx);
-        await sendReply(reply);
+        if (reply) await sendReply(reply);
       }
     } catch {
       // Silent — don't spam logs every 3 seconds
