@@ -287,6 +287,29 @@ function findConfig(): string {
   );
 }
 
+/**
+ * Read a secret from Docker/OrbStack secrets paths.
+ * Checks (in order):
+ *   1. /run/secrets/<name>  — standard Docker secrets mount
+ *   2. ~/.claude-orchestrator/secrets/<name>  — local dev secrets
+ * Returns the trimmed file contents, or undefined if not found.
+ */
+function readSecret(name: string): string | undefined {
+  const paths = [
+    `/run/secrets/${name}`,
+    resolve(process.env.HOME ?? "", ".claude-orchestrator", "secrets", name),
+  ];
+  for (const p of paths) {
+    try {
+      const value = readFileSync(p, "utf-8").trim();
+      if (value) return value;
+    } catch {
+      // File doesn't exist — try next path
+    }
+  }
+  return undefined;
+}
+
 export function loadConfig(configPath?: string): OrchestratorConfig {
   const path = configPath ?? findConfig();
   const raw = readFileSync(path, "utf-8");
@@ -317,7 +340,15 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
     parsed.orchestrator_dir = dirname(path);
   }
 
-  // Resolve GH_TOKEN: agents.yaml → env var → ~/.claude-orchestrator/.env → `gh auth token` CLI
+  // Resolve GH_TOKEN:
+  //   1. agents.yaml proxy.gh_token (already in parsed)
+  //   2. Docker/OrbStack secrets (/run/secrets/ or ~/.claude-orchestrator/secrets/)
+  //   3. GH_TOKEN env var
+  //   4. ~/.claude-orchestrator/.env file
+  //   5. `gh auth token` CLI (last resort)
+  if (!parsed.proxy.gh_token) {
+    parsed.proxy.gh_token = readSecret("gh_token");
+  }
   if (!parsed.proxy.gh_token && process.env.GH_TOKEN) {
     parsed.proxy.gh_token = process.env.GH_TOKEN;
   }
