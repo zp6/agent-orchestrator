@@ -252,6 +252,22 @@ describe("isConnectionError", () => {
     // exit 143 = SIGTERM from container timeout — handled by daemon watchdog, not here
     expect(isConnectionError(new Error("Timed out: dispatched 10 minutes ago with no response (exit 143)"))).toBe(false);
   });
+
+  it("recognises proxy spawn failure as retryable", () => {
+    expect(isConnectionError(new Error("Failed to spawn claude CLI: spawn ENOENT (ENOENT)"))).toBe(true);
+  });
+
+  it("recognises E2BIG spawn error as retryable", () => {
+    expect(isConnectionError(new Error("Failed to spawn claude CLI: Argument list too long (E2BIG)"))).toBe(true);
+  });
+
+  it("recognises EAGAIN spawn error as retryable", () => {
+    expect(isConnectionError(new Error("spawn EAGAIN"))).toBe(true);
+  });
+
+  it("recognises generic 'failed to spawn' message as retryable", () => {
+    expect(isConnectionError(new Error("failed to spawn codex CLI: some reason"))).toBe(true);
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────────

@@ -64,6 +64,9 @@ export const CONNECTION_ERROR_RETRY_DELAYS_MS = [30_000, 60_000, 120_000] as con
  * - Node.js network error codes: ECONNREFUSED, ETIMEDOUT, ECONNRESET, ENOTFOUND
  * - HTTP 5xx status codes (Anthropic SDK wraps these as errors with `.status`)
  * - Generic "connection error" / "connection refused" phrases in the message
+ * - Proxy spawn failures: "Failed to spawn claude CLI" (E2BIG, ENOENT, EAGAIN)
+ *   which are transient infrastructure errors when the container or CLI isn't
+ *   ready yet. The proxy returns 503 for these.
  *
  * Logic errors (bad output, wrong tool call, etc.) and timeout errors
  * (exit code 143 / SIGTERM handled by the daemon watchdog) are NOT
@@ -83,6 +86,18 @@ export function isConnectionError(err: unknown): boolean {
     msg.includes("network error") ||
     msg.includes("socket hang up") ||
     msg.includes("connect ehostunreach")
+  ) {
+    return true;
+  }
+
+  // Proxy CLI spawn failures — transient infrastructure errors (E2BIG, ENOENT
+  // on working directory, EAGAIN under memory pressure).  The proxy returns
+  // these as 503 with "Failed to spawn claude CLI" in the message body.
+  if (
+    msg.includes("failed to spawn") ||
+    msg.includes("e2big") ||
+    msg.includes("spawn enoent") ||
+    msg.includes("eagain")
   ) {
     return true;
   }
