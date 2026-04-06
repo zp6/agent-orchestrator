@@ -3,6 +3,35 @@ import chalk from "chalk";
 import { StateStore } from "../../state/store.js";
 import type { SupervisorDecisionRecord } from "../../state/store.js";
 
+/**
+ * Parse a duration string (e.g. "1h", "30m", "2d", "1h30m") into milliseconds.
+ * Returns null if the string cannot be parsed.
+ *
+ * Supported units: d (days), h (hours), m (minutes), s (seconds).
+ * Multiple components may be combined (e.g. "1h30m").
+ */
+export function parseDuration(s: string): number | null {
+  const pattern = /^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/;
+  const match = s.trim().match(pattern);
+  if (!match || s.trim() === "") return null;
+
+  const [, days, hours, minutes, seconds] = match;
+  const ms =
+    (parseInt(days ?? "0", 10) * 86_400_000) +
+    (parseInt(hours ?? "0", 10) * 3_600_000) +
+    (parseInt(minutes ?? "0", 10) * 60_000) +
+    (parseInt(seconds ?? "0", 10) * 1_000);
+
+  return ms > 0 ? ms : null;
+}
+
+/** Return a cutoff Date given a --since string, or null if unparseable. */
+export function sinceToDate(since: string): Date | null {
+  const ms = parseDuration(since);
+  if (ms === null) return null;
+  return new Date(Date.now() - ms);
+}
+
 /** Colour an outcome badge for terminal display. */
 function outcomeColour(outcome: string): string {
   switch (outcome) {
@@ -38,13 +67,18 @@ export function registerDecisionsCommand(program: Command): void {
     .command("decisions")
     .description("View the supervisor decision log")
     .option("-n, --limit <n>", "Number of decisions to show", "20")
+    .option(
+      "--since <duration>",
+      "Only show decisions newer than this duration (e.g. 1h, 30m, 2d, 1h30m)",
+    )
     .option("--action <type>", "Filter by action type (dispatch, verify, redeploy, create-issue, follow-up, none)")
     .option("--agent <name>", "Filter by agent name")
     .option("--outcome <type>", "Filter by outcome (dispatched, skipped, failed, none, unhandled)")
-    .option("--json", "Output raw JSON")
+    .option("--json", "Output newline-delimited JSON (one record per line, suitable for grep/jq)")
     .action(
       (opts: {
         limit: string;
+        since?: string;
         action?: string;
         agent?: string;
         outcome?: string;
@@ -54,6 +88,20 @@ export function registerDecisionsCommand(program: Command): void {
         if (isNaN(limit) || limit <= 0) {
           console.error(chalk.red("Error: --limit must be a positive integer."));
           process.exit(1);
+        }
+
+        // Parse --since early so we can report errors before opening the DB
+        let sinceDate: Date | null = null;
+        if (opts.since) {
+          sinceDate = sinceToDate(opts.since);
+          if (!sinceDate) {
+            console.error(
+              chalk.red(
+                `Error: --since '${opts.since}' is not a valid duration. Use formats like 1h, 30m, 2d, 1h30m.`,
+              ),
+            );
+            process.exit(1);
+          }
         }
 
         let store: StateStore;
@@ -69,16 +117,20 @@ export function registerDecisionsCommand(program: Command): void {
 
         let decisions: SupervisorDecisionRecord[];
         try {
-          // Fetch more than needed so we can filter client-side and still
-          // return up to `limit` results after filtering.
-          const fetchLimit =
-            opts.action || opts.agent || opts.outcome ? limit * 5 : limit;
+          // Fetch a larger window when filters are active so we can return up
+          // to `limit` results after client-side filtering.
+          const hasFilters = !!(opts.action || opts.agent || opts.outcome || sinceDate);
+          const fetchLimit = hasFilters ? Math.max(limit * 10, 500) : limit;
           decisions = store.getRecentSupervisorDecisions(fetchLimit);
         } finally {
           store.close();
         }
 
         // Apply optional filters
+        if (sinceDate) {
+          const cutoff = sinceDate.toISOString();
+          decisions = decisions.filter((d) => d.created_at >= cutoff);
+        }
         if (opts.action) {
           decisions = decisions.filter((d) => d.action === opts.action);
         }
@@ -93,7 +145,11 @@ export function registerDecisionsCommand(program: Command): void {
         decisions = decisions.slice(0, limit);
 
         if (opts.json) {
-          console.log(JSON.stringify(decisions, null, 2));
+          // Emit newline-delimited JSON (NDJSON) — one record per line,
+          // suitable for streaming into grep/jq/awk pipelines.
+          for (const d of decisions) {
+            console.log(JSON.stringify(d));
+          }
           return;
         }
 
@@ -120,9 +176,15 @@ export function registerDecisionsCommand(program: Command): void {
         }
 
         console.log();
+        const filterDesc = [
+          opts.since   && `since ${opts.since}`,
+          opts.action  && `action=${opts.action}`,
+          opts.agent   && `agent=${opts.agent}`,
+          opts.outcome && `outcome=${opts.outcome}`,
+        ].filter(Boolean).join(", ");
         console.log(
           chalk.dim(
-            `  Showing ${decisions.length} decision${decisions.length === 1 ? "" : "s"}${opts.action || opts.agent || opts.outcome ? " (filtered)" : ""}.`,
+            `  Showing ${decisions.length} decision${decisions.length === 1 ? "" : "s"}${filterDesc ? ` (filtered: ${filterDesc})` : ""}.`,
           ),
         );
         console.log();
