@@ -9,6 +9,7 @@ import { ulid } from "ulid";
 import { createLogger } from "../service/logger.js";
 import { validateGhAuth, GhAuthError } from "../triggers/github.js";
 import { cachedValidateForDispatch } from "../triggers/issue-state-bridge.js";
+import { checkDuplicate } from "../triggers/duplicate-guard.js";
 import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
 import { buildRejectionHistoryBlock } from "./rejection-history.js";
 import { notifyOperator } from "../service/notify.js";
@@ -21,6 +22,7 @@ import {
 
 /** Maximum number of retry attempts for a failed dispatch. */
 export const MAX_RETRIES = 3;
+export const FAILURE_REROUTE_THRESHOLD = 3;
 
 /** Backoff delays in milliseconds for each retry attempt (index = retry_count - 1). */
 export const RETRY_DELAYS_MS = [30_000, 120_000, 600_000] as const;
@@ -240,6 +242,16 @@ export interface DispatchResult {
   validation?: PreDispatchValidationResult;
 }
 
+interface FailureRerouteDecision {
+  fromAgent: string;
+  toAgent: string;
+  sourceRef: string;
+  taskType: TaskType;
+  failedAttempts: number;
+  fromStats: { total: number; done: number; successRate: number | null };
+  toStats: { total: number; done: number; successRate: number | null };
+}
+
 export class Dispatcher {
   private client: AgentClient;
   private router: Router;
@@ -256,6 +268,175 @@ export class Dispatcher {
     this.router = new Router(config, llmRouter);
     this.store = store;
     this.planner = new Planner(config, store);
+  }
+
+  private compareHealth(a: AgentHealth, b: AgentHealth): number {
+    if (a.is_healthy !== b.is_healthy) return a.is_healthy ? -1 : 1;
+    if (a.consecutive_failures !== b.consecutive_failures) {
+      return a.consecutive_failures - b.consecutive_failures;
+    }
+    return (a.last_error_at ?? "").localeCompare(b.last_error_at ?? "");
+  }
+
+  private defaultHealth(agentName: string): AgentHealth {
+    return {
+      agent_name: agentName,
+      consecutive_failures: 0,
+      last_error_at: null,
+      last_error_message: null,
+      last_success_at: null,
+      is_healthy: true,
+      auth_status: "ok",
+      auth_degraded_at: null,
+    };
+  }
+
+  private pickBestRerouteCandidate(currentAgentName: string, taskType: TaskType): string | null {
+    const currentAgent = this.config.agents[currentAgentName];
+    if (!currentAgent) return null;
+
+    const candidateEntries = Object.entries(this.config.agents)
+      .filter(([name]) => name !== currentAgentName)
+      .filter(([name]) => !this.store.hasActiveTask(name))
+      .filter(([name]) => taskType === "research" || !this.store.isAgentAuthDegraded(name));
+
+    const samePool = currentAgent.pool
+      ? candidateEntries.filter(([, agent]) => agent.pool === currentAgent.pool)
+      : [];
+
+    const scopedCandidates = samePool.length > 0
+      ? samePool
+      : candidateEntries.filter(([, agent]) => {
+          const capabilityOverlap = agent.capabilities
+            .filter((cap) => currentAgent.capabilities.includes(cap)).length;
+          const topicOverlap = agent.owns_topics
+            .filter((topic) => currentAgent.owns_topics.includes(topic)).length;
+          return Boolean(
+            (agent.repo && currentAgent.repo && agent.repo === currentAgent.repo) ||
+            (agent.github && currentAgent.github && agent.github === currentAgent.github) ||
+            capabilityOverlap > 0 ||
+            topicOverlap > 0,
+          );
+        });
+
+    if (scopedCandidates.length === 0) return null;
+
+    const candidateNames = scopedCandidates.map(([name]) => name);
+    const rateMap = new Map(
+      this.store.getTaskTypeSuccessRates(taskType, candidateNames).map((row) => [row.agent_name, row]),
+    );
+    const healthMap = new Map(
+      this.store.getAgentHealthBatch(candidateNames).map((health) => [health.agent_name, health]),
+    );
+
+    return [...candidateNames].sort((a, b) => {
+      const aRate = rateMap.get(a)?.success_rate ?? null;
+      const bRate = rateMap.get(b)?.success_rate ?? null;
+      if (aRate !== bRate) {
+        if (aRate === null) return 1;
+        if (bRate === null) return -1;
+        return bRate - aRate;
+      }
+
+      const aTotal = rateMap.get(a)?.total ?? 0;
+      const bTotal = rateMap.get(b)?.total ?? 0;
+      if (aTotal !== bTotal) return bTotal - aTotal;
+
+      return this.compareHealth(
+        healthMap.get(a) ?? this.defaultHealth(a),
+        healthMap.get(b) ?? this.defaultHealth(b),
+      );
+    })[0] ?? null;
+  }
+
+  private maybeGetFailureRerouteDecision(
+    sourceRef: string | undefined,
+    agentName: string,
+    taskType: TaskType,
+  ): FailureRerouteDecision | null {
+    if (!sourceRef) return null;
+
+    const failedAttempts = this.store.countFailuresForSourceRefByAgent(sourceRef, agentName);
+    if (failedAttempts < FAILURE_REROUTE_THRESHOLD) return null;
+
+    const substitute = this.pickBestRerouteCandidate(agentName, taskType);
+    if (!substitute) {
+      this.log.warn("Failure reroute threshold reached, but no substitute agent is available", {
+        sourceRef,
+        agentName,
+        failedAttempts,
+        taskType,
+      });
+      return null;
+    }
+
+    const statsMap = new Map(
+      this.store.getTaskTypeSuccessRates(taskType, [agentName, substitute]).map((row) => [row.agent_name, row]),
+    );
+    const fromStats = statsMap.get(agentName);
+    const toStats = statsMap.get(substitute);
+
+    return {
+      fromAgent: agentName,
+      toAgent: substitute,
+      sourceRef,
+      taskType,
+      failedAttempts,
+      fromStats: {
+        total: fromStats?.total ?? 0,
+        done: fromStats?.done ?? 0,
+        successRate: fromStats?.success_rate ?? null,
+      },
+      toStats: {
+        total: toStats?.total ?? 0,
+        done: toStats?.done ?? 0,
+        successRate: toStats?.success_rate ?? null,
+      },
+    };
+  }
+
+  private formatSuccessRate(stats: { total: number; done: number; successRate: number | null }): string {
+    if (stats.successRate === null) return "no prior history";
+    return `${(stats.successRate * 100).toFixed(0)}% (${stats.done}/${stats.total})`;
+  }
+
+  private buildFailureRerouteHeader(decision: FailureRerouteDecision): string {
+    return (
+      "## Auto-Reroute Context\n" +
+      `This issue has already failed ${decision.failedAttempts} time(s) with ${decision.fromAgent}. ` +
+      `It is now reassigned to ${decision.toAgent}.\n` +
+      `Selection basis: ${decision.taskType} success rate ${this.formatSuccessRate(decision.toStats)} ` +
+      `for ${decision.toAgent} vs ${this.formatSuccessRate(decision.fromStats)} for ${decision.fromAgent}.\n` +
+      "Take a fresh pass and avoid repeating the prior failed approach.\n\n"
+    );
+  }
+
+  private async recordFailureReroute(decision: FailureRerouteDecision, message: string, taskId?: string): Promise<void> {
+    const rationale =
+      `Auto-rerouted ${decision.sourceRef} from ${decision.fromAgent} to ${decision.toAgent} ` +
+      `after ${decision.failedAttempts} failed attempt(s). ` +
+      `${decision.taskType} success rate: ${decision.toAgent} ${this.formatSuccessRate(decision.toStats)} ` +
+      `vs ${decision.fromAgent} ${this.formatSuccessRate(decision.fromStats)}.`;
+
+    this.store.addSupervisorDecision({
+      action: "dispatch",
+      agent_name: decision.toAgent,
+      reason: "auto-reroute-failed-attempts",
+      message,
+      rationale,
+      outcome: taskId ? "dispatched" : "failed",
+      task_id: taskId,
+    });
+
+    await notifyOperator(
+      "Issue auto-rerouted after repeated failures",
+      `Issue ${decision.sourceRef} was reassigned from ${decision.fromAgent} to ${decision.toAgent} ` +
+      `after ${decision.failedAttempts} failed attempt(s). ` +
+      `${decision.taskType} success rate: ${decision.toAgent} ${this.formatSuccessRate(decision.toStats)} ` +
+      `vs ${decision.fromAgent} ${this.formatSuccessRate(decision.fromStats)}.`,
+      "warning",
+      `auto-reroute-failures:${decision.sourceRef}:${decision.fromAgent}:${decision.toAgent}`,
+    );
   }
 
   async dispatch(
@@ -276,6 +457,8 @@ export class Dispatcher {
        * cross-repo routing logic never fires.
        */
       sourceRepo?: string;
+      /** Internal escape hatch for orchestrator-managed auto-reroutes. */
+      skipDuplicateCheck?: boolean;
       prevalidated?: boolean;
     },
   ): Promise<DispatchResult> {
@@ -349,6 +532,19 @@ export class Dispatcher {
     // Auth-degraded agents can only receive read-only tasks (research/analysis).
     // Implementation tasks require GH_TOKEN for PR creation, so block them.
     const taskType = options?.taskType ?? "implementation";
+    const failureReroute = this.maybeGetFailureRerouteDecision(options?.sourceRef, agentName, taskType);
+    if (failureReroute) {
+      this.log.warn("Failure reroute hard gate triggered", {
+        sourceRef: failureReroute.sourceRef,
+        fromAgent: failureReroute.fromAgent,
+        toAgent: failureReroute.toAgent,
+        failedAttempts: failureReroute.failedAttempts,
+        taskType: failureReroute.taskType,
+      });
+      agentName = failureReroute.toAgent;
+      message = this.buildFailureRerouteHeader(failureReroute) + message;
+    }
+
     if (taskType !== "research" && this.store.isAgentAuthDegraded(agentName)) {
       this.log.warn("Dispatch blocked: agent is auth-degraded", {
         agentName,
@@ -433,7 +629,33 @@ export class Dispatcher {
         }
       }
     }
-
+    // Idempotency guard (issue #469): prevent the same source_ref from being
+    // dispatched to multiple agents simultaneously.  The trigger layer already
+    // checks this via inFlightDispatches + checkDuplicate, but direct callers
+    // (supervisor, CLI, Telegram, retries) bypass the trigger layer entirely.
+    // Placing the guard here in dispatch() itself closes that gap.
+    if (options?.sourceRef && options?.source && !options.skipDuplicateCheck && !failureReroute) {
+      const dupCheck = checkDuplicate(this.store, options.source, options.sourceRef);
+      if (dupCheck.isDuplicate) {
+        this.log.warn("Dispatch blocked: duplicate guard triggered", {
+          agentName,
+          source: options.source,
+          sourceRef: options.sourceRef,
+          reason: dupCheck.reason,
+          existingTaskId: dupCheck.existingTask?.id,
+        });
+        return {
+          taskId: "",
+          agentName,
+          response: {
+            content: `Duplicate: ${dupCheck.reason}`,
+            model: "",
+            usage: { input_tokens: 0, output_tokens: 0 },
+            stop_reason: "duplicate",
+          },
+        };
+      }
+    }
     // Create task — reuse the caller's conversationId when provided (e.g. PR
     // feedback or revision tasks that should resume the agent's prior session).
     const conversationId = options?.conversationId ?? ulid();
@@ -536,6 +758,10 @@ export class Dispatcher {
       // Record healthy dispatch for pool failover routing
       this.store.recordAgentSuccess(agentName);
 
+      if (failureReroute) {
+        await this.recordFailureReroute(failureReroute, message, task.id);
+      }
+
       return { taskId: task.id, agentName, response };
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
@@ -604,6 +830,10 @@ export class Dispatcher {
           retry_count: newRetryCount,
           next_retry_at: null,
         });
+      }
+
+      if (failureReroute) {
+        await this.recordFailureReroute(failureReroute, message);
       }
       throw err;
     }
@@ -691,6 +921,42 @@ export class Dispatcher {
         // Note: cachedValidateForDispatch above already covers closed issues,
         // merged PRs, and open PRs in a single cached check (issue #458).
       }
+    }
+
+    const taskType = task.task_type ?? "implementation";
+    const failureReroute = this.maybeGetFailureRerouteDecision(task.source_ref ?? undefined, agentName, taskType);
+    if (failureReroute) {
+      const reroutedMessage = this.buildFailureRerouteHeader(failureReroute) + (task.description ?? task.title);
+      this.log.warn("Retry converted into failure reroute", {
+        taskId: task.id,
+        sourceRef: failureReroute.sourceRef,
+        fromAgent: failureReroute.fromAgent,
+        toAgent: failureReroute.toAgent,
+        failedAttempts: failureReroute.failedAttempts,
+      });
+      this.store.addLog({
+        task_id: task.id,
+        direction: "system",
+        content:
+          `Auto-rerouted after ${failureReroute.failedAttempts} failed attempt(s): ` +
+          `${failureReroute.fromAgent} -> ${failureReroute.toAgent}`,
+      });
+      this.store.updateTask(task.id, { next_retry_at: null });
+      try {
+        const rerouted = await this.dispatch(reroutedMessage, {
+          agentName: failureReroute.toAgent,
+          source: task.source,
+          sourceRef: task.source_ref ?? undefined,
+          title: `[auto-reroute] ${task.title}`,
+          taskType,
+          skipDuplicateCheck: true,
+        });
+        await this.recordFailureReroute(failureReroute, reroutedMessage, rerouted.taskId);
+      } catch (err) {
+        await this.recordFailureReroute(failureReroute, reroutedMessage);
+        throw err;
+      }
+      return;
     }
 
     // Pre-retry escalation guard: if the cumulative failure count for this

@@ -2470,6 +2470,88 @@ describe("StateStore", () => {
     });
   });
 
+  describe("countFailuresForSourceRefByAgent", () => {
+    it("counts only the matching agent's failed attempts", () => {
+      const a1 = store.createTask({
+        title: "issue 12",
+        source: "github",
+        source_ref: "owner/repo#12",
+        agent_name: "agent-a",
+      });
+      store.updateTask(a1.id, { status: "failed", retry_count: 2 });
+
+      const b1 = store.createTask({
+        title: "issue 12",
+        source: "github",
+        source_ref: "owner/repo#12",
+        agent_name: "agent-b",
+      });
+      store.updateTask(b1.id, { status: "failed", retry_count: 0 });
+
+      expect(store.countFailuresForSourceRefByAgent("owner/repo#12", "agent-a")).toBe(3);
+      expect(store.countFailuresForSourceRefByAgent("owner/repo#12", "agent-b")).toBe(1);
+    });
+
+    it("excludes connection-error-exhausted attempts for the agent", () => {
+      const task = store.createTask({
+        title: "issue 13",
+        source: "github",
+        source_ref: "owner/repo#13",
+        agent_name: "agent-a",
+      });
+      store.updateTask(task.id, {
+        status: "failed",
+        retry_count: 2,
+        result: "connection-error-exhausted: ECONNREFUSED",
+      });
+
+      expect(store.countFailuresForSourceRefByAgent("owner/repo#13", "agent-a")).toBe(0);
+    });
+  });
+
+  describe("getTaskTypeSuccessRates", () => {
+    it("returns task-type success rates per agent", () => {
+      const implDone = store.createTask({
+        title: "impl done",
+        source: "manual",
+        agent_name: "agent-a",
+        task_type: "implementation",
+      });
+      store.updateTask(implDone.id, { status: "done" });
+
+      const implFailed = store.createTask({
+        title: "impl failed",
+        source: "manual",
+        agent_name: "agent-a",
+        task_type: "implementation",
+      });
+      store.updateTask(implFailed.id, { status: "failed" });
+
+      const researchDone = store.createTask({
+        title: "research done",
+        source: "manual",
+        agent_name: "agent-a",
+        task_type: "research",
+      });
+      store.updateTask(researchDone.id, { status: "done" });
+
+      const implDoneB = store.createTask({
+        title: "impl done b",
+        source: "manual",
+        agent_name: "agent-b",
+        task_type: "implementation",
+      });
+      store.updateTask(implDoneB.id, { status: "done" });
+
+      const rates = store.getTaskTypeSuccessRates("implementation", ["agent-a", "agent-b", "agent-c"]);
+      expect(rates).toEqual([
+        { agent_name: "agent-a", task_type: "implementation", total: 2, done: 1, success_rate: 0.5 },
+        { agent_name: "agent-b", task_type: "implementation", total: 1, done: 1, success_rate: 1 },
+        { agent_name: "agent-c", task_type: "implementation", total: 0, done: 0, success_rate: null },
+      ]);
+    });
+  });
+
   // ── Issue #418: Agent auth quarantine ────────────────────────────────────
 
   describe("agent auth quarantine (issue #418)", () => {

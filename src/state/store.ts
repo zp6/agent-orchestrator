@@ -470,6 +470,14 @@ export interface AgentHealthSummary {
   first_attempt_success_rate: number | null;
 }
 
+export interface AgentTaskTypeSuccessRate {
+  agent_name: string;
+  task_type: TaskType;
+  total: number;
+  done: number;
+  success_rate: number | null;
+}
+
 /**
  * A stored behavioral directive issued by the user.
  * Directives are injected into the system prompt of every agent dispatch
@@ -1176,6 +1184,73 @@ export class StateStore {
       )
       .get(sourceRef, clearedRowid, clearedRowid) as { total: number };
     return row?.total ?? 0;
+  }
+
+  /**
+   * Count failed attempts for a specific source_ref by a specific agent.
+   *
+   * Uses the same attempt semantics and connection-error exclusion as
+   * countFailuresForSourceRef(), but narrows the history to one agent so the
+   * dispatcher can detect repeated issue-specific failures and reroute.
+   */
+  countFailuresForSourceRefByAgent(sourceRef: string, agentName: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(retry_count + 1), 0) AS total
+         FROM tasks
+         WHERE source_ref = ?
+           AND agent_name = ?
+           AND parent_task_id IS NULL
+           AND status IN ('failed', 'escalated')
+           AND (result IS NULL OR result NOT LIKE 'connection-error-exhausted%')`,
+      )
+      .get(sourceRef, agentName) as { total: number };
+    return row?.total ?? 0;
+  }
+
+  /**
+   * Return per-agent success rates for a specific task type.
+   *
+   * Only terminal top-level tasks count toward the sample: done, failed,
+   * escalated. Agents with no terminal history for the task type return null.
+   */
+  getTaskTypeSuccessRates(taskType: TaskType, agentNames?: string[]): AgentTaskTypeSuccessRate[] {
+    const names =
+      agentNames ??
+      (
+        this.db
+          .prepare(
+            `SELECT DISTINCT agent_name
+             FROM tasks
+             WHERE agent_name IS NOT NULL AND parent_task_id IS NULL`,
+          )
+          .all() as Array<{ agent_name: string }>
+      ).map((r) => r.agent_name);
+
+    return names.map((agentName) => {
+      const row = this.db
+        .prepare(
+          `SELECT
+             COUNT(*) AS total,
+             COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0) AS done
+           FROM tasks
+           WHERE agent_name = ?
+             AND task_type = ?
+             AND parent_task_id IS NULL
+             AND status IN ('done', 'failed', 'escalated')`,
+        )
+        .get(agentName, taskType) as { total: number; done: number };
+
+      const total = row?.total ?? 0;
+      const done = row?.done ?? 0;
+      return {
+        agent_name: agentName,
+        task_type: taskType,
+        total,
+        done,
+        success_rate: total > 0 ? done / total : null,
+      };
+    });
   }
 
   /**

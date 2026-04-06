@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   Dispatcher,
+  FAILURE_REROUTE_THRESHOLD,
   MAX_RETRIES,
   RETRY_DELAYS_MS,
   TIMEOUT_RETRY_MAX,
@@ -367,6 +368,163 @@ describe("Dispatcher.dispatch — retry scheduling on failure", () => {
     expect(tasks[0].retry_count).toBe(1);
     // Logic errors are NOT retried — next_retry_at stays null
     expect(tasks[0].next_retry_at).toBeNull();
+  });
+});
+
+describe("Dispatcher auto-reroute after repeated failures", () => {
+  let store: StateStore;
+
+  const makeRerouteConfig = (): OrchestratorConfig => ({
+    proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 5000 },
+    orchestrator_dir: "/tmp",
+    base_dir: "/projects",
+    agents: {
+      "primary-agent": {
+        dir: "primary-agent",
+        description: "Primary implementation agent",
+        github: "rapartlu/agent-orchestrator",
+        capabilities: ["code", "orchestrator"],
+        owns_topics: ["orchestrator", "quality"],
+        docker: { port: 3457, api_key: "secret" },
+      },
+      "backup-fast": {
+        dir: "backup-fast",
+        description: "Best backup",
+        github: "rapartlu/agent-orchestrator",
+        capabilities: ["code", "orchestrator"],
+        owns_topics: ["orchestrator", "quality"],
+        docker: { port: 3458, api_key: "secret" },
+      },
+      "backup-slow": {
+        dir: "backup-slow",
+        description: "Worse backup",
+        github: "rapartlu/agent-orchestrator",
+        capabilities: ["code", "orchestrator"],
+        owns_topics: ["orchestrator", "quality"],
+        docker: { port: 3459, api_key: "secret" },
+      },
+    },
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+  });
+
+  it("reroutes a new dispatch to the best task-type substitute after 3 failed attempts", async () => {
+    const dispatcher = new Dispatcher(makeRerouteConfig(), store);
+    const sourceRef = "rapartlu/agent-orchestrator#524";
+
+    const failed = store.createTask({
+      title: "Issue 524",
+      source: "github",
+      source_ref: sourceRef,
+      agent_name: "primary-agent",
+      task_type: "implementation",
+    });
+    store.updateTask(failed.id, { status: "failed", retry_count: FAILURE_REROUTE_THRESHOLD - 1 });
+
+    for (let i = 0; i < 4; i++) {
+      const t = store.createTask({
+        title: `backup-fast-${i}`,
+        source: "manual",
+        agent_name: "backup-fast",
+        task_type: "implementation",
+      });
+      store.updateTask(t.id, { status: i === 3 ? "failed" : "done" });
+    }
+    for (let i = 0; i < 3; i++) {
+      const t = store.createTask({
+        title: `backup-slow-${i}`,
+        source: "manual",
+        agent_name: "backup-slow",
+        task_type: "implementation",
+      });
+      store.updateTask(t.id, { status: i === 0 ? "done" : "failed" });
+    }
+
+    mockSend.mockResolvedValueOnce({
+      content: "implemented",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    const result = await dispatcher.dispatch("Implement issue #524", {
+      agentName: "primary-agent",
+      source: "github",
+      sourceRef,
+      title: "Issue 524",
+      taskType: "implementation",
+    });
+
+    expect(result.agentName).toBe("backup-fast");
+    expect(mockSend).toHaveBeenCalledOnce();
+    expect(mockSend.mock.calls[0][0]).toBe("backup-fast");
+    expect(mockSend.mock.calls[0][1]).toContain("## Auto-Reroute Context");
+
+    const created = store.getTask(result.taskId);
+    expect(created?.agent_name).toBe("backup-fast");
+
+    const decisions = store.getRecentSupervisorDecisions(1);
+    expect(decisions[0].reason).toBe("auto-reroute-failed-attempts");
+    expect(decisions[0].agent_name).toBe("backup-fast");
+    expect(decisions[0].outcome).toBe("dispatched");
+    expect(decisions[0].rationale).toContain("after 3 failed attempt(s)");
+
+    expect(mockNotifyOperator).toHaveBeenCalledOnce();
+    expect(mockNotifyOperator.mock.calls[0][1]).toContain("reassigned from primary-agent to backup-fast");
+  });
+
+  it("converts a queued retry into a reroute and stops retrying the original task", async () => {
+    const dispatcher = new Dispatcher(makeRerouteConfig(), store);
+    const sourceRef = "rapartlu/agent-orchestrator#525";
+
+    for (let i = 0; i < 2; i++) {
+      const t = store.createTask({
+        title: `backup-fast-${i}`,
+        source: "manual",
+        agent_name: "backup-fast",
+        task_type: "implementation",
+      });
+      store.updateTask(t.id, { status: "done" });
+    }
+
+    const failed = store.createTask({
+      title: "Issue 525",
+      description: "Implement issue #525",
+      source: "github",
+      source_ref: sourceRef,
+      agent_name: "primary-agent",
+      task_type: "implementation",
+    });
+    store.updateTask(failed.id, {
+      status: "failed",
+      retry_count: FAILURE_REROUTE_THRESHOLD - 1,
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    });
+
+    mockSend.mockResolvedValueOnce({
+      content: "fixed by backup",
+      usage: { input_tokens: 12, output_tokens: 24 },
+    });
+
+    await dispatcher.retryTask(store.getTask(failed.id)!);
+
+    const original = store.getTask(failed.id);
+    expect(original?.next_retry_at).toBeNull();
+
+    const rerouted = store.listTasks({}).find((t) => t.title === "[auto-reroute] Issue 525");
+    expect(rerouted?.agent_name).toBe("backup-fast");
+    expect(rerouted?.status).toBe("done");
+
+    expect(mockSend).toHaveBeenCalledOnce();
+    expect(mockSend.mock.calls[0][0]).toBe("backup-fast");
+    expect(mockSend.mock.calls[0][1]).toContain("## Auto-Reroute Context");
+
+    const decisions = store.getRecentSupervisorDecisions(1);
+    expect(decisions[0].reason).toBe("auto-reroute-failed-attempts");
+    expect(decisions[0].task_id).toBe(rerouted?.id);
+
+    expect(mockNotifyOperator).toHaveBeenCalledOnce();
   });
 });
 
@@ -1097,6 +1255,30 @@ describe("Dispatcher.retryTask — closed-issue guard (issue #431)", () => {
   let store: StateStore;
   let dispatcher: Dispatcher;
 
+  const makeRetryRerouteConfig = (): OrchestratorConfig => ({
+    proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 5000 },
+    orchestrator_dir: "/tmp",
+    base_dir: "/projects",
+    agents: {
+      "primary-agent": {
+        dir: "primary-agent",
+        description: "Primary implementation agent",
+        github: "rapartlu/agent-orchestrator",
+        capabilities: ["code", "orchestrator"],
+        owns_topics: ["orchestrator", "quality"],
+        docker: { port: 3457, api_key: "secret" },
+      },
+      "backup-fast": {
+        dir: "backup-fast",
+        description: "Best backup",
+        github: "rapartlu/agent-orchestrator",
+        capabilities: ["code", "orchestrator"],
+        owns_topics: ["orchestrator", "quality"],
+        docker: { port: 3458, api_key: "secret" },
+      },
+    },
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     store = new StateStore(":memory:");
@@ -1129,6 +1311,47 @@ describe("Dispatcher.retryTask — closed-issue guard (issue #431)", () => {
     // Task should be failed with resolved-externally message
     const updated = store.getTask(task.id)!;
     expect(updated.status).toBe("failed");
+    expect(updated.result).toContain("Resolved externally");
+    expect(updated.next_retry_at).toBeNull();
+  });
+
+  it("does not auto-reroute a retry when the source issue is already closed", async () => {
+    const rerouteDispatcher = new Dispatcher(makeRetryRerouteConfig(), store);
+    const sourceRef = "owner/repo#99";
+
+    for (let i = 0; i < 2; i++) {
+      const t = store.createTask({
+        title: `backup-fast-${i}`,
+        source: "manual",
+        agent_name: "backup-fast",
+        task_type: "implementation",
+      });
+      store.updateTask(t.id, { status: "done" });
+    }
+
+    const task = store.createTask({
+      title: "Fix bug",
+      description: "Fix the bug",
+      source: "github",
+      source_ref: sourceRef,
+      agent_name: "primary-agent",
+      task_type: "implementation",
+    });
+    store.updateTask(task.id, {
+      status: "failed",
+      result: "connection refused",
+      retry_count: FAILURE_REROUTE_THRESHOLD - 1,
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    });
+
+    mockCachedValidateForDispatch.mockReturnValueOnce(`issue ${sourceRef} is closed`);
+
+    await rerouteDispatcher.retryTask(store.getTask(task.id)!);
+
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(store.listTasks({}).find((t) => t.title === "[auto-reroute] Fix bug")).toBeUndefined();
+
+    const updated = store.getTask(task.id)!;
     expect(updated.result).toContain("Resolved externally");
     expect(updated.next_retry_at).toBeNull();
   });
