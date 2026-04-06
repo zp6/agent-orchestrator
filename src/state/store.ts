@@ -203,6 +203,31 @@ export interface DailyCycleMetrics {
   avg_duration_ms: number | null;
 }
 
+/** Per-day dispatch efficiency metrics for the waste-rate widget (issue #517) */
+export interface DispatchWasteDay {
+  /** ISO date string: 'YYYY-MM-DD' */
+  date: string;
+  /** Dispatches blocked by the issue-state cache (stale/closed/already-PR'd) */
+  stale_prevented: number;
+  /** Total dispatch attempts = actual dispatches + stale_prevented */
+  dispatches_total: number;
+  /** Waste rate as a percentage (0–100), null if no attempts */
+  waste_rate_pct: number | null;
+}
+
+/**
+ * Aggregated dispatch efficiency over a rolling N-day window.
+ * Surfaces how many wasted agent cycles the issue-state cache (issue #458)
+ * is saving, so operators can verify the cache is working and trending down.
+ */
+export interface DispatchWasteMetrics {
+  days: number;
+  daily: DispatchWasteDay[];
+  total_stale_prevented: number;
+  total_dispatches: number;
+  avg_waste_rate_pct: number | null;
+}
+
 /**
  * Time-series metrics over a rolling N-day window, plus Δ deltas
  * comparing that window to the equally-sized prior window.
@@ -583,6 +608,7 @@ export class StateStore {
     this.runRevisionCountMigration();
     this.runTokenUsageMigration();
     this.runTokenUsageCacheMigration();
+    this.runDispatchWasteMigration();
   }
 
   private runPhase2Migration(): void {
@@ -1388,13 +1414,20 @@ export class StateStore {
     return result.lastInsertRowid as number;
   }
 
-  /** Mark a cycle as finished, recording duration. */
-  recordCycleEnd(cycleId: number, startedAt: Date): void {
+  /**
+   * Mark a cycle as finished, recording duration and dispatch waste delta.
+   *
+   * @param staleDispatchesPrevented Number of dispatches blocked by the issue-state
+   *   cache during this cycle (delta, not cumulative). Defaults to 0.
+   */
+  recordCycleEnd(cycleId: number, startedAt: Date, staleDispatchesPrevented = 0): void {
     const finishedAt = new Date();
     const durationMs = finishedAt.getTime() - startedAt.getTime();
     this.db
-      .prepare("UPDATE daemon_cycles SET finished_at = ?, duration_ms = ? WHERE id = ?")
-      .run(finishedAt.toISOString(), durationMs, cycleId);
+      .prepare(
+        "UPDATE daemon_cycles SET finished_at = ?, duration_ms = ?, stale_dispatches_prevented = ? WHERE id = ?",
+      )
+      .run(finishedAt.toISOString(), durationMs, staleDispatchesPrevented, cycleId);
   }
 
   // ── Aggregated metrics ───────────────────────────────────────────────────
@@ -3022,6 +3055,86 @@ export class StateStore {
     // Sort by revision_count descending (most stuck first)
     results.sort((a, b) => b.revision_count - a.revision_count);
     return results;
+  }
+
+  // ── Dispatch efficiency / waste-rate widget (issue #517) ────────────────
+
+  private runDispatchWasteMigration(): void {
+    const cols = this.db.prepare("PRAGMA table_info(daemon_cycles)").all() as Array<{ name: string }>;
+    const colNames = new Set(cols.map((c) => c.name));
+    if (!colNames.has("stale_dispatches_prevented")) {
+      this.db.exec(
+        "ALTER TABLE daemon_cycles ADD COLUMN stale_dispatches_prevented INTEGER NOT NULL DEFAULT 0",
+      );
+    }
+  }
+
+  /**
+   * Return per-day dispatch efficiency data over a rolling window.
+   *
+   * Waste rate = stale_prevented / (dispatched + stale_prevented).
+   * "Dispatched" is approximated by counting top-level tasks created
+   * each day; stale_prevented comes from daemon_cycles rows.
+   *
+   * @param days Rolling window in days (e.g. 7 or 30).
+   */
+  getDispatchWasteMetrics(days = 7): DispatchWasteMetrics {
+    // Per-day stale-prevented counts from daemon_cycles
+    const staleRows = this.db
+      .prepare(
+        `SELECT
+          date(started_at)                   AS date,
+          SUM(stale_dispatches_prevented)    AS stale_prevented
+        FROM daemon_cycles
+        WHERE finished_at IS NOT NULL
+          AND date(started_at) >= date('now', ? || ' days')
+        GROUP BY date(started_at)
+        ORDER BY date(started_at) ASC`,
+      )
+      .all(`-${days}`) as Array<{ date: string; stale_prevented: number }>;
+
+    // Per-day dispatched task counts (top-level tasks created in window)
+    const dispatchRows = this.db
+      .prepare(
+        `SELECT
+          date(created_at)  AS date,
+          COUNT(*)          AS dispatched
+        FROM tasks
+        WHERE parent_task_id IS NULL
+          AND date(created_at) >= date('now', ? || ' days')
+        GROUP BY date(created_at)
+        ORDER BY date(created_at) ASC`,
+      )
+      .all(`-${days}`) as Array<{ date: string; dispatched: number }>;
+
+    // Index dispatched counts by date for O(1) lookup
+    const dispatchByDate = new Map<string, number>();
+    for (const r of dispatchRows) {
+      dispatchByDate.set(r.date, r.dispatched);
+    }
+
+    const daily: DispatchWasteDay[] = staleRows.map((r) => {
+      const actual = dispatchByDate.get(r.date) ?? 0;
+      const total = r.stale_prevented + actual;
+      return {
+        date: r.date,
+        stale_prevented: r.stale_prevented,
+        dispatches_total: total,
+        waste_rate_pct: total > 0 ? (r.stale_prevented / total) * 100 : null,
+      };
+    });
+
+    const totalStale = daily.reduce((s, d) => s + d.stale_prevented, 0);
+    const totalDispatches = daily.reduce((s, d) => s + d.dispatches_total, 0);
+    const rates = daily.map((d) => d.waste_rate_pct).filter((v): v is number => v !== null);
+
+    return {
+      days,
+      daily,
+      total_stale_prevented: totalStale,
+      total_dispatches: totalDispatches,
+      avg_waste_rate_pct: rates.length > 0 ? rates.reduce((a, b) => a + b, 0) / rates.length : null,
+    };
   }
 
   close(): void {
