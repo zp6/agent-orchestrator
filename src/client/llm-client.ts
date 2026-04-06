@@ -2,6 +2,9 @@ import Anthropic from "@anthropic-ai/sdk";
 import { createProxyClient } from "./proxy-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { getAgentDir, getAgentBaseUrl, getPoolMembers } from "../config/schema.js";
+import { createLogger } from "../service/logger.js";
+
+const log = createLogger("llm-client");
 
 export type LLMTaskKind =
   | "default"
@@ -64,6 +67,74 @@ const DEFAULT_MODEL = "claude-sonnet-4-6";
 /** Round-robin counter for pool-based LLM routing. */
 let rrIndex = 0;
 
+// ── Token usage recording ───────────────────────────────────────────────────
+
+/**
+ * Callback signature for recording LLM token usage.
+ * Set via `setLLMUsageRecorder()` at daemon startup so that every
+ * `messages.create()` call through `createLLMClient()` is automatically tracked.
+ */
+export type LLMUsageRecorder = (
+  provider: string,
+  agentName: string,
+  tokensIn: number,
+  tokensOut: number,
+) => void;
+
+let usageRecorder: LLMUsageRecorder | null = null;
+
+/**
+ * Register a callback that will be invoked after every successful LLM call
+ * made through `createLLMClient()`. Typically called once at daemon startup
+ * with `store.recordTokenUsage.bind(store)`.
+ */
+export function setLLMUsageRecorder(recorder: LLMUsageRecorder): void {
+  usageRecorder = recorder;
+}
+
+/**
+ * Wrap an Anthropic client so that `messages.create()` automatically records
+ * token usage via the registered recorder.  Uses a Proxy on the `messages`
+ * namespace to intercept calls transparently — callers see a normal Anthropic
+ * client and don't need any changes.
+ */
+function wrapClientWithUsageTracking(
+  client: Anthropic,
+  provider: string,
+  agentName: string,
+): Anthropic {
+  if (!usageRecorder) return client;
+
+  const originalMessages = client.messages;
+  const originalCreate = originalMessages.create.bind(originalMessages);
+
+  const wrappedMessages = Object.create(originalMessages);
+  wrappedMessages.create = async function (...args: Parameters<typeof originalCreate>) {
+    const response = await originalCreate(...args);
+    try {
+      const usage = (response as Anthropic.Message).usage;
+      if (usage && usageRecorder) {
+        usageRecorder(provider, agentName, usage.input_tokens, usage.output_tokens);
+      }
+    } catch (err) {
+      log.warn("Failed to record LLM token usage", {
+        provider,
+        agentName,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return response;
+  };
+
+  // Replace the messages property with our wrapped version
+  return new Proxy(client, {
+    get(target, prop) {
+      if (prop === "messages") return wrappedMessages;
+      return Reflect.get(target, prop);
+    },
+  });
+}
+
 /** Return type for createLLMClient — includes the selected agent's model. */
 export interface LLMClientResult {
   client: Anthropic;
@@ -96,11 +167,16 @@ export function createLLMClient(config: OrchestratorConfig): LLMClientResult {
       const baseUrl = getAgentBaseUrl(config, selected);
       const workingDir = getAgentDir(config, selected);
       const model = preferred.model ?? DEFAULT_MODEL;
+      const provider = preferred.provider ?? "claude";
       return {
-        client: createProxyClient(config.proxy, workingDir, {
-          apiKey: preferred.docker!.api_key!,
-          baseUrl,
-        }),
+        client: wrapClientWithUsageTracking(
+          createProxyClient(config.proxy, workingDir, {
+            apiKey: preferred.docker!.api_key!,
+            baseUrl,
+          }),
+          provider,
+          selected,
+        ),
         model,
       };
     }
@@ -112,10 +188,14 @@ export function createLLMClient(config: OrchestratorConfig): LLMClientResult {
       const baseUrl = getAgentBaseUrl(config, name);
       const workingDir = getAgentDir(config, name);
       return {
-        client: createProxyClient(config.proxy, workingDir, {
-          apiKey: agent.docker.api_key,
-          baseUrl,
-        }),
+        client: wrapClientWithUsageTracking(
+          createProxyClient(config.proxy, workingDir, {
+            apiKey: agent.docker.api_key,
+            baseUrl,
+          }),
+          agent.provider ?? "claude",
+          name,
+        ),
         model: agent.model ?? DEFAULT_MODEL,
       };
     }
@@ -123,7 +203,11 @@ export function createLLMClient(config: OrchestratorConfig): LLMClientResult {
 
   // Last resort: use proxy URL directly
   return {
-    client: createProxyClient(config.proxy, config.orchestrator_dir, {}),
+    client: wrapClientWithUsageTracking(
+      createProxyClient(config.proxy, config.orchestrator_dir, {}),
+      "claude",
+      "unknown",
+    ),
     model: DEFAULT_MODEL,
   };
 }

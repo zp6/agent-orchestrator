@@ -1,5 +1,6 @@
 import { loadConfig, type OrchestratorConfig } from "../config/schema.js";
 import { StateStore } from "../state/store.js";
+import { setLLMUsageRecorder } from "../client/llm-client.js";
 import { Dispatcher, MAX_RETRIES, TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS, extractRepoFromSourceRef } from "../orchestrator/dispatcher.js";
 import { ReviewerClient } from "../client/reviewer-client.js";
 import { Verifier } from "../orchestrator/verifier.js";
@@ -124,6 +125,7 @@ export class Daemon {
   constructor(configPath?: string, pollIntervalMs?: number) {
     this.config = loadConfig(configPath);
     this.store = new StateStore();
+    setLLMUsageRecorder(this.store.recordTokenUsage.bind(this.store));
     this.dispatcher = new Dispatcher(this.config, this.store);
 
     // Shared ReviewerClient — all LLM-based review/verify/supervise/detect
