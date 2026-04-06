@@ -47,6 +47,12 @@ const CLOSED_ISSUE_CHECK_EVERY_N_CYCLES = 3; // ~15min at default — cancel in-
 const STALE_ISSUE_AGE_DAYS = 7;
 
 /**
+ * Tasks in 'done' state with no recorded result older than this threshold are
+ * considered silent failures and will be flagged as 'result_missing'.
+ */
+const RESULT_MISSING_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
+
+/**
  * How often (in poll cycles) to run the orphan-branch → PR creation check.
  * Set to 1 so the check runs every cycle, ensuring that within a single poll
  * interval of a branch being pushed the orchestrator creates the PR.
@@ -236,6 +242,10 @@ export class Daemon {
       //    Timeout failures are scheduled for retry (up to TIMEOUT_RETRY_MAX times)
       //    rather than being permanently failed immediately.
       this.checkStaleTasks(time);
+
+      // 1a. Flag 'done' tasks older than 30 min with no recorded result as
+      //     'result_missing', alert the operator, and schedule for re-dispatch.
+      await this.checkResultMissingTasks(time);
 
       // 1b. Cancel in-flight tasks whose source issue has been closed externally
       //     (issue #431). Runs periodically to avoid excessive GitHub API calls.
@@ -520,6 +530,65 @@ export class Daemon {
           next_retry_at: nextRetryAt,
         });
       }
+    }
+  }
+
+  /**
+   * Detect 'done' tasks that completed without writing any result back to
+   * state.db.  This is a silent failure mode: the source issue is neither
+   * retried (no failure record) nor closed (no success record), so it
+   * disappears from every detection loop.
+   *
+   * A task qualifies when it has been 'done' for ≥30 minutes with no result,
+   * no quality_score, and no verification_status — meaning the agent exited
+   * without recording output.
+   *
+   * For each qualifying task this method:
+   *   1. Flags the task as 'result_missing' in state.db.
+   *   2. Sends a Telegram alert with the task ID and source issue reference
+   *      so the operator can investigate within the same daemon cycle.
+   *   3. Schedules the task for immediate re-dispatch (next_retry_at = now)
+   *      so it is picked up by processRetries on the next poll.
+   */
+  private async checkResultMissingTasks(time: string): Promise<void> {
+    try {
+      const candidates = this.store.getResultMissingCandidates(RESULT_MISSING_THRESHOLD_MS);
+      if (candidates.length === 0) return;
+
+      console.log(`[${time}] Result-missing check: ${candidates.length} task(s) done with no recorded result`);
+      this.log.warn("Result-missing tasks detected", { count: candidates.length });
+
+      for (const task of candidates) {
+        const ageMin = Math.round((Date.now() - new Date(task.created_at).getTime()) / 60_000);
+        const issueRef = task.source_ref ?? "unknown";
+
+        console.log(
+          `[${time}] Result missing: task ${task.id.slice(0, 8)} (${task.agent_name}) for ${issueRef} — done ${ageMin}min ago with no result`,
+        );
+        this.log.warn("Task flagged as result_missing", {
+          taskId: task.id,
+          agentName: task.agent_name,
+          sourceRef: issueRef,
+          ageMinutes: ageMin,
+        });
+
+        // Flag the task and schedule for immediate re-dispatch
+        this.store.updateTask(task.id, {
+          status: "result_missing",
+          result: `Result missing: task completed ${ageMin} minutes ago but wrote no output. Scheduled for re-dispatch.`,
+          next_retry_at: new Date().toISOString(),
+        });
+
+        // Notify the operator — rate-limited per task to avoid spam on repeated cycles
+        await notifyOperator(
+          "Result missing — task re-queued",
+          `Task \`${task.id.slice(0, 8)}\` (agent: ${task.agent_name ?? "unknown"}) for issue \`${issueRef}\` completed ${ageMin} min ago but wrote no result back to state.db.\n\nFlagged as result_missing and re-queued for dispatch.`,
+          "warning",
+          `result-missing:${task.id}`,
+        );
+      }
+    } catch (err) {
+      console.error(`[${time}] Result-missing check failed: ${err instanceof Error ? err.message : err}`);
     }
   }
 

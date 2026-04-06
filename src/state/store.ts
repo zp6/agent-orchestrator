@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { ulid } from "ulid";
 
-export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed" | "escalated";
+export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed" | "escalated" | "result_missing";
 export type TaskSource = "github" | "linear" | "slack" | "manual" | "pr-feedback";
 export type TaskType = "implementation" | "research";
 
@@ -1412,7 +1412,7 @@ export class StateStore {
     const now = new Date().toISOString();
     return this.db.prepare(`
       SELECT * FROM tasks
-      WHERE status = 'failed'
+      WHERE status IN ('failed', 'result_missing')
         AND next_retry_at IS NOT NULL
         AND next_retry_at <= ?
         AND retry_count < ?
@@ -1432,6 +1432,35 @@ export class StateStore {
       "SELECT COUNT(*) as count FROM tasks WHERE status = 'done' AND verification_status IS NULL AND parent_task_id IS NULL",
     ).get() as { count: number };
     return row.count;
+  }
+
+  /**
+   * Return top-level tasks that completed ('done') but wrote no result back to
+   * the database and are older than `thresholdMs` milliseconds.  These are
+   * silent-failure candidates: the agent finished without recording any output,
+   * leaving the source issue in limbo.
+   *
+   * A task qualifies when ALL of the following hold:
+   *   - status = 'done'
+   *   - result IS NULL or empty string
+   *   - quality_score IS NULL  (verification never ran — nothing to score)
+   *   - verification_status IS NULL
+   *   - parent_task_id IS NULL (top-level tasks only)
+   *   - created_at is older than thresholdMs
+   */
+  getResultMissingCandidates(thresholdMs: number, limit = 20): Task[] {
+    const cutoff = new Date(Date.now() - thresholdMs).toISOString();
+    return this.db.prepare(`
+      SELECT * FROM tasks
+      WHERE status = 'done'
+        AND (result IS NULL OR result = '')
+        AND quality_score IS NULL
+        AND verification_status IS NULL
+        AND parent_task_id IS NULL
+        AND created_at <= ?
+      ORDER BY created_at ASC
+      LIMIT ?
+    `).all(cutoff, limit) as Task[];
   }
 
   /**
@@ -1895,6 +1924,7 @@ export class StateStore {
       in_progress: 0,
       done: 0,
       failed: 0,
+      result_missing: 0,
     };
     for (const row of rows) {
       if (row.status in counts) counts[row.status] = row.count;
