@@ -2278,6 +2278,23 @@ describe("StateStore", () => {
       store.updateTask(task.id, { status: "failed", retry_count: 0 });
       expect(store.countFailuresForSourceRef("owner/repo#9")).toBe(1);
     });
+
+    it("excludes connection-error-exhausted failures from the count", () => {
+      const t1 = store.createTask({ title: "conn fail", source: "github", source_ref: "owner/repo#10" });
+      store.updateTask(t1.id, { status: "failed", retry_count: 2, result: "connection-error-exhausted: ECONNREFUSED" });
+
+      const t2 = store.createTask({ title: "real fail", source: "github", source_ref: "owner/repo#10" });
+      store.updateTask(t2.id, { status: "failed", retry_count: 1 });
+
+      // Only t2 counts (2 attempts). t1's 3 connection-error attempts are excluded.
+      expect(store.countFailuresForSourceRef("owner/repo#10")).toBe(2);
+    });
+
+    it("excludes connection-error-exhausted even when all failures are connection errors", () => {
+      const t1 = store.createTask({ title: "conn fail", source: "github", source_ref: "owner/repo#11" });
+      store.updateTask(t1.id, { status: "failed", retry_count: 2, result: "connection-error-exhausted: spawn ENOENT" });
+      expect(store.countFailuresForSourceRef("owner/repo#11")).toBe(0);
+    });
   });
 
   // ── Issue #418: Agent auth quarantine ────────────────────────────────────

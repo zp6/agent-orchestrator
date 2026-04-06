@@ -988,6 +988,11 @@ export class StateStore {
    * Statuses counted: 'failed' and 'escalated' (both represent unsuccessful
    * attempts).  Pending / dispatched / in-progress / done tasks are excluded
    * because they haven't definitively failed yet.
+   *
+   * Connection-error failures (result starts with "connection-error-exhausted")
+   * are excluded because they represent infrastructure problems (spawn failures,
+   * network timeouts), not genuine task failures.  Counting them toward the
+   * escalation limit caused premature escalation of otherwise viable tasks.
    */
   countFailuresForSourceRef(sourceRef: string): number {
     const row = this.db
@@ -996,7 +1001,8 @@ export class StateStore {
          FROM tasks
          WHERE source_ref = ?
            AND parent_task_id IS NULL
-           AND status IN ('failed', 'escalated')`,
+           AND status IN ('failed', 'escalated')
+           AND (result IS NULL OR result NOT LIKE 'connection-error-exhausted%')`,
       )
       .get(sourceRef) as { total: number };
     return row?.total ?? 0;
