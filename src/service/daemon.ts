@@ -364,6 +364,14 @@ export class Daemon {
    */
   private async checkAgentGhAuth(): Promise<void> {
     try {
+      // If the orchestrator has a GH_TOKEN configured (secrets file, env, or .env),
+      // it will be pushed to all agents via syncAgents. Skip the management API
+      // check which returns stale data (proxy doesn't persist ghToken in responses).
+      if (this.config.proxy.gh_token) {
+        this.log.info("Agent GH auth check: skipped — orchestrator has GH_TOKEN configured, will push to agents via sync");
+        return;
+      }
+
       const management = new ManagementClient(this.config.proxy);
       const reachable = await management.isReachable();
       if (!reachable) return;
