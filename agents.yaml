@@ -8,12 +8,6 @@ proxy:
 base_dir: "/Users/paultarr/Documents/Git"
 orchestrator_dir: "/Users/paultarr/Documents/Git/claude-agent-orchestrator"
 
-# PLANNED: agent key names below will be renamed to remove the 'claude-' prefix
-# once multi-provider support is stable. See docs/rename-migration.md for the
-# full checklist. Current → Future: claude-agent-orchestrator → agent-orchestrator,
-# claude-orchestrator-dashboard → agent-dashboard, claude-orchestrator-reviewer →
-# agent-reviewer, claude-proxy → agent-proxy, claude-research-agent → research-agent.
-
 providers:
   claude:
     model: "claude-opus-4-6"
@@ -29,14 +23,17 @@ verification:
   enabled: true
   sources: ["github", "linear"]
   min_score: 0.7
-  max_revisions: 1  # revision cycles before giving up (0 = verify-only)
+  max_revisions: 1
 
 agents:
+  # ── Orchestrator pool (Claude + Codex) ──────────────────────────
   claude-agent-orchestrator:
     dir: "claude-agent-orchestrator"
     repo: "git@github.com:rapartlu/agent-orchestrator.git"
+    provider: "claude"
     model: "claude-opus-4-6"
-    description: "Core orchestration infrastructure: daemon loop, state store, task dispatching, trigger polling, agent deployment, and sync. Does NOT own dashboard/CLI UI or PR review/verification quality layer — those belong to the dashboard and reviewer agents."
+    pool: "orchestrator"
+    description: "Core orchestration infrastructure (Claude). Daemon, state store, dispatching, triggers."
     capabilities: ["typescript", "orchestration", "sqlite"]
     github: "rapartlu/agent-orchestrator"
     owns_topics: ["orchestrator", "daemon", "routing", "dispatcher", "planner", "deployer", "state", "triggers", "sync"]
@@ -46,26 +43,29 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
-  claude-orchestrator-dashboard:
-    dir: "claude-orchestrator-dashboard"
-    repo: "git@github.com:rapartlu/agent-dashboard.git"
-    model: "claude-sonnet-4-6"
-    description: "Dashboard, CLI commands, and observability UI for the orchestrator. Owns all user-facing interfaces: web dashboard, status/health/metrics commands, activity views, escalation queue."
-    capabilities: ["typescript", "html", "css", "express", "dashboard"]
-    github: "rapartlu/agent-dashboard"
-    owns_topics: ["dashboard", "cli", "status", "health", "metrics", "activity", "ui", "escalation-ui"]
+  codex-agent-orchestrator:
+    dir: "claude-agent-orchestrator"
+    repo: "git@github.com:rapartlu/agent-orchestrator.git"
+    provider: "openai"
+    model: "gpt-5.4"
+    pool: "orchestrator"
+    description: "Core orchestration infrastructure (Codex). Same repo, different provider for parallel throughput."
+    capabilities: ["typescript", "orchestration", "sqlite"]
+    owns_topics: []
     docker:
-      port: 3473
+      port: 3480
       api_key: "cheese"
       permissions: "bypassPermissions"
       session: "fresh"
 
+  # ── Reviewer pool (Claude + Codex) ──────────────────────────────
   claude-orchestrator-reviewer:
     dir: "claude-orchestrator-reviewer"
     repo: "git@github.com:rapartlu/agent-reviewer.git"
-    pool: "reviewer"
+    provider: "claude"
     model: "claude-sonnet-4-6"
-    description: "Quality and oversight layer. PR reviewer, task verifier, supervisor, improvement detector, and escalation system (Telegram notifications). Also serves as the LLM backend for all orchestrator operations."
+    pool: "reviewer"
+    description: "PR reviewer, verifier, supervisor (Claude). Also serves as LLM backend."
     capabilities: ["typescript", "llm", "review", "verification"]
     github: "rapartlu/agent-reviewer"
     owns_topics: ["review", "verification", "supervisor", "improvement", "escalation", "telegram", "quality"]
@@ -75,24 +75,59 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
-  claude-orchestrator-reviewer-2:
+  codex-orchestrator-reviewer:
     dir: "claude-orchestrator-reviewer"
     repo: "git@github.com:rapartlu/agent-reviewer.git"
+    provider: "openai"
+    model: "gpt-5.4"
     pool: "reviewer"
-    model: "claude-sonnet-4-6"
-    description: "Reviewer pool instance 2. Shares LLM workload with other reviewer instances."
+    description: "PR reviewer, verifier, supervisor (Codex). Parallel throughput + rate limit resilience."
     capabilities: ["typescript", "llm", "review", "verification"]
     owns_topics: []
     docker:
-      port: 3475
+      port: 3481
       api_key: "cheese"
       permissions: "bypassPermissions"
       session: "fresh"
 
+  # ── Dashboard pool (Claude + Codex) ─────────────────────────────
+  claude-orchestrator-dashboard:
+    dir: "claude-orchestrator-dashboard"
+    repo: "git@github.com:rapartlu/agent-dashboard.git"
+    provider: "claude"
+    model: "claude-sonnet-4-6"
+    pool: "dashboard"
+    description: "Dashboard, CLI commands, observability UI (Claude)."
+    capabilities: ["typescript", "html", "css", "express", "dashboard"]
+    github: "rapartlu/agent-dashboard"
+    owns_topics: ["dashboard", "cli", "status", "health", "metrics", "activity", "ui", "escalation-ui"]
+    docker:
+      port: 3473
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
+  codex-orchestrator-dashboard:
+    dir: "claude-orchestrator-dashboard"
+    repo: "git@github.com:rapartlu/agent-dashboard.git"
+    provider: "openai"
+    model: "gpt-5.4"
+    pool: "dashboard"
+    description: "Dashboard, CLI commands, observability UI (Codex)."
+    capabilities: ["typescript", "html", "css", "express", "dashboard"]
+    owns_topics: []
+    docker:
+      port: 3482
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
+  # ── Telegram ────────────────────────────────────────────────────
   claude-orchestrator-telegram:
     dir: "claude-agent-orchestrator"
+    provider: "claude"
     model: "claude-haiku-4-5"
-    description: "Dedicated lightweight instance for Telegram command handling. Not for dispatched work — only serves quick queries (status, health, summary) without blocking on long tasks."
+    description: "Dedicated Telegram command handler. Quick queries only."
     capabilities: ["telegram", "status"]
     owns_topics: []
     docker:
@@ -101,11 +136,14 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
+  # ── Research pool (Claude + Codex) ──────────────────────────────
   claude-research-agent:
     dir: "claude-research-agent"
     repo: "git@github.com:rapartlu/research-agent.git"
+    provider: "claude"
     model: "claude-opus-4-6"
-    description: "Specialized research agent: web search, doc analysis, technology comparisons, architecture decisions. Produces findings reports, not code."
+    pool: "research"
+    description: "Research agent: web search, doc analysis, technology evaluation (Claude)."
     capabilities: ["research", "web-search", "documentation", "analysis"]
     github: "rapartlu/research-agent"
     owns_topics: ["research", "investigation", "comparison", "evaluation", "exploration", "temporal", "architecture"]
@@ -115,11 +153,29 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
+  codex-research-agent:
+    dir: "claude-research-agent"
+    repo: "git@github.com:rapartlu/research-agent.git"
+    provider: "openai"
+    model: "gpt-5.4"
+    pool: "research"
+    description: "Research agent (Codex). Parallel throughput + rate limit resilience."
+    capabilities: ["research", "web-search", "documentation", "analysis"]
+    owns_topics: []
+    docker:
+      port: 3483
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
+  # ── Proxy pool (Claude + Codex) ────────────────────────────────
   claude-proxy:
     dir: "claude-proxy"
-    model: "claude-opus-4-6"
     repo: "git@github.com:rapartlu/agent-proxy.git"
-    description: "Development proxy server that wraps Claude Code CLI instances and exposes them via the Anthropic Messages API. Manages agent containers, Docker lifecycle, and multi-agent routing."
+    provider: "claude"
+    model: "claude-opus-4-6"
+    pool: "proxy"
+    description: "Proxy server: CLI sessions, container management (Claude)."
     capabilities: ["typescript", "docker", "proxy", "api", "infrastructure"]
     github: "rapartlu/agent-proxy"
     owns_topics: ["proxy", "docker", "container", "infrastructure", "auth", "ssh"]
@@ -129,3 +185,17 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
+  codex-proxy:
+    dir: "claude-proxy"
+    repo: "git@github.com:rapartlu/agent-proxy.git"
+    provider: "openai"
+    model: "gpt-5.4"
+    pool: "proxy"
+    description: "Proxy server (Codex). Parallel throughput + rate limit resilience."
+    capabilities: ["typescript", "docker", "proxy", "api", "infrastructure"]
+    owns_topics: []
+    docker:
+      port: 3484
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
