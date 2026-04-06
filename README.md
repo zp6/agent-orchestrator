@@ -63,6 +63,15 @@ proxy:
   url: "http://localhost:3457"
   timeout_ms: 300000
 
+llm:
+  provider: "auto"                       # optional: auto | claude | codex
+  preferred_agent: "claude-orchestrator-reviewer"
+  default_model: "claude-sonnet-4-6"     # override to a Codex-compatible model if using a codex reviewer agent
+  models:
+    reviewer: "claude-sonnet-4-6"
+    planner: "claude-sonnet-4-6"
+    router: "claude-sonnet-4-6"
+
 base_dir: "/path/to/your/repos"
 orchestrator_dir: "/path/to/this/repo"   # used for LLM routing/planning calls
 
@@ -91,6 +100,8 @@ agents:
 | `docker.port` | no | Dedicated port for the agent's container |
 | `docker.permissions` | no | Claude Code permission mode (`auto`, `plan`, etc.) |
 | `docker.session` | no | Session mode (`fresh`, `continue`, `resume`) |
+
+`llm` is optional. It controls orchestrator-side LLM work such as routing, planning, PR review, verification, and supervisor decisions. To switch those calls from Claude to Codex, point `llm.preferred_agent` at a Codex-backed reviewer agent and set Codex-compatible model IDs under `llm.default_model` or `llm.models.*`.
 
 ## CLI
 

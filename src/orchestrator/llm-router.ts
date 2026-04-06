@@ -1,4 +1,4 @@
-import { createLLMClient } from "../client/llm-client.js";
+import { createLLMClient, getLLMModel } from "../client/llm-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { PromptLearner } from "./prompt-learner.js";
 import type { StateStore } from "../state/store.js";
@@ -25,7 +25,7 @@ export class LLMRouter {
 
     try {
       const response = await client.messages.create({
-        model: "claude-sonnet-4-6",
+        model: getLLMModel(this.config, "router"),
         max_tokens: 1024,
         system: registry,
         messages: [{ role: "user", content: task }],

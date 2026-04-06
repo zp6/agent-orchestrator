@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { loadConfig, getAgentDir, type PRReviewConfig, type OrchestratorConfig, type ProviderConfig } from "./schema.js";
-import { resolve } from "node:path";
-import { writeFileSync, unlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { resolve, join } from "node:path";
 
 describe("loadConfig", () => {
   const configPath = resolve(import.meta.dirname, "..", "..", "agents.yaml");
@@ -50,6 +50,46 @@ describe("loadConfig", () => {
     const ports = Object.values(config.agents).map((a) => a.docker?.port);
     const uniquePorts = new Set(ports);
     expect(uniquePorts.size).toBe(ports.length);
+  });
+
+  it("mirrors proxy.gh_token into process.env.GH_TOKEN", () => {
+    const previous = process.env.GH_TOKEN;
+    const tmp = mkdtempSync(join(tmpdir(), "orch-config-"));
+    const configPath = join(tmp, "agents.yaml");
+
+    writeFileSync(
+      configPath,
+      [
+        "proxy:",
+        "  url: http://localhost:3457",
+        "  timeout_ms: 900000",
+        "  gh_token: ghp_test_from_config",
+        "base_dir: /tmp",
+        "orchestrator_dir: /tmp/orchestrator",
+        "agents:",
+        "  test-agent:",
+        "    dir: test-agent",
+        "    description: test",
+        "    capabilities: [typescript]",
+        "    owns_topics: [test]",
+        "    docker:",
+        "      port: 3472",
+      ].join("\n"),
+    );
+
+    try {
+      delete process.env.GH_TOKEN;
+      const config = loadConfig(configPath);
+      expect(config.proxy.gh_token).toBe("ghp_test_from_config");
+      expect(process.env.GH_TOKEN).toBe("ghp_test_from_config");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+      if (previous === undefined) {
+        delete process.env.GH_TOKEN;
+      } else {
+        process.env.GH_TOKEN = previous;
+      }
+    }
   });
 });
 

@@ -123,6 +123,22 @@ describe("StateStore", () => {
     });
   });
 
+  describe("token usage", () => {
+    it("records token usage and aggregates it by agent", () => {
+      store.recordTokenUsage("claude", "claude-agent-orchestrator", 100, 40);
+      store.recordTokenUsage("claude", "claude-agent-orchestrator", 60, 20);
+
+      const usage = store.getAgentTokenUsage(24);
+      expect(usage).toHaveLength(1);
+      expect(usage[0]).toMatchObject({
+        agent_name: "claude-agent-orchestrator",
+        input_tokens: 160,
+        output_tokens: 60,
+        total_tokens: 220,
+      });
+    });
+  });
+
   describe("findTaskByIssueRef", () => {
     it("finds a task by repo and issue number", () => {
       const t = store.createTask({

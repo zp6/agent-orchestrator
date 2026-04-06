@@ -121,6 +121,40 @@ export interface ProxyConfig {
   gh_token?: string;
 }
 
+export interface LLMModelConfig {
+  default?: string;
+  router?: string;
+  planner?: string;
+  reviewer?: string;
+  verifier?: string;
+  supervisor?: string;
+  improvement?: string;
+  issue_matcher?: string;
+}
+
+export interface LLMConfig {
+  /**
+   * Preferred provider family for orchestrator-side LLM calls.
+   * Used to choose which reviewer-style agent container to target first.
+   * Model IDs still come from `models` overrides or built-in defaults.
+   */
+  provider?: "auto" | "claude" | "codex";
+  /**
+   * Explicit agent name to target for orchestrator-side LLM work.
+   * Example: "codex-orchestrator-reviewer" or "claude-orchestrator-reviewer".
+   */
+  preferred_agent?: string;
+  /**
+   * Fallback model for orchestrator-side LLM calls when a task-specific model
+   * override is not configured.
+   */
+  default_model?: string;
+  /**
+   * Per-task model overrides for orchestrator-side LLM calls.
+   */
+  models?: LLMModelConfig;
+}
+
 export interface PRReviewConfig {
   /**
    * Maximum number of pr-feedback dispatch rounds before the daemon stops
@@ -215,6 +249,7 @@ export interface DashboardConfig {
 
 export interface OrchestratorConfig {
   proxy: ProxyConfig;
+  llm?: LLMConfig;
   base_dir: string;
   orchestrator_dir: string;
   providers?: Record<string, ProviderConfig>;
@@ -302,6 +337,11 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
     } catch {
       // gh CLI not available or not logged in
     }
+  }
+
+  // Keep downstream gh CLI checks aligned with config-loaded auth.
+  if (parsed.proxy.gh_token) {
+    process.env.GH_TOKEN = parsed.proxy.gh_token;
   }
 
   return parsed;

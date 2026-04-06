@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { createLogger } from "../service/logger.js";
-import { createLLMClient } from "../client/llm-client.js";
+import { createLLMClient, getLLMModel } from "../client/llm-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { validatePreSubmit, formatValidationSummary } from "./pre-submit-validator.js";
 import type { StateStore } from "../state/store.js";
@@ -109,7 +109,7 @@ async function llmPickIssue(
     let response;
     try {
       response = await client.messages.create({
-        model: "claude-haiku-4-5",
+        model: getLLMModel(config, "issue_matcher"),
         max_tokens: 64,
         messages: [
           {

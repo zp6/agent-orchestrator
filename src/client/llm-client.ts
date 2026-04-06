@@ -3,39 +3,84 @@ import { createProxyClient } from "./proxy-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { getAgentDir, getAgentBaseUrl, getPoolMembers } from "../config/schema.js";
 
-/**
- * Preferred agent (or pool member) for orchestrator LLM calls.
- * If this agent has a `pool`, all pool members are candidates and
- * requests are round-robined across them.
- */
-const PREFERRED_LLM_AGENT = "claude-orchestrator-reviewer";
+export type LLMTaskKind =
+  | "default"
+  | "router"
+  | "planner"
+  | "reviewer"
+  | "verifier"
+  | "supervisor"
+  | "improvement"
+  | "issue_matcher";
+
+const DEFAULT_MODEL_BY_TASK: Record<LLMTaskKind, string> = {
+  default: "claude-sonnet-4-6",
+  router: "claude-sonnet-4-6",
+  planner: "claude-sonnet-4-6",
+  reviewer: "claude-sonnet-4-6",
+  verifier: "claude-sonnet-4-6",
+  supervisor: "claude-sonnet-4-6",
+  improvement: "claude-sonnet-4-6",
+  issue_matcher: "claude-haiku-4-5",
+};
+
+function getPreferredLLMAgents(config: OrchestratorConfig): string[] {
+  const provider = config.llm?.provider ?? "auto";
+  const preferred = config.llm?.preferred_agent;
+
+  const providerDefaults =
+    provider === "codex"
+      ? ["codex-orchestrator-reviewer", "claude-orchestrator-reviewer"]
+      : provider === "claude"
+        ? ["claude-orchestrator-reviewer", "codex-orchestrator-reviewer"]
+        : ["claude-orchestrator-reviewer", "codex-orchestrator-reviewer"];
+
+  const fallbackReviewers = Object.keys(config.agents).filter((name) =>
+    name.endsWith("orchestrator-reviewer"),
+  );
+
+  return [preferred, ...providerDefaults, ...fallbackReviewers].filter(
+    (name, index, items): name is string => Boolean(name) && items.indexOf(name) === index,
+  );
+}
+
+export function getLLMModel(config: OrchestratorConfig, task: LLMTaskKind): string {
+  return (
+    config.llm?.models?.[task] ??
+    config.llm?.default_model ??
+    DEFAULT_MODEL_BY_TASK[task]
+  );
+}
 
 /** Round-robin counter for pool-based LLM routing. */
 let rrIndex = 0;
 
 /**
  * Get an Anthropic client for orchestrator LLM calls.
- * If the preferred agent belongs to a pool, round-robins across all
- * pool members so LLM calls are distributed instead of hammering one.
+ * Prefers a dedicated reviewer-style container to avoid blocking on
+ * busy agent containers. If the preferred reviewer belongs to a pool,
+ * round-robins across pool members. Falls back to the first available
+ * agent with a Docker port + API key.
  */
 export function createLLMClient(config: OrchestratorConfig): Anthropic {
-  // Get pool members (or just the single agent if no pool)
-  const candidates = getPoolMembers(config, PREFERRED_LLM_AGENT)
-    .filter((name) => {
-      const a = config.agents[name];
-      return a?.docker?.port && a?.docker?.api_key;
-    });
+  for (const agentName of getPreferredLLMAgents(config)) {
+    const candidates = getPoolMembers(config, agentName)
+      .filter((name) => {
+        const agent = config.agents[name];
+        return agent?.docker?.port && agent?.docker?.api_key;
+      });
 
-  if (candidates.length > 0) {
-    // Round-robin across pool members
-    const name = candidates[rrIndex % candidates.length];
-    rrIndex++;
-    const baseUrl = getAgentBaseUrl(config, name);
-    const workingDir = getAgentDir(config, name);
-    return createProxyClient(config.proxy, workingDir, {
-      apiKey: config.agents[name].docker!.api_key!,
-      baseUrl,
-    });
+    if (candidates.length > 0) {
+      const selected = candidates[rrIndex % candidates.length];
+      rrIndex++;
+      const preferred = config.agents[selected];
+      const baseUrl = getAgentBaseUrl(config, selected);
+      const workingDir = getAgentDir(config, selected);
+      return createProxyClient(config.proxy, workingDir, {
+        apiKey: preferred.docker!.api_key!,
+        baseUrl,
+      });
+    }
   }
 
   // Fallback: use any available agent

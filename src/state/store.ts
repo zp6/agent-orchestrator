@@ -523,10 +523,21 @@ CREATE TABLE IF NOT EXISTS daemon_cycles (
   duration_ms INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS token_usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider TEXT NOT NULL,
+  agent_name TEXT,
+  tokens_in INTEGER NOT NULL DEFAULT 0,
+  tokens_out INTEGER NOT NULL DEFAULT 0,
+  recorded_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(agent_name);
 CREATE INDEX IF NOT EXISTS idx_task_logs_task ON task_logs(task_id);
 CREATE INDEX IF NOT EXISTS idx_daemon_cycles_started ON daemon_cycles(started_at);
+CREATE INDEX IF NOT EXISTS idx_token_usage_recorded_at ON token_usage(recorded_at);
+CREATE INDEX IF NOT EXISTS idx_token_usage_agent_name ON token_usage(agent_name);
 `;
 
 export class StateStore {
@@ -552,6 +563,7 @@ export class StateStore {
     this.runDirectivesMigration();
     this.runAgentHealthMigration();
     this.runRevisionCountMigration();
+    this.runTokenUsageMigration();
   }
 
   private runPhase2Migration(): void {
@@ -2742,9 +2754,9 @@ export class StateStore {
   /**
    * Aggregate token usage per agent over a rolling time window.
    *
-   * Sums tokens_in + tokens_out from task_logs for the given window, grouped by
-   * agent_name.  Only rows with a non-null agent_name are included.  Returns one
-   * row per agent, sorted by total_tokens descending (heaviest consumers first).
+   * Sums tokens_in + tokens_out from token_usage for the given window, grouped
+   * by agent_name. Only rows with a non-null agent_name are included. Returns
+   * one row per agent, sorted by total_tokens descending (heaviest consumers first).
    *
    * @param windowHours Number of hours to look back from now (e.g. 24 for daily, 168 for weekly).
    */
@@ -2755,9 +2767,9 @@ export class StateStore {
         COALESCE(SUM(COALESCE(tokens_in,  0)), 0) AS input_tokens,
         COALESCE(SUM(COALESCE(tokens_out, 0)), 0) AS output_tokens,
         COALESCE(SUM(COALESCE(tokens_in,  0) + COALESCE(tokens_out, 0)), 0) AS total_tokens
-      FROM task_logs
+      FROM token_usage
       WHERE agent_name IS NOT NULL
-        AND created_at >= datetime('now', '-' || ? || ' hours')
+        AND recorded_at >= datetime('now', '-' || ? || ' hours')
       GROUP BY agent_name
       ORDER BY total_tokens DESC
     `).all(windowHours) as Array<{
@@ -2781,6 +2793,21 @@ export class StateStore {
         CREATE INDEX IF NOT EXISTS idx_tasks_revision_count ON tasks(revision_count) WHERE revision_count >= 2;
       `);
     }
+  }
+
+  private runTokenUsageMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS token_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        agent_name TEXT,
+        tokens_in INTEGER NOT NULL DEFAULT 0,
+        tokens_out INTEGER NOT NULL DEFAULT 0,
+        recorded_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_token_usage_recorded_at ON token_usage(recorded_at);
+      CREATE INDEX IF NOT EXISTS idx_token_usage_agent_name ON token_usage(agent_name);
+    `);
   }
 
   // ── Stuck issues ─────────────────────────────────────────────────────────

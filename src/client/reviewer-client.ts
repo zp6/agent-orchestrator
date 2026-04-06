@@ -11,7 +11,7 @@
  * orchestrator daemon delegates quality decisions to the reviewer agent
  * rather than running its own parallel LLM logic.
  */
-import { createLLMClient } from "./llm-client.js";
+import { createLLMClient, getLLMModel } from "./llm-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { Task } from "../state/store.js";
 import { createLogger } from "../service/logger.js";
@@ -271,7 +271,7 @@ export class ReviewerClient {
       let response;
       try {
         response = await client.messages.create({
-          model: "claude-sonnet-4-6",
+          model: getLLMModel(this.config, "verifier"),
           max_tokens: 1024,
           system: isResearch ? VERIFY_RESEARCH_SYSTEM_PROMPT : VERIFY_SYSTEM_PROMPT,
           messages: [{ role: "user", content: prompt }],
@@ -308,7 +308,7 @@ export class ReviewerClient {
       let response;
       try {
         response = await client.messages.create({
-          model: "claude-sonnet-4-6",
+          model: getLLMModel(this.config, "reviewer"),
           max_tokens: 2048,
           system: PR_REVIEW_SYSTEM_PROMPT,
           messages: [{ role: "user", content: prompt }],
@@ -344,7 +344,7 @@ export class ReviewerClient {
       let response;
       try {
         response = await client.messages.create({
-          model: "claude-sonnet-4-6",
+          model: getLLMModel(this.config, "supervisor"),
           max_tokens: 4096,
           system: SUPERVISOR_SYSTEM_PROMPT,
           messages: [{ role: "user", content: context }],
@@ -396,7 +396,7 @@ export class ReviewerClient {
       let response;
       try {
         response = await client.messages.create({
-          model: "claude-sonnet-4-6",
+          model: getLLMModel(this.config, "improvement"),
           max_tokens: 4096,
           system: IMPROVEMENT_SYSTEM_PROMPT,
           messages: [{ role: "user", content: prompt }],
