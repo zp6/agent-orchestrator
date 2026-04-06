@@ -72,20 +72,6 @@ agents:
       permissions: "bypassPermissions"
       session: "continue"
 
-  claude-orchestrator-reviewer-3:
-    dir: "claude-orchestrator-reviewer"
-    repo: "git@github.com:rapartlu/claude-orchestrator-reviewer.git"
-    pool: "reviewer"
-    model: "claude-sonnet-4-6"
-    description: "Reviewer pool instance 3. Shares LLM workload with other reviewer instances."
-    capabilities: ["typescript", "llm", "review", "verification"]
-    owns_topics: []
-    docker:
-      port: 3476
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "continue"
-
   claude-orchestrator-telegram:
     dir: "claude-agent-orchestrator"
     model: "claude-haiku-4-5"
