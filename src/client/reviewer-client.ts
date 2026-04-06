@@ -258,7 +258,7 @@ export class ReviewerClient {
    * Sends the task description + result to the reviewer pool for assessment.
    */
   async verifyTask(task: Task): Promise<VerificationResult> {
-    const { client, model } = createLLMClient(this.config);
+    const { client, model } = createLLMClient(this.config, "verifier");
 
     const isResearch = task.task_type === "research";
     const prompt = isResearch
@@ -300,7 +300,7 @@ export class ReviewerClient {
    * Sends PR metadata + diff to the reviewer pool for code review.
    */
   async reviewPRDiff(prompt: string): Promise<PRReviewResult> {
-    const { client, model } = createLLMClient(this.config);
+    const { client, model } = createLLMClient(this.config, "reviewer");
 
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), PR_REVIEW_LLM_TIMEOUT_MS);
@@ -336,7 +336,7 @@ export class ReviewerClient {
    * Sends the current system context to the reviewer pool for strategic analysis.
    */
   async supervisorReview(context: string): Promise<SupervisorDecision[]> {
-    const { client, model } = createLLMClient(this.config);
+    const { client, model } = createLLMClient(this.config, "supervisor");
 
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), DEFAULT_LLM_TIMEOUT_MS);
@@ -375,7 +375,7 @@ export class ReviewerClient {
     const implTasks = tasks.filter((t) => t.task_type !== "research");
     if (implTasks.length === 0) return [];
 
-    const { client, model } = createLLMClient(this.config);
+    const { client, model } = createLLMClient(this.config, "improvement");
 
     const taskSummaries = implTasks.map((t) => ({
       id: t.id.slice(0, 8),

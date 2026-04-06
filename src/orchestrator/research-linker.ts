@@ -131,7 +131,7 @@ export class ResearchLinker {
    * Use an LLM to extract implementation gaps from a research task's findings.
    */
   async analyzeForGaps(task: Task): Promise<ImplementationGap[]> {
-    const { client, model } = createLLMClient(this.config);
+    const { client, model } = createLLMClient(this.config, "improvement");
 
     // Build list of known repos so the LLM can target the right one
     const knownRepos = Object.entries(this.config.agents)

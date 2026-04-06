@@ -20,7 +20,7 @@ export class LLMRouter {
 
   async route(task: string, sourceRepo?: string): Promise<LLMRouteResult | null> {
     const registry = this.buildRegistryPrompt(sourceRepo) + (this.learner?.buildRouterContext() ?? "");
-    const { client, model } = createLLMClient(this.config);
+    const { client, model } = createLLMClient(this.config, "router");
 
     try {
       const response = await client.messages.create({

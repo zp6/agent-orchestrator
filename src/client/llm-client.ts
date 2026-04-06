@@ -1,20 +1,13 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { createProxyClient } from "./proxy-client.js";
-import type { OrchestratorConfig } from "../config/schema.js";
+import type { OrchestratorConfig, LLMTaskKind } from "../config/schema.js";
 import { getAgentDir, getAgentBaseUrl, getPoolMembers } from "../config/schema.js";
 import { createLogger } from "../service/logger.js";
 
 const log = createLogger("llm-client");
 
-export type LLMTaskKind =
-  | "default"
-  | "router"
-  | "planner"
-  | "reviewer"
-  | "verifier"
-  | "supervisor"
-  | "improvement"
-  | "issue_matcher";
+// Re-export for backwards compatibility with any callers that imported it from here.
+export type { LLMTaskKind };
 
 const DEFAULT_MODEL_BY_TASK: Record<LLMTaskKind, string> = {
   default: "claude-sonnet-4-6",
@@ -27,16 +20,44 @@ const DEFAULT_MODEL_BY_TASK: Record<LLMTaskKind, string> = {
   issue_matcher: "claude-haiku-4-5",
 };
 
-function getPreferredLLMAgents(config: OrchestratorConfig): string[] {
-  const provider = config.llm?.provider ?? "auto";
+/**
+ * High-frequency LLM task kinds that benefit most from Claude's prompt caching.
+ * When the global provider is "auto" and no explicit per-task override is set,
+ * these tasks will prefer Claude over Codex to avoid re-tokenising full system
+ * prompts on every request (Codex CLI does not support prompt caching).
+ */
+const CLAUDE_PREFERRED_TASKS = new Set<LLMTaskKind>([
+  "router",
+  "planner",
+  "verifier",
+  "supervisor",
+  "improvement",
+  "issue_matcher",
+]);
+
+function getPreferredLLMAgents(config: OrchestratorConfig, taskKind?: LLMTaskKind): string[] {
+  const globalProvider = config.llm?.provider ?? "auto";
   const preferred = config.llm?.preferred_agent;
 
+  // Resolve the effective provider for this task kind:
+  //   1. Explicit per-task override from config.llm.task_providers
+  //   2. Implicit default: Claude for cache-friendly tasks when provider is "auto"
+  //   3. Fall back to the global provider setting
+  let effectiveProvider = globalProvider;
+  if (taskKind) {
+    const taskOverride = config.llm?.task_providers?.[taskKind];
+    if (taskOverride && taskOverride !== "auto") {
+      effectiveProvider = taskOverride;
+    } else if (!taskOverride && globalProvider === "auto" && CLAUDE_PREFERRED_TASKS.has(taskKind)) {
+      // Default: steer cache-friendly tasks to Claude when no explicit override exists
+      effectiveProvider = "claude";
+    }
+  }
+
   const providerDefaults =
-    provider === "codex"
+    effectiveProvider === "codex"
       ? ["codex-orchestrator-reviewer", "claude-orchestrator-reviewer"]
-      : provider === "claude"
-        ? ["claude-orchestrator-reviewer", "codex-orchestrator-reviewer"]
-        : ["claude-orchestrator-reviewer", "codex-orchestrator-reviewer"];
+      : ["claude-orchestrator-reviewer", "codex-orchestrator-reviewer"];
 
   const fallbackReviewers = Object.keys(config.agents).filter((name) =>
     name.endsWith("orchestrator-reviewer"),
@@ -154,11 +175,16 @@ export interface LLMClientResult {
  * round-robins across pool members so LLM calls are distributed across
  * providers (Claude, Codex, etc.).
  *
+ * When `taskKind` is provided the provider preference is resolved per-task:
+ * high-frequency tasks ("verifier", "supervisor", "router", etc.) default to
+ * Claude when the global provider is "auto", so they benefit from prompt
+ * caching.  This can be overridden via `config.llm.task_providers`.
+ *
  * Returns both the client and the selected agent's model so callers
  * don't need to hardcode model strings.
  */
-export function createLLMClient(config: OrchestratorConfig): LLMClientResult {
-  for (const agentName of getPreferredLLMAgents(config)) {
+export function createLLMClient(config: OrchestratorConfig, taskKind?: LLMTaskKind): LLMClientResult {
+  for (const agentName of getPreferredLLMAgents(config, taskKind)) {
     const candidates = getPoolMembers(config, agentName)
       .filter((name) => {
         const agent = config.agents[name];

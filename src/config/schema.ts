@@ -128,6 +128,20 @@ export interface ProxyConfig {
   gh_token?: string;
 }
 
+/**
+ * Identifies the kind of orchestrator-side LLM work being performed.
+ * Used for per-task model and provider overrides.
+ */
+export type LLMTaskKind =
+  | "default"
+  | "router"
+  | "planner"
+  | "reviewer"
+  | "verifier"
+  | "supervisor"
+  | "improvement"
+  | "issue_matcher";
+
 export interface LLMModelConfig {
   default?: string;
   router?: string;
@@ -160,6 +174,27 @@ export interface LLMConfig {
    * Per-task model overrides for orchestrator-side LLM calls.
    */
   models?: LLMModelConfig;
+  /**
+   * Per-task provider preference overrides.
+   * When set, overrides the global `provider` setting for specific task kinds.
+   *
+   * Claude benefits from automatic prompt caching on repeated system-prompt
+   * prefixes; Codex (via CLI) does not.  Routing high-frequency tasks such as
+   * "verifier", "supervisor", and "router" to Claude therefore saves significant
+   * input tokens compared to a pure round-robin across both providers.
+   *
+   * Default behaviour when `provider` is "auto" and no per-task override is set:
+   * all high-frequency LLM tasks ("router", "planner", "verifier", "supervisor",
+   * "improvement", "issue_matcher") implicitly prefer Claude.  Set a task entry
+   * to "codex" or "auto" to opt out of that default.
+   *
+   * Example:
+   *   task_providers:
+   *     verifier: claude
+   *     supervisor: claude
+   *     reviewer: auto   # let global provider setting decide
+   */
+  task_providers?: Partial<Record<LLMTaskKind, "claude" | "codex" | "auto">>;
 }
 
 export interface PRReviewConfig {
