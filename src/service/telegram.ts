@@ -35,6 +35,21 @@ let chatId: string | null = null;
 const chatConversations = new Map<string, string>();
 let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
+const CHAT_PERSIST_PATH = join(homedir(), ".claude-orchestrator", "telegram-chats.json");
+
+function loadChatConversations(): void {
+  try {
+    const data = JSON.parse(readFileSync(CHAT_PERSIST_PATH, "utf-8")) as Record<string, string>;
+    for (const [k, v] of Object.entries(data)) chatConversations.set(k, v);
+  } catch { /* no file yet */ }
+}
+
+function saveChatConversations(): void {
+  import("node:fs/promises").then(({ writeFile }) =>
+    writeFile(CHAT_PERSIST_PATH, JSON.stringify(Object.fromEntries(chatConversations))).catch(() => {}),
+  );
+}
+
 function loadConfig(): boolean {
   if (botToken) return true;
   try {
@@ -237,6 +252,7 @@ Steps:
     const agentName = text.trim().split(/\s+/)[1];
     if (!agentName) return "Usage: newchat <agent>";
     chatConversations.delete(agentName);
+    saveChatConversations();
     return `🔄 Conversation with ${agentName} reset. Next chat message starts fresh.`;
   }
 
@@ -251,6 +267,7 @@ Steps:
     // Get or create a persistent conversation_id for this agent
     if (!chatConversations.has(agentName)) {
       chatConversations.set(agentName, `telegram-chat-${agentName}-${ulid()}`);
+      saveChatConversations();
     }
     const conversationId = chatConversations.get(agentName)!;
 
@@ -547,6 +564,7 @@ export function startTelegramPolling(ctx: TelegramContext): void {
   }
   if (pollingInterval) return; // already running
 
+  loadChatConversations();
   log.info("Telegram polling started (3s interval)");
 
   const poll = async () => {
