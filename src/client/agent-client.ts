@@ -211,10 +211,12 @@ export class AgentClient {
     const workingDir = getAgentDir(this.config, agentName);
     const apiKey = getAgentApiKey(this.config, agentName);
     const baseUrl = getAgentBaseUrl(this.config, agentName);
+    const provider = this.config.agents[agentName]?.provider;
     const client = createProxyClient(this.config.proxy, workingDir, {
       conversationId: options?.conversationId,
       apiKey,
       baseUrl,
+      provider,
     });
 
     const githubRepo = this.config.agents[agentName]?.github ?? "";
@@ -257,10 +259,12 @@ export class AgentClient {
     const workingDir = getAgentDir(this.config, agentName);
     const apiKey = getAgentApiKey(this.config, agentName);
     const baseUrl = getAgentBaseUrl(this.config, agentName);
+    const provider = this.config.agents[agentName]?.provider;
     const client = createProxyClient(this.config.proxy, workingDir, {
       conversationId: options?.conversationId,
       apiKey,
       baseUrl,
+      provider,
     });
 
     const githubRepo = this.config.agents[agentName]?.github ?? "";

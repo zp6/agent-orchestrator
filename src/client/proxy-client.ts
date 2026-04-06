@@ -8,6 +8,7 @@ export function createProxyClient(
     conversationId?: string;
     apiKey?: string;
     baseUrl?: string;
+    provider?: string;
   },
 ): Anthropic {
   const headers: Record<string, string> = {
@@ -15,6 +16,9 @@ export function createProxyClient(
   };
   if (options?.conversationId) {
     headers["x-conversation-id"] = options.conversationId;
+  }
+  if (options?.provider) {
+    headers["x-provider"] = options.provider;
   }
 
   return new Anthropic({

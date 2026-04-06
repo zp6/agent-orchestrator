@@ -173,6 +173,7 @@ export function createLLMClient(config: OrchestratorConfig): LLMClientResult {
           createProxyClient(config.proxy, workingDir, {
             apiKey: preferred.docker!.api_key!,
             baseUrl,
+            provider,
           }),
           provider,
           selected,
@@ -192,6 +193,7 @@ export function createLLMClient(config: OrchestratorConfig): LLMClientResult {
           createProxyClient(config.proxy, workingDir, {
             apiKey: agent.docker.api_key,
             baseUrl,
+            provider: agent.provider,
           }),
           agent.provider ?? "claude",
           name,
