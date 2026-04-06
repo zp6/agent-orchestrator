@@ -9,9 +9,13 @@ import { ReviewerClient } from "../client/reviewer-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore } from "../state/store.js";
 import { createLogger } from "../service/logger.js";
+import { notifyOperator } from "../service/notify.js";
 
 export type { VerificationResult } from "../client/reviewer-client.js";
 import type { VerificationResult } from "../client/reviewer-client.js";
+
+/** Revision count at which Telegram escalation is triggered. */
+const REVISION_ESCALATION_THRESHOLD = 3;
 
 export class Verifier {
   private log = createLogger("verifier");
@@ -69,6 +73,32 @@ export class Verifier {
     // Re-dispatch with revision feedback
     const task = this.store.getTask(taskId)!;
 
+    // Compute the new revision count for this source_ref
+    const newRevisionCount = (task.revision_count ?? 0) + 1;
+
+    // Update the current task's revision_count so the history is tracked
+    this.store.updateTask(taskId, { revision_count: newRevisionCount });
+
+    // Telegram escalation at threshold
+    if (newRevisionCount >= REVISION_ESCALATION_THRESHOLD) {
+      const sourceLabel = task.source_ref ?? task.title;
+      this.log.warn("Revision loop detected — escalating to operator", {
+        taskId,
+        sourceRef: task.source_ref,
+        revisionCount: newRevisionCount,
+      });
+      await notifyOperator(
+        "Stuck Issue — Revision Loop",
+        `Issue ${sourceLabel} has reached ${newRevisionCount} revision(s).\n` +
+        `Agent: ${task.agent_name ?? "unknown"}\n` +
+        `Quality score: ${task.quality_score?.toFixed(1) ?? "n/a"}\n` +
+        `Task: ${task.title}\n\n` +
+        `This issue may need manual intervention.`,
+        "warning",
+        `stuck-issue:${task.source_ref ?? taskId}`,
+      );
+    }
+
     // Capacity guard: if the agent is already busy, defer the revision by resetting
     // verification_status to null so the daemon re-picks the task on the next cycle.
     if (task.agent_name && this.store.hasActiveTask(task.agent_name)) {
@@ -95,6 +125,9 @@ export class Verifier {
         // instead of re-reading the entire codebase from scratch.
         conversationId: task.conversation_id ?? undefined,
       });
+
+      // Propagate revision_count to the new task so the history is visible
+      this.store.updateTask(revisionResult.taskId, { revision_count: newRevisionCount });
 
       // Verify the revision
       return this.verify(revisionResult.taskId);

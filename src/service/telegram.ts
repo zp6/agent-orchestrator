@@ -529,6 +529,12 @@ async function buildSummary(ctx: TelegramContext): Promise<string> {
     const ageH = (Date.now() - new Date(t.updated_at).getTime()) / 3600000;
     if (ageH < 2) attentionItems.push(`Failed: ${t.title?.slice(0, 40)}`);
   }
+  // Stuck issues (revision loops)
+  const stuckIssues = ctx.store.getStuckIssues(2);
+  for (const issue of stuckIssues) {
+    attentionItems.push(`🔁 Stuck: ${issue.source_ref} (${issue.revision_count} revisions)`);
+  }
+
   const attentionSection = attentionItems.length === 0
     ? "Nothing — all clear"
     : attentionItems.map((i) => `  • ${i}`).join("\n");

@@ -720,6 +720,30 @@ export function registerStatusCommand(program: Command): void {
             }
           }
 
+          // Surface stuck issues (revision_count >= 2)
+          const stuckIssues = store.getStuckIssues(2);
+          if (stuckIssues.length > 0) {
+            console.log(chalk.bold.yellow(`\n🔁 Stuck Issues (${stuckIssues.length})\n`));
+            for (const issue of stuckIssues) {
+              const ref = chalk.cyan(issue.source_ref);
+              const agent = issue.agent_name ? chalk.cyan(issue.agent_name) : chalk.dim("unassigned");
+              const scores = issue.quality_scores
+                .map((s) => (s !== null ? s.toFixed(1) : "—"))
+                .join(" → ");
+              const revLabel = issue.revision_count >= 3
+                ? chalk.red(`${issue.revision_count} revisions`)
+                : chalk.yellow(`${issue.revision_count} revisions`);
+              const age = Math.round((Date.now() - new Date(issue.last_attempt_at).getTime()) / 3_600_000);
+              const ageStr = age < 1 ? "<1h ago" : `${age}h ago`;
+              console.log(
+                `  ${ref.padEnd(35)} ${agent.padEnd(30)} ${revLabel}  scores: [${scores}]  ${chalk.dim(ageStr)}`,
+              );
+            }
+            console.log(
+              chalk.dim("\nThese issues have cycled through multiple revisions without passing quality checks."),
+            );
+          }
+
           // Surface escalated tasks with de-escalation instructions
           const escalated = store.findAllEscalatedTasks();
           if (escalated.length > 0) {

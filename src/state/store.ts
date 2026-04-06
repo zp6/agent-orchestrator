@@ -31,6 +31,8 @@ export interface Task {
   retry_count: number;
   /** ISO timestamp after which the task is eligible for retry, or null if not scheduled. */
   next_retry_at: string | null;
+  /** Number of revision attempts for this source_ref. Incremented each time a [revision] task is dispatched. */
+  revision_count: number;
   reported: number;
   created_at: string;
   updated_at: string;
@@ -429,6 +431,27 @@ export interface PRMetrics {
  * Per-agent token usage aggregate for a rolling time window.
  * Returned by StateStore.getAgentTokenUsage().
  */
+/**
+ * An issue that has gone through multiple revision cycles without resolution.
+ * Surfaced when revision_count >= 2 for any source_ref.
+ */
+export interface StuckIssue {
+  /** The source_ref (e.g. "owner/repo#42") identifying the issue */
+  source_ref: string;
+  /** Total number of revision attempts for this source_ref */
+  revision_count: number;
+  /** Agent currently assigned to the most recent task */
+  agent_name: string | null;
+  /** Quality scores from each attempt (chronological) */
+  quality_scores: (number | null)[];
+  /** Task IDs for all attempts (chronological) */
+  task_ids: string[];
+  /** Titles from all attempts (chronological) */
+  titles: string[];
+  /** Timestamp of the most recent attempt */
+  last_attempt_at: string;
+}
+
 export interface AgentTokenUsage {
   agent_name: string;
   /** Sum of tokens_in for the window */
@@ -528,6 +551,7 @@ export class StateStore {
     this.runProcessedTriggersCompletedAtMigration();
     this.runDirectivesMigration();
     this.runAgentHealthMigration();
+    this.runRevisionCountMigration();
   }
 
   private runPhase2Migration(): void {
@@ -798,7 +822,7 @@ export class StateStore {
     return row?.cnt ?? 0;
   }
 
-  updateTask(id: string, updates: Partial<Pick<Task, "status" | "agent_name" | "conversation_id" | "result" | "plan" | "verification_status" | "quality_score" | "verification_notes" | "retry_count" | "next_retry_at">>): Task | undefined {
+  updateTask(id: string, updates: Partial<Pick<Task, "status" | "agent_name" | "conversation_id" | "result" | "plan" | "verification_status" | "quality_score" | "verification_notes" | "retry_count" | "next_retry_at" | "revision_count">>): Task | undefined {
     const fields: string[] = [];
     const params: unknown[] = [];
 
@@ -2743,6 +2767,82 @@ export class StateStore {
       total_tokens: number;
     }>;
     return rows;
+  }
+
+  // ── Revision count migration ──────────────────────────────────────────────
+
+  private runRevisionCountMigration(): void {
+    const columns = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+    const colNames = new Set(columns.map((c) => c.name));
+
+    if (!colNames.has("revision_count")) {
+      this.db.exec(`
+        ALTER TABLE tasks ADD COLUMN revision_count INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX IF NOT EXISTS idx_tasks_revision_count ON tasks(revision_count) WHERE revision_count >= 2;
+      `);
+    }
+  }
+
+  // ── Stuck issues ─────────────────────────────────────────────────────────
+
+  /**
+   * Return issues that have gone through multiple revision cycles (revision_count >= threshold).
+   * Groups tasks by source_ref and returns the aggregate revision history.
+   *
+   * Only considers tasks with a non-null source_ref and looks at the maximum
+   * revision_count across all tasks sharing that source_ref.
+   */
+  getStuckIssues(threshold = 2): StuckIssue[] {
+    // Find source_refs where any task has revision_count >= threshold
+    const refs = this.db.prepare(`
+      SELECT DISTINCT source_ref
+      FROM tasks
+      WHERE source_ref IS NOT NULL
+        AND revision_count >= ?
+        AND parent_task_id IS NULL
+    `).all(threshold) as Array<{ source_ref: string }>;
+
+    if (refs.length === 0) return [];
+
+    const results: StuckIssue[] = [];
+
+    for (const { source_ref } of refs) {
+      // Get all tasks for this source_ref, chronologically
+      const tasks = this.db.prepare(`
+        SELECT id, title, agent_name, quality_score, revision_count, updated_at
+        FROM tasks
+        WHERE source_ref = ?
+          AND parent_task_id IS NULL
+        ORDER BY created_at ASC
+      `).all(source_ref) as Array<{
+        id: string;
+        title: string;
+        agent_name: string | null;
+        quality_score: number | null;
+        revision_count: number;
+        updated_at: string;
+      }>;
+
+      if (tasks.length === 0) continue;
+
+      const maxRevisionCount = Math.max(...tasks.map((t) => t.revision_count));
+      if (maxRevisionCount < threshold) continue;
+
+      const lastTask = tasks[tasks.length - 1];
+      results.push({
+        source_ref,
+        revision_count: maxRevisionCount,
+        agent_name: lastTask.agent_name,
+        quality_scores: tasks.map((t) => t.quality_score),
+        task_ids: tasks.map((t) => t.id),
+        titles: tasks.map((t) => t.title),
+        last_attempt_at: lastTask.updated_at,
+      });
+    }
+
+    // Sort by revision_count descending (most stuck first)
+    results.sort((a, b) => b.revision_count - a.revision_count);
+    return results;
   }
 
   close(): void {
