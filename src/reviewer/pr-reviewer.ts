@@ -308,29 +308,67 @@ export class PRReviewer {
     if (issueRepo && issueRepo !== repo) {
       const crossRepoIssues = validateClosesReferences(repo, pr.body, issueRepo);
       if (crossRepoIssues.length > 0) {
-        const fixes = crossRepoIssues
-          .map(
-            (issue) =>
-              `- \`${issue.keyword} #${issue.number}\` → should be \`${issue.keyword} ${issue.suggestedRef}\``,
-          )
-          .join("\n");
-        const result: PRReviewResult = {
-          decision: "request-changes",
-          comment:
-            `This PR is on \`${repo}\` but uses bare \`Closes #N\` references that only work within the same repo. ` +
-            `GitHub will **not** auto-close the linked issue on merge.\n\n` +
-            `Please update the PR body:\n${fixes}\n\n` +
-            `You can fix this with:\n\`\`\`\ngh pr edit ${prNumber} --repo ${repo} --body "$(gh pr view ${prNumber} --repo ${repo} --json body -q .body | sed 's/${crossRepoIssues.map(i => `${i.keyword} #${i.number}`).join("\\|")}/${crossRepoIssues.map(i => `${i.keyword} ${i.suggestedRef}`).join("\\|")}/g')"\n\`\`\``,
-          reason: "PR body uses bare Closes #N for cross-repo issue reference — GitHub won't auto-close",
-        };
-        this.log.warn("Cross-repo Closes #N detected", {
-          repo,
-          prNumber,
-          issueRepo,
-          issues: crossRepoIssues,
-        });
-        await this.executeDecision(repo, prNumber, result);
-        return result;
+        // Auto-patch when there's exactly one bare ref and we have a confident repo match
+        if (crossRepoIssues.length === 1) {
+          const issue = crossRepoIssues[0];
+          const patched = await this.autoPatchCrossRepoCloses(
+            repo,
+            prNumber,
+            pr.body,
+            issue,
+          );
+          if (patched) {
+            this.log.info("Auto-patched cross-repo Closes reference", {
+              repo,
+              prNumber,
+              issueRepo,
+              from: `${issue.keyword} #${issue.number}`,
+              to: `${issue.keyword} ${issue.suggestedRef}`,
+            });
+            // Continue with normal review — the body is now correct
+          } else {
+            // Auto-patch failed — fall back to request-changes
+            this.log.warn("Auto-patch failed for cross-repo Closes ref, requesting changes", {
+              repo,
+              prNumber,
+              issueRepo,
+            });
+            const result: PRReviewResult = {
+              decision: "request-changes",
+              comment:
+                `This PR is on \`${repo}\` but uses a bare \`${issue.keyword} #${issue.number}\` reference that only works within the same repo. ` +
+                `GitHub will **not** auto-close the linked issue on merge.\n\n` +
+                `Please update the PR body:\n- \`${issue.keyword} #${issue.number}\` → \`${issue.keyword} ${issue.suggestedRef}\``,
+              reason: "PR body uses bare Closes #N for cross-repo issue reference — GitHub won't auto-close (auto-patch failed)",
+            };
+            await this.executeDecision(repo, prNumber, result);
+            return result;
+          }
+        } else {
+          // Multiple bare refs — ambiguous, request manual review
+          const fixes = crossRepoIssues
+            .map(
+              (issue) =>
+                `- \`${issue.keyword} #${issue.number}\` → should be \`${issue.keyword} ${issue.suggestedRef}\``,
+            )
+            .join("\n");
+          const result: PRReviewResult = {
+            decision: "request-changes",
+            comment:
+              `This PR is on \`${repo}\` but uses bare \`Closes #N\` references that only work within the same repo. ` +
+              `GitHub will **not** auto-close the linked issue(s) on merge.\n\n` +
+              `Please update the PR body:\n${fixes}`,
+            reason: "PR body uses multiple bare Closes #N for cross-repo issue references — GitHub won't auto-close",
+          };
+          this.log.warn("Multiple cross-repo Closes #N detected, requesting changes", {
+            repo,
+            prNumber,
+            issueRepo,
+            issues: crossRepoIssues,
+          });
+          await this.executeDecision(repo, prNumber, result);
+          return result;
+        }
       }
     }
 
@@ -1166,6 +1204,53 @@ export class PRReviewer {
         repo,
         prNumber,
         issueNumber,
+        error: String(err),
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Auto-patch a single bare cross-repo `Closes #N` reference in the PR body
+   * to use the fully qualified `Closes owner/repo#N` form.
+   *
+   * Returns true if the patch was applied successfully, false on failure.
+   */
+  private async autoPatchCrossRepoCloses(
+    repo: string,
+    prNumber: number,
+    currentBody: string,
+    issue: CrossRepoCloseIssue,
+  ): Promise<boolean> {
+    try {
+      // Build a regex that matches the specific bare reference
+      // e.g. "Closes #42" → "Closes rapartlu/claude-agent-orchestrator#42"
+      const pattern = new RegExp(
+        `(${issue.keyword})\\s+#${issue.number}\\b`,
+        "gi",
+      );
+      const newBody = currentBody.replace(pattern, `$1 ${issue.suggestedRef}`);
+
+      if (newBody === currentBody) {
+        this.log.warn("Auto-patch produced no change — pattern may not match", {
+          repo,
+          prNumber,
+          keyword: issue.keyword,
+          number: issue.number,
+        });
+        return false;
+      }
+
+      execSync(
+        `gh pr edit ${prNumber} --repo ${repo} --body ${shellEscape(newBody)}`,
+        { encoding: "utf-8", timeout: 30000 },
+      );
+      return true;
+    } catch (err) {
+      this.log.error("Failed to auto-patch cross-repo Closes reference", {
+        repo,
+        prNumber,
+        issue,
         error: String(err),
       });
       return false;
