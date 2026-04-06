@@ -344,6 +344,145 @@ describe("Supervisor", () => {
       expect(matches).toBe(10);
     });
   });
+
+  describe("research findings in context (issue #428)", () => {
+    it("includes approved research findings in supervisor context", async () => {
+      // Create an approved research task with findings
+      const task = store.createTask({
+        title: "Research: Agent scaling patterns",
+        source: "manual",
+        agent_name: "agent-a",
+        task_type: "research",
+      });
+      store.updateTask(task.id, {
+        status: "done",
+        result: "Key finding: Horizontal scaling with pool-based routing outperforms round-robin by 40% under load. Recommendation: implement health-aware pool selection.",
+        verification_status: "approved",
+        quality_score: 0.92,
+      });
+
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "[]" }],
+      });
+
+      const supervisor = new Supervisor(config, store);
+      await supervisor.review();
+
+      const prompt = mockCreate.mock.calls[0][0].messages[0].content;
+      expect(prompt).toContain("## Recent Research Findings");
+      expect(prompt).toContain("Research: Agent scaling patterns");
+      expect(prompt).toContain("score: 0.9");
+      expect(prompt).toContain("Horizontal scaling with pool-based routing");
+    });
+
+    it("shows linked status when research has implementation issues filed", async () => {
+      // Create an approved research task
+      const researchTask = store.createTask({
+        title: "Research: Model tiering",
+        source: "manual",
+        agent_name: "agent-a",
+        task_type: "research",
+      });
+      store.updateTask(researchTask.id, {
+        status: "done",
+        result: "Finding: Use Haiku for routing, Sonnet for implementation, Opus for verification.",
+        verification_status: "approved",
+        quality_score: 0.88,
+      });
+
+      // Create a research-link bookkeeping record (simulating what research-linker does)
+      const linkTask = store.createTask({
+        title: `[research-link] Analyzed: Research: Model tiering`,
+        source: "manual",
+        source_ref: `research-link:${researchTask.id}`,
+        task_type: "implementation",
+      });
+      store.updateTask(linkTask.id, { status: "done" });
+
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "[]" }],
+      });
+
+      const supervisor = new Supervisor(config, store);
+      await supervisor.review();
+
+      const prompt = mockCreate.mock.calls[0][0].messages[0].content;
+      expect(prompt).toContain("implementation issues filed");
+    });
+
+    it("shows not-yet-linked status for unprocessed research", async () => {
+      const task = store.createTask({
+        title: "Research: New topic",
+        source: "manual",
+        agent_name: "agent-b",
+        task_type: "research",
+      });
+      store.updateTask(task.id, {
+        status: "done",
+        result: "Some findings here.",
+        verification_status: "approved",
+        quality_score: 0.85,
+      });
+
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "[]" }],
+      });
+
+      const supervisor = new Supervisor(config, store);
+      await supervisor.review();
+
+      const prompt = mockCreate.mock.calls[0][0].messages[0].content;
+      expect(prompt).toContain("not yet linked to implementation");
+    });
+
+    it("omits research findings section when no approved research exists", async () => {
+      // Create a non-research task
+      const task = store.createTask({
+        title: "Implementation task",
+        source: "manual",
+        agent_name: "agent-a",
+      });
+      store.updateTask(task.id, { status: "done", result: "Done" });
+
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "[]" }],
+      });
+
+      const supervisor = new Supervisor(config, store);
+      await supervisor.review();
+
+      const prompt = mockCreate.mock.calls[0][0].messages[0].content;
+      expect(prompt).not.toContain("## Recent Research Findings");
+    });
+
+    it("excludes research with quality score below threshold", async () => {
+      const task = store.createTask({
+        title: "Research: Low quality",
+        source: "manual",
+        agent_name: "agent-a",
+        task_type: "research",
+      });
+      store.updateTask(task.id, {
+        status: "done",
+        result: "Mediocre findings.",
+        verification_status: "approved",
+        quality_score: 0.5,
+      });
+
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "[]" }],
+      });
+
+      const supervisor = new Supervisor(config, store);
+      await supervisor.review();
+
+      const prompt = mockCreate.mock.calls[0][0].messages[0].content;
+      // The dedicated research section should not appear — low quality research
+      // is excluded. (It may still appear in "Recent Completed Tasks" which
+      // shows ALL done tasks regardless of quality, but that's expected.)
+      expect(prompt).not.toContain("## Recent Research Findings");
+    });
+  });
 });
 
 describe("extractIssueRefs", () => {

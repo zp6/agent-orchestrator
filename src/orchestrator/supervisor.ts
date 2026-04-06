@@ -59,6 +59,11 @@ You have memory of your recent decisions in "## Recent Supervisor Decisions". Us
 - Track whether your dispatches produced results
 - Identify patterns of repeated failures and escalate to issue creation instead
 
+You may see a "## Recent Research Findings" section containing approved research from the research agent. Use these findings to:
+- Inform routing decisions (e.g. a research finding about scaling patterns may affect which agent gets scaling work)
+- Prioritize implementation of gaps identified by research (issues filed from research are labelled "research-implementation")
+- Avoid dispatching research on topics already covered by recent findings
+
 Be specific and actionable. Only suggest actions that address real gaps. Return [] if everything is on track.`;
 
 /** Regex to detect issue references like #42 or owner/repo#42 */
@@ -277,6 +282,22 @@ export class Supervisor {
     if (recent.length > 0) {
       const taskLines = recent.map((t) => this.formatTask(t)).join("\n");
       sections.push(`## Recent Completed Tasks\n${taskLines}`);
+    }
+
+    // Research findings — approved research with full results so the supervisor
+    // can make informed decisions based on what the research agent discovered
+    // (issue #428).
+    const researchFindings = this.store.getApprovedResearchFindings(5);
+    if (researchFindings.length > 0) {
+      const lines = researchFindings.map((t) => {
+        const linked = this.store.isResearchLinked(t.id) ? " → implementation issues filed" : " → not yet linked to implementation";
+        const score = t.quality_score ? ` [score: ${t.quality_score.toFixed(1)}]` : "";
+        // Include up to 500 chars of findings (much more than the 150-char
+        // truncation in formatTask) so the supervisor has enough context.
+        const findings = t.result ? `\n  Findings: ${t.result.slice(0, 500)}` : "";
+        return `- ${t.id.slice(0, 8)} (${t.agent_name})${score}: ${t.title}${linked}${findings}`;
+      }).join("\n");
+      sections.push(`## Recent Research Findings\n${lines}`);
     }
 
     // Unverified tasks

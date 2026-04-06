@@ -2332,4 +2332,125 @@ describe("StateStore", () => {
       expect(health.auth_status).toBe("auth-degraded");
     });
   });
+
+  describe("getApprovedResearchFindings (issue #428)", () => {
+    it("returns approved research tasks with results", () => {
+      const task = store.createTask({
+        title: "Research: Scaling",
+        source: "manual",
+        agent_name: "research-agent",
+        task_type: "research",
+      });
+      store.updateTask(task.id, {
+        status: "done",
+        result: "Key findings about scaling patterns.",
+        verification_status: "approved",
+        quality_score: 0.9,
+      });
+
+      const findings = store.getApprovedResearchFindings();
+      expect(findings).toHaveLength(1);
+      expect(findings[0].title).toBe("Research: Scaling");
+      expect(findings[0].result).toContain("scaling patterns");
+    });
+
+    it("excludes non-research tasks", () => {
+      const task = store.createTask({
+        title: "Implementation task",
+        source: "manual",
+        agent_name: "agent-a",
+        task_type: "implementation",
+      });
+      store.updateTask(task.id, {
+        status: "done",
+        result: "Done",
+        verification_status: "approved",
+        quality_score: 0.9,
+      });
+
+      const findings = store.getApprovedResearchFindings();
+      expect(findings).toHaveLength(0);
+    });
+
+    it("excludes research below minimum quality score", () => {
+      const task = store.createTask({
+        title: "Research: Low quality",
+        source: "manual",
+        task_type: "research",
+      });
+      store.updateTask(task.id, {
+        status: "done",
+        result: "Mediocre findings.",
+        verification_status: "approved",
+        quality_score: 0.5,
+      });
+
+      const findings = store.getApprovedResearchFindings(5, 0.8);
+      expect(findings).toHaveLength(0);
+    });
+
+    it("excludes rejected research", () => {
+      const task = store.createTask({
+        title: "Research: Rejected",
+        source: "manual",
+        task_type: "research",
+      });
+      store.updateTask(task.id, {
+        status: "done",
+        result: "Bad research.",
+        verification_status: "rejected",
+        quality_score: 0.3,
+      });
+
+      const findings = store.getApprovedResearchFindings();
+      expect(findings).toHaveLength(0);
+    });
+
+    it("limits results to specified count", () => {
+      for (let i = 0; i < 10; i++) {
+        const task = store.createTask({
+          title: `Research: Topic ${i}`,
+          source: "manual",
+          task_type: "research",
+        });
+        store.updateTask(task.id, {
+          status: "done",
+          result: `Findings for topic ${i}.`,
+          verification_status: "approved",
+          quality_score: 0.9,
+        });
+      }
+
+      const findings = store.getApprovedResearchFindings(3);
+      expect(findings).toHaveLength(3);
+    });
+  });
+
+  describe("isResearchLinked (issue #428)", () => {
+    it("returns true when a research-link task exists", () => {
+      const research = store.createTask({
+        title: "Research: Topic",
+        source: "manual",
+        task_type: "research",
+      });
+      // Create the link record
+      store.createTask({
+        title: "[research-link] Analyzed",
+        source: "manual",
+        source_ref: `research-link:${research.id}`,
+      });
+
+      expect(store.isResearchLinked(research.id)).toBe(true);
+    });
+
+    it("returns false when no link record exists", () => {
+      const research = store.createTask({
+        title: "Research: Unlinked",
+        source: "manual",
+        task_type: "research",
+      });
+
+      expect(store.isResearchLinked(research.id)).toBe(false);
+    });
+  });
 });

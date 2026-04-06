@@ -1030,6 +1030,47 @@ export class StateStore {
   }
 
   /**
+   * Return recent approved research tasks with their full results.
+   * Used by the supervisor to include research findings in its decision context
+   * (issue #428).
+   *
+   * Only returns tasks where:
+   *   - task_type = 'research'
+   *   - verification_status = 'approved'
+   *   - quality_score >= minScore
+   *   - result is not null (findings exist)
+   */
+  getApprovedResearchFindings(limit = 5, minScore = 0.8): Task[] {
+    return this.db.prepare(`
+      SELECT * FROM tasks
+      WHERE task_type = 'research'
+        AND verification_status = 'approved'
+        AND quality_score IS NOT NULL
+        AND quality_score >= ?
+        AND result IS NOT NULL
+        AND parent_task_id IS NULL
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(minScore, limit) as Task[];
+  }
+
+  /**
+   * Check whether a research task has been analyzed by the research linker and
+   * had implementation issues filed from it.
+   *
+   * Returns true if a task with source_ref = 'research-link:{researchTaskId}'
+   * exists (the linker creates one as a bookkeeping record).
+   */
+  isResearchLinked(researchTaskId: string): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT 1 FROM tasks WHERE source_ref = ? LIMIT 1",
+      )
+      .get(`research-link:${researchTaskId}`);
+    return row !== undefined;
+  }
+
+  /**
    * Return failed tasks that are eligible for retry: their `next_retry_at` has
    * elapsed and they haven't yet reached `maxRetries` attempts.
    * Results are ordered by `next_retry_at` ascending (oldest due first).
