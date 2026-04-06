@@ -74,25 +74,33 @@ If something needs attention — fix it or dispatch work. Flag issues to the use
 
 Each monitoring iteration MUST perform substantive checks — not just confirm the daemon PID. Responding "Daemon running" without checking logs defeats the purpose.
 
-**Every iteration:**
+**Every iteration (mandatory):**
 1. Check daemon PID + cycle age (`orch service status`). Restart if >12 min since last cycle.
+2. Check Docker/OrbStack health (`docker ps` with a 5s timeout). If Docker is unresponsive:
+   - Try `killall OrbStack && sleep 3 && open -a OrbStack` to restart OrbStack
+   - Wait 20-30s for Docker to recover, then verify with `docker ps`
+   - Once Docker is back, re-sync agents (`orch agents sync`) and restart the daemon
+   - Flag to user if OrbStack can't be restarted automatically
+3. **Check open PRs across ALL repos** (`gh pr list` on every repo in agents.yaml). Flag any MERGEABLE PRs the reviewer hasn't handled.
 
 **Every 2nd iteration (alternate cycles):**
-2. Tail the last 10-15 log lines for errors, new merges, task completions, or failure patterns.
+4. Tail the last 10-15 log lines for errors, new merges, task completions, or failure patterns.
 
 **Every 3rd iteration:**
-3. Check open PRs across repos, recent merge count, and verification backlog.
-4. Flag any escalated PRs or stale issues that need human attention.
+5. Check recent merge count and verification backlog.
+6. Flag any escalated PRs or stale issues that need human attention.
 
 **Reporting rules:**
 - If nothing changed since last check AND last check was <3 min ago: one-line status is fine.
 - If new merges, errors, task completions, or dispatches happened: summarize them.
 - If daemon is stuck (>12 min): restart immediately and report.
+- If Docker is unresponsive: fix it immediately — everything depends on it.
 - If agents are idle with open issues: note it.
 
 **Known failure modes to watch for:**
+- **OrbStack/Docker stalls** — commands hang indefinitely. Root cause of most daemon hangs. Fix: restart OrbStack.
 - Daemon hangs when deployer restarts agent container mid-cycle (Docker API stalls)
-- PR review LLM calls can hang — AbortController timeout at 5 min should catch these
+- PR review LLM calls can hang — AbortController timeout at 10 min should catch these
 - `generate.sh` SSH key validation errors block agent re-registration (non-blocking for running agents)
 - Proxy containers occasionally get SIGTERM (code 143) — supervisor retries these
 
