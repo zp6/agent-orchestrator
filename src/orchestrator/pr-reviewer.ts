@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process";
 import { resolve } from "node:path";
 import { unlinkSync } from "node:fs";
-import { createLLMClient } from "../client/llm-client.js";
+import { ReviewerClient } from "../client/reviewer-client.js";
 import { createLogger } from "../service/logger.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { StateStore, type MergeQueueEntry } from "../state/store.js";
@@ -22,49 +22,14 @@ export interface PRInfo {
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
 }
 
-export interface PRReviewResult {
-  decision: "approve" | "request-changes" | "escalate";
-  comment: string;
-  reason: string;
-  /**
-   * Set to true when the escalation is specifically due to unresolvable merge
-   * conflicts (auto-rebase failed or no local repo for rebase).  The daemon
-   * uses this flag to decide when to auto-close a persistently conflicting PR
-   * and re-dispatch the linked issue from a clean state.
-   */
-  conflictEscalation?: boolean;
-}
-
-const SYSTEM_PROMPT = `You are a code reviewer for a multi-agent system. Your job is to catch real bugs and security issues, NOT to enforce style preferences.
-
-Decide ONE of:
-
-1. **approve** — the code works, is safe, and achieves its goal. Approve even if you'd write it differently.
-2. **request-changes** — there are BLOCKING issues only: bugs that will break at runtime, security vulnerabilities, data loss risks, or missing critical functionality. Style, naming, structure preferences, and "could be cleaner" observations are NOT blocking.
-3. **escalate** — needs human review (security-sensitive, architectural, breaking changes, or genuinely uncertain)
-
-IMPORTANT:
-- Default to APPROVE. Most PRs that work correctly should be approved.
-- Only request changes for issues that would cause real failures or security problems.
-- Never block on: code style, naming conventions, missing comments/docs, "could use a helper function", edge cases that are unlikely in practice, or suggestions for follow-up work.
-- If you have minor suggestions, include them in an approval comment — don't block the PR for them.
-
-CRITICAL — when decision is "request-changes", the "comment" field MUST be a numbered markdown checklist.
-Each item must be a concrete, self-contained action the agent can check off. No narrative prose.
-Example format:
-"1. Add \`Closes #N\` to the PR body\\n2. Guard \`parseInt\` against empty string input in \`src/foo.ts:42\`\\n3. Add unit test for the empty-array edge case in \`processItems()\`"
-
-Respond with ONLY a JSON object (no markdown, no code fences):
-{
-  "decision": "approve|request-changes|escalate",
-  "comment": "Your review comment to post on the PR",
-  "reason": "Brief internal reason for the decision"
-}`;
+export type { PRReviewResult } from "../client/reviewer-client.js";
+import type { PRReviewResult } from "../client/reviewer-client.js";
 
 export class PRReviewer {
   private log = createLogger("pr-reviewer");
   private deployer: Deployer;
   private store: StateStore;
+  private reviewerClient: ReviewerClient;
 
   /**
    * In-memory counter tracking how many times each PR has been escalated due
@@ -75,9 +40,10 @@ export class PRReviewer {
    */
   private conflictEscalationCount = new Map<string, number>();
 
-  constructor(private config: OrchestratorConfig, store?: StateStore) {
+  constructor(private config: OrchestratorConfig, store?: StateStore, reviewerClient?: ReviewerClient) {
     this.deployer = new Deployer(config);
     this.store = store ?? new StateStore();
+    this.reviewerClient = reviewerClient ?? new ReviewerClient(config);
   }
 
   async reviewPR(repo: string, prNumber: number): Promise<PRReviewResult> {
@@ -251,33 +217,10 @@ export class PRReviewer {
       ? `\n\n> ⚠️ **TRUNCATED DIFF WARNING**: The full diff is ${Math.round(diffSize / 1024)} KB but only the first ~${Math.round(truncatedDiff.length / 1024)} KB is shown here. Your review is INCOMPLETE — you have not seen all the changes. Factor this into your decision: note in your comment which files/areas you could not review, and consider escalating if the unseen portion looks significant based on file names or context.`
       : "";
 
-    const client = createLLMClient(this.config
-    );
-
     const prompt = `## PR #${pr.number}: ${pr.title}\n**Repo:** ${pr.repo}\n**Author:** ${pr.author}\n**Branch:** ${pr.branch}\n**Files changed:** ${pr.files_changed}${diffWarning}\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${truncatedDiff}\n\`\`\``;
 
-    const LLM_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — PR reviews need more time via proxy CLI
-    const abortController = new AbortController();
-    const timer = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
     try {
-      let response;
-      try {
-        response = await client.messages.create({
-          model: "claude-sonnet-4-6",
-          max_tokens: 2048,
-          system: SYSTEM_PROMPT,
-          messages: [{ role: "user", content: prompt }],
-        }, { signal: abortController.signal });
-      } finally {
-        clearTimeout(timer);
-      }
-
-      const text = response.content
-        .filter((b) => b.type === "text")
-        .map((b) => "text" in b ? b.text : "")
-        .join("");
-
-      const result = this.parseResponse(text);
+      const result = await this.reviewerClient.reviewPRDiff(prompt);
       this.log.info("PR review complete", { repo, prNumber, decision: result.decision, reason: result.reason });
 
       // Execute the decision — pass branch so approve can enqueue without an extra API call
@@ -998,91 +941,10 @@ export class PRReviewer {
     return prs.map((pr) => ({ ...pr, body: pr.body ?? "", branch: pr.headRefName ?? "" }));
   }
 
-  private parseResponse(text: string): PRReviewResult {
-    // Try multiple extraction strategies to handle varied LLM output formats.
-    // 57% of reviews were failing to parse — Claude often wraps JSON in
-    // explanation text or adds trailing commentary.
-    const strategies = [
-      // 1. Strip code fences and parse directly
-      () => JSON.parse(text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim()),
-      // 2. Extract first JSON object containing "decision" from anywhere
-      () => {
-        const match = text.match(/\{[\s\S]*?"decision"[\s\S]*?\}/);
-        if (!match) throw new Error("No JSON object found");
-        return JSON.parse(match[0]);
-      },
-      // 3. Find JSON between code fences specifically
-      () => {
-        const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-        if (!match) throw new Error("No code fence found");
-        return JSON.parse(match[1].trim());
-      },
-    ];
-
-    for (const strategy of strategies) {
-      try {
-        const parsed = strategy();
-        const decision = ["approve", "request-changes", "escalate"].includes(parsed.decision)
-          ? parsed.decision as PRReviewResult["decision"]
-          : "escalate";
-        const comment = String(parsed.comment ?? "");
-        return {
-          decision,
-          comment: decision === "request-changes" ? enforceChecklist(comment) : comment,
-          reason: String(parsed.reason ?? ""),
-        };
-      } catch {
-        continue;
-      }
-    }
-
-    return { decision: "escalate", comment: "Could not parse review — escalating to human.", reason: "Parse failure" };
-  }
 }
 
-/**
- * Ensure a request-changes comment is a numbered markdown checklist.
- * Exported for testing.
- *
- * When the LLM ignores the system prompt and returns narrative prose, this
- * function converts it into numbered items so agents receive a concrete,
- * checkable list rather than open-ended text.  The conversion is best-effort:
- * if the comment already contains numbered items (e.g. "1. Fix X") it is
- * returned unchanged.  Otherwise, each sentence / clause is turned into a
- * numbered line.
- */
-export function enforceChecklist(comment: string): string {
-  const trimmed = comment.trim();
-  if (!trimmed) return trimmed;
-
-  // Already has numbered checklist items (e.g. "1. …" or "1) …")
-  if (/^\d+[.)]\s/m.test(trimmed)) return trimmed;
-
-  // Split on newlines or sentence boundaries, filter blanks, re-number
-  const lines = trimmed
-    .split(/\n+/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-
-  if (lines.length === 1) {
-    // Single paragraph — split on ". " sentence boundaries
-    const sentences = trimmed
-      .split(/(?<=[.!?])\s+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (sentences.length > 1) {
-      return sentences.map((s, i) => `${i + 1}. ${s}`).join("\n");
-    }
-    // Single sentence — wrap as item 1
-    return `1. ${trimmed}`;
-  }
-
-  return lines.map((line, i) => {
-    // Strip existing bullet markers (-, *, •) before re-numbering
-    const stripped = line.replace(/^[-*•]\s*/, "");
-    return `${i + 1}. ${stripped}`;
-  }).join("\n");
-}
+// Re-export enforceChecklist from the reviewer client for backward compatibility
+export { enforceChecklist } from "../client/reviewer-client.js";
 
 function shellEscape(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;

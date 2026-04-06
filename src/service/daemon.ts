@@ -1,6 +1,7 @@
 import { loadConfig, type OrchestratorConfig } from "../config/schema.js";
 import { StateStore } from "../state/store.js";
 import { Dispatcher, MAX_RETRIES, TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS, extractRepoFromSourceRef } from "../orchestrator/dispatcher.js";
+import { ReviewerClient } from "../client/reviewer-client.js";
 import { Verifier } from "../orchestrator/verifier.js";
 import { ImprovementDetector } from "../orchestrator/improvement-detector.js";
 import { ResearchLinker } from "../orchestrator/research-linker.js";
@@ -123,13 +124,17 @@ export class Daemon {
     this.config = loadConfig(configPath);
     this.store = new StateStore();
     this.dispatcher = new Dispatcher(this.config, this.store);
-    this.verifier = new Verifier(this.config, this.store);
-    this.detector = new ImprovementDetector(this.config);
+
+    // Shared ReviewerClient — all LLM-based review/verify/supervise/detect
+    // operations are delegated to the reviewer agent pool through this client.
+    const reviewerClient = new ReviewerClient(this.config);
+    this.verifier = new Verifier(this.config, this.store, reviewerClient);
+    this.detector = new ImprovementDetector(this.config, reviewerClient);
     this.issueCreator = new IssueCreator(this.config);
     this.researchLinker = new ResearchLinker(this.config, this.store, this.issueCreator);
     this.deployer = new Deployer(this.config);
-    this.supervisor = new Supervisor(this.config, this.store);
-    this.prReviewer = new PRReviewer(this.config, this.store);
+    this.supervisor = new Supervisor(this.config, this.store, reviewerClient);
+    this.prReviewer = new PRReviewer(this.config, this.store, reviewerClient);
     this.prRetryQueue = new PRCreationRetryQueue(this.store);
     this.pollInterval = pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   }

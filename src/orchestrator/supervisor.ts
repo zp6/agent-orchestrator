@@ -1,70 +1,18 @@
+/**
+ * Supervisor — the strategic brain of the multi-agent system.
+ *
+ * LLM calls are delegated to the ReviewerClient (reviewer agent pool).
+ * This module handles context building, decision filtering, and utility
+ * functions for the daemon's supervisor cycle.
+ */
 import { execSync } from "node:child_process";
-import { createLLMClient } from "../client/llm-client.js";
+import { ReviewerClient } from "../client/reviewer-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore, Task, SupervisorDecisionRecord } from "../state/store.js";
 import { createLogger } from "../service/logger.js";
 
-export interface SupervisorDecision {
-  action: "dispatch" | "verify" | "redeploy" | "create-issue" | "follow-up" | "none";
-  agentName?: string;
-  message?: string;
-  reason: string;
-  rationale?: string;
-}
-
-const SYSTEM_PROMPT = `You are the orchestrator supervisor — the strategic brain of a multi-agent system. You review the current state of all agents and tasks, and decide what needs attention.
-
-You have these capabilities:
-- dispatch: send work to an agent
-- verify: check quality of completed work
-- redeploy: rebuild an agent's container with latest code
-- create-issue: create a GitHub issue on an agent's repo
-- follow-up: send a follow-up message to an agent about a previous task
-- none: everything looks good, no action needed
-
-Respond with ONLY a JSON array of decisions (no markdown, no code fences):
-[
-  {
-    "action": "follow-up",
-    "agentName": "claude-proxy",
-    "message": "Your previous task on issue #2 is done but the branch wasn't pushed. Please push branch issue-2-expand-claude-md to origin.",
-    "reason": "Branch created but not pushed to remote",
-    "rationale": "Issue #2 was opened 3 days ago and has no linked PR yet. The agent completed the work in task 01ABC but the branch was never pushed, blocking the PR review cycle. A successful result is the branch pushed and a PR created that closes #2."
-  }
-]
-
-For "dispatch" and "follow-up" actions, ALWAYS include a "rationale" field that explains:
-1. Why this issue/task was selected (recency, failure count, user impact, priority)
-2. What prior work is relevant (previous attempts, related tasks, dependencies)
-3. What a successful result looks like (expected deliverable, acceptance criteria)
-
-IMPORTANT PRIORITIES:
-- Do NOT dispatch to agents that already have active (dispatched) tasks — they can only handle one task at a time
-- Prefer dispatching PRODUCT WORK (features, content, user-facing improvements) over technical follow-ups
-- Do NOT re-dispatch the same failed technical task more than once — if it failed twice, create an issue instead
-- Do NOT follow up on tasks that are just internal tooling or testing infrastructure
-- If an agent is idle, dispatch product-focused work from their open issues, not more tech debt fixes
-
-CRITICAL — IDLE AGENT DISPATCH RULES (strictly enforced):
-- NEVER dispatch a vague "you are idle" or "check for work" message to an agent — these produce useless status reports that are immediately rejected
-- When dispatching to an idle agent, you MUST either:
-  (a) Reference a SPECIFIC open GitHub issue by number (e.g. "implement issue #42 from owner/repo"), OR
-  (b) Define a CONCRETE artifact the agent must produce (e.g. "create file X", "open a PR for Y", "run command Z and report results")
-- The open GitHub issues per agent are listed in the context under "## Open Issues". Pick one and dispatch it.
-- If an agent is idle and has no open issues, prefer action "none" over a vague dispatch — do not invent busywork
-- A dispatch message that will result in a pure status check or "system looks healthy" report is a quality failure and wastes a task slot
-
-You have memory of your recent decisions in "## Recent Supervisor Decisions". Use this to:
-- Avoid repeating actions that have already been taken (especially failed ones)
-- Track whether your dispatches produced results
-- Identify patterns of repeated failures and escalate to issue creation instead
-
-You may see a "## Recent Research Findings" section containing approved research from the research agent. Use these findings to:
-- Inform routing decisions (e.g. a research finding about scaling patterns may affect which agent gets scaling work)
-- Prioritize implementation of gaps identified by research (issues filed from research are labelled "research-implementation")
-- Avoid dispatching research on topics already covered by recent findings
-
-Be specific and actionable. Only suggest actions that address real gaps. Return [] if everything is on track.`;
+export type { SupervisorDecision } from "../client/reviewer-client.js";
+import type { SupervisorDecision } from "../client/reviewer-client.js";
 
 /** Regex to detect issue references like #42 or owner/repo#42 */
 const ISSUE_REF_RE = /#\d+/;
@@ -174,53 +122,29 @@ export function isConcreteDispatch(message: string): boolean {
 
 export class Supervisor {
   private log = createLogger("supervisor");
+  private reviewerClient: ReviewerClient;
 
   constructor(
     private config: OrchestratorConfig,
     private store: StateStore,
-  ) {}
+    reviewerClient?: ReviewerClient,
+  ) {
+    this.reviewerClient = reviewerClient ?? new ReviewerClient(config);
+  }
 
   async review(): Promise<SupervisorDecision[]> {
     const context = this.buildContext();
 
-    const client = createLLMClient(this.config
-    );
+    const decisions = await this.reviewerClient.supervisorReview(context);
+    const validated = this.filterVagueDispatches(decisions);
 
-    const LLM_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes hard timeout
-    const abortController = new AbortController();
-    const timer = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
-    try {
-      let response;
-      try {
-        response = await client.messages.create({
-          model: "claude-sonnet-4-6",
-          max_tokens: 4096,
-          system: SYSTEM_PROMPT,
-          messages: [{ role: "user", content: context }],
-        }, { signal: abortController.signal });
-      } finally {
-        clearTimeout(timer);
-      }
-
-      const text = response.content
-        .filter((b) => b.type === "text")
-        .map((b) => "text" in b ? b.text : "")
-        .join("");
-
-      const decisions = this.parseDecisions(text);
-      const validated = this.filterVagueDispatches(decisions);
-
-      const dropped = decisions.length - validated.length;
-      if (dropped > 0) {
-        this.log.warn("Supervisor: dropped vague idle-agent dispatches", { dropped });
-      }
-
-      this.log.info("Supervisor review complete", { decisions: validated.length, actions: validated.map((d) => d.action) });
-      return validated;
-    } catch (err) {
-      this.log.error("Supervisor review failed", { error: err instanceof Error ? err.message : String(err) });
-      return [];
+    const dropped = decisions.length - validated.length;
+    if (dropped > 0) {
+      this.log.warn("Supervisor: dropped vague idle-agent dispatches", { dropped });
     }
+
+    this.log.info("Supervisor review complete", { decisions: validated.length, actions: validated.map((d) => d.action) });
+    return validated;
   }
 
   /**
@@ -367,24 +291,5 @@ export class Supervisor {
     const verified = t.verification_status ? ` [${t.verification_status}${t.quality_score ? ` ${t.quality_score.toFixed(1)}` : ""}]` : " [unverified]";
     const result = t.result ? `\n  Result: ${t.result.slice(0, 150)}` : "";
     return `- ${t.id.slice(0, 8)} (${t.agent_name}) ${t.status}${typeTag}${verified}: ${t.title}${result}`;
-  }
-
-  private parseDecisions(text: string): SupervisorDecision[] {
-    const cleaned = text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim();
-    try {
-      const parsed = JSON.parse(cleaned);
-      if (!Array.isArray(parsed)) return [];
-      return parsed
-        .filter((d: Record<string, unknown>) => d.action && d.reason)
-        .map((d: Record<string, unknown>) => ({
-          action: String(d.action) as SupervisorDecision["action"],
-          agentName: d.agentName ? String(d.agentName) : undefined,
-          message: d.message ? String(d.message) : undefined,
-          reason: String(d.reason),
-          rationale: d.rationale ? String(d.rationale) : undefined,
-        }));
-    } catch {
-      return [];
-    }
   }
 }
