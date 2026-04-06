@@ -9,6 +9,7 @@ import { ulid } from "ulid";
 import { createLogger } from "../service/logger.js";
 import { validateGhAuth, GhAuthError } from "../triggers/github.js";
 import { cachedValidateForDispatch } from "../triggers/issue-state-bridge.js";
+import { checkDuplicate } from "../triggers/duplicate-guard.js";
 import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
 import { buildRejectionHistoryBlock } from "./rejection-history.js";
 import { notifyOperator } from "../service/notify.js";
@@ -354,11 +355,12 @@ export class Dispatcher {
       }
     }
 
-    // Pre-dispatch issue state guard (issues #444, #457, #458): validates issue
-    // state through the 60s TTL cache.  Catches closed issues, issues with merged
-    // PRs, and issues with open PRs — all without redundant GitHub API calls when
-    // multiple dispatch paths check the same issue within the TTL window.
-    if (options?.source === "github" && options?.sourceRef) {
+    // Pre-dispatch issue state guard (issues #444, #457, #458, #468): validates
+    // issue state through the 60s TTL cache.  Catches closed issues, issues with
+    // merged PRs, and issues with open PRs.  Runs for ALL dispatch sources (not
+    // just GitHub triggers) so supervisor, CLI, and Telegram dispatches that
+    // reference a GitHub issue are also caught.
+    if (options?.sourceRef) {
       const repo = extractRepoFromSourceRef(options.sourceRef);
       const issueMatch = options.sourceRef.match(/#(\d+)$/);
       if (repo && issueMatch) {
@@ -367,6 +369,7 @@ export class Dispatcher {
         if (skipReason) {
           this.log.warn("Dispatch skipped: issue state validation failed (cached)", {
             agentName,
+            source: options?.source,
             sourceRef: options.sourceRef,
             repo,
             issueNumber,
@@ -383,6 +386,34 @@ export class Dispatcher {
             },
           };
         }
+      }
+    }
+
+    // Idempotency guard (issue #469): prevent the same source_ref from being
+    // dispatched to multiple agents simultaneously.  The trigger layer already
+    // checks this via inFlightDispatches + checkDuplicate, but direct callers
+    // (supervisor, CLI, Telegram, retries) bypass the trigger layer entirely.
+    // Placing the guard here in dispatch() itself closes that gap.
+    if (options?.sourceRef && options?.source) {
+      const dupCheck = checkDuplicate(this.store, options.source, options.sourceRef);
+      if (dupCheck.isDuplicate) {
+        this.log.warn("Dispatch blocked: duplicate guard triggered", {
+          agentName,
+          source: options.source,
+          sourceRef: options.sourceRef,
+          reason: dupCheck.reason,
+          existingTaskId: dupCheck.existingTask?.id,
+        });
+        return {
+          taskId: "",
+          agentName,
+          response: {
+            content: `Duplicate: ${dupCheck.reason}`,
+            model: "",
+            usage: { input_tokens: 0, output_tokens: 0 },
+            stop_reason: "duplicate",
+          },
+        };
       }
     }
 
