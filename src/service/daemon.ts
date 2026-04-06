@@ -180,6 +180,13 @@ export class Daemon {
     // inside agent containers, causing tasks to require human escalation.
     await this.checkAgentGhAuth();
 
+    // Immediately attempt recovery: syncAgents above pushes ghToken to the
+    // management API, but checkAgentGhAuth may see stale registrations and
+    // quarantine agents prematurely.  Running recovery here clears quarantine
+    // for agents whose tokens have already propagated, instead of waiting 10
+    // cycles (~5 min) for the periodic check.
+    await this.checkAuthRecovery();
+
     // Start independent Telegram polling (3s interval, doesn't block cycles)
     startTelegramPolling({ config: this.config, store: this.store, dispatcher: this.dispatcher });
 
