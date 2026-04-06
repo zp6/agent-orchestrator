@@ -74,6 +74,7 @@ export interface SupervisorDecisionRecord {
   agent_name: string | null;
   reason: string;
   message: string | null;
+  rationale: string | null;
   outcome: SupervisorOutcome;
   task_id: string | null;
   created_at: string;
@@ -1661,6 +1662,14 @@ export class StateStore {
       );
       CREATE INDEX IF NOT EXISTS idx_supervisor_decisions_created ON supervisor_decisions(created_at);
     `);
+
+    // Migration: add rationale column if it doesn't exist yet
+    const cols = this.db
+      .prepare("PRAGMA table_info(supervisor_decisions)")
+      .all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "rationale")) {
+      this.db.exec("ALTER TABLE supervisor_decisions ADD COLUMN rationale TEXT");
+    }
   }
 
   /**
@@ -1672,19 +1681,21 @@ export class StateStore {
     agent_name?: string;
     reason: string;
     message?: string;
+    rationale?: string;
     outcome: SupervisorOutcome;
     task_id?: string;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO supervisor_decisions (action, agent_name, reason, message, outcome, task_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO supervisor_decisions (action, agent_name, reason, message, rationale, outcome, task_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         params.action,
         params.agent_name ?? null,
         params.reason,
         params.message ?? null,
+        params.rationale ?? null,
         params.outcome,
         params.task_id ?? null,
         new Date().toISOString(),

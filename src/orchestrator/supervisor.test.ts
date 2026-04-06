@@ -59,6 +59,42 @@ describe("Supervisor", () => {
     expect(decisions[0].agentName).toBe("agent-a");
   });
 
+  it("parses rationale field from LLM response", async () => {
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify([
+        {
+          action: "dispatch",
+          agentName: "agent-a",
+          message: "Implement issue #42 from owner/a",
+          reason: "Issue #42 is open",
+          rationale: "Issue #42 was opened 2 days ago with high user impact. No prior attempts. Success means a PR that closes #42.",
+        },
+      ])}],
+    });
+
+    const supervisor = new Supervisor(config, store);
+    const decisions = await supervisor.review();
+
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0].rationale).toBe(
+      "Issue #42 was opened 2 days ago with high user impact. No prior attempts. Success means a PR that closes #42.",
+    );
+  });
+
+  it("handles missing rationale gracefully", async () => {
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify([
+        { action: "dispatch", agentName: "agent-a", message: "Fix issue #10", reason: "Issue open" },
+      ])}],
+    });
+
+    const supervisor = new Supervisor(config, store);
+    const decisions = await supervisor.review();
+
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0].rationale).toBeUndefined();
+  });
+
   it("returns empty array when no actions needed", async () => {
     mockCreate.mockResolvedValueOnce({
       content: [{ type: "text", text: "[]" }],

@@ -1052,6 +1052,7 @@ export class Daemon {
             agent_name: d.agentName,
             reason: d.reason,
             message: d.message,
+            rationale: d.rationale,
             outcome: "none",
           });
           continue;
@@ -1073,6 +1074,7 @@ export class Daemon {
               agent_name: d.agentName,
               reason: d.reason,
               message: d.message,
+              rationale: d.rationale,
               outcome: "skipped",
             });
             this.store.incrementStat("supervisor_pre_resolved_skips");
@@ -1088,12 +1090,24 @@ export class Daemon {
               agent_name: d.agentName,
               reason: d.reason,
               message: d.message,
+              rationale: d.rationale,
               outcome: "skipped",
             });
           } else {
             try {
+              // Build dispatch message, prepending rationale block when available
+              const dispatchMessage = d.rationale
+                ? `## Supervisor Rationale\n${d.rationale}\n\n${d.message}`
+                : d.message;
+              if (d.rationale) {
+                this.log.info("Supervisor dispatch with rationale", {
+                  agentName: d.agentName,
+                  rationale: d.rationale.slice(0, 200),
+                });
+                console.log(`  rationale: ${d.rationale.slice(0, 120)}`);
+              }
               // Fire-and-forget: don't block the daemon cycle waiting for agent response
-              this.dispatcher.dispatch(d.message, {
+              this.dispatcher.dispatch(dispatchMessage, {
                 agentName: d.agentName,
                 title: `[supervisor] ${d.reason.slice(0, 80)}`,
               }).then((result) => {
@@ -1103,6 +1117,7 @@ export class Daemon {
                   agent_name: d.agentName,
                   reason: d.reason,
                   message: d.message,
+                  rationale: d.rationale,
                   outcome: "dispatched",
                   task_id: result.taskId,
                 });
@@ -1113,6 +1128,7 @@ export class Daemon {
                   agent_name: d.agentName,
                   reason: d.reason,
                   message: d.message,
+                  rationale: d.rationale,
                   outcome: "failed",
                 });
               });
@@ -1123,6 +1139,7 @@ export class Daemon {
                 agent_name: d.agentName,
                 reason: d.reason,
                 message: d.message,
+                rationale: d.rationale,
                 outcome: "failed",
               });
             }
@@ -1139,6 +1156,7 @@ export class Daemon {
             agent_name: d.agentName,
             reason: d.reason,
             message: d.message,
+            rationale: d.rationale,
             outcome: "unhandled",
           });
         }

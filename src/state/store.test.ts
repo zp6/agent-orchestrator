@@ -1373,6 +1373,7 @@ describe("StateStore", () => {
       expect(decisions).toHaveLength(1);
       expect(decisions[0].agent_name).toBeNull();
       expect(decisions[0].message).toBeNull();
+      expect(decisions[0].rationale).toBeNull();
       expect(decisions[0].task_id).toBeNull();
     });
 
@@ -1413,6 +1414,34 @@ describe("StateStore", () => {
       expect(decisions[0].action).toBe("create-issue");
       expect(decisions[0].outcome).toBe("unhandled");
       expect(decisions[0].task_id).toBeNull();
+    });
+
+    it("stores and retrieves rationale field", () => {
+      store.addSupervisorDecision({
+        action: "dispatch",
+        agent_name: "agent-a",
+        reason: "Issue #42 open and unassigned",
+        message: "Implement issue #42",
+        rationale: "Issue #42 was opened 3 days ago with high user impact. No prior attempts exist. Success means a merged PR closing #42.",
+        outcome: "dispatched",
+        task_id: "01XYZ789",
+      });
+
+      const decisions = store.getRecentSupervisorDecisions(1);
+      expect(decisions[0].rationale).toBe(
+        "Issue #42 was opened 3 days ago with high user impact. No prior attempts exist. Success means a merged PR closing #42.",
+      );
+    });
+
+    it("stores null rationale when not provided", () => {
+      store.addSupervisorDecision({
+        action: "none",
+        reason: "Everything on track",
+        outcome: "none",
+      });
+
+      const decisions = store.getRecentSupervisorDecisions(1);
+      expect(decisions[0].rationale).toBeNull();
     });
   });
 
