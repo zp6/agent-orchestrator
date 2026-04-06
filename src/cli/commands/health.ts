@@ -15,6 +15,7 @@ export interface AgentSnapshot {
   containerStatus: string;
   healthStatus: "alive" | "unreachable" | "no-port";
   latencyMs: number | null;
+  ghAuthOk: boolean | null; // null = unable to determine (container not running)
 }
 
 interface TimeoutEntry {
@@ -34,6 +35,8 @@ export interface HealthSnapshot {
   lastCycleAgeMs: number | null;
   ghAuthOk: boolean;
   ghAuthReason: string | null;
+  /** Number of running agent containers missing GH_TOKEN / gh auth. */
+  agentGhAuthFailures: number;
   agents: Map<string, AgentSnapshot>;
   taskCounts: Record<string, number>;
   unverified: number;
@@ -151,6 +154,7 @@ async function gatherHealthSnapshot(
   const healthMap = await pingAllAgents(config, agentNames, 3000);
 
   const agents = new Map<string, AgentSnapshot>();
+  let agentGhAuthFailures = 0;
   for (const name of agentNames) {
     const live = liveStatus?.get(name);
     const containerStatus = live?.status ?? (liveStatus === null ? "proxy-offline" : "not-created");
@@ -165,7 +169,16 @@ async function gatherHealthSnapshot(
         healthStatus = "unreachable";
       }
     }
-    agents.set(name, { containerStatus, healthStatus, latencyMs });
+
+    // Check if the agent container has GH_TOKEN configured via the proxy.
+    // A running container without ghToken will fail `gh pr create` etc.
+    let ghAuthOk: boolean | null = null;
+    if (live && containerStatus === "running") {
+      ghAuthOk = !!(live as { ghToken?: string }).ghToken;
+      if (!ghAuthOk) agentGhAuthFailures++;
+    }
+
+    agents.set(name, { containerStatus, healthStatus, latencyMs, ghAuthOk });
   }
 
   // 4 & 5. Tasks + timeouts + retries from DB
@@ -246,6 +259,19 @@ async function gatherHealthSnapshot(
       `CRITICAL: GitHub auth degraded — dispatch will be blocked: ${ghAuth.reason ?? "unknown reason"}`,
     );
   }
+
+  // Alert for agent containers missing GH_TOKEN
+  if (agentGhAuthFailures > 0) {
+    const failedAgents = [...agents.entries()]
+      .filter(([, a]) => a.ghAuthOk === false)
+      .map(([name]) => name);
+    const severity = agentGhAuthFailures >= 3 ? "CRITICAL" : "WARN";
+    if (severity === "CRITICAL") hasCriticalFailure = true;
+    alerts.push(
+      `${severity}: ${agentGhAuthFailures} agent container(s) missing GH_TOKEN — ` +
+        `gh pr create will fail: ${failedAgents.join(", ")}`,
+    );
+  }
   if (pid && !running) {
     hasCriticalFailure = true;
     alerts.push(`CRITICAL: Stale PID file — process ${pid} not found`);
@@ -299,6 +325,7 @@ async function gatherHealthSnapshot(
     lastCycleAgeMs,
     ghAuthOk: ghAuth.ok,
     ghAuthReason: ghAuth.reason ?? null,
+    agentGhAuthFailures,
     agents,
     taskCounts,
     unverified,
@@ -380,7 +407,14 @@ function printHealthSnapshot(snap: HealthSnapshot): void {
       healthStr = chalk.dim("— (no port)");
     }
 
-    console.log(`  ${chalk.cyan(name.padEnd(32))} ${containerStr} ${healthStr}`);
+    let ghAuthStr = "";
+    if (agent.ghAuthOk === true) {
+      ghAuthStr = chalk.green("  gh ✓");
+    } else if (agent.ghAuthOk === false) {
+      ghAuthStr = chalk.red("  gh ✗ (no GH_TOKEN)");
+    }
+
+    console.log(`  ${chalk.cyan(name.padEnd(32))} ${containerStr} ${healthStr}${ghAuthStr}`);
   }
 
   if (snap.dbUnavailable) {
@@ -564,7 +598,7 @@ export function computeDiff(prev: HealthSnapshot, curr: HealthSnapshot): DiffLin
     }
   }
 
-  // Agent container/health status
+  // Agent container/health/auth status
   for (const [name, curr_agent] of curr.agents) {
     const prev_agent = prev.agents.get(name);
     if (!prev_agent) continue;
@@ -581,6 +615,19 @@ export function computeDiff(prev: HealthSnapshot, curr: HealthSnapshot): DiffLin
         severity: isBad ? "warn" : "info",
         message: `agent ${name}: liveness ${prev_agent.healthStatus} → ${curr_agent.healthStatus}`,
       });
+    }
+    if (prev_agent.ghAuthOk !== curr_agent.ghAuthOk) {
+      if (curr_agent.ghAuthOk === false) {
+        changes.push({
+          severity: "warn",
+          message: `agent ${name}: GH_TOKEN lost — gh pr create will fail`,
+        });
+      } else if (curr_agent.ghAuthOk === true && prev_agent.ghAuthOk === false) {
+        changes.push({
+          severity: "info",
+          message: `agent ${name}: GH_TOKEN restored`,
+        });
+      }
     }
   }
 

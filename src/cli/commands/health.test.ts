@@ -42,6 +42,7 @@ function makeSnap(overrides: Partial<HealthSnapshot> = {}): HealthSnapshot {
     lastCycleAgeMs: null,
     ghAuthOk: true,
     ghAuthReason: null,
+    agentGhAuthFailures: 0,
     agents: new Map(),
     taskCounts: { done: 5, failed: 0, in_progress: 0, dispatched: 0, pending: 0 },
     unverified: 0,
@@ -232,14 +233,36 @@ describe("computeDiff", () => {
   });
 
   it("detects agent container status change", () => {
-    const agents = new Map([["my-agent", { containerStatus: "running", healthStatus: "alive" as const, latencyMs: 50 }]]);
+    const agents = new Map([["my-agent", { containerStatus: "running", healthStatus: "alive" as const, latencyMs: 50, ghAuthOk: true }]]);
     const prev = makeSnap({ agents });
-    const currAgents = new Map([["my-agent", { containerStatus: "stopped", healthStatus: "unreachable" as const, latencyMs: null }]]);
+    const currAgents = new Map([["my-agent", { containerStatus: "stopped", healthStatus: "unreachable" as const, latencyMs: null, ghAuthOk: null }]]);
     const curr = makeSnap({ agents: currAgents });
     const diff = computeDiff(prev, curr);
     const containerChange = diff.find((d) => d.message.includes("container"));
     expect(containerChange).toBeDefined();
     expect(containerChange?.severity).toBe("warn");
+  });
+
+  it("detects agent GH_TOKEN loss", () => {
+    const prevAgents = new Map([["my-agent", { containerStatus: "running", healthStatus: "alive" as const, latencyMs: 50, ghAuthOk: true }]]);
+    const currAgents = new Map([["my-agent", { containerStatus: "running", healthStatus: "alive" as const, latencyMs: 50, ghAuthOk: false }]]);
+    const prev = makeSnap({ agents: prevAgents });
+    const curr = makeSnap({ agents: currAgents });
+    const diff = computeDiff(prev, curr);
+    const authChange = diff.find((d) => d.message.includes("GH_TOKEN lost"));
+    expect(authChange).toBeDefined();
+    expect(authChange?.severity).toBe("warn");
+  });
+
+  it("detects agent GH_TOKEN restoration", () => {
+    const prevAgents = new Map([["my-agent", { containerStatus: "running", healthStatus: "alive" as const, latencyMs: 50, ghAuthOk: false }]]);
+    const currAgents = new Map([["my-agent", { containerStatus: "running", healthStatus: "alive" as const, latencyMs: 50, ghAuthOk: true }]]);
+    const prev = makeSnap({ agents: prevAgents });
+    const curr = makeSnap({ agents: currAgents });
+    const diff = computeDiff(prev, curr);
+    const authChange = diff.find((d) => d.message.includes("GH_TOKEN restored"));
+    expect(authChange).toBeDefined();
+    expect(authChange?.severity).toBe("info");
   });
 
   it("handles multiple simultaneous changes", () => {

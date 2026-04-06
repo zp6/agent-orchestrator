@@ -162,6 +162,10 @@ export class Daemon {
     // The management API loses agent state on proxy restart, so we sync on every daemon start.
     await this.syncAgents();
 
+    // Check that agents have GH_TOKEN configured — without it, `gh pr create` will fail
+    // inside agent containers, causing tasks to require human escalation.
+    await this.checkAgentGhAuth();
+
     // Start independent Telegram polling (3s interval, doesn't block cycles)
     startTelegramPolling({ config: this.config, store: this.store, dispatcher: this.dispatcher });
 
@@ -297,6 +301,40 @@ export class Daemon {
       }
     } catch (err) {
       this.log.error("Agent sync failed", { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  /**
+   * Check that running agent containers have GH_TOKEN configured.
+   * Logs a warning for each agent missing it — without GH_TOKEN, `gh pr create`
+   * and other GitHub CLI calls will fail inside the container.
+   */
+  private async checkAgentGhAuth(): Promise<void> {
+    try {
+      const management = new ManagementClient(this.config.proxy);
+      const reachable = await management.isReachable();
+      if (!reachable) return;
+
+      const proxyAgents = await management.listAgents();
+      const missing: string[] = [];
+
+      for (const agent of proxyAgents) {
+        if (agent.status === "running" && !agent.ghToken) {
+          missing.push(agent.name);
+        }
+      }
+
+      if (missing.length > 0) {
+        const msg = `${missing.length} running agent(s) missing GH_TOKEN — gh pr create will fail: ${missing.join(", ")}`;
+        this.log.warn("Agent GH auth check", { missing });
+        console.log(`⚠  ${msg}`);
+      } else if (proxyAgents.filter((a) => a.status === "running").length > 0) {
+        this.log.info("Agent GH auth check: all running agents have GH_TOKEN");
+      }
+    } catch (err) {
+      this.log.error("Agent GH auth check failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
