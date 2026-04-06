@@ -98,6 +98,20 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
+  claude-research-agent:
+    dir: "claude-research-agent"
+    repo: "git@github.com:rapartlu/claude-research-agent.git"
+    model: "claude-opus-4-6"
+    description: "Specialized research agent: web search, doc analysis, technology comparisons, architecture decisions. Produces findings reports, not code."
+    capabilities: ["research", "web-search", "documentation", "analysis"]
+    github: "rapartlu/claude-research-agent"
+    owns_topics: ["research", "investigation", "comparison", "evaluation", "exploration", "temporal", "architecture"]
+    docker:
+      port: 3478
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "continue"
+
   claude-proxy:
     dir: "claude-proxy"
     model: "claude-opus-4-6"
