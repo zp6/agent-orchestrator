@@ -7,6 +7,7 @@ import type { StateStore } from "../state/store.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { AgentClient } from "../client/agent-client.js";
+import { ulid } from "ulid";
 
 const log = createLogger("telegram");
 
@@ -29,6 +30,9 @@ interface TelegramContext {
 let lastUpdateId = 0;
 let botToken: string | null = null;
 let chatId: string | null = null;
+
+/** Persistent conversation IDs per agent for the chat command. */
+const chatConversations = new Map<string, string>();
 let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
 function loadConfig(): boolean {
@@ -228,7 +232,15 @@ Steps:
     return `📝 Creating issue on ${target.repo}...`;
   }
 
-  // Chat — direct real-time conversation with an agent
+  // New chat — reset conversation with an agent
+  if (cmd.startsWith("newchat ") || cmd.startsWith("/newchat ")) {
+    const agentName = text.trim().split(/\s+/)[1];
+    if (!agentName) return "Usage: newchat <agent>";
+    chatConversations.delete(agentName);
+    return `🔄 Conversation with ${agentName} reset. Next chat message starts fresh.`;
+  }
+
+  // Chat — persistent conversation with an agent
   if (cmd.startsWith("chat ") || cmd.startsWith("/chat ")) {
     const parts = text.trim().split(/\s+/);
     const agentName = parts[1];
@@ -236,18 +248,24 @@ Steps:
     if (!agentName || !message) return "Usage: chat <agent> <message>\nExample: chat claude-proxy what issues are you working on?";
     if (!ctx.config.agents[agentName]) return `❌ Unknown agent. Available: ${Object.keys(ctx.config.agents).join(", ")}`;
 
+    // Get or create a persistent conversation_id for this agent
+    if (!chatConversations.has(agentName)) {
+      chatConversations.set(agentName, `telegram-chat-${agentName}-${ulid()}`);
+    }
+    const conversationId = chatConversations.get(agentName)!;
+
     const client = ctx.agentClient ?? new AgentClient(ctx.config);
 
     // Send "thinking..." then edit with response
     const thinkingId = await sendReply(`💭 ${agentName} is thinking...`);
 
-    client.send(agentName, message)
+    client.send(agentName, message, { conversationId })
       .then(async (response) => {
         const reply = response.content.slice(0, 3900);
         if (thinkingId) {
           await editMessage(thinkingId, `🤖 *${agentName}*\n\n${reply}`);
         } else {
-          await sendReply(`🤖 *${agentName}*\n\n${reply}`);
+          await sendReply(`�� *${agentName}*\n\n${reply}`);
         }
       })
       .catch(async (err) => {
@@ -285,7 +303,8 @@ status — agent status
 health — ping containers
 issues — open issues
 prs — open PRs
-chat <agent> <msg> — talk to agent directly
+chat <agent> <msg> — talk to agent (persistent)
+newchat <agent> — reset conversation
 issue <idea> — create issue from rough idea
 dispatch <agent> <msg> — send task
 help — this message`;
