@@ -451,6 +451,10 @@ export class Dispatcher {
         tokens_out: response.usage.output_tokens,
       });
 
+      // Record token usage for provider tracking
+      const provider = this.config.agents[agentName]?.provider ?? "claude";
+      this.store.recordTokenUsage(provider, agentName, response.usage.input_tokens, response.usage.output_tokens);
+
       // Update task to done
       this.log.info("Task completed", { taskId: task.id, agentName, tokensIn: response.usage.input_tokens, tokensOut: response.usage.output_tokens });
       this.store.updateTask(task.id, {
@@ -696,6 +700,9 @@ export class Dispatcher {
         tokens_in: response.usage.input_tokens,
         tokens_out: response.usage.output_tokens,
       });
+
+      const retryProvider = this.config.agents[agentName]?.provider ?? "claude";
+      this.store.recordTokenUsage(retryProvider, agentName, response.usage.input_tokens, response.usage.output_tokens);
 
       this.log.info("Retry succeeded", { taskId: task.id, agentName });
       this.store.updateTask(task.id, {

@@ -1534,6 +1534,13 @@ export class StateStore {
     this.db.prepare("UPDATE tasks SET reported = 1 WHERE id = ?").run(taskId);
   }
 
+  recordTokenUsage(provider: string, agentName: string | null, tokensIn: number, tokensOut: number): void {
+    this.db.prepare(`
+      INSERT INTO token_usage (provider, agent_name, tokens_in, tokens_out, recorded_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(provider, agentName, tokensIn, tokensOut, new Date().toISOString());
+  }
+
   /**
    * Count top-level tasks by status created within the last N hours.
    */
