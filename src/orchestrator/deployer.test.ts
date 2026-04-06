@@ -85,7 +85,7 @@ describe("Deployer", () => {
     const result = await deployer.redeploy("agent-a");
     expect(result.action).toBe("redeployed");
     expect(mockUpdateAgent).toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it("returns error for unknown agent", async () => {
     const deployer = new Deployer(config);
@@ -160,7 +160,7 @@ describe("Deployer", () => {
     const results = await deployer.redeployStale();
     expect(results.length).toBeGreaterThan(0);
     expect(results[0].action).toBe("redeployed");
-  });
+  }, 15_000);
 });
 
 describe("Deployer — repo-based agents", () => {
@@ -197,7 +197,7 @@ describe("Deployer — repo-based agents", () => {
     expect(results[0].action).toBe("redeployed");
     expect(mockStopAgent).toHaveBeenCalled();
     expect(mockStartAgent).toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it("redeployStale includes repo agent restart results", async () => {
     mockExecSync.mockReturnValue("new-sha-xyz\n");
@@ -205,7 +205,7 @@ describe("Deployer — repo-based agents", () => {
     const results = await deployer.redeployStale();
     const agentNames = results.map((r) => r.agentName);
     expect(agentNames).toContain("repo-agent");
-  });
+  }, 15_000);
 
   it("getStaleRepoAgents treats agent as up-to-date when stored SHA matches remote", async () => {
     // Mock readFileSync to return the same SHA as the remote

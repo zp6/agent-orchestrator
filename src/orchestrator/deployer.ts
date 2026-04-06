@@ -18,6 +18,13 @@ export interface DeployResult {
 // Default delays (ms) between health-check attempts: 1s, 3s, 10s
 const HEALTH_CHECK_DELAYS_MS = [1_000, 3_000, 10_000];
 
+/**
+ * Post-restart warmup delay (ms). After a container passes the health check,
+ * wait this long before returning — gives the entrypoint time to finish
+ * git pull, CLI init, and temp-file setup before the daemon dispatches work.
+ */
+export const POST_RESTART_WARMUP_MS = 5_000;
+
 export class Deployer {
   private management: ManagementClient;
   private agentClient: AgentClient;
@@ -94,6 +101,9 @@ export class Deployer {
         };
       }
 
+      await new Promise((r) => setTimeout(r, POST_RESTART_WARMUP_MS));
+      this.log.info("Post-redeploy warmup complete", { agentName, warmupMs: POST_RESTART_WARMUP_MS });
+
       return { agentName, action: "redeployed", detail: "Container rebuild triggered" };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -128,6 +138,13 @@ export class Deployer {
           detail: "Container restarted but agent did not respond to health check",
         };
       }
+
+      // Post-restart warmup: the health check only verifies the HTTP port is
+      // up, but the entrypoint may still be running git pull / CLI init.
+      // Wait a few seconds so the next dispatch cycle doesn't hit a half-ready
+      // container (the spawn-on-startup race from issue #488).
+      await new Promise((r) => setTimeout(r, POST_RESTART_WARMUP_MS));
+      this.log.info("Post-restart warmup complete", { agentName, warmupMs: POST_RESTART_WARMUP_MS });
 
       return { agentName, action: "redeployed", detail: "Container restarted (pull on start)" };
     } catch (err) {
