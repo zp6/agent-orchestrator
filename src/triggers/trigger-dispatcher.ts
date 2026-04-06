@@ -4,6 +4,9 @@ import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { createLogger } from "../service/logger.js";
+
+/** Default TTL for issue claims: 2 hours (matches agents.yaml stale_timeout_ms conventions). */
+export const ISSUE_CLAIM_TTL_MS = 7_200_000;
 import { runGitHubPreDispatchValidation } from "../orchestrator/pre-dispatch-validator.js";
 
 const log = createLogger("trigger-dispatcher");
@@ -98,10 +101,23 @@ function fireAndForget(
     title: string;
     prevalidated?: boolean;
   },
+  /**
+   * The agent name that acquired the issue claim for this dispatch.
+   * When provided, the claim is released after the dispatch settles.
+   */
+  claimOwner: string | undefined,
   onAgentCompleted?: (agentName: string) => Promise<void>,
 ): void {
   dispatcher.dispatch(message, options).then(async (result) => {
     inFlightDispatches.delete(options.sourceRef);
+    // Release the issue claim now that the dispatch has settled
+    if (claimOwner) {
+      store.releaseIssueClaim(options.source, options.sourceRef, claimOwner);
+      log.debug("Issue claim released after dispatch settled", {
+        sourceRef: options.sourceRef,
+        agentName: claimOwner,
+      });
+    }
     if (!result.taskId) {
       log.info("Fire-and-forget dispatch skipped by dispatcher", {
         agentName: result.agentName,
@@ -112,6 +128,11 @@ function fireAndForget(
       });
       return;
     }
+    // Attach the task ID to the claim record while the task is in-flight so
+    // the dashboard can correlate claim → task.  The claim may already have
+    // been released above (dispatch settled instantly); this is a best-effort
+    // update and intentionally non-transactional.
+    store.updateClaimTaskId(options.source, options.sourceRef, result.taskId);
     store.markProcessed(options.source, options.sourceRef, result.taskId);
     log.info("Fire-and-forget dispatch completed", { taskId: result.taskId, agentName: result.agentName });
 
@@ -137,6 +158,14 @@ function fireAndForget(
     }
   }).catch((err) => {
     inFlightDispatches.delete(options.sourceRef);
+    // Release the claim even on error so the issue can be picked up next cycle
+    if (claimOwner) {
+      store.releaseIssueClaim(options.source, options.sourceRef, claimOwner);
+      log.debug("Issue claim released after dispatch error", {
+        sourceRef: options.sourceRef,
+        agentName: claimOwner,
+      });
+    }
     log.error("Fire-and-forget dispatch failed", { agentName: options.agentName ?? options.sourceRef, sourceRef: options.sourceRef, error: err instanceof Error ? err.message : String(err) });
   });
 }
@@ -169,6 +198,13 @@ export async function dispatchGitHubIssues(
     log.error("GitHub dispatch aborted: gh auth pre-flight failed", { reason });
     result.errors.push(`gh auth pre-flight failed: ${reason}`);
     return result;
+  }
+
+  // Evict expired claims at the start of each cycle so stale entries from
+  // crashed agents never permanently block an issue from being dispatched.
+  const expiredClaims = store.cleanExpiredClaims();
+  if (expiredClaims > 0) {
+    log.info("Cleaned expired issue claims", { count: expiredClaims });
   }
 
   for (const [agentName, agent] of Object.entries(config.agents)) {
@@ -263,6 +299,21 @@ export async function dispatchGitHubIssues(
         }
       }
 
+      // Atomically acquire a claim for this issue before dispatching.
+      // If another daemon instance or poll cycle already claimed the issue,
+      // skip it — two agents can never hold an active claim simultaneously.
+      const claimAcquired = store.tryClaimIssue("github", sourceRef, agentName, ISSUE_CLAIM_TTL_MS);
+      if (!claimAcquired) {
+        const existingClaim = store.getActiveClaim("github", sourceRef);
+        log.info("Skipping dispatch: issue already claimed by another agent", {
+          sourceRef,
+          claimedBy: existingClaim?.agent_name,
+          expiresAt: existingClaim?.expires_at,
+        });
+        result.skipped++;
+        continue;
+      }
+
       // Mark processed immediately to prevent duplicate dispatches
       inFlightDispatches.add(sourceRef);
 
@@ -279,7 +330,7 @@ export async function dispatchGitHubIssues(
         sourceRef,
         title: `[${issue.repo}#${issue.number}] ${issue.title}`,
         prevalidated: true,
-      }, onAgentCompleted);
+      }, agentName, onAgentCompleted);
       store.clearSourceRefPriority("github", sourceRef);
 
       result.dispatched++;
@@ -436,6 +487,19 @@ export async function dispatchIdleAgentBacklog(
         }
       }
 
+      // Atomically acquire a claim before dispatching (same guard as dispatchGitHubIssues).
+      const claimAcquired = store.tryClaimIssue("github", sourceRef, agentName, ISSUE_CLAIM_TTL_MS);
+      if (!claimAcquired) {
+        const existingClaim = store.getActiveClaim("github", sourceRef);
+        log.info("Idle pickup: skipping dispatch — issue already claimed by another agent", {
+          sourceRef,
+          claimedBy: existingClaim?.agent_name,
+          expiresAt: existingClaim?.expires_at,
+        });
+        result.skipped++;
+        continue;
+      }
+
       inFlightDispatches.add(sourceRef);
 
       // Pass sourceRepo instead of agentName so the router can detect cross-repo
@@ -446,7 +510,7 @@ export async function dispatchIdleAgentBacklog(
         sourceRef,
         title: `[${issue.repo}#${issue.number}] ${issue.title}`,
         prevalidated: true,
-      });
+      }, agentName);
       store.clearSourceRefPriority("github", sourceRef);
 
       log.info(forceReclaim ? "Idle reclaim: dispatched issue to long-idle agent" : "Idle pickup: dispatched highest-priority issue to idle agent", {
@@ -512,7 +576,7 @@ Report back what you found and what you did.`;
       source: "linear",
       sourceRef,
       title: `[linear] Check issues for ${agentName}`,
-    });
+    }, undefined);
 
     result.dispatched++;
   }
@@ -563,7 +627,7 @@ Report back what you found and what you did.`;
       source: "slack",
       sourceRef,
       title: `[slack] Check messages for ${agentName}`,
-    });
+    }, undefined);
 
     result.dispatched++;
   }

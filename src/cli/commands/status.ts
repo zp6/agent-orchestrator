@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { StateStore, type Task, type SystemMetrics, type ScoreDistribution, type ScoreTrend, type MetricsTrend, type PRMetrics, type RetryMetrics } from "../../state/store.js";
+import { StateStore, type Task, type SystemMetrics, type ScoreDistribution, type ScoreTrend, type MetricsTrend, type PRMetrics, type RetryMetrics, type IssueClaim } from "../../state/store.js";
 import { loadConfig } from "../../config/schema.js";
 import { MAX_RETRIES } from "../../orchestrator/dispatcher.js";
 import { checkDuplicate, RECENCY_WINDOW_HOURS } from "../../triggers/duplicate-guard.js";
@@ -530,6 +530,37 @@ function printTrend(trend: MetricsTrend): void {
 /** Warning threshold: surface a lag notice when this many done tasks are unverified. */
 const UNVERIFIED_WARN_THRESHOLD = 10;
 
+/**
+ * Print a summary of all currently-active issue claims.
+ * An active claim means an agent has atomically locked an issue and is either
+ * in the process of dispatching or actively working on it.  Expired claims are
+ * never shown (they are cleaned up by the daemon each cycle).
+ */
+export function printActiveClaims(claims: IssueClaim[]): void {
+  if (claims.length === 0) return;
+
+  console.log(chalk.bold(`\n🔒 Active Issue Claims (${claims.length})\n`));
+  const header = `  ${"Issue".padEnd(36)} ${"Agent".padEnd(30)} ${"Task ID".padEnd(10)} ${"Claimed".padEnd(20)} ${"Expires"}`;
+  console.log(chalk.dim(header));
+  console.log(chalk.dim("  " + "─".repeat(105)));
+
+  const now = Date.now();
+  for (const claim of claims) {
+    const issue = chalk.cyan(claim.source_ref.slice(0, 34).padEnd(36));
+    const agent = chalk.cyan(claim.agent_name.slice(0, 28).padEnd(30));
+    const taskId = claim.task_id ? chalk.dim(claim.task_id.slice(0, 8).padEnd(10)) : chalk.dim("pending   ");
+    const claimedAgo = Math.round((now - new Date(claim.claimed_at).getTime()) / 60_000);
+    const claimedStr = chalk.dim(`${claimedAgo}m ago`.padEnd(20));
+    const expiresInMs = new Date(claim.expires_at).getTime() - now;
+    const expiresInMins = Math.round(expiresInMs / 60_000);
+    const expiresStr = expiresInMins > 0
+      ? chalk.dim(`in ${expiresInMins}m`)
+      : chalk.red("expired");
+    console.log(`  ${issue} ${agent} ${taskId} ${claimedStr} ${expiresStr}`);
+  }
+  console.log(chalk.dim("\n  Claims are held while an issue is being dispatched. They auto-expire after 2h."));
+}
+
 export function registerStatusCommand(program: Command): void {
   program
     .command("status")
@@ -552,8 +583,23 @@ export function registerStatusCommand(program: Command): void {
         const tasks = store.findAllTasksBySourceRef(sourceRef);
         const dupCheck = checkDuplicate(store, "github", sourceRef);
         const processedInfo = store.getProcessedTriggerInfo("github", sourceRef);
+        const activeClaim = store.getActiveClaim("github", sourceRef);
 
         console.log(chalk.bold(`\nDedup status for ${chalk.cyan(sourceRef)}\n`));
+
+        // Active claim info
+        if (activeClaim) {
+          const claimedAgo = Math.round((Date.now() - new Date(activeClaim.claimed_at).getTime()) / 60_000);
+          const expiresInMins = Math.round((new Date(activeClaim.expires_at).getTime() - Date.now()) / 60_000);
+          console.log(
+            chalk.yellow("🔒 Active claim: ") +
+            chalk.cyan(activeClaim.agent_name) +
+            chalk.dim(` — claimed ${claimedAgo}m ago, expires in ${expiresInMins}m`) +
+            (activeClaim.task_id ? chalk.dim(` (task ${activeClaim.task_id.slice(0, 8)})`) : ""),
+          );
+        } else {
+          console.log(chalk.dim("🔓 No active claim on this issue"));
+        }
 
         // Dedup result
         if (dupCheck.isDuplicate) {
@@ -763,6 +809,11 @@ export function registerStatusCommand(program: Command): void {
               chalk.dim(" (e.g. orch deescalate owner/repo#42)"),
             );
           }
+
+          // Surface active issue claims so operators can see which agent holds
+          // exclusive dispatch rights on each in-flight issue.
+          const activeClaims = store.listActiveClaims();
+          printActiveClaims(activeClaims);
         }
       }
 

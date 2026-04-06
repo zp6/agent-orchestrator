@@ -575,6 +575,29 @@ export interface AgentDailyTokenUsage {
 }
 
 /**
+ * An atomic claim record written before any dispatch to prevent two agents
+ * being dispatched to the same issue simultaneously (issue #539).
+ *
+ * The claim is acquired via INSERT OR IGNORE inside a transaction so only
+ * one writer can hold it.  Claims expire after `claim_ttl_ms` milliseconds
+ * (default 2 hours) to handle hung or crashed agents.
+ */
+export interface IssueClaim {
+  /** The trigger source: "github" | "linear" | "slack" */
+  source: string;
+  /** The source ref, e.g. "owner/repo#42" */
+  source_ref: string;
+  /** Agent that holds this claim */
+  agent_name: string;
+  /** Task ID created for this dispatch (may be null if dispatch failed before task creation) */
+  task_id: string | null;
+  /** ISO timestamp when the claim was acquired */
+  claimed_at: string;
+  /** ISO timestamp after which the claim is considered expired */
+  expires_at: string;
+}
+
+/**
  * Per-agent health record for pool failover routing.
  * Tracks consecutive dispatch failures so the dispatcher can route around
  * unhealthy pool instances without waiting for the supervisor to intervene.
@@ -691,6 +714,7 @@ export class StateStore {
     this.runTokenUsageCacheMigration();
     this.runDispatchWasteMigration();
     this.runDispatchValidationMigration();
+    this.runIssueClaimsMigration();
   }
 
   private runPhase2Migration(): void {
@@ -3591,6 +3615,141 @@ export class StateStore {
       total_dispatches: totalDispatches,
       avg_waste_rate_pct: rates.length > 0 ? rates.reduce((a, b) => a + b, 0) / rates.length : null,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Issue Claim Lock (issue #539)
+  // ---------------------------------------------------------------------------
+
+  private runIssueClaimsMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS issue_claims (
+        source      TEXT NOT NULL,
+        source_ref  TEXT NOT NULL,
+        agent_name  TEXT NOT NULL,
+        task_id     TEXT,
+        claimed_at  TEXT NOT NULL,
+        expires_at  TEXT NOT NULL,
+        PRIMARY KEY (source, source_ref)
+      );
+      CREATE INDEX IF NOT EXISTS idx_issue_claims_expires ON issue_claims(expires_at);
+    `);
+  }
+
+  /**
+   * Atomically attempt to acquire a claim for (source, sourceRef).
+   *
+   * Before trying to INSERT, any expired claim for this source_ref is deleted
+   * so a hung agent's claim never blocks the queue permanently.
+   *
+   * Returns `true` if the claim was successfully acquired by `agentName`,
+   * `false` if another agent already holds a non-expired claim.
+   *
+   * @param ttlMs  How long the claim is valid in milliseconds.
+   *               Defaults to 2 hours (7_200_000 ms).
+   */
+  tryClaimIssue(
+    source: string,
+    sourceRef: string,
+    agentName: string,
+    ttlMs = 7_200_000,
+  ): boolean {
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
+    const claimedAt = now.toISOString();
+
+    const acquireClaim = this.db.transaction(() => {
+      // Evict any expired claim for this source_ref before attempting INSERT
+      this.db
+        .prepare(
+          `DELETE FROM issue_claims
+           WHERE source = ? AND source_ref = ? AND expires_at <= ?`,
+        )
+        .run(source, sourceRef, now.toISOString());
+
+      // Attempt atomic insert — no-op if an active claim already exists
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO issue_claims (source, source_ref, agent_name, task_id, claimed_at, expires_at)
+           VALUES (?, ?, ?, NULL, ?, ?)`,
+        )
+        .run(source, sourceRef, agentName, claimedAt, expiresAt);
+
+      // Verify we own the claim (INSERT OR IGNORE may have been a no-op)
+      const existing = this.db
+        .prepare(
+          `SELECT agent_name FROM issue_claims WHERE source = ? AND source_ref = ?`,
+        )
+        .get(source, sourceRef) as { agent_name: string } | undefined;
+
+      return existing?.agent_name === agentName;
+    });
+
+    return acquireClaim() as boolean;
+  }
+
+  /**
+   * Attach the task ID to an existing claim once the task record has been
+   * created.  No-op if the claim no longer exists (e.g. already released or
+   * expired and evicted).
+   */
+  updateClaimTaskId(source: string, sourceRef: string, taskId: string): void {
+    this.db
+      .prepare(
+        `UPDATE issue_claims SET task_id = ? WHERE source = ? AND source_ref = ?`,
+      )
+      .run(taskId, source, sourceRef);
+  }
+
+  /**
+   * Release a claim held by `agentName`.  Only the owning agent can release
+   * its own claim — passing a different agentName is a no-op.
+   */
+  releaseIssueClaim(source: string, sourceRef: string, agentName: string): void {
+    this.db
+      .prepare(
+        `DELETE FROM issue_claims WHERE source = ? AND source_ref = ? AND agent_name = ?`,
+      )
+      .run(source, sourceRef, agentName);
+  }
+
+  /**
+   * Return the active (non-expired) claim for a source_ref, or undefined if
+   * no claim exists or the claim has expired.
+   */
+  getActiveClaim(source: string, sourceRef: string): IssueClaim | undefined {
+    const now = new Date().toISOString();
+    return this.db
+      .prepare(
+        `SELECT * FROM issue_claims
+         WHERE source = ? AND source_ref = ? AND expires_at > ?`,
+      )
+      .get(source, sourceRef, now) as IssueClaim | undefined;
+  }
+
+  /**
+   * Return all active (non-expired) claims.  Used by the dashboard to display
+   * which agent currently holds a claim on every in-flight issue.
+   */
+  listActiveClaims(): IssueClaim[] {
+    const now = new Date().toISOString();
+    return this.db
+      .prepare(
+        `SELECT * FROM issue_claims WHERE expires_at > ? ORDER BY claimed_at ASC`,
+      )
+      .all(now) as IssueClaim[];
+  }
+
+  /**
+   * Delete all expired claims.  Called at the start of each daemon dispatch
+   * cycle to keep the table tidy.
+   */
+  cleanExpiredClaims(): number {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(`DELETE FROM issue_claims WHERE expires_at <= ?`)
+      .run(now);
+    return result.changes;
   }
 
   close(): void {

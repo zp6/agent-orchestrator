@@ -1463,7 +1463,7 @@ export class Daemon {
 
         if ((d.action === "dispatch" || d.action === "follow-up") && d.agentName && d.message) {
           const agentRepo = this.config.agents[d.agentName]?.github ?? null;
-          const issueRefs = agentRepo ? extractIssueRefs(`${d.message ?? ""} ${d.reason ?? ""}`) : [];
+          const issueRefs = agentRepo ? extractIssueRefs(`${d.message ?? ""} ${d.reason ?? ""}`).map(String) : [];
           const derivedSourceRef = agentRepo && issueRefs.length > 0
             ? `${agentRepo}#${issueRefs[0]}`
             : undefined;

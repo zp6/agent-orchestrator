@@ -90,6 +90,12 @@ describe("dispatchGitHubIssues", () => {
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
       countFailuresForSourceRef: vi.fn().mockReturnValue(0),
       addDispatchValidation: vi.fn(),
+      // Issue claim lock methods (added in #539)
+      cleanExpiredClaims: vi.fn().mockReturnValue(0),
+      tryClaimIssue: vi.fn().mockReturnValue(true),
+      getActiveClaim: vi.fn().mockReturnValue(undefined),
+      releaseIssueClaim: vi.fn(),
+      updateClaimTaskId: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -247,6 +253,12 @@ describe("pre-dispatch issue state validation", () => {
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
       countFailuresForSourceRef: vi.fn().mockReturnValue(0),
       addDispatchValidation: vi.fn(),
+      // Issue claim lock methods (added in #539)
+      cleanExpiredClaims: vi.fn().mockReturnValue(0),
+      tryClaimIssue: vi.fn().mockReturnValue(true),
+      getActiveClaim: vi.fn().mockReturnValue(undefined),
+      releaseIssueClaim: vi.fn(),
+      updateClaimTaskId: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -315,6 +327,12 @@ describe("duplicate PR detection before dispatch", () => {
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
       countFailuresForSourceRef: vi.fn().mockReturnValue(0),
       addDispatchValidation: vi.fn(),
+      // Issue claim lock methods (added in #539)
+      cleanExpiredClaims: vi.fn().mockReturnValue(0),
+      tryClaimIssue: vi.fn().mockReturnValue(true),
+      getActiveClaim: vi.fn().mockReturnValue(undefined),
+      releaseIssueClaim: vi.fn(),
+      updateClaimTaskId: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -512,6 +530,12 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
       countFailuresForSourceRef: vi.fn().mockReturnValue(0),
       addDispatchValidation: vi.fn(),
+      // Issue claim lock methods (added in #539)
+      cleanExpiredClaims: vi.fn().mockReturnValue(0),
+      tryClaimIssue: vi.fn().mockReturnValue(true),
+      getActiveClaim: vi.fn().mockReturnValue(undefined),
+      releaseIssueClaim: vi.fn(),
+      updateClaimTaskId: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -619,6 +643,12 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
       countFailuresForSourceRef: vi.fn().mockReturnValue(0),
       addDispatchValidation: vi.fn(),
+      // Issue claim lock methods (added in #539)
+      cleanExpiredClaims: vi.fn().mockReturnValue(0),
+      tryClaimIssue: vi.fn().mockReturnValue(true),
+      getActiveClaim: vi.fn().mockReturnValue(undefined),
+      releaseIssueClaim: vi.fn(),
+      updateClaimTaskId: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -945,6 +975,12 @@ describe("dispatchIdleAgentBacklog", () => {
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
       countFailuresForSourceRef: vi.fn().mockReturnValue(0),
       addDispatchValidation: vi.fn(),
+      // Issue claim lock methods (added in #539)
+      cleanExpiredClaims: vi.fn().mockReturnValue(0),
+      tryClaimIssue: vi.fn().mockReturnValue(true),
+      getActiveClaim: vi.fn().mockReturnValue(undefined),
+      releaseIssueClaim: vi.fn(),
+      updateClaimTaskId: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1186,6 +1222,12 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
       countFailuresForSourceRef: vi.fn().mockReturnValue(0),
       addDispatchValidation: vi.fn(),
+      // Issue claim lock methods (added in #539)
+      cleanExpiredClaims: vi.fn().mockReturnValue(0),
+      tryClaimIssue: vi.fn().mockReturnValue(true),
+      getActiveClaim: vi.fn().mockReturnValue(undefined),
+      releaseIssueClaim: vi.fn(),
+      updateClaimTaskId: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1312,6 +1354,12 @@ describe("in-flight branch detection", () => {
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(null),
       countFailuresForSourceRef: vi.fn().mockReturnValue(0),
       addDispatchValidation: vi.fn(),
+      // Issue claim lock methods (added in #539)
+      cleanExpiredClaims: vi.fn().mockReturnValue(0),
+      tryClaimIssue: vi.fn().mockReturnValue(true),
+      getActiveClaim: vi.fn().mockReturnValue(undefined),
+      releaseIssueClaim: vi.fn(),
+      updateClaimTaskId: vi.fn(),
     } as unknown as StateStore;
 
     vi.mocked(mockStore.hasActiveTask).mockReturnValue(false);
@@ -1349,6 +1397,12 @@ describe("in-flight branch detection", () => {
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(null),
       countFailuresForSourceRef: vi.fn().mockReturnValue(0),
       addDispatchValidation: vi.fn(),
+      // Issue claim lock methods (added in #539)
+      cleanExpiredClaims: vi.fn().mockReturnValue(0),
+      tryClaimIssue: vi.fn().mockReturnValue(true),
+      getActiveClaim: vi.fn().mockReturnValue(undefined),
+      releaseIssueClaim: vi.fn(),
+      updateClaimTaskId: vi.fn(),
     } as unknown as StateStore;
 
     await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1387,6 +1441,12 @@ describe("in-flight branch detection", () => {
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(null),
       countFailuresForSourceRef: vi.fn().mockReturnValue(0),
       addDispatchValidation: vi.fn(),
+      // Issue claim lock methods (added in #539)
+      cleanExpiredClaims: vi.fn().mockReturnValue(0),
+      tryClaimIssue: vi.fn().mockReturnValue(true),
+      getActiveClaim: vi.fn().mockReturnValue(undefined),
+      releaseIssueClaim: vi.fn(),
+      updateClaimTaskId: vi.fn(),
     } as unknown as StateStore;
 
     const result = await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1420,6 +1480,12 @@ describe("in-flight branch detection", () => {
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(null),
       countFailuresForSourceRef: vi.fn().mockReturnValue(0),
       addDispatchValidation: vi.fn(),
+      // Issue claim lock methods (added in #539)
+      cleanExpiredClaims: vi.fn().mockReturnValue(0),
+      tryClaimIssue: vi.fn().mockReturnValue(true),
+      getActiveClaim: vi.fn().mockReturnValue(undefined),
+      releaseIssueClaim: vi.fn(),
+      updateClaimTaskId: vi.fn(),
     } as unknown as StateStore;
 
     await dispatchIdleAgentBacklog(branchConfig, mockStore, mockDispatcher);
@@ -1453,6 +1519,12 @@ describe("approved PR skip logic", () => {
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
       countFailuresForSourceRef: vi.fn().mockReturnValue(0),
       addDispatchValidation: vi.fn(),
+      // Issue claim lock methods (added in #539)
+      cleanExpiredClaims: vi.fn().mockReturnValue(0),
+      tryClaimIssue: vi.fn().mockReturnValue(true),
+      getActiveClaim: vi.fn().mockReturnValue(undefined),
+      releaseIssueClaim: vi.fn(),
+      updateClaimTaskId: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
