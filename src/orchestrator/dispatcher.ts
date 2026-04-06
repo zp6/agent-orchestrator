@@ -7,7 +7,8 @@ import { StateStore, type Task, type TaskSource, type TaskType, type AgentHealth
 import { type OrchestratorConfig, getPoolMembers } from "../config/schema.js";
 import { ulid } from "ulid";
 import { createLogger } from "../service/logger.js";
-import { validateGhAuth, GhAuthError, isIssueOpen, findExistingPRsForIssue } from "../triggers/github.js";
+import { validateGhAuth, GhAuthError } from "../triggers/github.js";
+import { cachedValidateForDispatch } from "../triggers/issue-state-bridge.js";
 import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
 import { buildRejectionHistoryBlock } from "./rejection-history.js";
 import { notifyOperator } from "../service/notify.js";
@@ -329,55 +330,29 @@ export class Dispatcher {
       }
     }
 
-    // Pre-dispatch closed-issue guard (issue #444): if the task targets a GitHub
-    // issue that has already been closed, skip the dispatch entirely.  This catches
-    // cases where an issue closes between triage/trigger and the actual dispatch
-    // call (e.g. supervisor dispatch, daemon re-dispatch after conflict recovery).
+    // Pre-dispatch issue state guard (issues #444, #457, #458): validates issue
+    // state through the 60s TTL cache.  Catches closed issues, issues with merged
+    // PRs, and issues with open PRs — all without redundant GitHub API calls when
+    // multiple dispatch paths check the same issue within the TTL window.
     if (options?.source === "github" && options?.sourceRef) {
       const repo = extractRepoFromSourceRef(options.sourceRef);
       const issueMatch = options.sourceRef.match(/#(\d+)$/);
       if (repo && issueMatch) {
         const issueNumber = parseInt(issueMatch[1], 10);
-        if (!isIssueOpen(repo, issueNumber)) {
-          this.log.warn("Dispatch skipped: source issue already closed", {
+        const skipReason = cachedValidateForDispatch(repo, issueNumber);
+        if (skipReason) {
+          this.log.warn("Dispatch skipped: issue state validation failed (cached)", {
             agentName,
             sourceRef: options.sourceRef,
             repo,
             issueNumber,
+            reason: skipReason,
           });
           return {
             taskId: "",
             agentName,
             response: {
-              content: `Skipped: issue ${options.sourceRef} is already closed`,
-              model: "",
-              usage: { input_tokens: 0, output_tokens: 0 },
-              stop_reason: "skipped",
-            },
-          };
-        }
-
-        // Pre-dispatch already-resolved guard (issue #457): even if the issue is
-        // still open, check whether a merged PR already addresses it.  GitHub's
-        // auto-close is eventually consistent — the issue may remain open for a
-        // few seconds after the PR merges.  This catches supervisor dispatches,
-        // manual dispatches, and other paths that bypass trigger-level guards.
-        const existingPRs = findExistingPRsForIssue(repo, issueNumber);
-        const mergedPR = existingPRs.find((pr) => pr.state === "merged");
-        if (mergedPR) {
-          this.log.warn("Dispatch skipped: issue already resolved by merged PR", {
-            agentName,
-            sourceRef: options.sourceRef,
-            repo,
-            issueNumber,
-            mergedPR: mergedPR.number,
-            mergedPRUrl: mergedPR.url,
-          });
-          return {
-            taskId: "",
-            agentName,
-            response: {
-              content: `Skipped: issue ${options.sourceRef} is already resolved by merged PR #${mergedPR.number}`,
+              content: `Skipped: ${skipReason}`,
               model: "",
               usage: { input_tokens: 0, output_tokens: 0 },
               stop_reason: "skipped",
@@ -592,51 +567,30 @@ export class Dispatcher {
       const issueMatch = task.source_ref.match(/#(\d+)$/);
       if (repo && issueMatch) {
         const issueNumber = parseInt(issueMatch[1], 10);
-        if (!isIssueOpen(repo, issueNumber)) {
-          this.log.info("Retry skipped: source issue closed externally", {
+        const skipReason = cachedValidateForDispatch(repo, issueNumber);
+        if (skipReason) {
+          this.log.info("Retry skipped: issue state validation failed (cached)", {
             taskId: task.id,
             agentName,
             sourceRef: task.source_ref,
             issueNumber,
+            reason: skipReason,
           });
           this.store.addLog({
             task_id: task.id,
             direction: "system",
-            content: `Resolved externally: source issue ${task.source_ref} is now closed — retry cancelled.`,
+            content: `Resolved externally: ${skipReason} — retry cancelled.`,
           });
           this.store.updateTask(task.id, {
             status: "failed",
-            result: `Resolved externally: source issue ${task.source_ref} was closed before retry.`,
+            result: `Resolved externally: ${skipReason} — retry cancelled.`,
             next_retry_at: null,
           });
           return;
         }
 
-        // Pre-retry already-resolved guard (issue #457): even if the issue is
-        // still open, a merged PR may already address it.  Skip the retry to
-        // avoid wasting an agent cycle on already-resolved work.
-        const existingPRs = findExistingPRsForIssue(repo, issueNumber);
-        const mergedPR = existingPRs.find((pr) => pr.state === "merged");
-        if (mergedPR) {
-          this.log.info("Retry skipped: issue already resolved by merged PR", {
-            taskId: task.id,
-            agentName,
-            sourceRef: task.source_ref,
-            issueNumber,
-            mergedPR: mergedPR.number,
-          });
-          this.store.addLog({
-            task_id: task.id,
-            direction: "system",
-            content: `Resolved externally: issue ${task.source_ref} already addressed by merged PR #${mergedPR.number} — retry cancelled.`,
-          });
-          this.store.updateTask(task.id, {
-            status: "failed",
-            result: `Resolved externally: issue ${task.source_ref} already addressed by merged PR #${mergedPR.number}.`,
-            next_retry_at: null,
-          });
-          return;
-        }
+        // Note: cachedValidateForDispatch above already covers closed issues,
+        // merged PRs, and open PRs in a single cached check (issue #458).
       }
     }
 

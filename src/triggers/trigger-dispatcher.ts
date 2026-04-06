@@ -1,6 +1,7 @@
-import { fetchOpenIssues, findApprovedPRForIssue, findBranchForIssue, findExistingPRsForIssue, isIssueOpen, validateGhAuth, type GitHubIssue } from "./github.js";
+import { fetchOpenIssues, findApprovedPRForIssue, findBranchForIssue, findExistingPRsForIssue, validateGhAuth, type GitHubIssue } from "./github.js";
 import { reportResult } from "./reporters.js";
 import { checkDuplicate } from "./duplicate-guard.js";
+import { cachedIsIssueOpen, cachedGetIssueState, logCacheMetrics } from "./issue-state-bridge.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
@@ -198,18 +199,25 @@ export async function dispatchGitHubIssues(
         continue;
       }
 
-      // Pre-dispatch issue state validation: skip if the issue has been closed
-      // between the fetchOpenIssues call and now (race condition / API caching lag).
-      // Mark processed so the issue is not re-checked every daemon cycle.
-      if (!isIssueOpen(agent.github, issue.number)) {
-        log.info("Skipping dispatch: issue already closed", { sourceRef });
+      // Pre-dispatch issue state validation via cache (issue #458): re-validates
+      // issue state within 60s TTL, preventing dispatch to closed issues or
+      // issues already resolved by a merged/open PR.
+      const cachedState = cachedGetIssueState(agent.github, issue.number);
+
+      if (cachedState.state === "closed") {
+        log.info("Skipping dispatch: issue already closed (cached)", { sourceRef });
         store.markProcessed("github", sourceRef, `closed-issue-${issue.number}`);
         result.skipped++;
         continue;
       }
 
-      // Check for existing PRs that already address this issue
-      const existingPRs = findExistingPRsForIssue(agent.github, issue.number);
+      // Still need to call findExistingPRsForIssue for the full PR objects
+      // (the cache only tracks hasOpenPR/hasMergedPR booleans, not PR details).
+      // But skip the API call entirely when the cache says no PRs exist.
+      let existingPRs: ReturnType<typeof findExistingPRsForIssue> = [];
+      if (cachedState.hasOpenPR || cachedState.hasMergedPR) {
+        existingPRs = findExistingPRsForIssue(agent.github, issue.number);
+      }
       const mergedPR = existingPRs.find((pr) => pr.state === "merged");
       const openPR = existingPRs.find((pr) => pr.state === "open");
 
@@ -423,18 +431,23 @@ export async function dispatchIdleAgentBacklog(
         }
       }
 
-      // Pre-dispatch issue state validation: skip closed issues
-      if (!isIssueOpen(agent.github, issue.number)) {
-        log.info("Idle pickup: skipping closed issue", { sourceRef });
+      // Pre-dispatch issue state validation via cache (issue #458)
+      const cachedState2 = cachedGetIssueState(agent.github, issue.number);
+
+      if (cachedState2.state === "closed") {
+        log.info("Idle pickup: skipping closed issue (cached)", { sourceRef });
         store.markProcessed("github", sourceRef, `closed-issue-${issue.number}`);
         result.skipped++;
         continue;
       }
 
-      // Check for existing PRs that already address this issue
-      const existingPRs = findExistingPRsForIssue(agent.github, issue.number);
-      const mergedPR = existingPRs.find((pr) => pr.state === "merged");
-      const openPR = existingPRs.find((pr) => pr.state === "open");
+      // Fetch full PR objects only when cache indicates PRs exist
+      let existingPRs2: ReturnType<typeof findExistingPRsForIssue> = [];
+      if (cachedState2.hasOpenPR || cachedState2.hasMergedPR) {
+        existingPRs2 = findExistingPRsForIssue(agent.github, issue.number);
+      }
+      const mergedPR = existingPRs2.find((pr) => pr.state === "merged");
+      const openPR = existingPRs2.find((pr) => pr.state === "open");
 
       if (mergedPR) {
         log.info("Idle pickup: skipping issue with merged PR", {

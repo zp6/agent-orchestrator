@@ -10,6 +10,7 @@ import { ReviewerClient } from "../client/reviewer-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore, Task, SupervisorDecisionRecord } from "../state/store.js";
 import { createLogger } from "../service/logger.js";
+import { cachedGetIssueState } from "../triggers/issue-state-bridge.js";
 
 export type { SupervisorDecision } from "../client/reviewer-client.js";
 import type { SupervisorDecision } from "../client/reviewer-client.js";
@@ -52,8 +53,23 @@ export function isDecisionAlreadyResolved(
 
   for (const num of refs) {
     try {
-      // Try as a GitHub issue first; fall back to PR if the issue lookup fails
-      // (Issues and PRs share a number namespace but require separate gh commands.)
+      // First, try the issue state cache (issue #458) — this avoids redundant
+      // GitHub API calls when the same issue is checked multiple times within
+      // the 60s TTL window.
+      try {
+        const cached = cachedGetIssueState(agentGithub, num);
+        checkedAny = true;
+        if (cached.state === "open" && !cached.hasMergedPR) {
+          return false; // Issue is still open and unresolved
+        }
+        // Closed or has merged PR — continue checking other refs
+        continue;
+      } catch {
+        // Cache fetch failed (e.g. gh not available) — fall through to direct check
+      }
+
+      // Fallback: direct gh CLI check for PRs (which share the number namespace
+      // but are not tracked by the issue cache).
       let state: string | null = null;
 
       try {

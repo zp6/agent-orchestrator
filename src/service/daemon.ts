@@ -11,7 +11,8 @@ import { Supervisor, isDecisionAlreadyResolved, extractIssueRefs } from "../orch
 import { PRReviewer } from "../orchestrator/pr-reviewer.js";
 import { findOrphanBranches, createPRForBranch, deleteStaleOrphanBranches, STALE_BRANCH_BEHIND_THRESHOLD } from "../orchestrator/pr-creator.js";
 import { PRCreationRetryQueue } from "../orchestrator/pr-creation-retry-queue.js";
-import { validateGhAuth, isIssueOpen, findExistingPRsForIssue } from "../triggers/github.js";
+import { validateGhAuth } from "../triggers/github.js";
+import { cachedIsIssueOpen, cachedGetIssueState, logCacheMetrics } from "../triggers/issue-state-bridge.js";
 import {
   dispatchGitHubIssues,
   dispatchIdleAgentBacklog,
@@ -314,6 +315,8 @@ export class Daemon {
     } finally {
       this.store.recordCycleEnd(cycleId, cycleStartedAt);
       const durationMs = Date.now() - cycleStartedAt.getTime();
+      // Surface issue state cache metrics every cycle (issue #458)
+      logCacheMetrics();
       this.log.info("Cycle complete", { cycle: this.cycleCount, durationMs });
       console.log(`[${time}] Cycle #${this.cycleCount} complete (${durationMs}ms)`);
     }
@@ -536,7 +539,7 @@ export class Daemon {
 
         const issueNumber = parseInt(issueMatch[1], 10);
 
-        if (!isIssueOpen(repo, issueNumber)) {
+        if (!cachedIsIssueOpen(repo, issueNumber)) {
           this.log.info("Cancelling in-flight task: source issue closed externally", {
             taskId: task.id,
             agentName: task.agent_name,
@@ -1295,17 +1298,25 @@ export class Daemon {
             let skipReason: string | null = null;
 
             for (const issueNum of issueRefs) {
+              // Re-validate via issue state cache (issue #458): single cached
+              // lookup replaces two separate gh API calls per issue reference.
+              const state = cachedGetIssueState(agentGithub, issueNum);
+
               // 1. Skip if the issue has been closed since the supervisor polled
-              if (!isIssueOpen(agentGithub, issueNum)) {
+              if (state.state === "closed") {
                 skipReason = `issue #${issueNum} is now closed`;
                 break;
               }
 
-              // 2. Skip if a non-draft open PR already targets this issue
-              const linkedPRs = findExistingPRsForIssue(agentGithub, issueNum);
-              const openNonDraft = linkedPRs.find((pr) => pr.state === "open" && !pr.isDraft);
-              if (openNonDraft) {
-                skipReason = `open PR #${openNonDraft.number} already exists for issue #${issueNum}`;
+              // 2. Skip if issue already has a merged PR
+              if (state.hasMergedPR) {
+                skipReason = `issue #${issueNum} already has a merged PR`;
+                break;
+              }
+
+              // 3. Skip if a non-draft open PR already targets this issue
+              if (state.hasOpenPR) {
+                skipReason = `open PR already exists for issue #${issueNum}`;
                 break;
               }
             }
