@@ -97,6 +97,47 @@ describe("recent completed tasks", () => {
     const result = checkDuplicate(store as StateStore, "github", "owner/repo#1");
     expect(result.isDuplicate).toBe(true);
   });
+
+  it("allows re-dispatch of failed task with infrastructure error (Persistent session)", () => {
+    const store = makeStore(makeTask({
+      status: "failed",
+      updated_at: hoursAgo(1),
+      result: '500 {"type":"error","error":{"message":"Persistent session process not available"}}',
+    }));
+    const result = checkDuplicate(store as StateStore, "github", "owner/repo#1");
+    expect(result.isDuplicate).toBe(false);
+  });
+
+  it("allows re-dispatch of failed task with connection error", () => {
+    const store = makeStore(makeTask({
+      status: "failed",
+      updated_at: hoursAgo(1),
+      result: "Connection error",
+    }));
+    const result = checkDuplicate(store as StateStore, "github", "owner/repo#1");
+    expect(result.isDuplicate).toBe(false);
+  });
+
+  it("still blocks failed task with work error within window", () => {
+    const store = makeStore(makeTask({
+      status: "failed",
+      updated_at: hoursAgo(1),
+      result: "Agent failed: could not find the function to modify",
+    }));
+    const result = checkDuplicate(store as StateStore, "github", "owner/repo#1");
+    expect(result.isDuplicate).toBe(true);
+  });
+
+  it("still blocks done task even if result contains infra pattern", () => {
+    // done tasks with infra error patterns are not exempt — only failed tasks
+    const store = makeStore(makeTask({
+      status: "done",
+      updated_at: hoursAgo(1),
+      result: "Persistent session process not available",
+    }));
+    const result = checkDuplicate(store as StateStore, "github", "owner/repo#1");
+    expect(result.isDuplicate).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

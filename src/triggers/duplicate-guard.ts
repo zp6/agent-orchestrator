@@ -15,6 +15,28 @@ const log = createLogger("duplicate-guard");
  */
 export const RECENCY_WINDOW_HOURS = 24;
 
+const INFRA_ERROR_PATTERNS = [
+  "Persistent session process not available",
+  "Persistent session process died",
+  "Connection error",
+  "connection-error-exhausted",
+  "fetch failed",
+  "ENOENT",
+  "FOREIGN KEY constraint failed",
+  "spawn claude",
+  "E2BIG",
+  "database connection is not open",
+];
+
+/**
+ * Returns true if the task result indicates an infrastructure/connection
+ * failure rather than the agent attempting and failing the work.
+ */
+function isInfrastructureError(result: string | null | undefined): boolean {
+  if (!result) return false;
+  return INFRA_ERROR_PATTERNS.some((p) => result.includes(p));
+}
+
 export interface DuplicateCheckResult {
   isDuplicate: boolean;
   /** Human-readable reason, present only when isDuplicate is true. */
@@ -132,6 +154,18 @@ export function checkDuplicate(
         sourceRef,
         taskId: task.id,
         completedAt: task.updated_at,
+      });
+      return { isDuplicate: false };
+    }
+
+    // Infrastructure errors (proxy down, spawn failures, connection errors)
+    // should not block re-dispatch — the agent never attempted the work.
+    // Only suppress when the agent actually tried and the result needs review.
+    if (task.status === "failed" && isInfrastructureError(task.result)) {
+      log.info("Allowing re-dispatch: prior failure was infrastructure error", {
+        sourceRef,
+        taskId: task.id,
+        result: task.result?.substring(0, 100),
       });
       return { isDuplicate: false };
     }
