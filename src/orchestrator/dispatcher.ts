@@ -124,6 +124,9 @@ export function isConnectionError(err: unknown): boolean {
  * consecutive failures and the oldest last_error_at timestamp (most likely
  * to have recovered).
  */
+/** Round-robin counter for pool dispatch — distributes work across providers. */
+let poolRRIndex = 0;
+
 export function selectHealthiestPoolInstance(
   members: string[],
   healthRecords: AgentHealth[],
@@ -173,7 +176,26 @@ export function selectHealthiestPoolInstance(
     return aErr.localeCompare(bErr);
   });
 
-  return candidates[0].name;
+  // Round-robin among equally-qualified candidates: find all candidates that
+  // tie with the best on ALL sort criteria, then rotate among them.
+  // Without this, the first member always wins when both are idle+healthy,
+  // starving Codex agents of work and producing zero Codex token usage.
+  const best = candidates[0];
+  const tied = candidates.filter(
+    (c) =>
+      c.idle === best.idle &&
+      c.health.is_healthy === best.health.is_healthy &&
+      c.health.consecutive_failures === best.health.consecutive_failures &&
+      (c.health.last_error_at ?? "") === (best.health.last_error_at ?? ""),
+  );
+
+  if (tied.length > 1) {
+    const selected = tied[poolRRIndex % tied.length];
+    poolRRIndex++;
+    return selected.name;
+  }
+
+  return best.name;
 }
 
 /**

@@ -1940,18 +1940,19 @@ describe("selectHealthiestPoolInstance", () => {
     expect(result).toBe("reviewer-2");
   });
 
-  it("when all healthy, picks the first idle member (stable ordering)", () => {
+  it("when all healthy, round-robins among tied idle members", () => {
     const health = [
       makeHealth("reviewer-1"),
       makeHealth("reviewer-2"),
       makeHealth("reviewer-3"),
     ];
-    const result = selectHealthiestPoolInstance(
-      ["reviewer-1", "reviewer-2", "reviewer-3"],
-      health,
-      noActiveTask,
-    );
-    expect(result).toBe("reviewer-1");
+    const members = ["reviewer-1", "reviewer-2", "reviewer-3"];
+    const results = new Set<string>();
+    for (let i = 0; i < 6; i++) {
+      results.add(selectHealthiestPoolInstance(members, health, noActiveTask));
+    }
+    // All three should be selected across 6 calls (round-robin)
+    expect(results.size).toBe(3);
   });
 
   it("prefers instance with no errors over one with reset errors (same failure count)", () => {
