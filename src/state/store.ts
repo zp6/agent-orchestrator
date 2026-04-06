@@ -872,6 +872,47 @@ export class StateStore {
   }
 
   /**
+   * Remove the processed-trigger record for a given source + source_ref.
+   * Used by `orch deescalate` to allow the daemon to re-dispatch the trigger
+   * on its next poll cycle.  Returns true if a record was actually deleted.
+   */
+  removeProcessedTrigger(source: string, sourceRef: string): boolean {
+    const result = this.db
+      .prepare("DELETE FROM processed_triggers WHERE source = ? AND source_ref = ?")
+      .run(source, sourceRef);
+    return result.changes > 0;
+  }
+
+  /**
+   * Find the most-recent escalated top-level task for a given source_ref
+   * (across all sources).  Used by `orch deescalate` to locate the task to
+   * reset.
+   */
+  findEscalatedTask(sourceRef: string): Task | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE source_ref = ? AND parent_task_id IS NULL AND status = 'escalated'
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(sourceRef) as Task | undefined;
+  }
+
+  /**
+   * Return all currently escalated top-level tasks, most recent first.
+   * Used by `orch status` to surface escalated tasks with de-escalation hints.
+   */
+  findAllEscalatedTasks(): Task[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE status = 'escalated' AND parent_task_id IS NULL
+         ORDER BY updated_at DESC`,
+      )
+      .all() as Task[];
+  }
+
+  /**
    * Return all top-level tasks whose source_ref exactly matches the given
    * value, across all sources.  Used by `orch status --source-ref` to show
    * the full dispatch history for a GitHub issue or similar trigger.

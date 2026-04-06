@@ -719,6 +719,26 @@ export function registerStatusCommand(program: Command): void {
               );
             }
           }
+
+          // Surface escalated tasks with de-escalation instructions
+          const escalated = store.findAllEscalatedTasks();
+          if (escalated.length > 0) {
+            console.log(chalk.bold.red(`\n⚠ Escalated Tasks (${escalated.length})\n`));
+            for (const task of escalated) {
+              const ref = task.source_ref ? chalk.cyan(task.source_ref) : chalk.dim("no ref");
+              const agent = task.agent_name ? chalk.cyan(task.agent_name) : chalk.dim("unassigned");
+              const age = Math.round((Date.now() - new Date(task.updated_at).getTime()) / 3_600_000);
+              const ageStr = age < 1 ? "<1h ago" : `${age}h ago`;
+              console.log(
+                `  ${chalk.dim(task.id.slice(0, 8))} ${chalk.red("escalated")}   ${agent.padEnd(30)} ${ref} ${chalk.dim(ageStr)}`,
+              );
+            }
+            console.log(
+              chalk.dim(`\nTo unblock: `) +
+              chalk.white("orch deescalate <source_ref>") +
+              chalk.dim(" (e.g. orch deescalate owner/repo#42)"),
+            );
+          }
         }
       }
 
