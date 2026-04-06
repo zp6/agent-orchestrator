@@ -2263,4 +2263,73 @@ describe("StateStore", () => {
       expect(store.countFailuresForSourceRef("owner/repo#9")).toBe(1);
     });
   });
+
+  // ── Issue #418: Agent auth quarantine ────────────────────────────────────
+
+  describe("agent auth quarantine (issue #418)", () => {
+    it("agents are not auth-degraded by default", () => {
+      expect(store.isAgentAuthDegraded("new-agent")).toBe(false);
+    });
+
+    it("getAgentHealth returns auth_status='ok' for unknown agents", () => {
+      const health = store.getAgentHealth("unknown-agent");
+      expect(health.auth_status).toBe("ok");
+      expect(health.auth_degraded_at).toBeNull();
+    });
+
+    it("setAgentAuthDegraded marks agent as auth-degraded", () => {
+      store.setAgentAuthDegraded("agent-a", "GH_TOKEN missing");
+      expect(store.isAgentAuthDegraded("agent-a")).toBe(true);
+
+      const health = store.getAgentHealth("agent-a");
+      expect(health.auth_status).toBe("auth-degraded");
+      expect(health.auth_degraded_at).toBeTruthy();
+      expect(health.last_error_message).toBe("GH_TOKEN missing");
+    });
+
+    it("clearAgentAuthDegraded restores agent to ok", () => {
+      store.setAgentAuthDegraded("agent-b", "token expired");
+      expect(store.isAgentAuthDegraded("agent-b")).toBe(true);
+
+      store.clearAgentAuthDegraded("agent-b");
+      expect(store.isAgentAuthDegraded("agent-b")).toBe(false);
+
+      const health = store.getAgentHealth("agent-b");
+      expect(health.auth_status).toBe("ok");
+      expect(health.auth_degraded_at).toBeNull();
+    });
+
+    it("getAuthDegradedAgents returns only quarantined agents", () => {
+      store.setAgentAuthDegraded("degraded-1", "missing token");
+      store.setAgentAuthDegraded("degraded-2", "expired token");
+      store.recordAgentSuccess("healthy-1"); // not degraded
+
+      const degraded = store.getAuthDegradedAgents();
+      expect(degraded).toHaveLength(2);
+      expect(degraded.map((a) => a.agent_name).sort()).toEqual(["degraded-1", "degraded-2"]);
+    });
+
+    it("setAgentAuthDegraded preserves original auth_degraded_at on repeated calls", () => {
+      store.setAgentAuthDegraded("agent-c", "first failure");
+      const first = store.getAgentHealth("agent-c").auth_degraded_at;
+
+      // Second call should preserve the original timestamp (COALESCE)
+      store.setAgentAuthDegraded("agent-c", "second failure");
+      const second = store.getAgentHealth("agent-c").auth_degraded_at;
+
+      expect(first).toBe(second);
+      expect(store.getAgentHealth("agent-c").last_error_message).toBe("second failure");
+    });
+
+    it("setAgentAuthDegraded does not reset consecutive_failures for existing agents", () => {
+      store.recordAgentFailure("agent-d", "some error");
+      store.recordAgentFailure("agent-d", "another error");
+      expect(store.getAgentHealth("agent-d").consecutive_failures).toBe(2);
+
+      store.setAgentAuthDegraded("agent-d", "token missing");
+      // consecutive_failures should be preserved (ON CONFLICT doesn't touch it)
+      const health = store.getAgentHealth("agent-d");
+      expect(health.auth_status).toBe("auth-degraded");
+    });
+  });
 });

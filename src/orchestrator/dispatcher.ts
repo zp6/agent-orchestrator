@@ -10,6 +10,7 @@ import { createLogger } from "../service/logger.js";
 import { validateGhAuth, GhAuthError } from "../triggers/github.js";
 import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
 import { buildRejectionHistoryBlock } from "./rejection-history.js";
+import { notifyOperator } from "../service/notify.js";
 
 /** Maximum number of retry attempts for a failed dispatch. */
 export const MAX_RETRIES = 3;
@@ -133,6 +134,8 @@ export function selectHealthiestPoolInstance(
       last_error_message: null,
       last_success_at: null,
       is_healthy: true,
+      auth_status: "ok" as const,
+      auth_degraded_at: null,
     },
   }));
 
@@ -273,22 +276,54 @@ export class Dispatcher {
       );
     }
 
+    // Pre-flight: check agent auth quarantine status (issue #418).
+    // Auth-degraded agents can only receive read-only tasks (research/analysis).
+    // Implementation tasks require GH_TOKEN for PR creation, so block them.
+    const taskType = options?.taskType ?? "implementation";
+    if (taskType !== "research" && this.store.isAgentAuthDegraded(agentName)) {
+      this.log.warn("Dispatch blocked: agent is auth-degraded", {
+        agentName,
+        taskType,
+        sourceRef: options?.sourceRef,
+      });
+      throw new GhAuthError(
+        `Agent "${agentName}" is auth-degraded (GH_TOKEN missing/invalid). ` +
+        `Only research tasks can be dispatched to auth-degraded agents. ` +
+        `Fix the agent's GH_TOKEN to resume normal operation.`,
+        "agent-auth-degraded",
+      );
+    }
+
     // Pre-flight: for GitHub-sourced tasks, verify gh is authenticated before
     // dispatching.  A missing/expired credential lets the agent push a branch
     // successfully (via SSH) but then fail on `gh pr create`, producing a silent
     // orphan branch.  Blocking here gives a clear error and keeps the issue in
     // the unprocessed queue so the daemon retries when auth recovers.
+    // Also quarantines the agent if auth fails (issue #418).
     if (options?.source === "github") {
       const authStatus = validateGhAuth();
       if (!authStatus.ok) {
         const reason = authStatus.reason ?? "gh CLI is not authenticated";
-        this.log.error("GitHub dispatch blocked: gh auth pre-flight failed", {
+
+        // Quarantine the agent — mark as auth-degraded
+        this.store.setAgentAuthDegraded(agentName, reason);
+        this.log.error("GitHub dispatch blocked: gh auth pre-flight failed — agent quarantined", {
           agentName,
           reason,
           sourceRef: options?.sourceRef,
         });
+
+        // Fire Telegram alert so operator is notified immediately
+        notifyOperator(
+          "Agent quarantined: auth-degraded",
+          `Agent "${agentName}" has been quarantined due to missing/invalid GH_TOKEN. ` +
+          `Reason: ${reason}. Only research tasks will be dispatched until auth is restored.`,
+          "critical",
+          `auth-degraded:${agentName}`,
+        );
+
         throw new GhAuthError(
-          `GH auth pre-flight failed — aborting dispatch to prevent orphan branch: ${reason}`,
+          `GH auth pre-flight failed — agent "${agentName}" quarantined as auth-degraded: ${reason}`,
           reason,
         );
       }
@@ -297,7 +332,6 @@ export class Dispatcher {
     // Create task — reuse the caller's conversationId when provided (e.g. PR
     // feedback or revision tasks that should resume the agent's prior session).
     const conversationId = options?.conversationId ?? ulid();
-    const taskType = options?.taskType ?? "implementation";
     const task = this.store.createTask({
       title: options?.title ?? message.slice(0, 100),
       description: message,

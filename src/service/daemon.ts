@@ -202,10 +202,13 @@ export class Daemon {
       // 0a. Sync agents every 10 cycles (~5 min) to recover from proxy restarts.
       //     The management API loses agent state when the proxy restarts, so periodic
       //     sync ensures agents are re-registered without requiring a daemon restart.
+      //     Also check for auth recovery on quarantined agents (issue #418).
       if (this.cycleCount % AGENT_SYNC_EVERY_N_CYCLES === 0) {
         await this.syncAgents();
         // Re-fetch registered agents after sync in case new ones were created
         registeredAgents = await this.deployer.getRegisteredAgents();
+        // Check if quarantined agents have recovered their GH_TOKEN
+        await this.checkAuthRecovery();
       }
 
       // 0b. Poll Telegram for operator commands (lightweight — single HTTP call)
@@ -327,6 +330,9 @@ export class Daemon {
    * Check that running agent containers have GH_TOKEN configured.
    * Logs a warning for each agent missing it — without GH_TOKEN, `gh pr create`
    * and other GitHub CLI calls will fail inside the container.
+   *
+   * Also quarantines agents that are missing GH_TOKEN (issue #418) so the
+   * dispatcher blocks non-research tasks until auth is restored.
    */
   private async checkAgentGhAuth(): Promise<void> {
     try {
@@ -340,13 +346,22 @@ export class Daemon {
       for (const agent of proxyAgents) {
         if (agent.status === "running" && !agent.ghToken) {
           missing.push(agent.name);
+          // Quarantine the agent so it only receives research tasks
+          this.store.setAgentAuthDegraded(agent.name, "GH_TOKEN missing from container environment");
         }
       }
 
       if (missing.length > 0) {
-        const msg = `${missing.length} running agent(s) missing GH_TOKEN — gh pr create will fail: ${missing.join(", ")}`;
-        this.log.warn("Agent GH auth check", { missing });
+        const msg = `${missing.length} running agent(s) missing GH_TOKEN — quarantined as auth-degraded: ${missing.join(", ")}`;
+        this.log.warn("Agent GH auth check — agents quarantined", { missing });
         console.log(`⚠  ${msg}`);
+        notifyOperator(
+          "Agents quarantined: missing GH_TOKEN",
+          `${missing.length} agent(s) quarantined on startup: ${missing.join(", ")}. ` +
+          `These agents will only receive research tasks until GH_TOKEN is restored.`,
+          "critical",
+          "startup-auth-check",
+        );
       } else if (proxyAgents.filter((a) => a.status === "running").length > 0) {
         this.log.info("Agent GH auth check: all running agents have GH_TOKEN");
       }
@@ -354,6 +369,74 @@ export class Daemon {
       this.log.error("Agent GH auth check failed", {
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+  }
+
+  /**
+   * Periodic auth recovery check (issue #418).
+   *
+   * Re-validates agents currently in auth-degraded state.  If the orchestrator's
+   * own GH_TOKEN has recovered (validateGhAuth() returns ok) AND the agent's
+   * container now has a GH_TOKEN configured, clear the quarantine so it can
+   * receive implementation tasks again.
+   *
+   * Runs at the same cadence as agent sync (~5 min) to balance responsiveness
+   * against management API load.
+   */
+  private async checkAuthRecovery(): Promise<void> {
+    const degraded = this.store.getAuthDegradedAgents();
+    if (degraded.length === 0) return;
+
+    // First check if the orchestrator's own auth has recovered
+    const authStatus = validateGhAuth();
+    if (!authStatus.ok) {
+      this.log.info("Auth recovery check: orchestrator GH_TOKEN still invalid, skipping", {
+        degradedCount: degraded.length,
+      });
+      return;
+    }
+
+    // Check each degraded agent's container for GH_TOKEN
+    let management: ManagementClient | null = null;
+    let proxyAgentMap: Map<string, boolean> | null = null;
+    try {
+      management = new ManagementClient(this.config.proxy);
+      const reachable = await management.isReachable();
+      if (reachable) {
+        const proxyAgents = await management.listAgents();
+        proxyAgentMap = new Map(proxyAgents.map((a) => [a.name, !!a.ghToken]));
+      }
+    } catch {
+      // If proxy is unreachable, we can still clear agents whose quarantine was
+      // caused by the orchestrator's own auth failure (not container-level).
+    }
+
+    const recovered: string[] = [];
+    for (const agent of degraded) {
+      // If we can check the container, require it to have GH_TOKEN too
+      if (proxyAgentMap !== null) {
+        const containerHasToken = proxyAgentMap.get(agent.agent_name);
+        if (containerHasToken === false) {
+          // Container still missing token — keep quarantined
+          continue;
+        }
+      }
+
+      // Auth has recovered — clear quarantine
+      this.store.clearAgentAuthDegraded(agent.agent_name);
+      recovered.push(agent.agent_name);
+    }
+
+    if (recovered.length > 0) {
+      this.log.info("Auth recovery: agents un-quarantined", { recovered });
+      console.log(`✅ Auth recovered for ${recovered.length} agent(s): ${recovered.join(", ")}`);
+      notifyOperator(
+        "Agents recovered from auth-degraded",
+        `${recovered.length} agent(s) restored to full operation: ${recovered.join(", ")}. ` +
+        `GH_TOKEN is now valid — implementation tasks will be dispatched normally.`,
+        "info",
+        "auth-recovery",
+      );
     }
   }
 

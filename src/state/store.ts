@@ -430,6 +430,8 @@ export interface PRMetrics {
  * Tracks consecutive dispatch failures so the dispatcher can route around
  * unhealthy pool instances without waiting for the supervisor to intervene.
  */
+export type AgentAuthStatus = "ok" | "auth-degraded";
+
 export interface AgentHealth {
   agent_name: string;
   consecutive_failures: number;
@@ -437,6 +439,10 @@ export interface AgentHealth {
   last_error_message: string | null;
   last_success_at: string | null;
   is_healthy: boolean;
+  /** Auth status: "ok" means fully functional, "auth-degraded" means GH_TOKEN missing/invalid. */
+  auth_status: AgentAuthStatus;
+  /** ISO timestamp when the agent entered auth-degraded state, or null. */
+  auth_degraded_at: string | null;
 }
 
 const MIGRATIONS = `
@@ -2437,6 +2443,16 @@ export class StateStore {
         last_success_at TEXT
       );
     `);
+
+    // Migration: add auth_status and auth_degraded_at columns (issue #418)
+    const colCheck = this.db.prepare("PRAGMA table_info(agent_health)").all() as Array<{ name: string }>;
+    const colNames = new Set(colCheck.map((c) => c.name));
+    if (!colNames.has("auth_status")) {
+      this.db.exec(`
+        ALTER TABLE agent_health ADD COLUMN auth_status TEXT NOT NULL DEFAULT 'ok';
+        ALTER TABLE agent_health ADD COLUMN auth_degraded_at TEXT;
+      `);
+    }
   }
 
   /**
@@ -2481,6 +2497,8 @@ export class StateStore {
       last_error_at: string | null;
       last_error_message: string | null;
       last_success_at: string | null;
+      auth_status: string;
+      auth_degraded_at: string | null;
     } | undefined;
 
     if (!row) {
@@ -2491,12 +2509,15 @@ export class StateStore {
         last_error_message: null,
         last_success_at: null,
         is_healthy: true,
+        auth_status: "ok",
+        auth_degraded_at: null,
       };
     }
 
     return {
       ...row,
       is_healthy: row.consecutive_failures < 3,
+      auth_status: (row.auth_status as AgentAuthStatus) ?? "ok",
     };
   }
 
@@ -2505,6 +2526,68 @@ export class StateStore {
    */
   getAgentHealthBatch(agentNames: string[]): AgentHealth[] {
     return agentNames.map((name) => this.getAgentHealth(name));
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Agent auth quarantine (GH_TOKEN validation — issue #418)
+  // ────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Mark an agent as auth-degraded (GH_TOKEN missing/invalid).
+   * Auth-degraded agents can only receive research/analysis tasks.
+   */
+  setAgentAuthDegraded(agentName: string, reason: string): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO agent_health (agent_name, consecutive_failures, auth_status, auth_degraded_at, last_error_at, last_error_message)
+      VALUES (?, 0, 'auth-degraded', ?, ?, ?)
+      ON CONFLICT(agent_name) DO UPDATE SET
+        auth_status = 'auth-degraded',
+        auth_degraded_at = COALESCE(agent_health.auth_degraded_at, ?),
+        last_error_at = ?,
+        last_error_message = ?
+    `).run(agentName, now, now, reason, now, now, reason);
+  }
+
+  /**
+   * Clear auth-degraded status for an agent (auth has recovered).
+   */
+  clearAgentAuthDegraded(agentName: string): void {
+    this.db.prepare(`
+      UPDATE agent_health
+      SET auth_status = 'ok', auth_degraded_at = NULL
+      WHERE agent_name = ?
+    `).run(agentName);
+  }
+
+  /**
+   * Check if a specific agent is in auth-degraded state.
+   */
+  isAgentAuthDegraded(agentName: string): boolean {
+    const health = this.getAgentHealth(agentName);
+    return health.auth_status === "auth-degraded";
+  }
+
+  /**
+   * Get all agents currently in auth-degraded state.
+   */
+  getAuthDegradedAgents(): AgentHealth[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM agent_health WHERE auth_status = 'auth-degraded'"
+    ).all() as Array<{
+      agent_name: string;
+      consecutive_failures: number;
+      last_error_at: string | null;
+      last_error_message: string | null;
+      last_success_at: string | null;
+      auth_status: string;
+      auth_degraded_at: string | null;
+    }>;
+    return rows.map((row) => ({
+      ...row,
+      is_healthy: row.consecutive_failures < 3,
+      auth_status: row.auth_status as AgentAuthStatus,
+    }));
   }
 
   close(): void {

@@ -29,8 +29,16 @@ vi.mock("../triggers/reporters.js", async (importOriginal) => {
   return { ...actual, reportEscalation: vi.fn().mockReturnValue(false) };
 });
 
+// Mock notifyOperator so tests don't send real Telegram messages.
+vi.mock("../service/notify.js", () => ({
+  notifyOperator: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { reportEscalation } from "../triggers/reporters.js";
 const mockReportEscalation = vi.mocked(reportEscalation);
+
+import { notifyOperator } from "../service/notify.js";
+const mockNotifyOperator = vi.mocked(notifyOperator);
 
 import { validateGhAuth, GhAuthError } from "../triggers/github.js";
 const mockValidateGhAuth = vi.mocked(validateGhAuth);
@@ -628,6 +636,107 @@ describe("Dispatcher.dispatch — gh auth pre-flight for github source", () => {
       .catch(() => {});
 
     expect(store.listTasks()).toHaveLength(0);
+  });
+
+  it("quarantines agent as auth-degraded when gh auth fails on github-sourced dispatch", async () => {
+    mockValidateGhAuth.mockReturnValue({ ok: false, reason: "token expired" });
+
+    await dispatcher
+      .dispatch("fix the bug", { agentName: "test-agent", source: "github" })
+      .catch(() => {});
+
+    expect(store.isAgentAuthDegraded("test-agent")).toBe(true);
+  });
+
+  it("sends Telegram alert when quarantining an agent", async () => {
+    mockValidateGhAuth.mockReturnValue({ ok: false, reason: "token expired" });
+
+    await dispatcher
+      .dispatch("fix the bug", { agentName: "test-agent", source: "github" })
+      .catch(() => {});
+
+    expect(mockNotifyOperator).toHaveBeenCalledWith(
+      "Agent quarantined: auth-degraded",
+      expect.stringContaining("test-agent"),
+      "critical",
+      "auth-degraded:test-agent",
+    );
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// dispatch() — auth-degraded quarantine blocking (issue #418)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("Dispatcher.dispatch — auth-degraded quarantine", () => {
+  let store: StateStore;
+  let dispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+    dispatcher = new Dispatcher(makeConfig(), store);
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+  });
+
+  it("blocks non-research tasks to auth-degraded agents", async () => {
+    store.setAgentAuthDegraded("test-agent", "GH_TOKEN missing");
+
+    const err = await dispatcher
+      .dispatch("fix the bug", { agentName: "test-agent", source: "github" })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(GhAuthError);
+    expect((err as GhAuthError).reason).toBe("agent-auth-degraded");
+    expect(store.listTasks()).toHaveLength(0);
+  });
+
+  it("allows research tasks to auth-degraded agents", async () => {
+    store.setAgentAuthDegraded("test-agent", "GH_TOKEN missing");
+
+    mockSend.mockResolvedValue({
+      content: "research result",
+      model: "test",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+
+    const result = await dispatcher.dispatch("research this topic", {
+      agentName: "test-agent",
+      source: "github",
+      taskType: "research",
+    });
+
+    expect(result.taskId).toBeDefined();
+    expect(result.response.content).toBe("research result");
+  });
+
+  it("allows dispatch after auth-degraded status is cleared", async () => {
+    store.setAgentAuthDegraded("test-agent", "GH_TOKEN missing");
+    store.clearAgentAuthDegraded("test-agent");
+
+    mockSend.mockResolvedValue({
+      content: "done",
+      model: "test",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+
+    const result = await dispatcher.dispatch("fix the bug", {
+      agentName: "test-agent",
+      source: "github",
+    });
+
+    expect(result.taskId).toBeDefined();
+  });
+
+  it("blocks manual implementation tasks to auth-degraded agents too", async () => {
+    store.setAgentAuthDegraded("test-agent", "GH_TOKEN missing");
+
+    const err = await dispatcher
+      .dispatch("fix the bug", { agentName: "test-agent", source: "manual" })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(GhAuthError);
+    expect((err as GhAuthError).reason).toBe("agent-auth-degraded");
   });
 });
 
