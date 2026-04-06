@@ -132,6 +132,7 @@ export function toProxyConfig(
     sessionId: agent.docker?.session_id ?? "",
     sshKey: config.proxy.ssh_key,
     ghToken: config.proxy.gh_token,
+    provider: agent.provider,
     packages: agent.docker?.packages,
     apiKey: agent.docker?.api_key ?? "",
     allowedTools: agent.docker?.allowed_tools,

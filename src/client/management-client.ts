@@ -14,6 +14,7 @@ export interface ProxyAgentConfig {
   sessionId?: string;
   sshKey?: string;
   ghToken?: string;
+  provider?: string;
   packages?: string[];
   allowedTools?: string;
 }

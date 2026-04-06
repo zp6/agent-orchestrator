@@ -86,6 +86,7 @@ export class Deployer {
         session: agent.docker?.session ?? "fresh",
         sshKey: this.config.proxy.ssh_key,
         ghToken: this.config.proxy.gh_token,
+        provider: agent.provider,
       });
       this.markDeployed(agentName);
       this.log.info("Agent redeployed", { agentName });
@@ -327,6 +328,7 @@ export class Deployer {
         session: agent.docker?.session ?? "fresh",
         sshKey: this.config.proxy.ssh_key,
         ghToken: this.config.proxy.gh_token,
+        provider: agent.provider,
         apiKey: agent.docker?.api_key ?? "",
       };
       await this.management.createAgent(proxyConfig);
