@@ -260,6 +260,16 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
     throw new Error("Config missing agents");
   }
 
+  // Validate github: field format for each agent that specifies one
+  for (const [name, agent] of Object.entries(parsed.agents)) {
+    if (agent.github && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(agent.github)) {
+      throw new Error(
+        `Agent "${name}" has invalid github field: "${agent.github}". ` +
+          `Expected "owner/repo" format (e.g. "rapartlu/agent-orchestrator").`,
+      );
+    }
+  }
+
   // Default orchestrator_dir to the directory containing agents.yaml
   if (!parsed.orchestrator_dir) {
     parsed.orchestrator_dir = dirname(path);

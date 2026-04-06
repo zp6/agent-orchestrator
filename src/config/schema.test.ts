@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { loadConfig, getAgentDir, type PRReviewConfig, type OrchestratorConfig, type ProviderConfig } from "./schema.js";
 import { resolve } from "node:path";
+import { writeFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 describe("loadConfig", () => {
   const configPath = resolve(import.meta.dirname, "..", "..", "agents.yaml");
@@ -48,6 +50,88 @@ describe("loadConfig", () => {
     const ports = Object.values(config.agents).map((a) => a.docker?.port);
     const uniquePorts = new Set(ports);
     expect(uniquePorts.size).toBe(ports.length);
+  });
+});
+
+describe("github field validation", () => {
+  function writeTempConfig(githubValue: string): string {
+    const tmpPath = resolve(tmpdir(), `agents-test-${Date.now()}.yaml`);
+    const yaml = `
+proxy:
+  url: "http://localhost:3457"
+  timeout_ms: 900000
+base_dir: "/tmp"
+agents:
+  test-agent:
+    dir: "test"
+    github: "${githubValue}"
+    description: "Test agent"
+    capabilities: ["test"]
+    owns_topics: ["test"]
+    docker:
+      port: 9999
+`;
+    writeFileSync(tmpPath, yaml);
+    return tmpPath;
+  }
+
+  it("accepts valid owner/repo format", () => {
+    const tmp = writeTempConfig("rapartlu/agent-orchestrator");
+    try {
+      const config = loadConfig(tmp);
+      expect(config.agents["test-agent"].github).toBe("rapartlu/agent-orchestrator");
+    } finally {
+      unlinkSync(tmp);
+    }
+  });
+
+  it("accepts owner/repo with dots and hyphens", () => {
+    const tmp = writeTempConfig("my-org.io/my-repo.js");
+    try {
+      const config = loadConfig(tmp);
+      expect(config.agents["test-agent"].github).toBe("my-org.io/my-repo.js");
+    } finally {
+      unlinkSync(tmp);
+    }
+  });
+
+  it("rejects missing slash (owner-repo)", () => {
+    const tmp = writeTempConfig("owner-repo");
+    try {
+      expect(() => loadConfig(tmp)).toThrow('Agent "test-agent" has invalid github field');
+    } finally {
+      unlinkSync(tmp);
+    }
+  });
+
+  it("rejects full URL instead of owner/repo", () => {
+    const tmp = writeTempConfig("https://github.com/owner/repo");
+    try {
+      expect(() => loadConfig(tmp)).toThrow('Agent "test-agent" has invalid github field');
+    } finally {
+      unlinkSync(tmp);
+    }
+  });
+
+  it("rejects trailing slash", () => {
+    const tmp = writeTempConfig("owner/repo/extra");
+    try {
+      expect(() => loadConfig(tmp)).toThrow('Agent "test-agent" has invalid github field');
+    } finally {
+      unlinkSync(tmp);
+    }
+  });
+
+  it("all agents in real config have valid github fields", () => {
+    const realConfigPath = resolve(import.meta.dirname, "..", "..", "agents.yaml");
+    const config = loadConfig(realConfigPath);
+    for (const [name, agent] of Object.entries(config.agents)) {
+      if (agent.github) {
+        expect(agent.github, `${name} has invalid github field`).toMatch(
+          /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/,
+        );
+      }
+    }
   });
 });
 
