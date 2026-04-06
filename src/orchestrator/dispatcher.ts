@@ -224,7 +224,7 @@ export class Dispatcher {
       /** Resume an existing CLI session by reusing a prior conversation ID. */
       conversationId?: string;
       /**
-       * The GitHub repo that triggered this task (e.g. "rapartlu/claude-proxy").
+       * The GitHub repo that triggered this task (e.g. "rapartlu/agent-proxy").
        * Passed to the router so cross-repo destination detection
        * (`scoreCrossRepoDestination` / `taskMentionsOtherAgent`) can activate.
        * Without this, both helpers return immediately and the deterministic

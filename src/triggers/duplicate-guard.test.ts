@@ -28,7 +28,7 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     source: "github",
     source_ref: "owner/repo#1",
     status: "done",
-    agent_name: "claude-agent-orchestrator",
+    agent_name: "agent-orchestrator",
     conversation_id: null,
     result: null,
     parent_task_id: null,
@@ -330,11 +330,17 @@ describe("result shape", () => {
 // ---------------------------------------------------------------------------
 
 describe("escalated tasks", () => {
-  it("blocks an escalated task regardless of age", () => {
-    const store = makeStore(makeTask({ status: "escalated", updated_at: hoursAgo(100) }));
+  it("blocks an escalated task within recency window", () => {
+    const store = makeStore(makeTask({ status: "escalated", updated_at: hoursAgo(2) }));
     const result = checkDuplicate(store as StateStore, "github", "owner/repo#1");
     expect(result.isDuplicate).toBe(true);
     expect(result.reason).toContain("escalated");
+  });
+
+  it("allows re-dispatch of escalated task after recency window", () => {
+    const store = makeStore(makeTask({ status: "escalated", updated_at: hoursAgo(100) }));
+    const result = checkDuplicate(store as StateStore, "github", "owner/repo#1");
+    expect(result.isDuplicate).toBe(false);
   });
 
   it("includes existingTask when blocking escalated", () => {

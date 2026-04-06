@@ -3,20 +3,20 @@ import { normaliseSourceRef } from "./deescalate.js";
 
 describe("normaliseSourceRef", () => {
   it("passes through a plain owner/repo#N ref unchanged", () => {
-    expect(normaliseSourceRef("rapartlu/claude-proxy#145")).toBe(
-      "rapartlu/claude-proxy#145",
+    expect(normaliseSourceRef("rapartlu/agent-proxy#145")).toBe(
+      "rapartlu/agent-proxy#145",
     );
   });
 
   it("strips a 'github:' prefix", () => {
-    expect(normaliseSourceRef("github:rapartlu/claude-proxy#145")).toBe(
-      "rapartlu/claude-proxy#145",
+    expect(normaliseSourceRef("github:rapartlu/agent-proxy#145")).toBe(
+      "rapartlu/agent-proxy#145",
     );
   });
 
   it("strips a 'pr-feedback:' prefix", () => {
-    expect(normaliseSourceRef("pr-feedback:rapartlu/claude-proxy#145")).toBe(
-      "rapartlu/claude-proxy#145",
+    expect(normaliseSourceRef("pr-feedback:rapartlu/agent-proxy#145")).toBe(
+      "rapartlu/agent-proxy#145",
     );
   });
 

@@ -43,7 +43,7 @@ describe("Router.routeToRepo", () => {
   const router = new Router(config);
 
   it("finds agent by GitHub repo", () => {
-    expect(router.routeToRepo("rapartlu/claude-proxy")).toBe("claude-proxy");
+    expect(router.routeToRepo("rapartlu/agent-proxy")).toBe("claude-proxy");
   });
 
   it("returns undefined for unknown repo", () => {
@@ -58,7 +58,7 @@ describe("Router cross-repo destination routing", () => {
     // Task triggered from claude-proxy but explicitly targets claude-agent-orchestrator
     const matches = router.route(
       "update claude-agent-orchestrator to consume the new streaming API",
-      "rapartlu/claude-proxy",
+      "rapartlu/agent-proxy",
     );
     expect(matches[0].agentName).toBe("claude-agent-orchestrator");
     expect(matches[0].reason).toMatch(/cross-repo destination/i);
@@ -66,8 +66,8 @@ describe("Router cross-repo destination routing", () => {
 
   it("routes to destination agent when task mentions full repo path", () => {
     const matches = router.route(
-      "in rapartlu/claude-agent-orchestrator, add support for X",
-      "rapartlu/claude-proxy",
+      "in rapartlu/agent-orchestrator, add support for X",
+      "rapartlu/agent-proxy",
     );
     expect(matches[0].agentName).toBe("claude-agent-orchestrator");
     expect(matches[0].reason).toMatch(/cross-repo destination/i);
@@ -77,7 +77,7 @@ describe("Router cross-repo destination routing", () => {
     // Task from claude-proxy that doesn't mention any other agent
     const matches = router.route(
       "fix the docker container startup timeout",
-      "rapartlu/claude-proxy",
+      "rapartlu/agent-proxy",
     );
     expect(matches[0].agentName).toBe("claude-proxy");
   });
@@ -86,7 +86,7 @@ describe("Router cross-repo destination routing", () => {
     // Task from claude-agent-orchestrator mentioning itself — no cross-repo boost needed
     const matches = router.route(
       "update claude-agent-orchestrator daemon loop interval",
-      "rapartlu/claude-agent-orchestrator",
+      "rapartlu/agent-orchestrator",
     );
     // Should still route to claude-agent-orchestrator but via normal source-match path
     expect(matches[0].agentName).toBe("claude-agent-orchestrator");
@@ -98,7 +98,7 @@ describe("Router cross-repo destination routing", () => {
     // Task from claude-proxy repo but title clearly says "claude-agent-orchestrator"
     const matches = router.route(
       "claude-agent-orchestrator: add proxy health-check polling",
-      "rapartlu/claude-proxy",
+      "rapartlu/agent-proxy",
     );
     expect(matches[0].agentName).toBe("claude-agent-orchestrator");
     expect(matches[0].reason).toMatch(/cross-repo destination/i);

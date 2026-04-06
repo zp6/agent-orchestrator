@@ -104,14 +104,14 @@ describe("extractClosedIssueNumbers", () => {
 
 describe("extractCrossRepoIssueRefs", () => {
   it("extracts Closes owner/repo#N", () => {
-    expect(extractCrossRepoIssueRefs("Closes rapartlu/claude-agent-orchestrator#424")).toEqual([
-      { owner: "rapartlu", repo: "claude-agent-orchestrator", number: 424 },
+    expect(extractCrossRepoIssueRefs("Closes rapartlu/agent-orchestrator#424")).toEqual([
+      { owner: "rapartlu", repo: "agent-orchestrator", number: 424 },
     ]);
   });
 
   it("extracts Fixes owner/repo#N", () => {
-    expect(extractCrossRepoIssueRefs("Fixes rapartlu/claude-proxy#10")).toEqual([
-      { owner: "rapartlu", repo: "claude-proxy", number: 10 },
+    expect(extractCrossRepoIssueRefs("Fixes rapartlu/agent-proxy#10")).toEqual([
+      { owner: "rapartlu", repo: "agent-proxy", number: 10 },
     ]);
   });
 

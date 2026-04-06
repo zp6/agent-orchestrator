@@ -127,7 +127,7 @@ When creating GitHub issues, PRs, comments, or any public-facing content, always
 
 ## Orchestrator Integration
 
-This agent is managed by the [claude-agent-orchestrator](https://github.com/rapartlu/claude-agent-orchestrator). The orchestrator:
+This agent is managed by the [claude-agent-orchestrator](https://github.com/rapartlu/agent-orchestrator). The orchestrator:
 - Dispatches work to you via GitHub issues
 - Reviews your PRs (approves, requests changes, or escalates to human)
 - Verifies the quality of your completed work
@@ -154,7 +154,7 @@ ${options.capabilities.map((c) => `- ${c}`).join("\n")}
 
 ## Managed By
 
-This agent is managed by the [claude-agent-orchestrator](https://github.com/rapartlu/claude-agent-orchestrator).
+This agent is managed by the [claude-agent-orchestrator](https://github.com/rapartlu/agent-orchestrator).
 
 ## Development
 

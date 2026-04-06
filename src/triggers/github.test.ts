@@ -80,9 +80,9 @@ describe("fetchOpenIssues", () => {
 
   it("passes correct repo to gh CLI", () => {
     mockExecSync.mockReturnValue("[]");
-    fetchOpenIssues("rapartlu/claude-proxy");
+    fetchOpenIssues("rapartlu/agent-proxy");
     expect(mockExecSync).toHaveBeenCalledWith(
-      expect.stringContaining("repos/rapartlu/claude-proxy/issues"),
+      expect.stringContaining("repos/rapartlu/agent-proxy/issues"),
       expect.any(Object),
     );
   });

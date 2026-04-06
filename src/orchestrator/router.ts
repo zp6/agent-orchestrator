@@ -183,7 +183,7 @@ export class Router {
    * Examples:
    *   - "update claude-agent-orchestrator to consume the new reviewer API"
    *     → boosts claude-agent-orchestrator, not claude-proxy (the source repo)
-   *   - "rapartlu/claude-agent-orchestrator should handle X"
+   *   - "rapartlu/agent-orchestrator should handle X"
    *     → boosts claude-agent-orchestrator
    *
    * Returns 0.9 if this agent is the explicit destination (to beat the source
@@ -206,7 +206,7 @@ export class Router {
 
     // Check if the task explicitly mentions this agent's GitHub repo (full or short form)
     if (agent.github) {
-      const fullRepo = agent.github.toLowerCase(); // e.g. "rapartlu/claude-agent-orchestrator"
+      const fullRepo = agent.github.toLowerCase(); // e.g. "rapartlu/agent-orchestrator"
       const shortRepo = fullRepo.split("/")[1]; // e.g. "claude-agent-orchestrator"
 
       if (taskLower.includes(fullRepo) || taskLower.includes(shortRepo)) {

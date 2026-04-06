@@ -4,9 +4,9 @@ import { StateStore } from "../../state/store.js";
 
 /**
  * Normalise a source_ref provided by the operator.  Accepts shorthand like
- * `rapartlu/claude-proxy#145` and converts to the canonical form used in the
+ * `rapartlu/agent-proxy#145` and converts to the canonical form used in the
  * database.  If the ref already contains a source prefix (e.g.
- * `github:rapartlu/claude-proxy#145`), the prefix is stripped — the source
+ * `github:rapartlu/agent-proxy#145`), the prefix is stripped — the source
  * column is inferred separately.
  */
 export function normaliseSourceRef(raw: string): string {
@@ -22,7 +22,7 @@ export function registerDeescalateCommand(program: Command): void {
   program
     .command("deescalate")
     .description("Unblock an escalated source_ref so the daemon can re-dispatch it")
-    .argument("<source_ref>", "The source ref to de-escalate (e.g. rapartlu/claude-proxy#145)")
+    .argument("<source_ref>", "The source ref to de-escalate (e.g. rapartlu/agent-proxy#145)")
     .option("--reason <reason>", "Reason for de-escalation (logged for audit)")
     .action((rawRef: string, opts: { reason?: string }) => {
       const store = new StateStore();

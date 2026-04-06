@@ -46,7 +46,7 @@ vi.mock("../../config/schema.js", () => ({
     agents: {
       "claude-agent-orchestrator": {
         dir: "claude-agent-orchestrator",
-        github: "rapartlu/claude-agent-orchestrator",
+        github: "rapartlu/agent-orchestrator",
         capabilities: [],
       },
     },

@@ -211,7 +211,7 @@ describe("decisionMatchesIssue", () => {
   });
 
   it("matches sourceRef patterns like owner/repo#457", () => {
-    const d = makeDecision({ reason: "Skipped rapartlu/claude-agent-orchestrator#457" });
+    const d = makeDecision({ reason: "Skipped rapartlu/agent-orchestrator#457" });
     expect(decisionMatchesIssue(d, 457)).toBe(true);
   });
 

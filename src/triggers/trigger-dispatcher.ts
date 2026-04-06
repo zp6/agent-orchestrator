@@ -75,7 +75,7 @@ function fireAndForget(
   options: {
     agentName?: string;
     /**
-     * The GitHub repo that triggered this task (e.g. "rapartlu/claude-proxy").
+     * The GitHub repo that triggered this task (e.g. "rapartlu/agent-proxy").
      * When provided (and `agentName` is omitted), the router uses this to
      * activate cross-repo destination detection so tasks explicitly naming a
      * different agent are routed to the correct destination rather than always

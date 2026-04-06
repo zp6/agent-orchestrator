@@ -35,11 +35,11 @@ describe("StateStore", () => {
         title: "Test",
         description: "A longer description",
         source: "github",
-        source_ref: "rapartlu/claude-proxy#1",
+        source_ref: "rapartlu/agent-proxy#1",
         agent_name: "claude-proxy",
       });
       expect(task.description).toBe("A longer description");
-      expect(task.source_ref).toBe("rapartlu/claude-proxy#1");
+      expect(task.source_ref).toBe("rapartlu/agent-proxy#1");
       expect(task.agent_name).toBe("claude-proxy");
     });
   });

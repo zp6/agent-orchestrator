@@ -67,7 +67,7 @@ ROUTING RULES:
    integrate with the source. Example: "wire reviewer package into orchestrator daemon"
    should route to the orchestrator agent (it owns the daemon), NOT the reviewer agent.
 3. CROSS-REPO TASKS: If the task description explicitly names a specific repo or agent
-   (e.g. "update claude-agent-orchestrator to...", "in rapartlu/claude-proxy, add..."),
+   (e.g. "update claude-agent-orchestrator to...", "in rapartlu/agent-proxy, add..."),
    route to the agent that OWNS THAT NAMED REPO, even if the task was triggered from a
    different repo. The destination repo mentioned in the task body takes priority over
    the triggering source repo.

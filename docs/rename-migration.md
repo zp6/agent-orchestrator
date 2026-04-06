@@ -1,7 +1,7 @@
 # Repo Rename Migration: `claude-*` → Provider-Agnostic Names
 
 **Status:** Pending — execute after multi-provider support is tested and stable.
-**Tracking issue:** [#402](https://github.com/rapartlu/claude-agent-orchestrator/issues/402)
+**Tracking issue:** [#402](https://github.com/rapartlu/agent-orchestrator/issues/402)
 
 ## Motivation
 
@@ -44,8 +44,8 @@ Update agent keys, `dir`, `repo`, and `github` fields:
 # Before
 claude-agent-orchestrator:
   dir: "claude-agent-orchestrator"
-  repo: "git@github.com:rapartlu/claude-agent-orchestrator.git"
-  github: "rapartlu/claude-agent-orchestrator"
+  repo: "git@github.com:rapartlu/agent-orchestrator.git"
+  github: "rapartlu/agent-orchestrator"
 
 # After
 agent-orchestrator:

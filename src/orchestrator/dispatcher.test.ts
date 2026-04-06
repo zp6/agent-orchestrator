@@ -1692,8 +1692,8 @@ describe("StateStore.countFailedTasksForSourceRef", () => {
 
 describe("extractRepoFromSourceRef", () => {
   it("extracts owner/repo from a GitHub source_ref", () => {
-    expect(extractRepoFromSourceRef("rapartlu/claude-agent-orchestrator#338")).toBe(
-      "rapartlu/claude-agent-orchestrator",
+    expect(extractRepoFromSourceRef("rapartlu/agent-orchestrator#338")).toBe(
+      "rapartlu/agent-orchestrator",
     );
   });
 
@@ -1723,9 +1723,9 @@ describe("extractRepoFromSourceRef", () => {
 
 describe("buildTargetRepoHeader", () => {
   it("returns a markdown block containing the repo name", () => {
-    const header = buildTargetRepoHeader("rapartlu/claude-agent-orchestrator#338");
+    const header = buildTargetRepoHeader("rapartlu/agent-orchestrator#338");
     expect(header).toBeDefined();
-    expect(header).toContain("rapartlu/claude-agent-orchestrator");
+    expect(header).toContain("rapartlu/agent-orchestrator");
     expect(header).toContain("Target repository");
   });
 
@@ -1755,11 +1755,11 @@ describe("Dispatcher — target-repo header injection (issue #338)", () => {
     await dispatcher.dispatch("Implement feature X", {
       agentName: "test-agent",
       source: "github",
-      sourceRef: "rapartlu/claude-agent-orchestrator#338",
+      sourceRef: "rapartlu/agent-orchestrator#338",
     });
 
     const [, sentMessage] = mockSend.mock.calls[0];
-    expect(sentMessage).toContain("rapartlu/claude-agent-orchestrator");
+    expect(sentMessage).toContain("rapartlu/agent-orchestrator");
     expect(sentMessage).toContain("Target repository");
     expect(sentMessage).toContain("Implement feature X");
     // Header must come before the task body
@@ -1793,7 +1793,7 @@ describe("Dispatcher — target-repo header injection (issue #338)", () => {
       title: "Fix the bug",
       description: "Fix the bug in detail",
       source: "github",
-      source_ref: "rapartlu/claude-agent-orchestrator#338",
+      source_ref: "rapartlu/agent-orchestrator#338",
       agent_name: "test-agent",
     });
     store.updateTask(task.id, {
@@ -1809,7 +1809,7 @@ describe("Dispatcher — target-repo header injection (issue #338)", () => {
     await dispatcher.retryTask(store.getTask(task.id)!);
 
     const [, sentMessage] = mockSend.mock.calls[0];
-    expect(sentMessage).toContain("rapartlu/claude-agent-orchestrator");
+    expect(sentMessage).toContain("rapartlu/agent-orchestrator");
     expect(sentMessage).toContain("Target repository");
     expect(sentMessage).toContain("Fix the bug in detail");
   });

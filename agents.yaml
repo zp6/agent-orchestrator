@@ -34,11 +34,11 @@ verification:
 agents:
   claude-agent-orchestrator:
     dir: "claude-agent-orchestrator"
-    repo: "git@github.com:rapartlu/claude-agent-orchestrator.git"
+    repo: "git@github.com:rapartlu/agent-orchestrator.git"
     model: "claude-opus-4-6"
     description: "Core orchestration infrastructure: daemon loop, state store, task dispatching, trigger polling, agent deployment, and sync. Does NOT own dashboard/CLI UI or PR review/verification quality layer — those belong to the dashboard and reviewer agents."
     capabilities: ["typescript", "orchestration", "sqlite"]
-    github: "rapartlu/claude-agent-orchestrator"
+    github: "rapartlu/agent-orchestrator"
     owns_topics: ["orchestrator", "daemon", "routing", "dispatcher", "planner", "deployer", "state", "triggers", "sync"]
     docker:
       port: 3472
@@ -48,11 +48,11 @@ agents:
 
   claude-orchestrator-dashboard:
     dir: "claude-orchestrator-dashboard"
-    repo: "git@github.com:rapartlu/claude-orchestrator-dashboard.git"
+    repo: "git@github.com:rapartlu/agent-dashboard.git"
     model: "claude-sonnet-4-6"
     description: "Dashboard, CLI commands, and observability UI for the orchestrator. Owns all user-facing interfaces: web dashboard, status/health/metrics commands, activity views, escalation queue."
     capabilities: ["typescript", "html", "css", "express", "dashboard"]
-    github: "rapartlu/claude-orchestrator-dashboard"
+    github: "rapartlu/agent-dashboard"
     owns_topics: ["dashboard", "cli", "status", "health", "metrics", "activity", "ui", "escalation-ui"]
     docker:
       port: 3473
@@ -62,12 +62,12 @@ agents:
 
   claude-orchestrator-reviewer:
     dir: "claude-orchestrator-reviewer"
-    repo: "git@github.com:rapartlu/claude-orchestrator-reviewer.git"
+    repo: "git@github.com:rapartlu/agent-reviewer.git"
     pool: "reviewer"
     model: "claude-sonnet-4-6"
     description: "Quality and oversight layer. PR reviewer, task verifier, supervisor, improvement detector, and escalation system (Telegram notifications). Also serves as the LLM backend for all orchestrator operations."
     capabilities: ["typescript", "llm", "review", "verification"]
-    github: "rapartlu/claude-orchestrator-reviewer"
+    github: "rapartlu/agent-reviewer"
     owns_topics: ["review", "verification", "supervisor", "improvement", "escalation", "telegram", "quality"]
     docker:
       port: 3474
@@ -77,7 +77,7 @@ agents:
 
   claude-orchestrator-reviewer-2:
     dir: "claude-orchestrator-reviewer"
-    repo: "git@github.com:rapartlu/claude-orchestrator-reviewer.git"
+    repo: "git@github.com:rapartlu/agent-reviewer.git"
     pool: "reviewer"
     model: "claude-sonnet-4-6"
     description: "Reviewer pool instance 2. Shares LLM workload with other reviewer instances."
@@ -103,11 +103,11 @@ agents:
 
   claude-research-agent:
     dir: "claude-research-agent"
-    repo: "git@github.com:rapartlu/claude-research-agent.git"
+    repo: "git@github.com:rapartlu/research-agent.git"
     model: "claude-opus-4-6"
     description: "Specialized research agent: web search, doc analysis, technology comparisons, architecture decisions. Produces findings reports, not code."
     capabilities: ["research", "web-search", "documentation", "analysis"]
-    github: "rapartlu/claude-research-agent"
+    github: "rapartlu/research-agent"
     owns_topics: ["research", "investigation", "comparison", "evaluation", "exploration", "temporal", "architecture"]
     docker:
       port: 3478
@@ -118,10 +118,10 @@ agents:
   claude-proxy:
     dir: "claude-proxy"
     model: "claude-opus-4-6"
-    repo: "git@github.com:rapartlu/claude-proxy.git"
+    repo: "git@github.com:rapartlu/agent-proxy.git"
     description: "Development proxy server that wraps Claude Code CLI instances and exposes them via the Anthropic Messages API. Manages agent containers, Docker lifecycle, and multi-agent routing."
     capabilities: ["typescript", "docker", "proxy", "api", "infrastructure"]
-    github: "rapartlu/claude-proxy"
+    github: "rapartlu/agent-proxy"
     owns_topics: ["proxy", "docker", "container", "infrastructure", "auth", "ssh"]
     docker:
       port: 3471

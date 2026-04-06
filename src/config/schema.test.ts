@@ -69,9 +69,9 @@ describe("ProviderConfig", () => {
     }
   });
 
-  it("non-claude providers have api_key_env", () => {
+  it("non-claude providers are configured", () => {
     const config = loadConfig(configPath);
-    expect(config.providers!["openai"].api_key_env).toBe("OPENAI_API_KEY");
+    expect(config.providers!["openai"].model).toBe("gpt-5.4");
     expect(config.providers!["gemini"].api_key_env).toBe("GEMINI_API_KEY");
   });
 
@@ -120,8 +120,8 @@ describe("getAgentDir", () => {
   it("returns container path for repo-based agents", () => {
     const config = loadConfig(configPath);
     const dir = getAgentDir(config, "claude-proxy");
-    // claude-proxy has repo: set → container path
-    expect(dir).toBe("/home/claude/workspace/claude-proxy");
+    // claude-proxy has repo: set → container path derived from repo URL
+    expect(dir).toBe("/home/claude/workspace/agent-proxy");
   });
 
   it("returns host path for bind-mounted agents without repo", () => {

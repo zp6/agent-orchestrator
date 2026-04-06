@@ -12,7 +12,7 @@ export interface ImplementationGap {
   title: string;
   /** Detailed description of what to build and why */
   description: string;
-  /** Target repo (e.g. "rapartlu/claude-proxy") where the issue should be filed */
+  /** Target repo (e.g. "rapartlu/agent-proxy") where the issue should be filed */
   target_repo: string;
   /** Severity: how impactful is this gap */
   severity: "low" | "medium" | "high";

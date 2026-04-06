@@ -21,14 +21,14 @@ const config: OrchestratorConfig = {
       description: "Proxy server",
       capabilities: ["implementation"],
       owns_topics: ["proxy"],
-      github: "rapartlu/claude-proxy",
+      github: "rapartlu/agent-proxy",
     },
     "claude-orchestrator": {
       dir: "orchestrator",
       description: "Orchestrator",
       capabilities: ["implementation"],
       owns_topics: ["orchestrator"],
-      github: "rapartlu/claude-agent-orchestrator",
+      github: "rapartlu/agent-orchestrator",
     },
     "research-agent": {
       dir: "research",
@@ -80,9 +80,9 @@ function createMockIssueCreator() {
   return {
     isDuplicate: vi.fn().mockReturnValue(false),
     createIssue: vi.fn().mockReturnValue({
-      repo: "rapartlu/claude-proxy",
+      repo: "rapartlu/agent-proxy",
       number: 42,
-      url: "https://github.com/rapartlu/claude-proxy/issues/42",
+      url: "https://github.com/rapartlu/agent-proxy/issues/42",
     }),
     getOpenOrchestratorIssueCount: vi.fn().mockReturnValue(0),
     getOpenIssueTitles: vi.fn().mockReturnValue([]),
@@ -109,7 +109,7 @@ describe("ResearchLinker", () => {
           text: JSON.stringify([{
             title: "Add connection pooling to proxy",
             description: "Implement connection pooling for better scaling under load",
-            target_repo: "rapartlu/claude-proxy",
+            target_repo: "rapartlu/agent-proxy",
             severity: "high",
           }]),
         }],
@@ -120,9 +120,9 @@ describe("ResearchLinker", () => {
       const created = await linker.linkResearchToImplementation([task]);
 
       expect(created).toHaveLength(1);
-      expect(created[0].repo).toBe("rapartlu/claude-proxy");
+      expect(created[0].repo).toBe("rapartlu/agent-proxy");
       expect(mockIssueCreator.createIssue).toHaveBeenCalledWith(
-        "rapartlu/claude-proxy",
+        "rapartlu/agent-proxy",
         "[Orchestrator] Add connection pooling to proxy",
         expect.stringContaining("Implementation Gap Identified from Research"),
         ["orchestrator", "research-implementation"],
@@ -176,7 +176,7 @@ describe("ResearchLinker", () => {
           text: JSON.stringify([{
             title: "Existing improvement",
             description: "Already filed",
-            target_repo: "rapartlu/claude-proxy",
+            target_repo: "rapartlu/agent-proxy",
             severity: "medium",
           }]),
         }],
@@ -234,13 +234,13 @@ describe("ResearchLinker", () => {
             {
               title: "Proxy improvement",
               description: "Something for proxy",
-              target_repo: "rapartlu/claude-proxy",
+              target_repo: "rapartlu/agent-proxy",
               severity: "medium",
             },
             {
               title: "Orchestrator improvement",
               description: "Something for orchestrator",
-              target_repo: "rapartlu/claude-agent-orchestrator",
+              target_repo: "rapartlu/agent-orchestrator",
               severity: "high",
             },
           ]),
@@ -249,14 +249,14 @@ describe("ResearchLinker", () => {
 
       mockIssueCreator.createIssue
         .mockReturnValueOnce({
-          repo: "rapartlu/claude-proxy",
+          repo: "rapartlu/agent-proxy",
           number: 100,
-          url: "https://github.com/rapartlu/claude-proxy/issues/100",
+          url: "https://github.com/rapartlu/agent-proxy/issues/100",
         })
         .mockReturnValueOnce({
-          repo: "rapartlu/claude-agent-orchestrator",
+          repo: "rapartlu/agent-orchestrator",
           number: 200,
-          url: "https://github.com/rapartlu/claude-agent-orchestrator/issues/200",
+          url: "https://github.com/rapartlu/agent-orchestrator/issues/200",
         });
 
       const linker = new ResearchLinker(config, mockStore as any, mockIssueCreator as any);

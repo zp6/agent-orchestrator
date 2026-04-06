@@ -22,11 +22,11 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 
 | Repo | Owner | Scope |
 |------|-------|-------|
-| `rapartlu/claude-agent-orchestrator` | This repo | Daemon, state, dispatching, routing, triggers |
-| `rapartlu/claude-orchestrator-dashboard` | Dashboard agent | Web dashboard, CLI, metrics |
-| `rapartlu/claude-orchestrator-reviewer` | Reviewer pool | PR review, verification, supervisor |
-| `rapartlu/claude-research-agent` | Research agent | Findings reports, technology evaluation |
-| `rapartlu/claude-proxy` | Proxy agent | CLI wrapper, container management |
+| `rapartlu/agent-orchestrator` | This repo | Daemon, state, dispatching, routing, triggers |
+| `rapartlu/agent-dashboard` | Dashboard agent | Web dashboard, CLI, metrics |
+| `rapartlu/agent-reviewer` | Reviewer pool | PR review, verification, supervisor |
+| `rapartlu/research-agent` | Research agent | Findings reports, technology evaluation |
+| `rapartlu/agent-proxy` | Proxy agent | CLI wrapper, container management |
 
 ### Key Features
 
@@ -53,10 +53,10 @@ This repo owns **core infrastructure only**:
 **Owns:** daemon loop, state store (SQLite), task dispatching, trigger polling, agent deployment/sync, routing, planning, execution, Telegram bot.
 
 **Does NOT own:**
-- Dashboard, CLI UI → `rapartlu/claude-orchestrator-dashboard`
-- PR reviewer, verifier, supervisor → `rapartlu/claude-orchestrator-reviewer`
-- Proxy server, containers → `rapartlu/claude-proxy`
-- Research reports → `rapartlu/claude-research-agent`
+- Dashboard, CLI UI → `rapartlu/agent-dashboard`
+- PR reviewer, verifier, supervisor → `rapartlu/agent-reviewer`
+- Proxy server, containers → `rapartlu/agent-proxy`
+- Research reports → `rapartlu/research-agent`
 
 ## Management API
 

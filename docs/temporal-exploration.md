@@ -1,7 +1,7 @@
 # Temporal.io Exploration: Durable Orchestration for Claude Agents
 
 > **Status:** Research document — no implementation yet.  
-> **Issue:** [#81](https://github.com/rapartlu/claude-agent-orchestrator/issues/81)  
+> **Issue:** [#81](https://github.com/rapartlu/agent-orchestrator/issues/81)  
 > **Date:** 2026-04-04
 
 ---

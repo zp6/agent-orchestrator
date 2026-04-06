@@ -1544,7 +1544,7 @@ export class Daemon {
     }
 
     // Cross-repo closure: scan all merged PR bodies for references to issues in other repos
-    // e.g., a claude-proxy PR containing "Closes rapartlu/claude-agent-orchestrator#424"
+    // e.g., a claude-proxy PR containing "Closes rapartlu/agent-orchestrator#424"
     this.closeCrossRepoIssues(time, allMergedPRBodies);
   }
 
@@ -1831,7 +1831,7 @@ export function extractClosedIssueNumbers(prBody: string): number[] {
  * Extract cross-repo issue references from a PR body.
  *
  * Matches patterns like:
- *   - "Closes rapartlu/claude-agent-orchestrator#424"
+ *   - "Closes rapartlu/agent-orchestrator#424"
  *   - "Fixes owner/repo#123"
  *   - "Resolves owner/repo#42"
  *
