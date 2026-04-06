@@ -395,21 +395,38 @@ async function buildStats(ctx: TelegramContext): Promise<string> {
   // Throughput per hour
   const mergesPerHour = merged6h > 0 ? (merged6h / 6).toFixed(1) : "0";
 
-  return `📊 *Detailed Stats*
+  // WIP — what's actively being worked on
+  const agents = Object.keys(ctx.config.agents);
+  const wipLines: string[] = [];
+  for (const name of agents) {
+    const active = ctx.store.listTasks({ agent_name: name, status: "dispatched", limit: 1 });
+    if (active.length > 0) {
+      const shortName = name.replace("claude-orchestrator-", "").replace("claude-", "");
+      const ageMin = Math.round((now - new Date(active[0].created_at).getTime()) / 60000);
+      wipLines.push(`  ${shortName}: ${active[0].title?.slice(0, 35)} (${ageMin}m)`);
+    }
+  }
 
-*Throughput*
-  PRs merged: ${merged1h}/1h | ${merged6h}/6h | ${merged24h}/24h
-  Issues closed: ${closed1h}/1h | ${closed6h}/6h | ${closed24h}/24h
-  Rate: ~${mergesPerHour} merges/hour
+  // Pending verification
+  const unverified = ctx.store.getUnverified(20);
 
-*Pipeline*
-  Open issues: ${openIssues}
-  Open PRs: ${openPRs}
-  Tasks: ${totalTotal} total | ${totalDone} done | ${totalFailed} failed
-  Success: ${successRate}%
+  return `📊 *Stats*
 
-*Per Agent*
-${agentLines.join("\n")}
+*Backlog*
+  ${openIssues} open issues → ${openPRs} open PRs → ready to merge
+
+*WIP*
+${wipLines.length > 0 ? wipLines.join("\n") : "  All agents idle"}
+
+*Progression (merged PRs)*
+  Last 1h: ${merged1h} | 6h: ${merged6h} | 24h: ${merged24h}
+  Rate: ~${mergesPerHour}/hour
+
+*Issues closed*
+  Last 1h: ${closed1h} | 6h: ${closed6h} | 24h: ${closed24h}
+
+*Verification*
+  ${unverified.length} pending | ${totalDone} verified total | ${successRate}% pass rate
 
 ${buildPoolStats(ctx, agentStats)}`;
 }
