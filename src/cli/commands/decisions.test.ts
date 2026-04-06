@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { parseDuration, sinceToDate } from "./decisions.js";
+import { parseDuration, sinceToDate, decisionMatchesIssue, decisionMatchesSearch } from "./decisions.js";
 
 // ── parseDuration ─────────────────────────────────────────────────────────────
 
@@ -189,5 +189,120 @@ describe("--json NDJSON output format", () => {
     const parsed = JSON.parse(line);
     expect(Array.isArray(parsed)).toBe(false);
     expect(parsed.action).toBe("dispatch");
+  });
+});
+
+// ── decisionMatchesIssue ─────────────────────────────────────────────────────
+
+describe("decisionMatchesIssue", () => {
+  it("matches issue number in reason field", () => {
+    const d = makeDecision({ reason: "Dispatching work for #457 to agent" });
+    expect(decisionMatchesIssue(d, 457)).toBe(true);
+  });
+
+  it("matches issue number in message field", () => {
+    const d = makeDecision({ message: "GitHub Issue #123: Fix the bug" });
+    expect(decisionMatchesIssue(d, 123)).toBe(true);
+  });
+
+  it("matches issue number in rationale field", () => {
+    const d = makeDecision({ rationale: "Issue #99 is high priority" });
+    expect(decisionMatchesIssue(d, 99)).toBe(true);
+  });
+
+  it("matches sourceRef patterns like owner/repo#457", () => {
+    const d = makeDecision({ reason: "Skipped rapartlu/claude-agent-orchestrator#457" });
+    expect(decisionMatchesIssue(d, 457)).toBe(true);
+  });
+
+  it("does not match when issue number is a prefix of another number", () => {
+    const d = makeDecision({ reason: "Working on #4570" });
+    expect(decisionMatchesIssue(d, 457)).toBe(false);
+  });
+
+  it("does not match unrelated issue numbers", () => {
+    const d = makeDecision({ reason: "Dispatching #100" });
+    expect(decisionMatchesIssue(d, 200)).toBe(false);
+  });
+
+  it("returns false when all text fields are null/empty", () => {
+    const d = makeDecision({ reason: "No issue ref", message: null, rationale: null });
+    expect(decisionMatchesIssue(d, 457)).toBe(false);
+  });
+});
+
+// ── decisionMatchesSearch ────────────────────────────────────────────────────
+
+describe("decisionMatchesSearch", () => {
+  it("matches case-insensitively in reason", () => {
+    const d = makeDecision({ reason: "Dispatching to Agent-A for urgent fix" });
+    expect(decisionMatchesSearch(d, "urgent")).toBe(true);
+    expect(decisionMatchesSearch(d, "URGENT")).toBe(true);
+  });
+
+  it("matches in message field", () => {
+    const d = makeDecision({ message: "GitHub Issue #457: Pre-dispatch detection" });
+    expect(decisionMatchesSearch(d, "pre-dispatch")).toBe(true);
+  });
+
+  it("matches in rationale field", () => {
+    const d = makeDecision({ rationale: "Agent is idle and issue is fresh" });
+    expect(decisionMatchesSearch(d, "idle")).toBe(true);
+  });
+
+  it("matches in action field", () => {
+    const d = makeDecision({ action: "dispatch" });
+    expect(decisionMatchesSearch(d, "dispatch")).toBe(true);
+  });
+
+  it("matches in agent_name field", () => {
+    const d = makeDecision({ agent_name: "claude-orchestrator-dashboard" });
+    expect(decisionMatchesSearch(d, "dashboard")).toBe(true);
+  });
+
+  it("matches in outcome field", () => {
+    const d = makeDecision({ outcome: "skipped" });
+    expect(decisionMatchesSearch(d, "skipped")).toBe(true);
+  });
+
+  it("returns false when no field matches", () => {
+    const d = makeDecision({ reason: "All good", message: null, rationale: null });
+    expect(decisionMatchesSearch(d, "nonexistent")).toBe(false);
+  });
+
+  it("handles null fields without errors", () => {
+    const d = makeDecision({ message: null, rationale: null, agent_name: null as unknown as string });
+    expect(decisionMatchesSearch(d, "test")).toBe(false);
+  });
+});
+
+// ── --issue filter integration ───────────────────────────────────────────────
+
+describe("--issue filter", () => {
+  const decisions: SupervisorDecisionRecord[] = [
+    makeDecision({ id: 1, reason: "Dispatching rapartlu/repo#457 to agent-a", outcome: "dispatched" }),
+    makeDecision({ id: 2, reason: "Skipped #457 — already resolved by merged PR", outcome: "skipped" }),
+    makeDecision({ id: 3, reason: "Dispatching #100 to agent-b", outcome: "dispatched" }),
+    makeDecision({ id: 4, reason: "No action needed", outcome: "none" }),
+    makeDecision({ id: 5, message: "GitHub Issue #457: Fix detection", reason: "Fresh issue", outcome: "dispatched" }),
+  ];
+
+  it("filters decisions related to a specific issue", () => {
+    const result = decisions.filter((d) => decisionMatchesIssue(d, 457));
+    expect(result).toHaveLength(3);
+    expect(result.map((d) => d.id)).toEqual([1, 2, 5]);
+  });
+
+  it("combines --issue with --outcome filter", () => {
+    const result = decisions
+      .filter((d) => decisionMatchesIssue(d, 457))
+      .filter((d) => d.outcome === "skipped");
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe(2);
+  });
+
+  it("returns empty when issue has no decisions", () => {
+    const result = decisions.filter((d) => decisionMatchesIssue(d, 999));
+    expect(result).toHaveLength(0);
   });
 });

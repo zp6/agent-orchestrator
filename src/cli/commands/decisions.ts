@@ -62,6 +62,44 @@ function formatRow(d: SupervisorDecisionRecord): string {
   return `  ${chalk.dim(ts)}  ${chalk.bold(d.action.padEnd(13))} ${String(agent).padEnd(32)} ${outcome.padEnd(20)} ${task}  ${reason}`;
 }
 
+/**
+ * Test whether a decision record mentions a given issue number.
+ *
+ * Matches `#N` (with word boundary) in the reason, message, and rationale
+ * fields.  Also matches `sourceRef` patterns like `owner/repo#N`.
+ *
+ * Exported for unit testing.
+ */
+export function decisionMatchesIssue(d: SupervisorDecisionRecord, issueNumber: number): boolean {
+  // Match #N at word boundary (e.g. "#457", "repo#457") but not "#4570"
+  const pattern = new RegExp(`#${issueNumber}\\b`);
+  return (
+    pattern.test(d.reason) ||
+    pattern.test(d.message ?? "") ||
+    pattern.test(d.rationale ?? "")
+  );
+}
+
+/**
+ * Test whether a decision record matches a free-text search query.
+ *
+ * Case-insensitive substring match across reason, message, rationale,
+ * action, agent_name, and outcome fields.
+ *
+ * Exported for unit testing.
+ */
+export function decisionMatchesSearch(d: SupervisorDecisionRecord, query: string): boolean {
+  const q = query.toLowerCase();
+  return (
+    d.reason.toLowerCase().includes(q) ||
+    (d.message ?? "").toLowerCase().includes(q) ||
+    (d.rationale ?? "").toLowerCase().includes(q) ||
+    d.action.toLowerCase().includes(q) ||
+    (d.agent_name ?? "").toLowerCase().includes(q) ||
+    d.outcome.toLowerCase().includes(q)
+  );
+}
+
 export function registerDecisionsCommand(program: Command): void {
   program
     .command("decisions")
@@ -74,6 +112,8 @@ export function registerDecisionsCommand(program: Command): void {
     .option("--action <type>", "Filter by action type (dispatch, verify, redeploy, create-issue, follow-up, none)")
     .option("--agent <name>", "Filter by agent name")
     .option("--outcome <type>", "Filter by outcome (dispatched, skipped, failed, none, unhandled)")
+    .option("--issue <number>", "Trace all decisions about a specific issue number (e.g. --issue 457)")
+    .option("--search <text>", "Free-text search across reason, message, rationale, and other fields")
     .option("--json", "Output newline-delimited JSON (one record per line, suitable for grep/jq)")
     .action(
       (opts: {
@@ -82,6 +122,8 @@ export function registerDecisionsCommand(program: Command): void {
         action?: string;
         agent?: string;
         outcome?: string;
+        issue?: string;
+        search?: string;
         json?: boolean;
       }) => {
         const limit = parseInt(opts.limit, 10);
@@ -104,6 +146,20 @@ export function registerDecisionsCommand(program: Command): void {
           }
         }
 
+        // Parse --issue early so we can report errors before opening the DB
+        let issueNumber: number | null = null;
+        if (opts.issue) {
+          issueNumber = parseInt(opts.issue, 10);
+          if (isNaN(issueNumber) || issueNumber <= 0) {
+            console.error(
+              chalk.red(
+                `Error: --issue '${opts.issue}' is not a valid issue number. Use a positive integer (e.g. --issue 457).`,
+              ),
+            );
+            process.exit(1);
+          }
+        }
+
         let store: StateStore;
         try {
           store = new StateStore();
@@ -119,7 +175,7 @@ export function registerDecisionsCommand(program: Command): void {
         try {
           // Fetch a larger window when filters are active so we can return up
           // to `limit` results after client-side filtering.
-          const hasFilters = !!(opts.action || opts.agent || opts.outcome || sinceDate);
+          const hasFilters = !!(opts.action || opts.agent || opts.outcome || opts.issue || opts.search || sinceDate);
           const fetchLimit = hasFilters ? Math.max(limit * 10, 500) : limit;
           decisions = store.getRecentSupervisorDecisions(fetchLimit);
         } finally {
@@ -139,6 +195,12 @@ export function registerDecisionsCommand(program: Command): void {
         }
         if (opts.outcome) {
           decisions = decisions.filter((d) => d.outcome === opts.outcome);
+        }
+        if (issueNumber !== null) {
+          decisions = decisions.filter((d) => decisionMatchesIssue(d, issueNumber));
+        }
+        if (opts.search) {
+          decisions = decisions.filter((d) => decisionMatchesSearch(d, opts.search!));
         }
 
         // Trim to requested limit after filtering
@@ -181,6 +243,8 @@ export function registerDecisionsCommand(program: Command): void {
           opts.action  && `action=${opts.action}`,
           opts.agent   && `agent=${opts.agent}`,
           opts.outcome && `outcome=${opts.outcome}`,
+          opts.issue   && `issue=#${opts.issue}`,
+          opts.search  && `search="${opts.search}"`,
         ].filter(Boolean).join(", ");
         console.log(
           chalk.dim(
