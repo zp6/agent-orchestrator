@@ -40,10 +40,13 @@ export function planSync(
       });
     } else if (hasConfigDrift(config, name, agent, existing)) {
       // Agent exists but config has drifted — update
+      const ghTokenDrift = hasGhTokenDrift(config, existing);
       actions.push({
         type: "update",
         agentName: name,
-        reason: "Config differs from desired state",
+        reason: ghTokenDrift
+          ? "GH_TOKEN differs from desired state"
+          : "Config differs from desired state",
       });
     } else {
       actions.push({
@@ -82,7 +85,18 @@ function hasConfigDrift(
   // volume type (named volume for repo-based agents vs host bind-mount).
   if ((agent.repo ?? "") !== (proxy.repo ?? "")) return true;
   if ((agent.deploy_branch ?? "") !== (proxy.branch ?? "")) return true;
+  // Detect ghToken drift so agents don't lose `gh` CLI auth after proxy restart
+  if (hasGhTokenDrift(config, proxy)) return true;
   return false;
+}
+
+function hasGhTokenDrift(
+  config: OrchestratorConfig,
+  proxy: ProxyAgentStatus,
+): boolean {
+  const desired = config.proxy.gh_token ?? "";
+  const actual = proxy.ghToken ?? "";
+  return desired !== "" && desired !== actual;
 }
 
 export function toProxyConfig(

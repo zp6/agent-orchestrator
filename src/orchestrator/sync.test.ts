@@ -255,3 +255,102 @@ describe("planSync — repo/branch drift detection", () => {
     expect(skipActions).toHaveLength(1);
   });
 });
+
+describe("planSync — GH_TOKEN drift detection", () => {
+  const tokenConfig: OrchestratorConfig = {
+    proxy: { url: "http://localhost:3457", timeout_ms: 300000, gh_token: "ghp_new_token_123" },
+    orchestrator_dir: "/projects/orchestrator",
+    base_dir: "/projects",
+    agents: {
+      "agent-a": {
+        dir: "agent-a",
+        description: "Agent A",
+        capabilities: ["test"],
+        owns_topics: ["a"],
+        docker: { port: 3460, permissions: "auto" },
+      },
+    },
+  };
+
+  it("detects drift when proxy agent has no ghToken but config does", () => {
+    const proxyAgents: ProxyAgentStatus[] = [
+      {
+        name: "agent-a",
+        project: "/projects/agent-a",
+        port: 3460,
+        permissions: "auto",
+        status: "running",
+        tunnel: false,
+        session: "fresh",
+        packages: [],
+        // no ghToken — simulates container recreated without token
+      },
+    ];
+    const actions = planSync(tokenConfig, proxyAgents);
+    const updateActions = actions.filter((a) => a.type === "update");
+    expect(updateActions).toHaveLength(1);
+    expect(updateActions[0].reason).toBe("GH_TOKEN differs from desired state");
+  });
+
+  it("detects drift when proxy agent has a stale ghToken", () => {
+    const proxyAgents: ProxyAgentStatus[] = [
+      {
+        name: "agent-a",
+        project: "/projects/agent-a",
+        port: 3460,
+        permissions: "auto",
+        status: "running",
+        tunnel: false,
+        session: "fresh",
+        packages: [],
+        ghToken: "ghp_old_token_456",
+      },
+    ];
+    const actions = planSync(tokenConfig, proxyAgents);
+    const updateActions = actions.filter((a) => a.type === "update");
+    expect(updateActions).toHaveLength(1);
+    expect(updateActions[0].reason).toBe("GH_TOKEN differs from desired state");
+  });
+
+  it("skips when proxy agent ghToken matches config", () => {
+    const proxyAgents: ProxyAgentStatus[] = [
+      {
+        name: "agent-a",
+        project: "/projects/agent-a",
+        port: 3460,
+        permissions: "auto",
+        status: "running",
+        tunnel: false,
+        session: "fresh",
+        packages: [],
+        ghToken: "ghp_new_token_123",
+      },
+    ];
+    const actions = planSync(tokenConfig, proxyAgents);
+    const skipActions = actions.filter((a) => a.type === "skip");
+    expect(skipActions).toHaveLength(1);
+  });
+
+  it("skips when config has no ghToken (nothing to enforce)", () => {
+    const noTokenConfig: OrchestratorConfig = {
+      ...tokenConfig,
+      proxy: { ...tokenConfig.proxy, gh_token: undefined },
+    };
+    const proxyAgents: ProxyAgentStatus[] = [
+      {
+        name: "agent-a",
+        project: "/projects/agent-a",
+        port: 3460,
+        permissions: "auto",
+        status: "running",
+        tunnel: false,
+        session: "fresh",
+        packages: [],
+        // proxy has no token either — should be fine
+      },
+    ];
+    const actions = planSync(noTokenConfig, proxyAgents);
+    const skipActions = actions.filter((a) => a.type === "skip");
+    expect(skipActions).toHaveLength(1);
+  });
+});
