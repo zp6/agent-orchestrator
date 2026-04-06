@@ -264,3 +264,37 @@ describe("getAgentDir", () => {
     expect(() => getAgentDir(config, "nonexistent")).toThrow("Unknown agent: nonexistent");
   });
 });
+
+describe("AgentConfig auto-reroute threshold", () => {
+  it("loads per-agent auto_reroute_rejection_threshold from config", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "orch-reroute-config-"));
+    const configPath = join(tmp, "agents.yaml");
+
+    writeFileSync(
+      configPath,
+      [
+        "proxy:",
+        "  url: http://localhost:3457",
+        "  timeout_ms: 900000",
+        "base_dir: /tmp",
+        "orchestrator_dir: /tmp/orchestrator",
+        "agents:",
+        "  test-agent:",
+        "    dir: test-agent",
+        "    description: test",
+        "    capabilities: [typescript]",
+        "    owns_topics: [orchestrator]",
+        "    auto_reroute_rejection_threshold: 4",
+        "    docker:",
+        "      port: 3472",
+      ].join("\n"),
+    );
+
+    try {
+      const config = loadConfig(configPath);
+      expect(config.agents["test-agent"].auto_reroute_rejection_threshold).toBe(4);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

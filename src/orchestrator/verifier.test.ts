@@ -23,11 +23,37 @@ vi.mock("./dispatcher.js", () => ({
   },
 }));
 
+vi.mock("../service/notify.js", () => ({
+  notifyOperator: vi.fn().mockResolvedValue(undefined),
+}));
+
+import { notifyOperator } from "../service/notify.js";
+const mockNotifyOperator = vi.mocked(notifyOperator);
+
 const config: OrchestratorConfig = {
   proxy: { url: "http://localhost:3457", timeout_ms: 5000 },
   orchestrator_dir: "/tmp/orchestrator",
   base_dir: "/projects",
-  agents: {},
+  agents: {
+    "primary-agent": {
+      dir: "primary-agent",
+      description: "Primary agent",
+      pool: "orchestrator",
+      repo: "git@github.com:rapartlu/agent-orchestrator.git",
+      github: "rapartlu/agent-orchestrator",
+      capabilities: ["typescript", "orchestration", "sqlite"],
+      owns_topics: ["orchestrator", "dispatcher"],
+      auto_reroute_rejection_threshold: 3,
+    },
+    "backup-agent": {
+      dir: "backup-agent",
+      description: "Backup agent",
+      pool: "orchestrator",
+      repo: "git@github.com:rapartlu/agent-orchestrator.git",
+      capabilities: ["typescript", "orchestration", "sqlite"],
+      owns_topics: [],
+    },
+  },
 };
 
 describe("Verifier", () => {
@@ -173,6 +199,7 @@ describe("Verifier.verifyAndRevise — retry mechanism", () => {
     // Reset queued return values (mockResolvedValueOnce) as well as call counts
     mockCreate.mockReset();
     mockDispatch.mockReset();
+    mockNotifyOperator.mockReset();
     dbPath = join(tmpdir(), `orch-retry-test-${Date.now()}.db`);
     store = new StateStore(dbPath);
   });
@@ -340,5 +367,67 @@ describe("Verifier.verifyAndRevise — retry mechanism", () => {
     // Status stays rejected (no retries left — this is an intentional final rejection, not a deferral)
     const updated = store.getTask(task.id);
     expect(updated?.verification_status).toBe("rejected");
+  });
+
+  it("auto-reroutes after configured consecutive rejections, logs the decision, and notifies Telegram", async () => {
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify({ approved: false, score: 0.1, notes: "Still wrong", revision: "Take a different approach" }) }],
+    });
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify({ approved: true, score: 0.92, notes: "Fixed" }) }],
+    });
+
+    for (let i = 0; i < 2; i++) {
+      const prior = store.createTask({
+        title: `Prior ${i}`,
+        description: "Implement issue",
+        source: "github",
+        source_ref: "rapartlu/agent-orchestrator#516",
+        agent_name: "primary-agent",
+      });
+      store.updateTask(prior.id, {
+        status: "done",
+        result: "bad",
+        verification_status: "rejected",
+        quality_score: 0.1,
+      });
+    }
+
+    const reroutedTask = store.createTask({
+      title: "[auto-reroute] Issue 516",
+      source: "github",
+      agent_name: "backup-agent",
+    });
+    store.updateTask(reroutedTask.id, { status: "done", result: "fixed" });
+    mockDispatch.mockResolvedValueOnce({ taskId: reroutedTask.id });
+
+    const task = store.createTask({
+      title: "Issue 516",
+      description: "Implement issue",
+      source: "github",
+      source_ref: "rapartlu/agent-orchestrator#516",
+      agent_name: "primary-agent",
+    });
+    store.updateTask(task.id, { status: "done", result: "still bad" });
+
+    const verifier = new Verifier(config, store);
+    const result = await verifier.verifyAndRevise(task.id);
+
+    expect(result.approved).toBe(true);
+    expect(mockDispatch).toHaveBeenCalledOnce();
+    expect(mockDispatch.mock.calls[0][1]).toMatchObject({
+      agentName: "backup-agent",
+      sourceRef: "rapartlu/agent-orchestrator#516",
+      conversationId: undefined,
+    });
+
+    const decisions = store.getRecentSupervisorDecisions(1);
+    expect(decisions[0].reason).toBe("auto-reroute");
+    expect(decisions[0].agent_name).toBe("backup-agent");
+    expect(decisions[0].outcome).toBe("dispatched");
+    expect(decisions[0].rationale).toContain("Substituted primary-agent with backup-agent");
+
+    expect(mockNotifyOperator).toHaveBeenCalledOnce();
+    expect(mockNotifyOperator.mock.calls[0][1]).toContain("reassigned from primary-agent to backup-agent");
   });
 });

@@ -1088,6 +1088,34 @@ export class StateStore {
     }>;
   }
 
+  /**
+   * Count the most recent consecutive verifier rejections for a source_ref by
+   * the same agent. Stops at the first non-rejected attempt or agent switch.
+   */
+  countConsecutiveRejectionsForSourceRef(sourceRef: string, agentName: string): number {
+    const rows = this.db
+      .prepare(
+        `SELECT agent_name, verification_status
+         FROM tasks
+         WHERE source_ref = ?
+           AND parent_task_id IS NULL
+         ORDER BY rowid DESC`,
+      )
+      .all(sourceRef) as Array<{
+      agent_name: string | null;
+      verification_status: VerificationStatus;
+    }>;
+
+    let count = 0;
+    for (const row of rows) {
+      if (row.agent_name !== agentName || row.verification_status !== "rejected") {
+        break;
+      }
+      count++;
+    }
+    return count;
+  }
+
   getRecentActivity(limit = 50): TaskLog[] {
     return this.db.prepare(
       "SELECT * FROM task_logs ORDER BY created_at DESC LIMIT ?",

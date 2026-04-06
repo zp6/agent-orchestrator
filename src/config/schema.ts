@@ -93,6 +93,12 @@ export interface AgentConfig {
   docker?: AgentDockerConfig;
   /** Per-agent token budget alerts and pause-on-exceeded control. */
   token_budget?: TokenBudgetConfig;
+  /**
+   * Automatically reroute a source_ref to a substitute agent after this many
+   * consecutive verifier rejections for the same issue by this agent.
+   * Set to 0 or omit to disable.
+   */
+  auto_reroute_rejection_threshold?: number;
 }
 
 export interface VerificationConfig {

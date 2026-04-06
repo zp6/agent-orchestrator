@@ -43,6 +43,7 @@ agents:
     capabilities: ["typescript", "orchestration", "sqlite"]
     github: "rapartlu/agent-orchestrator"
     owns_topics: ["orchestrator", "daemon", "routing", "dispatcher", "planner", "deployer", "state", "triggers", "sync"]
+    auto_reroute_rejection_threshold: 4
     docker:
       port: 3472
       api_key: "cheese"
@@ -58,6 +59,7 @@ agents:
     description: "Core orchestration infrastructure (Codex). Same repo, different provider for parallel throughput."
     capabilities: ["typescript", "orchestration", "sqlite"]
     owns_topics: []
+    auto_reroute_rejection_threshold: 4
     docker:
       port: 3480
       api_key: "cheese"

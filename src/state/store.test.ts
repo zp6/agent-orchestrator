@@ -1461,6 +1461,35 @@ describe("StateStore", () => {
     });
   });
 
+  describe("countConsecutiveRejectionsForSourceRef", () => {
+    it("counts only the most recent consecutive rejected attempts by the same agent", () => {
+      const sourceRef = "rapartlu/agent-orchestrator#516";
+
+      const olderApproved = store.createTask({ title: "older", source: "github", source_ref: sourceRef, agent_name: "agent-a" });
+      store.updateTask(olderApproved.id, { status: "done", verification_status: "approved", quality_score: 0.9 });
+
+      const rejected1 = store.createTask({ title: "r1", source: "github", source_ref: sourceRef, agent_name: "agent-a" });
+      store.updateTask(rejected1.id, { status: "done", verification_status: "rejected", quality_score: 0.2 });
+
+      const rejected2 = store.createTask({ title: "r2", source: "github", source_ref: sourceRef, agent_name: "agent-a" });
+      store.updateTask(rejected2.id, { status: "done", verification_status: "rejected", quality_score: 0.1 });
+
+      expect(store.countConsecutiveRejectionsForSourceRef(sourceRef, "agent-a")).toBe(2);
+    });
+
+    it("stops counting when the most recent attempt belongs to a different agent", () => {
+      const sourceRef = "rapartlu/agent-orchestrator#516";
+
+      const rejected = store.createTask({ title: "r1", source: "github", source_ref: sourceRef, agent_name: "agent-a" });
+      store.updateTask(rejected.id, { status: "done", verification_status: "rejected", quality_score: 0.2 });
+
+      const differentAgent = store.createTask({ title: "r2", source: "github", source_ref: sourceRef, agent_name: "agent-b" });
+      store.updateTask(differentAgent.id, { status: "done", verification_status: "rejected", quality_score: 0.1 });
+
+      expect(store.countConsecutiveRejectionsForSourceRef(sourceRef, "agent-a")).toBe(0);
+    });
+  });
+
   describe("getWindowedAgentMetrics", () => {
     it("returns empty array when no tasks exist", () => {
       const rows = store.getWindowedAgentMetrics(7);
