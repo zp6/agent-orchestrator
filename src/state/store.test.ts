@@ -1375,6 +1375,8 @@ describe("StateStore", () => {
       expect(decisions[0].reason).toBe("Agent is idle with open issue #42");
       expect(decisions[0].outcome).toBe("dispatched");
       expect(decisions[0].task_id).toBe("01ABC123");
+      expect(decisions[0].issue_refs).toEqual([]);
+      expect(decisions[0].hard_gates).toEqual([]);
       expect(decisions[0].created_at).toBeTruthy();
     });
 
@@ -1391,6 +1393,8 @@ describe("StateStore", () => {
       expect(decisions[0].message).toBeNull();
       expect(decisions[0].rationale).toBeNull();
       expect(decisions[0].task_id).toBeNull();
+      expect(decisions[0].issue_refs).toEqual([]);
+      expect(decisions[0].hard_gates).toEqual([]);
     });
 
     it("returns decisions newest-first", () => {
@@ -1458,6 +1462,23 @@ describe("StateStore", () => {
 
       const decisions = store.getRecentSupervisorDecisions(1);
       expect(decisions[0].rationale).toBeNull();
+    });
+
+    it("stores and retrieves structured issue refs and hard gates", () => {
+      store.addSupervisorDecision({
+        action: "dispatch",
+        agent_name: "agent-a",
+        reason: "Blocked issue #523",
+        message: "Implement issue #523",
+        rationale: "Issue is high priority.",
+        issue_refs: ["rapartlu/agent-orchestrator#523"],
+        hard_gates: ["issue already has open PR", "agent busy"],
+        outcome: "skipped",
+      });
+
+      const decisions = store.getRecentSupervisorDecisions(1);
+      expect(decisions[0].issue_refs).toEqual(["rapartlu/agent-orchestrator#523"]);
+      expect(decisions[0].hard_gates).toEqual(["issue already has open PR", "agent busy"]);
     });
   });
 
@@ -2323,6 +2344,27 @@ describe("StateStore", () => {
       const t1 = store.createTask({ title: "conn fail", source: "github", source_ref: "owner/repo#11" });
       store.updateTask(t1.id, { status: "failed", retry_count: 2, result: "connection-error-exhausted: spawn ENOENT" });
       expect(store.countFailuresForSourceRef("owner/repo#11")).toBe(0);
+    });
+
+    it("ignores failures that were cleared by an operator reroute", () => {
+      const task = store.createTask({ title: "old fail", source: "github", source_ref: "owner/repo#12" });
+      store.updateTask(task.id, { status: "failed", retry_count: 2 });
+
+      store.clearFailureHistoryForSourceRef("github", "owner/repo#12");
+
+      expect(store.countFailuresForSourceRef("owner/repo#12")).toBe(0);
+      expect(store.countFailedTasksForSourceRef("github", "owner/repo#12")).toBe(0);
+      expect(store.findDispatchCandidateBySourceRef("github", "owner/repo#12")).toBeUndefined();
+    });
+
+    it("tracks and clears priority boosts independently of failure resets", () => {
+      expect(store.isSourceRefPriorityBoosted("github", "owner/repo#13")).toBe(false);
+
+      store.boostSourceRefPriority("github", "owner/repo#13");
+      expect(store.isSourceRefPriorityBoosted("github", "owner/repo#13")).toBe(true);
+
+      store.clearSourceRefPriority("github", "owner/repo#13");
+      expect(store.isSourceRefPriorityBoosted("github", "owner/repo#13")).toBe(false);
     });
   });
 

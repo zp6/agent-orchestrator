@@ -13,9 +13,9 @@ function hoursAgo(h: number): string {
 function makeStore(
   task: Task | undefined,
   opts?: { hasPrFeedbackSince?: boolean },
-): Pick<StateStore, "findTaskBySourceRef" | "hasPrFeedbackSince"> {
+): Pick<StateStore, "findDispatchCandidateBySourceRef" | "hasPrFeedbackSince"> {
   return {
-    findTaskBySourceRef: () => task,
+    findDispatchCandidateBySourceRef: () => task,
     hasPrFeedbackSince: () => opts?.hasPrFeedbackSince ?? false,
   } as unknown as StateStore;
 }

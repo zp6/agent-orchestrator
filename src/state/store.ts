@@ -77,6 +77,10 @@ export interface SupervisorDecisionRecord {
   reason: string;
   message: string | null;
   rationale: string | null;
+  /** Concrete issue refs attached to this decision, e.g. ["owner/repo#523"] */
+  issue_refs: string[];
+  /** Hard gates that fired for this decision, e.g. ["issue already closed"] */
+  hard_gates: string[];
   outcome: SupervisorOutcome;
   task_id: string | null;
   created_at: string;
@@ -98,6 +102,16 @@ export interface DispatchRationale {
   agent_idle_duration_ms: number | null;
   /** LLM-assigned confidence score (0–1), null if not provided */
   confidence_score: number | null;
+}
+
+function parseJsonStringArray(value: unknown): string[] {
+  if (typeof value !== "string" || value.trim() === "") return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -559,6 +573,17 @@ CREATE TABLE IF NOT EXISTS processed_triggers (
   PRIMARY KEY (source, source_ref)
 );
 
+CREATE TABLE IF NOT EXISTS source_ref_controls (
+  source TEXT NOT NULL,
+  source_ref TEXT NOT NULL,
+  failure_history_cleared_at TEXT,
+  failure_history_cleared_rowid INTEGER,
+  priority_boosted_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (source, source_ref)
+);
+
 CREATE TABLE IF NOT EXISTS daemon_cycles (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   started_at TEXT NOT NULL,
@@ -603,6 +628,7 @@ export class StateStore {
     this.runDaemonStatsMigration();
     this.runPRCreationRetryMigration();
     this.runProcessedTriggersCompletedAtMigration();
+    this.runSourceRefControlsMigration();
     this.runDirectivesMigration();
     this.runAgentHealthMigration();
     this.runRevisionCountMigration();
@@ -879,6 +905,24 @@ export class StateStore {
       .get(source, sourceRef) as Task | undefined;
   }
 
+  /**
+   * Return the most recent top-level task for a source_ref, excluding attempts
+   * that were explicitly cleared by an operator reroute.
+   */
+  findDispatchCandidateBySourceRef(source: string, sourceRef: string): Task | undefined {
+    const clearedRowid = this.getFailureHistoryClearedRowid(source, sourceRef);
+    if (clearedRowid === null) {
+      return this.findTaskBySourceRef(source, sourceRef);
+    }
+    return this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE source = ? AND source_ref = ? AND parent_task_id IS NULL AND rowid > ?
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(source, sourceRef, clearedRowid) as Task | undefined;
+  }
+
 
   /**
    * Count all top-level tasks for (source, sourceRef) that are in a terminal
@@ -886,14 +930,16 @@ export class StateStore {
    * when a source_ref has exceeded the configured auto-escalation threshold.
    */
   countFailedTasksForSourceRef(source: string, sourceRef: string): number {
+    const clearedRowid = this.getFailureHistoryClearedRowid(source, sourceRef);
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS cnt FROM tasks
          WHERE source = ? AND source_ref = ?
            AND parent_task_id IS NULL
-           AND status IN ('failed', 'escalated')`,
+           AND status IN ('failed', 'escalated')
+           AND (? IS NULL OR rowid > ?)`,
       )
-      .get(source, sourceRef) as { cnt: number } | undefined;
+      .get(source, sourceRef, clearedRowid, clearedRowid) as { cnt: number } | undefined;
     return row?.cnt ?? 0;
   }
 
@@ -1069,6 +1115,7 @@ export class StateStore {
    * escalation limit caused premature escalation of otherwise viable tasks.
    */
   countFailuresForSourceRef(sourceRef: string): number {
+    const clearedRowid = this.getFailureHistoryClearedRowid("github", sourceRef);
     const row = this.db
       .prepare(
         `SELECT COALESCE(SUM(retry_count + 1), 0) AS total
@@ -1076,9 +1123,10 @@ export class StateStore {
          WHERE source_ref = ?
            AND parent_task_id IS NULL
            AND status IN ('failed', 'escalated')
+           AND (? IS NULL OR rowid > ?)
            AND (result IS NULL OR result NOT LIKE 'connection-error-exhausted%')`,
       )
-      .get(sourceRef) as { total: number };
+      .get(sourceRef, clearedRowid, clearedRowid) as { total: number };
     return row?.total ?? 0;
   }
 
@@ -1095,16 +1143,18 @@ export class StateStore {
     verification_notes: string | null;
     created_at: string;
   }> {
+    const clearedRowid = this.getFailureHistoryClearedRowid("github", sourceRef);
     return this.db
       .prepare(
         `SELECT id, result, verification_status, quality_score, verification_notes, created_at
          FROM tasks
          WHERE source_ref = ?
            AND parent_task_id IS NULL
+           AND (? IS NULL OR rowid > ?)
            AND (status IN ('done', 'failed', 'escalated') OR verification_status = 'rejected')
          ORDER BY created_at ASC`,
       )
-      .all(sourceRef) as Array<{
+      .all(sourceRef, clearedRowid, clearedRowid) as Array<{
       id: string;
       result: string | null;
       verification_status: string | null;
@@ -1119,15 +1169,17 @@ export class StateStore {
    * the same agent. Stops at the first non-rejected attempt or agent switch.
    */
   countConsecutiveRejectionsForSourceRef(sourceRef: string, agentName: string): number {
+    const clearedRowid = this.getFailureHistoryClearedRowid("github", sourceRef);
     const rows = this.db
       .prepare(
         `SELECT agent_name, verification_status
          FROM tasks
          WHERE source_ref = ?
            AND parent_task_id IS NULL
+           AND (? IS NULL OR rowid > ?)
          ORDER BY rowid DESC`,
       )
-      .all(sourceRef) as Array<{
+      .all(sourceRef, clearedRowid, clearedRowid) as Array<{
       agent_name: string | null;
       verification_status: VerificationStatus;
     }>;
@@ -1930,12 +1982,18 @@ export class StateStore {
       CREATE INDEX IF NOT EXISTS idx_supervisor_decisions_created ON supervisor_decisions(created_at);
     `);
 
-    // Migration: add rationale column if it doesn't exist yet
+    // Migrations: add structured feed columns if they don't exist yet.
     const cols = this.db
       .prepare("PRAGMA table_info(supervisor_decisions)")
       .all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === "rationale")) {
       this.db.exec("ALTER TABLE supervisor_decisions ADD COLUMN rationale TEXT");
+    }
+    if (!cols.some((c) => c.name === "issue_refs")) {
+      this.db.exec("ALTER TABLE supervisor_decisions ADD COLUMN issue_refs TEXT");
+    }
+    if (!cols.some((c) => c.name === "hard_gates")) {
+      this.db.exec("ALTER TABLE supervisor_decisions ADD COLUMN hard_gates TEXT");
     }
   }
 
@@ -1949,13 +2007,15 @@ export class StateStore {
     reason: string;
     message?: string;
     rationale?: string;
+    issue_refs?: string[];
+    hard_gates?: string[];
     outcome: SupervisorOutcome;
     task_id?: string;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO supervisor_decisions (action, agent_name, reason, message, rationale, outcome, task_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO supervisor_decisions (action, agent_name, reason, message, rationale, issue_refs, hard_gates, outcome, task_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         params.action,
@@ -1963,6 +2023,8 @@ export class StateStore {
         params.reason,
         params.message ?? null,
         params.rationale ?? null,
+        JSON.stringify(params.issue_refs ?? []),
+        JSON.stringify(params.hard_gates ?? []),
         params.outcome,
         params.task_id ?? null,
         new Date().toISOString(),
@@ -1974,11 +2036,19 @@ export class StateStore {
    * Used by the supervisor to build context across cycles.
    */
   getRecentSupervisorDecisions(limit = 10): SupervisorDecisionRecord[] {
-    return this.db
+    const rows = this.db
       .prepare(
         "SELECT * FROM supervisor_decisions ORDER BY created_at DESC LIMIT ?",
       )
-      .all(limit) as SupervisorDecisionRecord[];
+      .all(limit) as Array<Omit<SupervisorDecisionRecord, "issue_refs" | "hard_gates"> & {
+        issue_refs?: string | null;
+        hard_gates?: string | null;
+      }>;
+    return rows.map((row) => ({
+      ...row,
+      issue_refs: parseJsonStringArray(row.issue_refs),
+      hard_gates: parseJsonStringArray(row.hard_gates),
+    }));
   }
 
   /**
@@ -2346,6 +2416,115 @@ export class StateStore {
         "ALTER TABLE processed_triggers ADD COLUMN completed_at TEXT",
       );
     }
+  }
+
+  /** Create the operator override table used for manual reroutes and boosts. */
+  private runSourceRefControlsMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS source_ref_controls (
+        source TEXT NOT NULL,
+        source_ref TEXT NOT NULL,
+        failure_history_cleared_at TEXT,
+        failure_history_cleared_rowid INTEGER,
+        priority_boosted_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (source, source_ref)
+      );
+    `);
+
+    const columns = this.db
+      .prepare("PRAGMA table_info(source_ref_controls)")
+      .all() as Array<{ name: string }>;
+    const colNames = new Set(columns.map((c) => c.name));
+    if (!colNames.has("failure_history_cleared_rowid")) {
+      this.db.exec("ALTER TABLE source_ref_controls ADD COLUMN failure_history_cleared_rowid INTEGER");
+    }
+  }
+
+  private upsertSourceRefControl(
+    source: string,
+    sourceRef: string,
+    updates: {
+      failure_history_cleared_at?: string | null;
+      failure_history_cleared_rowid?: number | null;
+      priority_boosted_at?: string | null;
+    },
+  ): void {
+    const now = new Date().toISOString();
+    this.db.prepare(
+      `INSERT INTO source_ref_controls
+         (source, source_ref, failure_history_cleared_at, failure_history_cleared_rowid, priority_boosted_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(source, source_ref) DO UPDATE SET
+         failure_history_cleared_at = COALESCE(excluded.failure_history_cleared_at, source_ref_controls.failure_history_cleared_at),
+         failure_history_cleared_rowid = COALESCE(excluded.failure_history_cleared_rowid, source_ref_controls.failure_history_cleared_rowid),
+         priority_boosted_at = CASE
+           WHEN excluded.priority_boosted_at IS NULL THEN source_ref_controls.priority_boosted_at
+           ELSE excluded.priority_boosted_at
+         END,
+         updated_at = excluded.updated_at`,
+    ).run(
+      source,
+      sourceRef,
+      updates.failure_history_cleared_at ?? null,
+      updates.failure_history_cleared_rowid ?? null,
+      updates.priority_boosted_at ?? null,
+      now,
+      now,
+    );
+  }
+
+  private getFailureHistoryClearedRowid(source: string, sourceRef: string): number | null {
+    const row = this.db
+      .prepare(
+        "SELECT failure_history_cleared_rowid FROM source_ref_controls WHERE source = ? AND source_ref = ?",
+      )
+      .get(source, sourceRef) as { failure_history_cleared_rowid: number | null } | undefined;
+    return row?.failure_history_cleared_rowid ?? null;
+  }
+
+  getFailureHistoryClearedAt(source: string, sourceRef: string): string | null {
+    const row = this.db
+      .prepare(
+        "SELECT failure_history_cleared_at FROM source_ref_controls WHERE source = ? AND source_ref = ?",
+      )
+      .get(source, sourceRef) as { failure_history_cleared_at: string | null } | undefined;
+    return row?.failure_history_cleared_at ?? null;
+  }
+
+  clearFailureHistoryForSourceRef(source: string, sourceRef: string, clearedAt = new Date().toISOString()): void {
+    const row = this.db
+      .prepare(
+        "SELECT COALESCE(MAX(rowid), 0) AS max_rowid FROM tasks WHERE source = ? AND source_ref = ? AND parent_task_id IS NULL",
+      )
+      .get(source, sourceRef) as { max_rowid: number };
+    this.upsertSourceRefControl(source, sourceRef, {
+      failure_history_cleared_at: clearedAt,
+      failure_history_cleared_rowid: row.max_rowid,
+    });
+  }
+
+  boostSourceRefPriority(source: string, sourceRef: string, boostedAt = new Date().toISOString()): void {
+    this.upsertSourceRefControl(source, sourceRef, { priority_boosted_at: boostedAt });
+  }
+
+  clearSourceRefPriority(source: string, sourceRef: string): void {
+    const now = new Date().toISOString();
+    this.db.prepare(
+      `UPDATE source_ref_controls
+       SET priority_boosted_at = NULL, updated_at = ?
+       WHERE source = ? AND source_ref = ?`,
+    ).run(now, source, sourceRef);
+  }
+
+  isSourceRefPriorityBoosted(source: string, sourceRef: string): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT 1 FROM source_ref_controls WHERE source = ? AND source_ref = ? AND priority_boosted_at IS NOT NULL",
+      )
+      .get(source, sourceRef);
+    return !!row;
   }
 
   /** Insert a new PR creation attempt record. */

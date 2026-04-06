@@ -149,6 +149,7 @@ This issue has been reassigned from ${task.agent_name} to ${autoReroute.agentNam
           reason: "auto-reroute",
           message: revisionMessage,
           rationale,
+          issue_refs: task.source_ref ? [task.source_ref] : [],
           outcome: revisionResult.taskId ? "dispatched" : "skipped",
           task_id: revisionResult.taskId || undefined,
         });
@@ -177,6 +178,7 @@ This issue has been reassigned from ${task.agent_name} to ${autoReroute.agentNam
             `Attempted to substitute ${task.agent_name} with ${autoReroute.agentName} after ` +
             `${autoReroute.consecutiveRejections} consecutive rejected attempt(s) ` +
             `on ${task.source_ref ?? task.title}, but dispatch failed.`,
+          issue_refs: task.source_ref ? [task.source_ref] : [],
           outcome: "failed",
         });
       }

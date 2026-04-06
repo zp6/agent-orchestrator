@@ -83,8 +83,10 @@ describe("dispatchGitHubIssues", () => {
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
       // checkDuplicate calls this; return undefined by default (no prior task)
-      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
+      findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -107,7 +109,7 @@ describe("dispatchGitHubIssues", () => {
 
   it("skips issues that already have an active task (duplicate-guard)", async () => {
     // Simulate an active dispatched task for this source_ref
-    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+    (mockStore.findDispatchCandidateBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
       id: "task-existing",
       status: "dispatched",
       source: "github",
@@ -203,6 +205,25 @@ describe("dispatchGitHubIssues", () => {
     expect(result.dispatched).toBe(0);
     expect(result.skipped).toBeGreaterThanOrEqual(1);
   });
+
+  it("dispatches a priority-boosted issue ahead of older issue numbers", async () => {
+    (mockStore.isSourceRefPriorityBoosted as ReturnType<typeof vi.fn>).mockImplementation(
+      (_source: string, sourceRef: string) => sourceRef === "owner/my-repo#9",
+    );
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 5, title: "Older", body: "", url: "", labels: [] },
+      { repo: "owner/my-repo", number: 9, title: "Boosted", body: "", url: "", labels: [] },
+    ]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher, 1);
+
+    expect(result.dispatched).toBe(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(
+      expect.stringContaining("Boosted"),
+      expect.objectContaining({ sourceRef: "owner/my-repo#9" }),
+    );
+    expect(mockStore.clearSourceRefPriority).toHaveBeenCalledWith("github", "owner/my-repo#9");
+  });
 });
 
 describe("pre-dispatch issue state validation", () => {
@@ -218,7 +239,9 @@ describe("pre-dispatch issue state validation", () => {
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
-      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
+      findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -282,7 +305,9 @@ describe("duplicate PR detection before dispatch", () => {
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
-      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
+      findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -475,7 +500,9 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
-      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
+      findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -502,7 +529,7 @@ describe("idle agent pickup (post-completion dispatch)", () => {
     // Same cycle: agent just finished its task, now idle
     (mockStore.hasActiveTask as ReturnType<typeof vi.fn>).mockReturnValue(false);
     // New issue #2 is unprocessed (issue #1 already done)
-    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockImplementation(
+    (mockStore.findDispatchCandidateBySourceRef as ReturnType<typeof vi.fn>).mockImplementation(
       (_source: string, ref: string) => {
         if (ref === "owner/my-repo#1") {
           // Prior issue — recently completed, within recency window; duplicate suppressed
@@ -547,7 +574,7 @@ describe("idle agent pickup (post-completion dispatch)", () => {
   it("is a no-op when all open issues are already processed (no new work)", async () => {
     (mockStore.hasActiveTask as ReturnType<typeof vi.fn>).mockReturnValue(false);
     // Both open issues have recent completed tasks — duplicate suppressed
-    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+    (mockStore.findDispatchCandidateBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
       id: "task-recent",
       status: "done",
       verification_status: null,
@@ -578,7 +605,9 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
-      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
+      findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -590,7 +619,7 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
 
   it("normally skips issues within the recency window (baseline)", async () => {
     // Issue #1 has a recent done task — duplicate-guard blocks it
-    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+    (mockStore.findDispatchCandidateBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
       id: "task-recent",
       status: "done",
       verification_status: null,
@@ -609,7 +638,7 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
 
   it("force-reclaim bypasses recency window and dispatches oldest open issue", async () => {
     // Issue #1 has a recent done task — normally blocked by duplicate-guard
-    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+    (mockStore.findDispatchCandidateBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
       id: "task-recent",
       status: "done",
       verification_status: null,
@@ -632,7 +661,7 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
 
   it("force-reclaim still skips issues with active tasks (pending/dispatched/in_progress)", async () => {
     // Active task — even force-reclaim should not double-dispatch
-    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+    (mockStore.findDispatchCandidateBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
       id: "task-active",
       status: "dispatched",
       verification_status: null,
@@ -652,7 +681,7 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
 
   it("force-reclaim dispatches even when task was failed within recency window", async () => {
     // Failed task within recency window — normally duplicate-guard blocks; force-reclaim overrides
-    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+    (mockStore.findDispatchCandidateBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
       id: "task-failed",
       status: "failed",
       verification_status: null,
@@ -671,7 +700,7 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
 
   it("force-reclaim only applies to agents in the set — others are unaffected", async () => {
     // Issue has recent done task — blocks for non-force agents
-    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+    (mockStore.findDispatchCandidateBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
       id: "task-recent",
       status: "done",
       verification_status: null,
@@ -803,6 +832,8 @@ describe("dispatchLinearChecks", () => {
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "linear-agent", response: { content: "done" } }),
@@ -849,6 +880,8 @@ describe("dispatchSlackChecks", () => {
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "slack-agent", response: { content: "done" } }),
@@ -896,7 +929,9 @@ describe("dispatchIdleAgentBacklog", () => {
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
-      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
+      findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -935,7 +970,7 @@ describe("dispatchIdleAgentBacklog", () => {
   });
 
   it("skips already-processed issues (not re-dispatched)", async () => {
-    (mockStore.findTaskBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
+    (mockStore.findDispatchCandidateBySourceRef as ReturnType<typeof vi.fn>).mockReturnValue({
       id: "task-done",
       status: "done",
       verification_status: null,
@@ -1133,7 +1168,9 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
-      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
+      findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1251,11 +1288,13 @@ describe("in-flight branch detection", () => {
     const mockStore = {
       hasActiveTask: vi.fn().mockReturnValue(false),
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
       isProcessed: vi.fn().mockReturnValue(false),
       markProcessed: vi.fn(),
       getTask: vi.fn().mockReturnValue(null),
       addLog: vi.fn(),
-      findTaskBySourceRef: vi.fn().mockReturnValue(null),
+      findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(null),
     } as unknown as StateStore;
 
     vi.mocked(mockStore.hasActiveTask).mockReturnValue(false);
@@ -1284,11 +1323,13 @@ describe("in-flight branch detection", () => {
     const mockStore = {
       hasActiveTask: vi.fn().mockReturnValue(false),
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
       isProcessed: vi.fn().mockReturnValue(false),
       markProcessed: vi.fn(),
       getTask: vi.fn().mockReturnValue(null),
       addLog: vi.fn(),
-      findTaskBySourceRef: vi.fn().mockReturnValue(null),
+      findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(null),
     } as unknown as StateStore;
 
     await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1318,11 +1359,13 @@ describe("in-flight branch detection", () => {
     const mockStore = {
       hasActiveTask: vi.fn().mockReturnValue(false),
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
       isProcessed: vi.fn().mockReturnValue(false),
       markProcessed: vi.fn(),
       getTask: vi.fn().mockReturnValue(null),
       addLog: vi.fn(),
-      findTaskBySourceRef: vi.fn().mockReturnValue(null),
+      findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(null),
     } as unknown as StateStore;
 
     const result = await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1347,11 +1390,13 @@ describe("in-flight branch detection", () => {
     const mockStore = {
       hasActiveTask: vi.fn().mockReturnValue(false),
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
       isProcessed: vi.fn().mockReturnValue(false),
       markProcessed: vi.fn(),
       getTask: vi.fn().mockReturnValue(null),
       addLog: vi.fn(),
-      findTaskBySourceRef: vi.fn().mockReturnValue(null),
+      findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(null),
     } as unknown as StateStore;
 
     await dispatchIdleAgentBacklog(branchConfig, mockStore, mockDispatcher);
@@ -1380,7 +1425,9 @@ describe("approved PR skip logic", () => {
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
-      findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
+      findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),

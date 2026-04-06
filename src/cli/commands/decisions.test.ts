@@ -105,6 +105,8 @@ function makeDecision(overrides: Partial<SupervisorDecisionRecord> = {}): Superv
     reason: "Issue looks good",
     message: null,
     rationale: null,
+    issue_refs: [],
+    hard_gates: [],
     outcome: "dispatched",
     task_id: "abc12345",
     created_at: "2026-04-06T11:30:00.000Z",
@@ -215,6 +217,11 @@ describe("decisionMatchesIssue", () => {
     expect(decisionMatchesIssue(d, 457)).toBe(true);
   });
 
+  it("matches issue number in structured issue_refs", () => {
+    const d = makeDecision({ issue_refs: ["rapartlu/agent-orchestrator#523"] });
+    expect(decisionMatchesIssue(d, 523)).toBe(true);
+  });
+
   it("does not match when issue number is a prefix of another number", () => {
     const d = makeDecision({ reason: "Working on #4570" });
     expect(decisionMatchesIssue(d, 457)).toBe(false);
@@ -248,6 +255,11 @@ describe("decisionMatchesSearch", () => {
   it("matches in rationale field", () => {
     const d = makeDecision({ rationale: "Agent is idle and issue is fresh" });
     expect(decisionMatchesSearch(d, "idle")).toBe(true);
+  });
+
+  it("matches in hard gate field", () => {
+    const d = makeDecision({ hard_gates: ["issue already closed"] });
+    expect(decisionMatchesSearch(d, "closed")).toBe(true);
   });
 
   it("matches in action field", () => {

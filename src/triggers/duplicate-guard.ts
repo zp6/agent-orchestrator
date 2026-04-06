@@ -68,7 +68,7 @@ export function checkDuplicate(
   source: string,
   sourceRef: string,
 ): DuplicateCheckResult {
-  const task = store.findTaskBySourceRef(source, sourceRef);
+  const task = store.findDispatchCandidateBySourceRef(source, sourceRef);
   if (!task) {
     return { isDuplicate: false };
   }

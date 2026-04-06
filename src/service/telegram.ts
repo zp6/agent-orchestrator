@@ -8,6 +8,7 @@ import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { AgentClient } from "../client/agent-client.js";
 import { ulid } from "ulid";
+import { findBranchForIssue, findExistingPRsForIssue, type GitHubIssue } from "../triggers/github.js";
 
 const log = createLogger("telegram");
 
@@ -125,8 +126,84 @@ async function ghAsync(cmd: string): Promise<string> {
   });
 }
 
-async function handleCommand(text: string, ctx: TelegramContext): Promise<string> {
+interface ResolvedIssueRef {
+  repo: string;
+  issueNumber: number;
+  sourceRef: string;
+}
+
+async function resolveIssueRef(rawIssueRef: string, repos: string[]): Promise<ResolvedIssueRef | null> {
+  const trimmed = rawIssueRef.trim();
+  const fullRefMatch = trimmed.match(/^([\w.-]+\/[\w.-]+)#(\d+)$/);
+  if (fullRefMatch) {
+    const repo = fullRefMatch[1];
+    const issueNumber = parseInt(fullRefMatch[2], 10);
+    return { repo, issueNumber, sourceRef: `${repo}#${issueNumber}` };
+  }
+
+  const bareNumberMatch = trimmed.match(/^\d+$/);
+  if (!bareNumberMatch) return null;
+
+  const issueNumber = parseInt(trimmed, 10);
+  for (const repo of repos) {
+    const raw = await ghAsync(`gh issue view ${issueNumber} --repo ${repo} --json number -q .number`);
+    if (raw && raw.trim() === String(issueNumber)) {
+      return { repo, issueNumber, sourceRef: `${repo}#${issueNumber}` };
+    }
+  }
+  return null;
+}
+
+async function fetchIssueDetails(repo: string, issueNumber: number): Promise<(GitHubIssue & { state: string }) | null> {
+  const raw = await ghAsync(`gh issue view ${issueNumber} --repo ${repo} --json number,title,body,url,state,labels`);
+  if (!raw) return null;
+  try {
+    const issue = JSON.parse(raw) as {
+      number: number;
+      title: string;
+      body: string | null;
+      url: string;
+      state: string;
+      labels?: Array<{ name?: string }>;
+    };
+    return {
+      repo,
+      number: issue.number,
+      title: issue.title,
+      body: issue.body ?? "",
+      url: issue.url,
+      state: issue.state,
+      labels: (issue.labels ?? []).map((label) => label.name).filter((name): name is string => !!name),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildGitHubIssueDispatchMessage(agentName: string, issue: GitHubIssue): string {
+  let message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}`;
+
+  const openPR = findExistingPRsForIssue(issue.repo, issue.number).find((pr) => pr.state === "open");
+  if (openPR) {
+    message += `\n\n⚠️ This issue already has an open ${openPR.isDraft ? "draft " : ""}PR: #${openPR.number} (${openPR.url}). Do NOT create a new branch or open another PR. Instead, review the existing PR, make any needed fixes, and push to its branch.`;
+    message += `\n\n---\nWhen done: commit your changes and push to the existing PR branch. Do NOT run \`gh pr create\`.`;
+    return message;
+  }
+
+  const existingBranch = findBranchForIssue(issue.repo, issue.number);
+  if (existingBranch) {
+    message += `\n\n⚠️ A branch for this issue already exists: \`${existingBranch}\`. Do NOT create a new branch. Check out this branch, continue the work, and open a PR when ready.`;
+    message += `\n\n---\nWhen done: push to branch \`${existingBranch}\` and open a PR with \`gh pr create --head ${existingBranch} --title "[${agentName}] <title>" --body "Closes #${issue.number}"\`.`;
+    return message;
+  }
+
+  message += `\n\n---\nWhen done: create a branch, commit, push, and open a PR with \`gh pr create --title "[${agentName}] <title>" --body "Closes #${issue.number}"\`. The "Closes #${issue.number}" is required so the issue auto-closes on merge.`;
+  return message;
+}
+
+export async function handleCommand(text: string, ctx: TelegramContext): Promise<string> {
   const cmd = text.trim().toLowerCase();
+  const repos = [...new Set(Object.values(ctx.config.agents).map((a) => a.github).filter(Boolean))] as string[];
 
   // Summary — the main command
   if (cmd === "summary" || cmd === "/summary" || cmd === "s") {
@@ -163,7 +240,6 @@ async function handleCommand(text: string, ctx: TelegramContext): Promise<string
 
   // Issues (parallel across repos)
   if (cmd === "issues" || cmd === "/issues") {
-    const repos = [...new Set(Object.values(ctx.config.agents).map((a) => a.github).filter(Boolean))] as string[];
     const results = await Promise.all(repos.map(async (repo) => {
       const raw = await ghAsync(`gh issue list --repo ${repo} --state open --json number,title -L 5`);
       if (!raw) return "";
@@ -177,7 +253,6 @@ async function handleCommand(text: string, ctx: TelegramContext): Promise<string
 
   // PRs (parallel across repos)
   if (cmd === "prs" || cmd === "/prs") {
-    const repos = [...new Set(Object.values(ctx.config.agents).map((a) => a.github).filter(Boolean))] as string[];
     const results = await Promise.all(repos.map(async (repo) => {
       const raw = await ghAsync(`gh pr list --repo ${repo} --state open --json number,title,mergeable -L 5`);
       if (!raw) return "";
@@ -203,7 +278,6 @@ async function handleCommand(text: string, ctx: TelegramContext): Promise<string
     const issueStatusMatch = text.trim().match(/^\/?\s*issue\s+(?:status\s+)?(\d+)\s*$/i);
     if (issueStatusMatch) {
       const issueNumber = parseInt(issueStatusMatch[1], 10);
-      const repos = [...new Set(Object.values(ctx.config.agents).map((a) => a.github).filter(Boolean))] as string[];
       // Try each repo to find the issue
       let foundRepo: string | null = null;
       for (const repo of repos) {
@@ -333,6 +407,71 @@ Steps:
     return `📤 Dispatching to ${agentName}...`;
   }
 
+  if (cmd.startsWith("reassign ") || cmd.startsWith("/reassign ")) {
+    const parts = text.trim().split(/\s+/);
+    const rawIssueRef = parts[1];
+    const agentName = parts[2];
+    if (!rawIssueRef || !agentName) return "Usage: /reassign <issue-id|owner/repo#N> <agent-name>";
+    if (!ctx.config.agents[agentName]) return `❌ Unknown agent. Available: ${Object.keys(ctx.config.agents).join(", ")}`;
+
+    const resolved = await resolveIssueRef(rawIssueRef, repos);
+    if (!resolved) return `❌ Could not resolve issue "${rawIssueRef}" in configured repos.`;
+
+    const issue = await fetchIssueDetails(resolved.repo, resolved.issueNumber);
+    if (!issue) return `❌ Failed to load ${resolved.sourceRef} from GitHub.`;
+    if (issue.state.toLowerCase() !== "open") return `❌ ${resolved.sourceRef} is ${issue.state.toLowerCase()}, not open.`;
+
+    ctx.store.clearFailureHistoryForSourceRef("github", resolved.sourceRef);
+    ctx.store.removeProcessedTrigger("github", resolved.sourceRef);
+
+    const latestTask = ctx.store.findAllTasksBySourceRef(resolved.sourceRef)[0];
+    if (latestTask) {
+      ctx.store.addLog({
+        task_id: latestTask.id,
+        direction: "system",
+        content: `Operator reassigned via Telegram to ${agentName}; failure history cleared.`,
+      });
+    }
+
+    const message = buildGitHubIssueDispatchMessage(agentName, issue);
+    ctx.dispatcher.dispatch(message, {
+      agentName,
+      source: "github",
+      sourceRef: resolved.sourceRef,
+      title: `[${issue.repo}#${issue.number}] ${issue.title}`,
+    })
+      .then((r) => sendReply(`✅ Reassigned ${resolved.sourceRef} to ${agentName} (${r.taskId})`))
+      .catch((e) => sendReply(`❌ Reassign failed for ${resolved.sourceRef}: ${e instanceof Error ? e.message : String(e)}`));
+    return `🔀 Reassigning ${resolved.sourceRef} to ${agentName} now...`;
+  }
+
+  if (cmd.startsWith("prioritize ") || cmd.startsWith("/prioritize ")) {
+    const parts = text.trim().split(/\s+/);
+    const rawIssueRef = parts[1];
+    if (!rawIssueRef) return "Usage: /prioritize <issue-id|owner/repo#N>";
+
+    const resolved = await resolveIssueRef(rawIssueRef, repos);
+    if (!resolved) return `❌ Could not resolve issue "${rawIssueRef}" in configured repos.`;
+
+    const issue = await fetchIssueDetails(resolved.repo, resolved.issueNumber);
+    if (!issue) return `❌ Failed to load ${resolved.sourceRef} from GitHub.`;
+    if (issue.state.toLowerCase() !== "open") return `❌ ${resolved.sourceRef} is ${issue.state.toLowerCase()}, not open.`;
+
+    ctx.store.boostSourceRefPriority("github", resolved.sourceRef);
+    ctx.store.removeProcessedTrigger("github", resolved.sourceRef);
+
+    const latestTask = ctx.store.findAllTasksBySourceRef(resolved.sourceRef)[0];
+    if (latestTask) {
+      ctx.store.addLog({
+        task_id: latestTask.id,
+        direction: "system",
+        content: "Operator priority boost via Telegram.",
+      });
+    }
+
+    return `⚡ Prioritized ${resolved.sourceRef} for the next daemon cycle.`;
+  }
+
   // Help
   if (cmd === "help" || cmd === "/help" || cmd === "/start") {
     return `🤖 *Commands*
@@ -348,6 +487,8 @@ newchat <agent> — reset conversation
 issue <N> — pre-dispatch issue inspection
 issue <idea> — create issue from rough idea
 dispatch <agent> <msg> — send task
+/reassign <issue> <agent> — reroute issue now
+/prioritize <issue> — move issue to front next cycle
 help — this message`;
   }
 

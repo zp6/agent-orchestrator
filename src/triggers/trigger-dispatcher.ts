@@ -13,6 +13,17 @@ const log = createLogger("trigger-dispatcher");
 // while dispatch is in-flight, without violating DB foreign key constraints)
 const inFlightDispatches = new Set<string>();
 
+function sortIssuesForDispatch(store: StateStore, issues: GitHubIssue[]): GitHubIssue[] {
+  return [...issues].sort((a, b) => {
+    const aBoosted = store.isSourceRefPriorityBoosted("github", `${a.repo}#${a.number}`);
+    const bBoosted = store.isSourceRefPriorityBoosted("github", `${b.repo}#${b.number}`);
+    if (aBoosted !== bBoosted) {
+      return aBoosted ? -1 : 1;
+    }
+    return a.number - b.number;
+  });
+}
+
 /**
  * Build the mandatory pre-declaration review checklist injected into every
  * fix-existing-PR task message.  Agents must work through all five steps
@@ -181,7 +192,7 @@ export async function dispatchGitHubIssues(
     }
 
     let dispatchedForAgent = 0;
-    for (const issue of issues) {
+    for (const issue of sortIssuesForDispatch(store, issues)) {
       if (dispatchedForAgent >= maxPerAgent) break;
 
       const sourceRef = `${issue.repo}#${issue.number}`;
@@ -308,6 +319,7 @@ export async function dispatchGitHubIssues(
         sourceRef,
         title: `[${issue.repo}#${issue.number}] ${issue.title}`,
       }, onAgentCompleted);
+      store.clearSourceRefPriority("github", sourceRef);
 
       result.dispatched++;
       dispatchedForAgent++;
@@ -389,8 +401,7 @@ export async function dispatchIdleAgentBacklog(
       continue;
     }
 
-    // Sort by issue number ascending so the oldest (highest-priority) issue is first
-    const sorted = [...issues].sort((a, b) => a.number - b.number);
+    const sorted = sortIssuesForDispatch(store, issues);
 
     let dispatched = false;
     for (const issue of sorted) {
@@ -522,6 +533,7 @@ export async function dispatchIdleAgentBacklog(
         sourceRef,
         title: `[${issue.repo}#${issue.number}] ${issue.title}`,
       });
+      store.clearSourceRefPriority("github", sourceRef);
 
       log.info(forceReclaim ? "Idle reclaim: dispatched issue to long-idle agent" : "Idle pickup: dispatched highest-priority issue to idle agent", {
         agentName,

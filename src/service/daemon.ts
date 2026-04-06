@@ -1310,6 +1310,14 @@ export class Daemon {
     return JSON.stringify(rationale);
   }
 
+  private extractDecisionIssueRefs(d: import("../client/reviewer-client.js").SupervisorDecision): string[] {
+    const refs = extractIssueRefs(`${d.message ?? ""} ${d.reason ?? ""}`);
+    if (refs.length === 0) return [];
+
+    const repo = d.agentName ? this.config.agents[d.agentName]?.github : undefined;
+    return [...new Set(refs.map((num) => (repo ? `${repo}#${num}` : `#${num}`)))];
+  }
+
   private async runSupervisor(time: string): Promise<void> {
     try {
       const decisions = await this.supervisor.review();
@@ -1327,6 +1335,7 @@ export class Daemon {
       // Record blocked decisions as "skipped — already resolved"
       let cycleSkipped = 0;
       for (const { decision: bd, skipReason } of gateResult.blocked) {
+        const issueRefs = this.extractDecisionIssueRefs(bd);
         this.log.info("Supervisor hard gate: dispatch blocked", {
           agentName: bd.agentName,
           reason: bd.reason,
@@ -1339,6 +1348,8 @@ export class Daemon {
           reason: bd.reason,
           message: bd.message,
           rationale: bd.rationale,
+          issue_refs: issueRefs,
+          hard_gates: [skipReason],
           outcome: "skipped",
         });
         this.store.incrementStat("supervisor_hard_gate_blocks");
@@ -1346,6 +1357,8 @@ export class Daemon {
       }
 
       for (const d of gateResult.passed) {
+        const issueRefs = this.extractDecisionIssueRefs(d);
+
         if (d.action === "none") {
           this.store.addSupervisorDecision({
             action: d.action,
@@ -1353,6 +1366,7 @@ export class Daemon {
             reason: d.reason,
             message: d.message,
             rationale: d.rationale,
+            issue_refs: issueRefs,
             outcome: "none",
           });
           continue;
@@ -1371,6 +1385,8 @@ export class Daemon {
               reason: d.reason,
               message: d.message,
               rationale: structuredRationale,
+              issue_refs: issueRefs,
+              hard_gates: ["agent busy"],
               outcome: "skipped",
             });
           } else {
@@ -1398,6 +1414,7 @@ export class Daemon {
                   reason: d.reason,
                   message: d.message,
                   rationale: structuredRationale,
+                  issue_refs: issueRefs,
                   outcome: "dispatched",
                   task_id: result.taskId,
                 });
@@ -1409,6 +1426,7 @@ export class Daemon {
                   reason: d.reason,
                   message: d.message,
                   rationale: structuredRationale,
+                  issue_refs: issueRefs,
                   outcome: "failed",
                 });
               });
@@ -1420,6 +1438,7 @@ export class Daemon {
                 reason: d.reason,
                 message: d.message,
                 rationale: structuredRationale,
+                issue_refs: issueRefs,
                 outcome: "failed",
               });
             }
@@ -1437,6 +1456,7 @@ export class Daemon {
             reason: d.reason,
             message: d.message,
             rationale: d.rationale,
+            issue_refs: issueRefs,
             outcome: "unhandled",
           });
         }

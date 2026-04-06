@@ -83,6 +83,13 @@ function formatRationaleSummary(r: DispatchRationale): string {
   return parts.join(" ");
 }
 
+function formatRationaleText(d: SupervisorDecisionRecord): string | null {
+  const structured = parseStructuredRationale(d.rationale);
+  const text = structured?.llm_reasoning ?? d.rationale;
+  if (!text) return null;
+  return text.length > 140 ? `${text.slice(0, 137)}...` : text;
+}
+
 /** Format a single decision row for the table. */
 function formatRow(d: SupervisorDecisionRecord): string {
   const ts = d.created_at.slice(0, 16).replace("T", " ");
@@ -103,6 +110,19 @@ function formatRow(d: SupervisorDecisionRecord): string {
     }
   }
 
+  if (d.issue_refs.length > 0) {
+    line += `\n  ${" ".repeat(18)}${chalk.cyan(`issues: ${d.issue_refs.join(", ")}`)}`;
+  }
+
+  const rationaleText = formatRationaleText(d);
+  if (rationaleText) {
+    line += `\n  ${" ".repeat(18)}${chalk.dim(`why: ${rationaleText}`)}`;
+  }
+
+  if (d.hard_gates.length > 0) {
+    line += `\n  ${" ".repeat(18)}${chalk.yellow(`gates: ${d.hard_gates.join("; ")}`)}`;
+  }
+
   return line;
 }
 
@@ -118,6 +138,7 @@ export function decisionMatchesIssue(d: SupervisorDecisionRecord, issueNumber: n
   // Match #N at word boundary (e.g. "#457", "repo#457") but not "#4570"
   const pattern = new RegExp(`#${issueNumber}\\b`);
   return (
+    d.issue_refs.some((ref) => pattern.test(ref)) ||
     pattern.test(d.reason) ||
     pattern.test(d.message ?? "") ||
     pattern.test(d.rationale ?? "")
@@ -135,6 +156,8 @@ export function decisionMatchesIssue(d: SupervisorDecisionRecord, issueNumber: n
 export function decisionMatchesSearch(d: SupervisorDecisionRecord, query: string): boolean {
   const q = query.toLowerCase();
   return (
+    d.issue_refs.some((ref) => ref.toLowerCase().includes(q)) ||
+    d.hard_gates.some((gate) => gate.toLowerCase().includes(q)) ||
     d.reason.toLowerCase().includes(q) ||
     (d.message ?? "").toLowerCase().includes(q) ||
     (d.rationale ?? "").toLowerCase().includes(q) ||
@@ -147,7 +170,7 @@ export function decisionMatchesSearch(d: SupervisorDecisionRecord, query: string
 export function registerDecisionsCommand(program: Command): void {
   program
     .command("decisions")
-    .description("View the supervisor decision log")
+    .description("View the supervisor decision feed")
     .option("-n, --limit <n>", "Number of decisions to show", "20")
     .option(
       "--since <duration>",

@@ -288,7 +288,9 @@ export class Supervisor {
         .map((d: SupervisorDecisionRecord) => {
           const agentPart = d.agent_name ? ` → ${d.agent_name}` : "";
           const taskPart = d.task_id ? ` [task:${d.task_id.slice(0, 8)}]` : "";
-          return `- [${d.created_at.slice(0, 16)}] ${d.action}${agentPart}: ${d.reason} (outcome: ${d.outcome}${taskPart})`;
+          const issuePart = d.issue_refs.length > 0 ? ` [issues: ${d.issue_refs.join(", ")}]` : "";
+          const gatePart = d.hard_gates.length > 0 ? ` [gates: ${d.hard_gates.join("; ")}]` : "";
+          return `- [${d.created_at.slice(0, 16)}] ${d.action}${agentPart}: ${d.reason} (outcome: ${d.outcome}${taskPart})${issuePart}${gatePart}`;
         })
         .join("\n");
       sections.push(`## Recent Supervisor Decisions\n${lines}`);
