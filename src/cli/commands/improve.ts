@@ -1,10 +1,10 @@
 import type { Command } from "commander";
 import chalk from "chalk";
+import { ReviewerClient } from "../../client/reviewer-client.js";
 import { loadConfig } from "../../config/schema.js";
 import { StateStore } from "../../state/store.js";
-import { Verifier } from "../../orchestrator/verifier.js";
-import { ImprovementDetector } from "../../orchestrator/improvement-detector.js";
 import { IssueCreator } from "../../orchestrator/issue-creator.js";
+import { detectImprovements, verifyTask } from "../../service/reviewer-ops.js";
 
 export function registerImproveCommand(program: Command): void {
   const improveCmd = program
@@ -19,7 +19,7 @@ export function registerImproveCommand(program: Command): void {
     .action(async (opts: { dryRun?: boolean; limit: string }) => {
       const config = loadConfig(program.opts().config);
       const store = new StateStore();
-      const detector = new ImprovementDetector(config);
+      const reviewerClient = new ReviewerClient(config);
 
       const tasks = store.getRecentCompleted(parseInt(opts.limit, 10));
 
@@ -30,7 +30,7 @@ export function registerImproveCommand(program: Command): void {
       }
 
       console.log(chalk.dim(`Analyzing ${tasks.length} recent tasks...\n`));
-      const improvements = await detector.analyze(tasks);
+      const improvements = await detectImprovements(reviewerClient, tasks);
 
       if (improvements.length === 0) {
         console.log(chalk.green("No improvements detected."));
@@ -76,7 +76,7 @@ export function registerImproveCommand(program: Command): void {
     .action(async (opts: { limit: string }) => {
       const config = loadConfig(program.opts().config);
       const store = new StateStore();
-      const verifier = new Verifier(config, store);
+      const reviewerClient = new ReviewerClient(config);
 
       const tasks = store.getUnverified(parseInt(opts.limit, 10));
 
@@ -93,7 +93,7 @@ export function registerImproveCommand(program: Command): void {
         process.stdout.write(`  ${chalk.dim(task.id.slice(0, 8))} ${agent} ${task.title.slice(0, 50)}... `);
 
         try {
-          const result = await verifier.verify(task.id);
+          const result = await verifyTask(store, reviewerClient, task.id);
           const scoreColor = result.score >= 0.7 ? chalk.green : result.score >= 0.5 ? chalk.yellow : chalk.red;
           const status = result.approved ? chalk.green("approved") : chalk.red("rejected");
           console.log(`${status} ${scoreColor(`(${result.score.toFixed(1)})`)}`);

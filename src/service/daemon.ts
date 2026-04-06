@@ -1,14 +1,11 @@
 import { loadConfig, type OrchestratorConfig } from "../config/schema.js";
 import { StateStore, type DispatchRationale } from "../state/store.js";
 import { setLLMUsageRecorder } from "../client/llm-client.js";
+import { ReviewerClient, type SupervisorDecision } from "../client/reviewer-client.js";
 import { Dispatcher, MAX_RETRIES, TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS, extractRepoFromSourceRef } from "../orchestrator/dispatcher.js";
-import { ReviewerClient } from "../client/reviewer-client.js";
-import { Verifier } from "../orchestrator/verifier.js";
-import { ImprovementDetector } from "../orchestrator/improvement-detector.js";
 import { ResearchLinker } from "../orchestrator/research-linker.js";
 import { IssueCreator } from "../orchestrator/issue-creator.js";
 import { Deployer } from "../orchestrator/deployer.js";
-import { Supervisor, type GateResult, extractIssueRefs } from "../orchestrator/supervisor.js";
 import { PRReviewer } from "../orchestrator/pr-reviewer.js";
 import { findOrphanBranches, createPRForBranch, deleteStaleOrphanBranches, STALE_BRANCH_BEHIND_THRESHOLD } from "../orchestrator/pr-creator.js";
 import { PRCreationRetryQueue } from "../orchestrator/pr-creation-retry-queue.js";
@@ -29,6 +26,14 @@ import { planSync, executeSync } from "../orchestrator/sync.js";
 import { notifyOperator } from "./notify.js";
 import { startTelegramPolling, stopTelegramPolling, pollTelegram } from "./telegram.js";
 import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.js";
+import {
+  type GateResult,
+  detectImprovements,
+  extractIssueRefs,
+  gateResolvedIssues,
+  reviewSupervisorState,
+  verifyAndReviseTask,
+} from "./reviewer-ops.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
@@ -99,12 +104,10 @@ export class Daemon {
   private config: OrchestratorConfig;
   private store: StateStore;
   private dispatcher: Dispatcher;
-  private verifier: Verifier;
-  private detector: ImprovementDetector;
+  private reviewerClient: ReviewerClient;
   private researchLinker: ResearchLinker;
   private issueCreator: IssueCreator;
   private deployer: Deployer;
-  private supervisor: Supervisor;
   private prReviewer: PRReviewer;
   private prRetryQueue: PRCreationRetryQueue;
   private pollInterval: number;
@@ -128,16 +131,11 @@ export class Daemon {
     setLLMUsageRecorder(this.store.recordTokenUsage.bind(this.store));
     this.dispatcher = new Dispatcher(this.config, this.store);
 
-    // Shared ReviewerClient — all LLM-based review/verify/supervise/detect
-    // operations are delegated to the reviewer agent pool through this client.
-    const reviewerClient = new ReviewerClient(this.config);
-    this.verifier = new Verifier(this.config, this.store, reviewerClient);
-    this.detector = new ImprovementDetector(this.config, reviewerClient);
+    this.reviewerClient = new ReviewerClient(this.config);
     this.issueCreator = new IssueCreator(this.config);
     this.researchLinker = new ResearchLinker(this.config, this.store, this.issueCreator);
     this.deployer = new Deployer(this.config);
-    this.supervisor = new Supervisor(this.config, this.store, reviewerClient);
-    this.prReviewer = new PRReviewer(this.config, this.store, reviewerClient);
+    this.prReviewer = new PRReviewer(this.config, this.store, this.reviewerClient);
     this.prRetryQueue = new PRCreationRetryQueue(this.store);
     this.pollInterval = pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   }
@@ -805,7 +803,13 @@ export class Daemon {
         }
 
         try {
-          const result = await this.verifier.verifyAndRevise(task.id, maxRevisions);
+          const result = await verifyAndReviseTask(
+            this.config,
+            this.store,
+            this.reviewerClient,
+            task.id,
+            maxRevisions,
+          );
           if (result.notes === "Deferred: agent busy") {
             deferred++;
             console.log(
@@ -850,7 +854,7 @@ export class Daemon {
       const recent = this.store.getRecentVerified(20, minScore);
       if (recent.length < 5) return; // need enough data
 
-      const improvements = await this.detector.analyze(recent);
+      const improvements = await detectImprovements(this.reviewerClient, recent);
       if (improvements.length === 0) return;
 
       console.log(`[${time}] Detected ${improvements.length} improvement(s)`);
@@ -1269,7 +1273,7 @@ export class Daemon {
    * to produce a JSON rationale string stored in the decisions table.
    */
   private buildDispatchRationale(
-    d: import("../client/reviewer-client.js").SupervisorDecision,
+    d: SupervisorDecision,
     validation?: {
       outcome: "passed" | "blocked";
       failureCheck: string | null;
@@ -1326,7 +1330,7 @@ export class Daemon {
     return JSON.stringify(rationale);
   }
 
-  private extractDecisionIssueRefs(d: import("../client/reviewer-client.js").SupervisorDecision): string[] {
+  private extractDecisionIssueRefs(d: SupervisorDecision): string[] {
     const refs = extractIssueRefs(`${d.message ?? ""} ${d.reason ?? ""}`);
     if (refs.length === 0) return [];
 
@@ -1336,7 +1340,7 @@ export class Daemon {
 
   private async runSupervisor(time: string): Promise<void> {
     try {
-      const decisions = await this.supervisor.review();
+      const decisions = await reviewSupervisorState(this.config, this.store, this.reviewerClient);
       if (decisions.length === 0) return;
 
       console.log(`[${time}] Supervisor: ${decisions.length} decision(s)`);
@@ -1346,7 +1350,7 @@ export class Daemon {
       // layer — the authoritative point before any dispatch is committed.
       // This replaces the previous two-layer cached check (issues #444, #446,
       // #458) which could serve stale data within the 60s TTL window.
-      const gateResult: GateResult = this.supervisor.gateResolvedIssues(decisions);
+      const gateResult: GateResult = gateResolvedIssues(this.config, this.store, decisions);
 
       // Record blocked decisions as "skipped — already resolved"
       let cycleSkipped = 0;

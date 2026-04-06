@@ -1,9 +1,10 @@
 import type { Command } from "commander";
 import chalk from "chalk";
+import { ReviewerClient } from "../../client/reviewer-client.js";
 import { loadConfig } from "../../config/schema.js";
 import { StateStore } from "../../state/store.js";
-import { Supervisor } from "../../orchestrator/supervisor.js";
 import { Dispatcher } from "../../orchestrator/dispatcher.js";
+import { reviewSupervisorState } from "../../service/reviewer-ops.js";
 
 const ACTION_COLORS: Record<string, (s: string) => string> = {
   dispatch: chalk.blue,
@@ -22,11 +23,11 @@ export function registerSuperviseCommand(program: Command): void {
     .action(async (opts: { dryRun?: boolean }) => {
       const config = loadConfig(program.opts().config);
       const store = new StateStore();
-      const supervisor = new Supervisor(config, store);
+      const reviewerClient = new ReviewerClient(config);
 
       console.log(chalk.dim("Supervisor reviewing current state...\n"));
 
-      const decisions = await supervisor.review();
+      const decisions = await reviewSupervisorState(config, store, reviewerClient);
 
       if (decisions.length === 0) {
         console.log(chalk.green("Everything looks good. No actions needed."));

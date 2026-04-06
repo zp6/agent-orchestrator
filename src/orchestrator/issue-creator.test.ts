@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { IssueCreator } from "./issue-creator.js";
 import type { OrchestratorConfig } from "../config/schema.js";
-import type { DetectedImprovement } from "./improvement-detector.js";
+import type { DetectedImprovement } from "../client/reviewer-client.js";
 
 vi.mock("node:child_process", () => ({
   execSync: vi.fn((cmd: string) => {

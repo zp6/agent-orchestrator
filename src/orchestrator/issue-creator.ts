@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
 import type { OrchestratorConfig } from "../config/schema.js";
-import type { DetectedImprovement } from "./improvement-detector.js";
+import type { DetectedImprovement } from "../client/reviewer-client.js";
 import { createLogger } from "../service/logger.js";
 
 export interface CreatedIssue {

@@ -1,0 +1,591 @@
+import { execSync } from "node:child_process";
+import { ReviewerClient } from "../client/reviewer-client.js";
+import type {
+  DetectedImprovement,
+  SupervisorDecision,
+  VerificationResult,
+} from "../client/reviewer-client.js";
+import type { OrchestratorConfig } from "../config/schema.js";
+import { Dispatcher } from "../orchestrator/dispatcher.js";
+import type { AgentHealth, StateStore, SupervisorDecisionRecord, Task } from "../state/store.js";
+import { createLogger } from "./logger.js";
+import { notifyOperator } from "./notify.js";
+import { cachedGetIssueState, liveValidateForDispatch } from "../triggers/issue-state-bridge.js";
+
+const verifierLog = createLogger("verifier");
+const supervisorLog = createLogger("supervisor");
+
+const REVISION_ESCALATION_THRESHOLD = 3;
+const ISSUE_REF_RE = /#\d+/;
+const ARTIFACT_KEYWORDS = [
+  "create file",
+  "open a pr",
+  "open pr",
+  "push branch",
+  "push your branch",
+  "push the branch",
+  "push to ",
+  "write ",
+  "implement ",
+  "add ",
+  "fix ",
+  "update ",
+  "run command",
+  "produce ",
+  "generate ",
+];
+
+export interface GateResult {
+  passed: SupervisorDecision[];
+  blocked: Array<{ decision: SupervisorDecision; skipReason: string }>;
+}
+
+export async function verifyTask(
+  store: StateStore,
+  reviewerClient: ReviewerClient,
+  taskId: string,
+): Promise<VerificationResult> {
+  const task = store.getTask(taskId);
+  if (!task) {
+    throw new Error(`Task not found: ${taskId}`);
+  }
+  if (task.status !== "done") {
+    throw new Error(`Task ${taskId} is not done (status: ${task.status})`);
+  }
+
+  store.updateTask(taskId, { verification_status: "pending" });
+
+  try {
+    const result = await reviewerClient.verifyTask(task);
+
+    verifierLog.info("Verification complete", {
+      taskId,
+      approved: result.approved,
+      score: result.score,
+      agent: task.agent_name,
+    });
+
+    store.updateTask(taskId, {
+      verification_status: result.approved ? "approved" : "rejected",
+      quality_score: result.score,
+      verification_notes: result.notes,
+    });
+
+    return result;
+  } catch (err) {
+    verifierLog.error("Verification failed", {
+      taskId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    store.updateTask(taskId, { verification_status: null });
+    throw new Error(`Verification failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+export async function verifyAndReviseTask(
+  config: OrchestratorConfig,
+  store: StateStore,
+  reviewerClient: ReviewerClient,
+  taskId: string,
+  maxRetries = 1,
+): Promise<VerificationResult> {
+  const result = await verifyTask(store, reviewerClient, taskId);
+
+  if (result.approved || maxRetries <= 0 || !result.revision) {
+    return result;
+  }
+
+  const task = store.getTask(taskId)!;
+  const newRevisionCount = (task.revision_count ?? 0) + 1;
+  store.updateTask(taskId, { revision_count: newRevisionCount });
+
+  if (newRevisionCount >= REVISION_ESCALATION_THRESHOLD) {
+    const sourceLabel = task.source_ref ?? task.title;
+    verifierLog.warn("Revision loop detected — escalating to operator", {
+      taskId,
+      sourceRef: task.source_ref,
+      revisionCount: newRevisionCount,
+    });
+    await notifyOperator(
+      "Stuck Issue — Revision Loop",
+      `Issue ${sourceLabel} has reached ${newRevisionCount} revision(s).\n` +
+      `Agent: ${task.agent_name ?? "unknown"}\n` +
+      `Quality score: ${task.quality_score?.toFixed(1) ?? "n/a"}\n` +
+      `Task: ${task.title}\n\n` +
+      "This issue may need manual intervention.",
+      "warning",
+      `stuck-issue:${task.source_ref ?? taskId}`,
+    );
+  }
+
+  const autoReroute = getAutoRerouteTarget(config, store, task);
+
+  if (!autoReroute && task.agent_name && store.hasActiveTask(task.agent_name)) {
+    verifierLog.info("Revision deferred: agent busy, will retry next cycle", {
+      taskId,
+      agentName: task.agent_name,
+    });
+    store.updateTask(taskId, { verification_status: null });
+    return result;
+  }
+
+  const dispatcher = new Dispatcher(config, store);
+  const rerouteHeader = autoReroute
+    ? `## Auto-Reroute Context
+This issue has been reassigned from ${task.agent_name} to ${autoReroute.agentName} after ${autoReroute.consecutiveRejections} consecutive verifier rejection(s) for ${task.source_ref ?? task.title}. Please take a fresh pass and avoid repeating the prior failed approach.
+
+`
+    : "";
+  const revisionMessage = `${rerouteHeader}Your previous response to this task was reviewed and needs revision.\n\n## Original Task\n${task.description ?? task.title}\n\n## Reviewer Feedback\n${result.revision}\n\nPlease address the feedback and provide an improved response.`;
+
+  try {
+    const revisionResult = await dispatcher.dispatch(revisionMessage, {
+      agentName: autoReroute?.agentName ?? task.agent_name ?? undefined,
+      source: task.source,
+      sourceRef: task.source_ref ?? undefined,
+      title: `${autoReroute ? "[auto-reroute]" : "[revision]"} ${task.title}`,
+      conversationId: autoReroute ? undefined : task.conversation_id ?? undefined,
+    });
+
+    store.updateTask(revisionResult.taskId, { revision_count: newRevisionCount });
+
+    if (autoReroute) {
+      const rationale =
+        `Substituted ${task.agent_name} with ${autoReroute.agentName} after ` +
+        `${autoReroute.consecutiveRejections} consecutive rejected attempt(s) ` +
+        `on ${task.source_ref ?? task.title} (threshold ${autoReroute.threshold}).`;
+      store.addSupervisorDecision({
+        action: "dispatch",
+        agent_name: autoReroute.agentName,
+        reason: "auto-reroute",
+        message: revisionMessage,
+        rationale,
+        issue_refs: task.source_ref ? [task.source_ref] : [],
+        outcome: revisionResult.taskId ? "dispatched" : "skipped",
+        task_id: revisionResult.taskId || undefined,
+      });
+      if (revisionResult.taskId) {
+        await notifyOperator(
+          "Issue auto-rerouted",
+          `Issue ${task.source_ref ?? task.title} was reassigned from ${task.agent_name} to ` +
+          `${autoReroute.agentName} after ${autoReroute.consecutiveRejections} consecutive ` +
+          `rejections (threshold ${autoReroute.threshold}).`,
+          "warning",
+          `auto-reroute:${task.source_ref ?? taskId}:${task.agent_name}:${autoReroute.agentName}`,
+        );
+      }
+    }
+
+    return verifyTask(store, reviewerClient, revisionResult.taskId);
+  } catch (err) {
+    if (autoReroute) {
+      store.addSupervisorDecision({
+        action: "dispatch",
+        agent_name: autoReroute.agentName,
+        reason: "auto-reroute",
+        message: revisionMessage,
+        rationale:
+          `Attempted to substitute ${task.agent_name} with ${autoReroute.agentName} after ` +
+          `${autoReroute.consecutiveRejections} consecutive rejected attempt(s) ` +
+          `on ${task.source_ref ?? task.title}, but dispatch failed.`,
+        issue_refs: task.source_ref ? [task.source_ref] : [],
+        outcome: "failed",
+      });
+    }
+    verifierLog.warn("Revision dispatch failed, resetting for retry", {
+      taskId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    store.updateTask(taskId, { verification_status: null });
+    return result;
+  }
+}
+
+export async function reviewSupervisorState(
+  config: OrchestratorConfig,
+  store: StateStore,
+  reviewerClient: ReviewerClient,
+): Promise<SupervisorDecision[]> {
+  const context = buildSupervisorContext(config, store);
+  const decisions = await reviewerClient.supervisorReview(context);
+  const validated = filterVagueDispatches(store, decisions);
+
+  const dropped = decisions.length - validated.length;
+  if (dropped > 0) {
+    supervisorLog.warn("Supervisor: dropped vague idle-agent dispatches", { dropped });
+  }
+
+  supervisorLog.info("Supervisor review complete", {
+    decisions: validated.length,
+    actions: validated.map((d) => d.action),
+  });
+  return validated;
+}
+
+export function gateResolvedIssues(
+  config: OrchestratorConfig,
+  store: StateStore,
+  decisions: SupervisorDecision[],
+): GateResult {
+  const passed: SupervisorDecision[] = [];
+  const blocked: GateResult["blocked"] = [];
+
+  for (const d of decisions) {
+    if (d.action !== "dispatch" && d.action !== "follow-up") {
+      passed.push(d);
+      continue;
+    }
+
+    const agentGithub = d.agentName
+      ? config.agents[d.agentName]?.github
+      : undefined;
+
+    if (!agentGithub) {
+      passed.push(d);
+      continue;
+    }
+
+    const issueRefs = extractIssueRefs(`${d.message ?? ""} ${d.reason ?? ""}`);
+    if (issueRefs.length === 0) {
+      passed.push(d);
+      continue;
+    }
+
+    let skipReason: string | null = null;
+
+    for (const issueNum of issueRefs) {
+      try {
+        skipReason = liveValidateForDispatch(agentGithub, issueNum);
+        if (skipReason) {
+          supervisorLog.warn("Supervisor hard gate: dispatch blocked", {
+            agentName: d.agentName,
+            issueNum,
+            skipReason,
+            reason: d.reason,
+          });
+          break;
+        }
+      } catch (err) {
+        supervisorLog.warn("Supervisor hard gate: GitHub check failed, allowing dispatch", {
+          agentName: d.agentName,
+          issueNum,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    if (skipReason) {
+      blocked.push({ decision: d, skipReason });
+    } else {
+      passed.push(d);
+    }
+  }
+
+  if (blocked.length > 0) {
+    supervisorLog.info("Supervisor hard gate summary", {
+      total: decisions.length,
+      passed: passed.length,
+      blocked: blocked.length,
+      blockedReasons: blocked.map((b) => b.skipReason),
+    });
+  }
+
+  return { passed, blocked };
+}
+
+export function buildSupervisorContext(config: OrchestratorConfig, store: StateStore): string {
+  const sections: string[] = [];
+
+  const priorDecisions = store.getRecentSupervisorDecisions(10);
+  if (priorDecisions.length > 0) {
+    const lines = priorDecisions
+      .map((d: SupervisorDecisionRecord) => {
+        const agentPart = d.agent_name ? ` → ${d.agent_name}` : "";
+        const taskPart = d.task_id ? ` [task:${d.task_id.slice(0, 8)}]` : "";
+        const issuePart = d.issue_refs.length > 0 ? ` [issues: ${d.issue_refs.join(", ")}]` : "";
+        const gatePart = d.hard_gates.length > 0 ? ` [gates: ${d.hard_gates.join("; ")}]` : "";
+        return `- [${d.created_at.slice(0, 16)}] ${d.action}${agentPart}: ${d.reason} (outcome: ${d.outcome}${taskPart})${issuePart}${gatePart}`;
+      })
+      .join("\n");
+    sections.push(`## Recent Supervisor Decisions\n${lines}`);
+  }
+
+  const agents = Object.entries(config.agents)
+    .map(([name, a]) => `- ${name}: ${a.description}${a.github ? ` (${a.github})` : ""}`)
+    .join("\n");
+  sections.push(`## Agents\n${agents}`);
+
+  const openIssues = fetchOpenIssues(config);
+  if (openIssues.length > 0) {
+    sections.push(`## Open Issues\n${openIssues.join("\n")}`);
+  }
+
+  const recent = store.getRecentCompleted(10);
+  if (recent.length > 0) {
+    const taskLines = recent.map((t) => formatTask(t)).join("\n");
+    sections.push(`## Recent Completed Tasks\n${taskLines}`);
+  }
+
+  const researchFindings = store.getApprovedResearchFindings(5);
+  if (researchFindings.length > 0) {
+    const lines = researchFindings.map((t) => {
+      const linked = store.isResearchLinked(t.id) ? " → implementation issues filed" : " → not yet linked to implementation";
+      const score = t.quality_score ? ` [score: ${t.quality_score.toFixed(1)}]` : "";
+      const findings = t.result ? `\n  Findings: ${t.result.slice(0, 500)}` : "";
+      return `- ${t.id.slice(0, 8)} (${t.agent_name})${score}: ${t.title}${linked}${findings}`;
+    }).join("\n");
+    sections.push(`## Recent Research Findings\n${lines}`);
+  }
+
+  const unverified = store.getUnverified(10);
+  if (unverified.length > 0) {
+    const lines = unverified.map((t) => `- ${t.id.slice(0, 8)} (${t.agent_name}): ${t.title}`).join("\n");
+    sections.push(`## Unverified Tasks (${unverified.length})\n${lines}`);
+  }
+
+  const failed = store.listTasks({ status: "failed", limit: 5 });
+  if (failed.length > 0) {
+    const lines = failed.map((t) => `- ${t.id.slice(0, 8)} (${t.agent_name}): ${t.title}\n  Error: ${t.result?.slice(0, 100)}`).join("\n");
+    sections.push(`## Recent Failures\n${lines}`);
+  }
+
+  const loadLines: string[] = [];
+  for (const name of Object.keys(config.agents)) {
+    const active = store.listTasks({ status: "dispatched", agent_name: name, limit: 10 });
+    loadLines.push(`- ${name}: ${active.length} active task(s)`);
+  }
+  sections.push(`## Agent Load\n${loadLines.join("\n")}`);
+
+  const stats = store.getAgentStats();
+  if (stats.length > 0) {
+    const lines = stats.map((s) => {
+      const rate = s.total > 0 ? ((s.done / s.total) * 100).toFixed(0) : "N/A";
+      return `- ${s.agent_name}: ${s.done}/${s.total} done (${rate}%), ${s.failed} failed`;
+    }).join("\n");
+    sections.push(`## Agent Performance\n${lines}`);
+  }
+
+  return sections.join("\n\n");
+}
+
+export function extractIssueRefs(text: string): number[] {
+  const refs = new Set<number>();
+  for (const match of text.matchAll(/#(\d+)/g)) {
+    refs.add(parseInt(match[1], 10));
+  }
+  return [...refs];
+}
+
+export function isDecisionAlreadyResolved(
+  message: string,
+  reason: string,
+  agentGithub: string,
+): boolean {
+  const refs = extractIssueRefs(`${message} ${reason}`);
+  if (refs.length === 0) return false;
+
+  let checkedAny = false;
+
+  for (const num of refs) {
+    try {
+      try {
+        const cached = cachedGetIssueState(agentGithub, num);
+        checkedAny = true;
+        if (cached.state === "open" && !cached.hasMergedPR) {
+          return false;
+        }
+        continue;
+      } catch {
+      }
+
+      let state: string | null = null;
+
+      try {
+        state = execSync(
+          `gh issue view ${num} --repo ${agentGithub} --json state --jq '.state'`,
+          { encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"] },
+        ).trim().toUpperCase();
+      } catch {
+        try {
+          state = execSync(
+            `gh pr view ${num} --repo ${agentGithub} --json state --jq '.state'`,
+            { encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"] },
+          ).trim().toUpperCase();
+        } catch {
+          continue;
+        }
+      }
+
+      if (!state) continue;
+      checkedAny = true;
+
+      if (state === "OPEN") {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  return checkedAny;
+}
+
+export function isConcreteDispatch(message: string): boolean {
+  if (!message) return false;
+  const lower = message.toLowerCase();
+  if (ISSUE_REF_RE.test(message)) return true;
+  return ARTIFACT_KEYWORDS.some((kw) => lower.includes(kw));
+}
+
+function filterVagueDispatches(store: StateStore, decisions: SupervisorDecision[]): SupervisorDecision[] {
+  return decisions.filter((d) => {
+    if (d.action !== "dispatch" && d.action !== "follow-up") return true;
+    if (!d.agentName || !d.message) return true;
+
+    const isIdle = !store.hasActiveTask(d.agentName);
+    if (!isIdle) return true;
+
+    const concrete = isConcreteDispatch(d.message);
+    if (!concrete) {
+      supervisorLog.warn("Dropping vague idle-agent dispatch", {
+        agentName: d.agentName,
+        reason: d.reason,
+        message: d.message.slice(0, 120),
+      });
+    }
+    return concrete;
+  });
+}
+
+function fetchOpenIssues(config: OrchestratorConfig): string[] {
+  const lines: string[] = [];
+  for (const [name, agent] of Object.entries(config.agents)) {
+    if (!agent.github) continue;
+    try {
+      const raw = execSync(
+        `gh issue list --repo ${agent.github} --state open --json number,title -L 10`,
+        { encoding: "utf-8", timeout: 10000 },
+      ).trim();
+      if (!raw) continue;
+      const issues = JSON.parse(raw) as Array<{ number: number; title: string }>;
+      for (const issue of issues) {
+        lines.push(`- ${name} (${agent.github}): #${issue.number} ${issue.title}`);
+      }
+    } catch {
+    }
+  }
+  return lines;
+}
+
+function formatTask(t: Task): string {
+  const typeTag = t.task_type === "research" ? " [research]" : "";
+  const verified = t.verification_status ? ` [${t.verification_status}${t.quality_score ? ` ${t.quality_score.toFixed(1)}` : ""}]` : " [unverified]";
+  const result = t.result ? `\n  Result: ${t.result.slice(0, 150)}` : "";
+  return `- ${t.id.slice(0, 8)} (${t.agent_name}) ${t.status}${typeTag}${verified}: ${t.title}${result}`;
+}
+
+function getAutoRerouteTarget(
+  config: OrchestratorConfig,
+  store: StateStore,
+  task: Task,
+): { agentName: string; threshold: number; consecutiveRejections: number } | null {
+  if (!task.agent_name || !task.source_ref) return null;
+  const threshold = config.agents[task.agent_name]?.auto_reroute_rejection_threshold ?? 0;
+  if (threshold <= 0) return null;
+
+  const consecutiveRejections = store.countConsecutiveRejectionsForSourceRef(task.source_ref, task.agent_name);
+  if (consecutiveRejections < threshold) return null;
+
+  const substitute = selectSubstituteAgent(config, store, task);
+  if (!substitute) {
+    verifierLog.warn("Auto-reroute threshold reached, but no substitute agent is available", {
+      taskId: task.id,
+      sourceRef: task.source_ref,
+      agentName: task.agent_name,
+      threshold,
+      consecutiveRejections,
+    });
+    return null;
+  }
+
+  return { agentName: substitute, threshold, consecutiveRejections };
+}
+
+function selectSubstituteAgent(config: OrchestratorConfig, store: StateStore, task: Task): string | null {
+  const currentName = task.agent_name;
+  if (!currentName) return null;
+  const currentAgent = config.agents[currentName];
+  if (!currentAgent) return null;
+
+  const candidateEntries = Object.entries(config.agents)
+    .filter(([name]) => name !== currentName)
+    .filter(([name]) => !store.hasActiveTask(name))
+    .filter(([name]) => task.task_type === "research" || !store.isAgentAuthDegraded(name));
+
+  const samePool = currentAgent.pool
+    ? candidateEntries.filter(([, agent]) => agent.pool === currentAgent.pool)
+    : [];
+  if (samePool.length > 0) {
+    return pickHealthiestCandidate(store, samePool.map(([name]) => name));
+  }
+
+  const currentCapabilities = new Set(currentAgent.capabilities);
+  const currentTopics = new Set(currentAgent.owns_topics);
+  const ranked = candidateEntries
+    .map(([name, agent]) => ({
+      name,
+      score:
+        (agent.repo && currentAgent.repo && agent.repo === currentAgent.repo ? 100 : 0) +
+        (agent.github && currentAgent.github && agent.github === currentAgent.github ? 100 : 0) +
+        agent.capabilities.filter((cap) => currentCapabilities.has(cap)).length * 10 +
+        agent.owns_topics.filter((topic) => currentTopics.has(topic)).length,
+    }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (ranked.length === 0) return null;
+  const bestScore = ranked[0].score;
+  return pickHealthiestCandidate(store, ranked.filter((candidate) => candidate.score === bestScore).map((c) => c.name));
+}
+
+function pickHealthiestCandidate(store: StateStore, agentNames: string[]): string | null {
+  if (agentNames.length === 0) return null;
+  if (agentNames.length === 1) return agentNames[0];
+
+  const healthMap = new Map(
+    store.getAgentHealthBatch(agentNames).map((health) => [health.agent_name, health]),
+  );
+
+  return [...agentNames].sort((a, b) => compareHealth(
+    healthMap.get(a) ?? defaultHealth(a),
+    healthMap.get(b) ?? defaultHealth(b),
+  ))[0] ?? null;
+}
+
+function compareHealth(a: AgentHealth, b: AgentHealth): number {
+  if (a.is_healthy !== b.is_healthy) return a.is_healthy ? -1 : 1;
+  if (a.consecutive_failures !== b.consecutive_failures) {
+    return a.consecutive_failures - b.consecutive_failures;
+  }
+  return (a.last_error_at ?? "").localeCompare(b.last_error_at ?? "");
+}
+
+function defaultHealth(agentName: string): AgentHealth {
+  return {
+    agent_name: agentName,
+    consecutive_failures: 0,
+    last_error_at: null,
+    last_error_message: null,
+    last_success_at: null,
+    is_healthy: true,
+    auth_status: "ok",
+    auth_degraded_at: null,
+  };
+}
+
+export async function detectImprovements(
+  reviewerClient: ReviewerClient,
+  recentTasks: Task[],
+): Promise<DetectedImprovement[]> {
+  return reviewerClient.analyzeImprovements(recentTasks);
+}
