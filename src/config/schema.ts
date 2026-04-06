@@ -3,6 +3,12 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
+export interface ProviderConfig {
+  model: string;
+  api_key_env?: string;
+  daily_token_limit?: number;
+}
+
 export interface AgentDockerConfig {
   port?: number;
   permissions?: string;
@@ -41,6 +47,8 @@ export interface AgentConfig {
   github?: string;
   linear?: AgentLinearConfig;
   slack?: AgentSlackConfig;
+  /** Provider to use for this agent. Must match a key in the top-level `providers` map. Defaults to "claude". */
+  provider?: string;
   owns_topics: string[];
   system_prompt?: string;
   max_concurrent?: number;
@@ -162,6 +170,7 @@ export interface OrchestratorConfig {
   proxy: ProxyConfig;
   base_dir: string;
   orchestrator_dir: string;
+  providers?: Record<string, ProviderConfig>;
   verification?: VerificationConfig;
   pr_review?: PRReviewConfig;
   escalation?: EscalationConfig;

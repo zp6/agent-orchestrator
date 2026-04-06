@@ -14,6 +14,18 @@ orchestrator_dir: "/Users/paultarr/Documents/Git/claude-agent-orchestrator"
 # claude-orchestrator-dashboard → agent-dashboard, claude-orchestrator-reviewer →
 # agent-reviewer, claude-proxy → agent-proxy, claude-research-agent → research-agent.
 
+providers:
+  claude:
+    model: "claude-opus-4-6"
+    daily_token_limit: 5000000
+  openai:
+    model: "o3"
+    api_key_env: "OPENAI_API_KEY"
+    daily_token_limit: 10000000
+  gemini:
+    model: "gemini-2.5-pro"
+    api_key_env: "GEMINI_API_KEY"
+
 verification:
   enabled: true
   sources: ["github", "linear"]

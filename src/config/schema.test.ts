@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { loadConfig, getAgentDir, type PRReviewConfig, type OrchestratorConfig } from "./schema.js";
+import { loadConfig, getAgentDir, type PRReviewConfig, type OrchestratorConfig, type ProviderConfig } from "./schema.js";
 import { resolve } from "node:path";
 
 describe("loadConfig", () => {
@@ -48,6 +48,49 @@ describe("loadConfig", () => {
     const ports = Object.values(config.agents).map((a) => a.docker?.port);
     const uniquePorts = new Set(ports);
     expect(uniquePorts.size).toBe(ports.length);
+  });
+});
+
+describe("ProviderConfig", () => {
+  const configPath = resolve(import.meta.dirname, "..", "..", "agents.yaml");
+
+  it("loads providers from agents.yaml", () => {
+    const config = loadConfig(configPath);
+    expect(config.providers).toBeDefined();
+    expect(config.providers!["claude"]).toBeDefined();
+    expect(config.providers!["openai"]).toBeDefined();
+    expect(config.providers!["gemini"]).toBeDefined();
+  });
+
+  it("each provider has a model field", () => {
+    const config = loadConfig(configPath);
+    for (const [name, provider] of Object.entries(config.providers!)) {
+      expect(provider.model, `${name} missing model`).toBeTruthy();
+    }
+  });
+
+  it("non-claude providers have api_key_env", () => {
+    const config = loadConfig(configPath);
+    expect(config.providers!["openai"].api_key_env).toBe("OPENAI_API_KEY");
+    expect(config.providers!["gemini"].api_key_env).toBe("GEMINI_API_KEY");
+  });
+
+  it("ProviderConfig interface works correctly", () => {
+    const provider: ProviderConfig = {
+      model: "test-model",
+      api_key_env: "TEST_KEY",
+      daily_token_limit: 1000000,
+    };
+    expect(provider.model).toBe("test-model");
+    expect(provider.api_key_env).toBe("TEST_KEY");
+    expect(provider.daily_token_limit).toBe(1000000);
+  });
+
+  it("agent provider field defaults to undefined (caller defaults to claude)", () => {
+    const config = loadConfig(configPath);
+    // Agents in agents.yaml don't set provider yet — it should be undefined
+    const agent = config.agents["claude-agent-orchestrator"];
+    expect(agent.provider).toBeUndefined();
   });
 });
 
