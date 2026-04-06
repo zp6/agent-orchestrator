@@ -157,6 +157,20 @@ export async function dispatchGitHubIssues(
       continue;
     }
 
+    // Pre-dispatch auth hold (issue #430): skip auth-degraded agents entirely.
+    // Their issues stay in the unprocessed pool and will be dispatched once auth
+    // recovers (checkAuthRecovery un-quarantines them). This avoids wasting
+    // GitHub API calls fetching issues for agents that can't create PRs.
+    if (store.isAgentAuthDegraded(agentName)) {
+      log.warn("Holding issues for auth-degraded agent", {
+        agentName,
+        repo: agent.github,
+        reason: "GH_TOKEN missing or invalid — issues held until auth recovers",
+      });
+      result.skipped++;
+      continue;
+    }
+
     let issues: GitHubIssue[];
     try {
       issues = fetchOpenIssues(agent.github);
@@ -344,6 +358,16 @@ export async function dispatchIdleAgentBacklog(
     // Only dispatch to genuinely idle agents — skip anyone with an active task
     if (store.hasActiveTask(agentName)) {
       log.info("Idle pickup: skipping busy agent", { agentName });
+      continue;
+    }
+
+    // Pre-dispatch auth hold (issue #430): skip auth-degraded agents.
+    if (store.isAgentAuthDegraded(agentName)) {
+      log.warn("Idle pickup: holding issues for auth-degraded agent", {
+        agentName,
+        repo: agent.github,
+      });
+      result.skipped++;
       continue;
     }
 

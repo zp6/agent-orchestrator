@@ -73,6 +73,7 @@ describe("dispatchGitHubIssues", () => {
       getTask: vi.fn().mockReturnValue(null),
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
       // checkDuplicate calls this; return undefined by default (no prior task)
       findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
@@ -168,6 +169,31 @@ describe("dispatchGitHubIssues", () => {
     expect(result.dispatched).toBe(1);
     expect(result.errors).toHaveLength(0);
   });
+
+  it("skips auth-degraded agents without fetching issues (issue #430)", async () => {
+    vi.mocked(mockStore.isAgentAuthDegraded).mockReturnValue(true);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // Should skip without fetching issues or dispatching
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    expect(mockFetchIssues).not.toHaveBeenCalled();
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("dispatches to non-degraded agents while skipping degraded ones (issue #430)", async () => {
+    // my-agent is degraded, but it's the only one with github config
+    vi.mocked(mockStore.isAgentAuthDegraded).mockImplementation((name: string) => name === "my-agent");
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // my-agent is the only github agent, and it's degraded → nothing dispatched
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+  });
 });
 
 describe("pre-dispatch issue state validation", () => {
@@ -182,6 +208,7 @@ describe("pre-dispatch issue state validation", () => {
       getTask: vi.fn().mockReturnValue(null),
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
       findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -245,6 +272,7 @@ describe("duplicate PR detection before dispatch", () => {
       getTask: vi.fn().mockReturnValue(null),
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
       findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -427,6 +455,7 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       getTask: vi.fn().mockReturnValue(null),
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
       findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -529,6 +558,7 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       getTask: vi.fn().mockReturnValue(null),
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
       findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -750,6 +780,7 @@ describe("dispatchLinearChecks", () => {
       markProcessed: vi.fn(),
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "linear-agent", response: { content: "done" } }),
@@ -795,6 +826,7 @@ describe("dispatchSlackChecks", () => {
       markProcessed: vi.fn(),
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "slack-agent", response: { content: "done" } }),
@@ -841,6 +873,7 @@ describe("dispatchIdleAgentBacklog", () => {
       getTask: vi.fn().mockReturnValue(null),
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
       findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -1039,6 +1072,21 @@ describe("dispatchIdleAgentBacklog", () => {
     expect(mockFetchIssues).not.toHaveBeenCalled();
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
   });
+
+  it("skips auth-degraded agents without fetching issues (issue #430)", async () => {
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+    vi.mocked(mockStore.isAgentAuthDegraded).mockReturnValue(true);
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    expect(mockFetchIssues).not.toHaveBeenCalled();
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1059,6 +1107,7 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       getTask: vi.fn().mockReturnValue(null),
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
       findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -1176,6 +1225,7 @@ describe("in-flight branch detection", () => {
 
     const mockStore = {
       hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
       isProcessed: vi.fn().mockReturnValue(false),
       markProcessed: vi.fn(),
       getTask: vi.fn().mockReturnValue(null),
@@ -1208,6 +1258,7 @@ describe("in-flight branch detection", () => {
 
     const mockStore = {
       hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
       isProcessed: vi.fn().mockReturnValue(false),
       markProcessed: vi.fn(),
       getTask: vi.fn().mockReturnValue(null),
@@ -1240,6 +1291,7 @@ describe("in-flight branch detection", () => {
 
     const mockStore = {
       hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
       isProcessed: vi.fn().mockReturnValue(false),
       markProcessed: vi.fn(),
       getTask: vi.fn().mockReturnValue(null),
@@ -1268,6 +1320,7 @@ describe("in-flight branch detection", () => {
 
     const mockStore = {
       hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
       isProcessed: vi.fn().mockReturnValue(false),
       markProcessed: vi.fn(),
       getTask: vi.fn().mockReturnValue(null),
@@ -1300,6 +1353,7 @@ describe("approved PR skip logic", () => {
       getTask: vi.fn().mockReturnValue(null),
       listTasks: vi.fn().mockReturnValue([]),
       hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
       findTaskBySourceRef: vi.fn().mockReturnValue(undefined),
     } as unknown as StateStore;
     mockDispatcher = {

@@ -213,6 +213,10 @@ export class Daemon {
         await this.syncAgents();
         // Re-fetch registered agents after sync in case new ones were created
         registeredAgents = await this.deployer.getRegisteredAgents();
+        // Periodic container token scan (issue #430): detect agents whose
+        // GH_TOKEN has gone missing since the last check and quarantine them
+        // before any work is dispatched. Previously only ran at startup.
+        await this.checkAgentGhAuth();
         // Check if quarantined agents have recovered their GH_TOKEN
         await this.checkAuthRecovery();
       }
