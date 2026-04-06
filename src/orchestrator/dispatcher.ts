@@ -14,6 +14,7 @@ import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/re
 import { buildRejectionHistoryBlock } from "./rejection-history.js";
 import { notifyOperator } from "../service/notify.js";
 import { resolveAgentBudget } from "../cli/commands/budget.js";
+import { detectAndCreateFollowUps, formatFollowUpNote } from "./cross-repo-tracker.js";
 
 /** Maximum number of retry attempts for a failed dispatch. */
 export const MAX_RETRIES = 3;
@@ -525,9 +526,27 @@ export class Dispatcher {
 
       // Update task to done
       this.log.info("Task completed", { taskId: task.id, agentName, tokensIn: response.usage.input_tokens, tokensOut: response.usage.output_tokens });
+
+      // Detect cross-repo follow-ups: if the task description mentions work
+      // that belongs to a peer repo, create a child issue there so the
+      // downstream agent picks it up in the next supervisor cycle.
+      const completedTask = this.store.getTask(task.id);
+      let finalResult = response.content;
+      if (completedTask) {
+        const followUps = detectAndCreateFollowUps(completedTask, agentName, this.config);
+        if (followUps.length > 0) {
+          finalResult += formatFollowUpNote(followUps);
+          this.log.info("Cross-repo follow-ups created", {
+            taskId: task.id,
+            agentName,
+            followUps: followUps.map((f) => `${f.repo}#${f.issueNumber}`),
+          });
+        }
+      }
+
       this.store.updateTask(task.id, {
         status: "done",
-        result: response.content,
+        result: finalResult,
       });
 
       // Record healthy dispatch for pool failover routing
