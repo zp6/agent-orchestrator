@@ -426,6 +426,20 @@ export interface PRMetrics {
 }
 
 /**
+ * Per-agent token usage aggregate for a rolling time window.
+ * Returned by StateStore.getAgentTokenUsage().
+ */
+export interface AgentTokenUsage {
+  agent_name: string;
+  /** Sum of tokens_in for the window */
+  input_tokens: number;
+  /** Sum of tokens_out for the window */
+  output_tokens: number;
+  /** Total tokens (input + output) for the window */
+  total_tokens: number;
+}
+
+/**
  * Per-agent health record for pool failover routing.
  * Tracks consecutive dispatch failures so the dispatcher can route around
  * unhealthy pool instances without waiting for the supervisor to intervene.
@@ -2692,6 +2706,36 @@ export class StateStore {
       is_healthy: row.consecutive_failures < 3,
       auth_status: row.auth_status as AgentAuthStatus,
     }));
+  }
+
+  /**
+   * Aggregate token usage per agent over a rolling time window.
+   *
+   * Sums tokens_in + tokens_out from task_logs for the given window, grouped by
+   * agent_name.  Only rows with a non-null agent_name are included.  Returns one
+   * row per agent, sorted by total_tokens descending (heaviest consumers first).
+   *
+   * @param windowHours Number of hours to look back from now (e.g. 24 for daily, 168 for weekly).
+   */
+  getAgentTokenUsage(windowHours: number): AgentTokenUsage[] {
+    const rows = this.db.prepare(`
+      SELECT
+        agent_name,
+        COALESCE(SUM(COALESCE(tokens_in,  0)), 0) AS input_tokens,
+        COALESCE(SUM(COALESCE(tokens_out, 0)), 0) AS output_tokens,
+        COALESCE(SUM(COALESCE(tokens_in,  0) + COALESCE(tokens_out, 0)), 0) AS total_tokens
+      FROM task_logs
+      WHERE agent_name IS NOT NULL
+        AND created_at >= datetime('now', '-' || ? || ' hours')
+      GROUP BY agent_name
+      ORDER BY total_tokens DESC
+    `).all(windowHours) as Array<{
+      agent_name: string;
+      input_tokens: number;
+      output_tokens: number;
+      total_tokens: number;
+    }>;
+    return rows;
   }
 
   close(): void {

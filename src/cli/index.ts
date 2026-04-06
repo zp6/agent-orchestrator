@@ -21,6 +21,7 @@ import { registerTimeoutsCommand } from "./commands/timeouts.js";
 import { registerDirectivesCommand } from "./commands/directives.js";
 import { registerDeescalateCommand } from "./commands/deescalate.js";
 import { registerDecisionsCommand } from "./commands/decisions.js";
+import { registerBudgetCommand } from "./commands/budget.js";
 
 const program = new Command();
 
@@ -51,5 +52,6 @@ registerTimeoutsCommand(program);
 registerDirectivesCommand(program);
 registerDeescalateCommand(program);
 registerDecisionsCommand(program);
+registerBudgetCommand(program);
 
 program.parse();

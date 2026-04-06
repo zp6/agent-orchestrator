@@ -12,6 +12,7 @@ import { cachedValidateForDispatch } from "../triggers/issue-state-bridge.js";
 import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
 import { buildRejectionHistoryBlock } from "./rejection-history.js";
 import { notifyOperator } from "../service/notify.js";
+import { resolveAgentBudget } from "../cli/commands/budget.js";
 
 /** Maximum number of retry attempts for a failed dispatch. */
 export const MAX_RETRIES = 3;
@@ -275,6 +276,29 @@ export class Dispatcher {
       throw new Error(
         `Unknown agent: ${agentName}. Available: ${Object.keys(this.config.agents).join(", ")}`,
       );
+    }
+
+    // Pre-flight: check token budget pause (issue #436).
+    // When an agent has pause_on_exceeded: true and has consumed >= critical_pct of
+    // its daily budget, block dispatch so runaway spend is contained automatically.
+    const { budget, critPct, pauseOnExceeded } = resolveAgentBudget(this.config, agentName, "daily");
+    if (pauseOnExceeded && budget !== null) {
+      const usageRows = this.store.getAgentTokenUsage(24);
+      const agentUsage = usageRows.find((r) => r.agent_name === agentName);
+      const usedTokens = agentUsage?.total_tokens ?? 0;
+      if (usedTokens / budget * 100 >= critPct) {
+        this.log.warn("Dispatch blocked: agent has exceeded daily token budget", {
+          agentName,
+          usedTokens,
+          budget,
+          critPct,
+        });
+        throw new Error(
+          `Agent "${agentName}" has exceeded its daily token budget ` +
+          `(${usedTokens.toLocaleString()} / ${budget.toLocaleString()} tokens, ` +
+          `pause_on_exceeded is enabled). Dispatch will resume when the budget window resets.`,
+        );
+      }
     }
 
     // Pre-flight: check agent auth quarantine status (issue #418).

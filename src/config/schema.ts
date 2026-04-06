@@ -30,6 +30,35 @@ export interface AgentSlackConfig {
   mention_pattern?: string;
 }
 
+/** Per-agent token budget configuration. */
+export interface TokenBudgetConfig {
+  /**
+   * Daily token budget (resets at midnight UTC).
+   * When set, takes precedence over the provider-level daily_token_limit.
+   */
+  daily?: number;
+  /**
+   * Weekly token budget (rolling 7-day window).
+   */
+  weekly?: number;
+  /**
+   * Utilization percentage at which a dashboard warning is shown (default: 80).
+   * Range: 1–100.
+   */
+  warning_pct?: number;
+  /**
+   * Utilization percentage at which a Telegram alert fires (default: 100).
+   * Range: 1–200 (allows alerting before OR after the limit).
+   */
+  critical_pct?: number;
+  /**
+   * If true, pause new dispatches to this agent once critical_pct is reached.
+   * The pause lifts automatically when the budget window resets.
+   * Defaults to false.
+   */
+  pause_on_exceeded?: boolean;
+}
+
 export interface AgentConfig {
   dir: string;
   repo?: string;
@@ -55,6 +84,8 @@ export interface AgentConfig {
   max_concurrent?: number;
   stale_timeout_ms?: number;
   docker?: AgentDockerConfig;
+  /** Per-agent token budget alerts and pause-on-exceeded control. */
+  token_budget?: TokenBudgetConfig;
 }
 
 export interface VerificationConfig {
@@ -163,8 +194,23 @@ export interface DigestConfig {
   schedule?: string;
 }
 
+/** Global dashboard-level budget alert thresholds (applied when per-agent overrides are absent). */
+export interface GlobalBudgetConfig {
+  /**
+   * Default warning utilization percentage across all agents (default: 80).
+   * Can be overridden per-agent via agent.token_budget.warning_pct.
+   */
+  warning_pct?: number;
+  /**
+   * Default critical utilization percentage across all agents (default: 100).
+   * Can be overridden per-agent via agent.token_budget.critical_pct.
+   */
+  critical_pct?: number;
+}
+
 export interface DashboardConfig {
   digest?: DigestConfig;
+  budget?: GlobalBudgetConfig;
 }
 
 export interface OrchestratorConfig {

@@ -8,6 +8,13 @@ import { ManagementClient } from "../../client/management-client.js";
 import { pingAllAgents } from "./agents.js";
 import { TIMEOUT_MAX_RETRIES } from "../../service/daemon.js";
 import { validateGhAuth } from "../../triggers/github.js";
+import { notifyOperator } from "../../service/notify.js";
+import {
+  buildBudgetStatuses,
+  renderBar,
+  formatTokens,
+  type AgentBudgetStatus,
+} from "./budget.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -47,6 +54,8 @@ export interface HealthSnapshot {
   alerts: string[]; // plain text, no chalk for diffing
   hasCriticalFailure: boolean;
   dbUnavailable: boolean;
+  /** Per-agent budget utilization (24h window). Empty when DB unavailable. */
+  budgetStatuses: Map<string, AgentBudgetStatus>;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -181,13 +190,14 @@ async function gatherHealthSnapshot(
     agents.set(name, { containerStatus, healthStatus, latencyMs, ghAuthOk });
   }
 
-  // 4 & 5. Tasks + timeouts + retries from DB
+  // 4 & 5. Tasks + timeouts + retries + token budgets from DB
   let taskCounts: Record<string, number> = {};
   let unverified = 0;
   let agentTimeoutMap = new Map<string, TimeoutEntry>();
   let retryMetrics: RetryMetrics | null = null;
   let agentFailures: Array<{ agent_name: string; failed: number }> = [];
   let dbUnavailable = false;
+  let budgetStatuses = new Map<string, AgentBudgetStatus>();
 
   try {
     const store = new StateStore();
@@ -201,6 +211,13 @@ async function gatherHealthSnapshot(
     agentFailures = store.getAgentsWithRecentFailures(24, 1);
     unverified = store.countUnverified();
     retryMetrics = store.getRetryMetrics(24);
+
+    // Token budget utilization (24h window)
+    const tokenUsage = store.getAgentTokenUsage(24);
+    const budgetList = buildBudgetStatuses(config, tokenUsage, "daily");
+    for (const s of budgetList) {
+      budgetStatuses.set(s.agent_name, s);
+    }
 
     const timeoutRates24h = store.getTimeoutRates(24);
     const timeoutRates7d = store.getTimeoutRates(168);
@@ -317,6 +334,40 @@ async function gatherHealthSnapshot(
     }
   }
 
+  // Budget alerts — fire Telegram notifications for exceeded agents
+  const telegramPromises: Array<Promise<void>> = [];
+  for (const [agentName, bs] of budgetStatuses.entries()) {
+    if (bs.is_exceeded) {
+      const usedStr = formatTokens(bs.used_tokens);
+      const budgetStr = bs.budget_tokens !== null ? formatTokens(bs.budget_tokens) : "?";
+      const pauseNote = bs.pause_on_exceeded ? " — new dispatches paused" : "";
+      alerts.push(
+        `CRITICAL: ${agentName} exceeded daily token budget (${usedStr} / ${budgetStr} tokens)${pauseNote}`,
+      );
+      hasCriticalFailure = true;
+      telegramPromises.push(
+        notifyOperator(
+          `Token budget exceeded: ${agentName}`,
+          `Agent "${agentName}" has used ${usedStr} of its ${budgetStr} daily token budget ` +
+            `(${Math.round((bs.utilization ?? 1) * 100)}%)${pauseNote}.`,
+          "critical",
+          `budget-exceeded:${agentName}:daily`,
+        ),
+      );
+    } else if (bs.is_warning) {
+      const usedStr = formatTokens(bs.used_tokens);
+      const budgetStr = bs.budget_tokens !== null ? formatTokens(bs.budget_tokens) : "?";
+      alerts.push(
+        `WARN: ${agentName} is at ${Math.round((bs.utilization ?? 0) * 100)}% of daily token budget (${usedStr} / ${budgetStr} tokens)`,
+      );
+    }
+  }
+
+  // Fire Telegram alerts asynchronously (don't block snapshot return)
+  if (telegramPromises.length > 0) {
+    Promise.all(telegramPromises).catch(() => { /* best-effort */ });
+  }
+
   return {
     timestamp: new Date(),
     daemonRunning: running,
@@ -336,6 +387,7 @@ async function gatherHealthSnapshot(
     alerts,
     hasCriticalFailure,
     dbUnavailable,
+    budgetStatuses,
   };
 }
 
@@ -415,6 +467,21 @@ function printHealthSnapshot(snap: HealthSnapshot): void {
     }
 
     console.log(`  ${chalk.cyan(name.padEnd(32))} ${containerStr} ${healthStr}${ghAuthStr}`);
+
+    // Budget utilization bar (shown beneath the agent line when a budget is configured)
+    const bs = snap.budgetStatuses.get(name);
+    if (bs && bs.budget_tokens !== null) {
+      const bar = renderBar(bs.utilization, bs.warning_pct, bs.critical_pct, 16);
+      const pct = bs.utilization !== null ? `${Math.round(bs.utilization * 100)}%` : "—";
+      const pctColored =
+        bs.is_exceeded ? chalk.red(pct.padStart(4)) : bs.is_warning ? chalk.yellow(pct.padStart(4)) : chalk.green(pct.padStart(4));
+      const usedStr = formatTokens(bs.used_tokens);
+      const budgetStr = formatTokens(bs.budget_tokens);
+      const pauseNote = bs.pause_on_exceeded && bs.is_exceeded ? chalk.red(" [PAUSED]") : "";
+      console.log(
+        `  ${chalk.dim("  └ budget (24h):")} ${bar} ${pctColored}  ${chalk.dim(usedStr + " / " + budgetStr)}${pauseNote}`,
+      );
+    }
   }
 
   if (snap.dbUnavailable) {
