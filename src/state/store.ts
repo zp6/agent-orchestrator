@@ -904,6 +904,38 @@ export class StateStore {
     return row?.total ?? 0;
   }
 
+  /**
+   * Return prior task attempts for a given source_ref that have completed,
+   * failed, or been rejected. Used to inject rejection history into retry
+   * dispatch prompts so agents avoid repeating failed approaches.
+   */
+  getPriorAttempts(sourceRef: string): Array<{
+    id: string;
+    result: string | null;
+    verification_status: string | null;
+    quality_score: number | null;
+    verification_notes: string | null;
+    created_at: string;
+  }> {
+    return this.db
+      .prepare(
+        `SELECT id, result, verification_status, quality_score, verification_notes, created_at
+         FROM tasks
+         WHERE source_ref = ?
+           AND parent_task_id IS NULL
+           AND (status IN ('done', 'failed', 'escalated') OR verification_status = 'rejected')
+         ORDER BY created_at ASC`,
+      )
+      .all(sourceRef) as Array<{
+      id: string;
+      result: string | null;
+      verification_status: string | null;
+      quality_score: number | null;
+      verification_notes: string | null;
+      created_at: string;
+    }>;
+  }
+
   getRecentActivity(limit = 50): TaskLog[] {
     return this.db.prepare(
       "SELECT * FROM task_logs ORDER BY created_at DESC LIMIT ?",

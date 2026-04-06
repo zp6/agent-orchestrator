@@ -9,6 +9,7 @@ import { ulid } from "ulid";
 import { createLogger } from "../service/logger.js";
 import { validateGhAuth, GhAuthError } from "../triggers/github.js";
 import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
+import { buildRejectionHistoryBlock } from "./rejection-history.js";
 
 /** Maximum number of retry attempts for a failed dispatch. */
 export const MAX_RETRIES = 3;
@@ -315,7 +316,23 @@ export class Dispatcher {
     // Prepend the target-repo header so the agent always knows which repo to
     // target, even when instructions are deeply nested in a long message.
     const repoHeader = buildTargetRepoHeader(options?.sourceRef);
-    const messageToSend = repoHeader ? `${repoHeader}\n${message}` : message;
+    let messageToSend = repoHeader ? `${repoHeader}\n${message}` : message;
+
+    // Inject rejection history from prior attempts for the same source_ref
+    // so the agent avoids repeating failed approaches.
+    if (options?.sourceRef) {
+      const priorAttempts = this.store.getPriorAttempts(options.sourceRef);
+      const rejectionBlock = buildRejectionHistoryBlock(priorAttempts);
+      if (rejectionBlock) {
+        this.log.info("Injecting rejection history into dispatch", {
+          taskId: task.id,
+          agentName,
+          sourceRef: options.sourceRef,
+          priorAttemptCount: priorAttempts.length,
+        });
+        messageToSend = messageToSend + rejectionBlock;
+      }
+    }
 
     // Log the outgoing message
     this.log.info("Dispatching to agent", { taskId: task.id, agentName, title: task.title });
@@ -509,7 +526,23 @@ export class Dispatcher {
     const message = task.description ?? task.title;
     const conversationId = task.conversation_id ?? ulid();
     const repoHeader = buildTargetRepoHeader(task.source_ref);
-    const messageToSend = repoHeader ? `${repoHeader}\n${message}` : message;
+    let messageToSend = repoHeader ? `${repoHeader}\n${message}` : message;
+
+    // Inject rejection history from prior attempts for the same source_ref
+    // so the agent avoids repeating failed approaches on retry.
+    if (task.source_ref) {
+      const priorAttempts = this.store.getPriorAttempts(task.source_ref);
+      const rejectionBlock = buildRejectionHistoryBlock(priorAttempts);
+      if (rejectionBlock) {
+        this.log.info("Injecting rejection history into retry", {
+          taskId: task.id,
+          agentName,
+          sourceRef: task.source_ref,
+          priorAttemptCount: priorAttempts.length,
+        });
+        messageToSend = messageToSend + rejectionBlock;
+      }
+    }
 
     // Reset to dispatched for this attempt
     this.store.updateTask(task.id, {
