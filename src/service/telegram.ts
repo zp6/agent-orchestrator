@@ -155,6 +155,61 @@ async function handleCommand(text: string, ctx: TelegramContext): Promise<string
     return lines ? `🔀 *PRs*\n\n${lines}` : "🔀 No open PRs";
   }
 
+  // Stats — detailed progression metrics
+  if (cmd === "stats" || cmd === "/stats") {
+    return await buildStats(ctx);
+  }
+
+  // Issue creation — rough idea → agent fleshes out and creates GitHub issue
+  if (cmd.startsWith("issue ") || cmd.startsWith("/issue ")) {
+    const rest = text.trim().slice(text.trim().indexOf(" ") + 1);
+    if (!rest) return "Usage: issue <rough description>\nExample: issue add retry logic for failed PR merges";
+
+    // Determine target repo from keywords or default to orchestrator
+    const repos = Object.entries(ctx.config.agents)
+      .filter(([, a]) => a.github)
+      .map(([name, a]) => ({ name, repo: a.github! }));
+    const lowerRest = rest.toLowerCase();
+    let target = repos.find((r) => r.repo.includes("orchestrator"))!; // default
+    for (const r of repos) {
+      const repoShort = r.repo.split("/")[1].toLowerCase();
+      if (lowerRest.includes(repoShort) || lowerRest.includes(r.name.replace("claude-", ""))) {
+        target = r;
+        break;
+      }
+    }
+
+    // Dispatch to the target agent to create a detailed issue
+    const prompt = `Create a GitHub issue on ${target.repo} based on this idea from the operator:
+
+"${rest}"
+
+Steps:
+1. Think about what this feature/fix needs — scope it properly
+2. Write a clear title prefixed with [${target.name}]
+3. Write a detailed body with: Problem, Solution, Key files to modify
+4. Create it: gh issue create --repo ${target.repo} --label orchestrator --title "..." --body "..."
+5. Reply with the issue URL`;
+
+    ctx.dispatcher.dispatch(prompt, {
+      agentName: target.name,
+      source: "manual",
+      title: `[telegram-issue] ${rest.slice(0, 50)}`,
+    })
+      .then((r) => {
+        // Extract issue URL from the result if present
+        const urlMatch = r.response?.content?.match(/https:\/\/github\.com\/[^\s)]+\/issues\/\d+/);
+        if (urlMatch) {
+          sendReply(`✅ Issue created: ${urlMatch[0]}`);
+        } else {
+          sendReply(`✅ Issue task completed (${r.taskId})`);
+        }
+      })
+      .catch((e) => sendReply(`❌ Issue creation failed: ${e instanceof Error ? e.message : String(e)}`));
+
+    return `📝 Creating issue on ${target.repo}...`;
+  }
+
   // Dispatch (fire-and-forget — reply immediately, don't block polling)
   if (cmd.startsWith("dispatch ") || cmd.startsWith("/dispatch ")) {
     const parts = text.trim().split(/\s+/);
@@ -172,11 +227,13 @@ async function handleCommand(text: string, ctx: TelegramContext): Promise<string
   if (cmd === "help" || cmd === "/help" || cmd === "/start") {
     return `🤖 *Commands*
 
-summary (or s) — what's happening
+s — executive summary
+stats — detailed metrics
 status — agent status
 health — ping containers
 issues — open issues
 prs — open PRs
+issue <idea> — create issue from rough idea
 dispatch <agent> <msg> — send task
 help — this message`;
   }
@@ -189,6 +246,81 @@ help — this message`;
     .then((r) => sendReply(`✅ Directive completed (${r.taskId})`))
     .catch((e) => sendReply(`❌ Directive failed: ${e instanceof Error ? e.message : String(e)}`));
   return `📨 Forwarding as directive...`;
+}
+
+async function buildStats(ctx: TelegramContext): Promise<string> {
+  const repos = [...new Set(Object.values(ctx.config.agents).map((a) => a.github).filter(Boolean))] as string[];
+
+  // Per-agent stats
+  const agentStats = ctx.store.getAgentStats();
+  const agentLines = agentStats.map((a) => {
+    const rate = a.done + a.failed > 0 ? Math.round((a.done / (a.done + a.failed)) * 100) : 0;
+    const score = a.avg_score !== null ? ` | avg ${a.avg_score.toFixed(1)}` : "";
+    const name = a.agent_name.replace("claude-orchestrator-", "").replace("claude-", "");
+    return `  ${name}: ${a.done}✅ ${a.failed}❌ ${rate}%${score}`;
+  });
+
+  // Merged PRs by time window (parallel)
+  const mergedResults = await Promise.all(repos.map(async (repo) => {
+    const raw = await ghAsync(`gh pr list --repo ${repo} --state merged --json mergedAt -L 50`);
+    if (!raw) return [];
+    try {
+      return (JSON.parse(raw) as Array<{ mergedAt: string }>).map((pr) => new Date(pr.mergedAt).getTime());
+    } catch { return []; }
+  }));
+  const allMergedTimes = mergedResults.flat();
+  const now = Date.now();
+  const merged1h = allMergedTimes.filter((t) => now - t < 3600000).length;
+  const merged6h = allMergedTimes.filter((t) => now - t < 6 * 3600000).length;
+  const merged24h = allMergedTimes.filter((t) => now - t < 24 * 3600000).length;
+
+  // Closed issues by time window (parallel)
+  const closedResults = await Promise.all(repos.map(async (repo) => {
+    const raw = await ghAsync(`gh issue list --repo ${repo} --state closed --json closedAt -L 50`);
+    if (!raw) return [];
+    try {
+      return (JSON.parse(raw) as Array<{ closedAt: string }>).map((i) => new Date(i.closedAt).getTime());
+    } catch { return []; }
+  }));
+  const allClosedTimes = closedResults.flat();
+  const closed1h = allClosedTimes.filter((t) => now - t < 3600000).length;
+  const closed6h = allClosedTimes.filter((t) => now - t < 6 * 3600000).length;
+  const closed24h = allClosedTimes.filter((t) => now - t < 24 * 3600000).length;
+
+  // Open issues/PRs count
+  const [openIssueResults, openPRResults] = await Promise.all([
+    Promise.all(repos.map((r) => ghAsync(`gh issue list --repo ${r} --state open --json number -q length`))),
+    Promise.all(repos.map((r) => ghAsync(`gh pr list --repo ${r} --state open --json number -q length`))),
+  ]);
+  const openIssues = openIssueResults.reduce((s, r) => s + (parseInt(r) || 0), 0);
+  const openPRs = openPRResults.reduce((s, r) => s + (parseInt(r) || 0), 0);
+
+  // Task totals
+  const totalDone = agentStats.reduce((s, a) => s + a.done, 0);
+  const totalFailed = agentStats.reduce((s, a) => s + a.failed, 0);
+  const totalTotal = agentStats.reduce((s, a) => s + a.total, 0);
+  const successRate = totalDone + totalFailed > 0
+    ? Math.round((totalDone / (totalDone + totalFailed)) * 100)
+    : 0;
+
+  // Throughput per hour
+  const mergesPerHour = merged6h > 0 ? (merged6h / 6).toFixed(1) : "0";
+
+  return `📊 *Detailed Stats*
+
+*Throughput*
+  PRs merged: ${merged1h}/1h | ${merged6h}/6h | ${merged24h}/24h
+  Issues closed: ${closed1h}/1h | ${closed6h}/6h | ${closed24h}/24h
+  Rate: ~${mergesPerHour} merges/hour
+
+*Pipeline*
+  Open issues: ${openIssues}
+  Open PRs: ${openPRs}
+  Tasks: ${totalTotal} total | ${totalDone} done | ${totalFailed} failed
+  Success: ${successRate}%
+
+*Per Agent*
+${agentLines.join("\n")}`;
 }
 
 async function buildSummary(ctx: TelegramContext): Promise<string> {
