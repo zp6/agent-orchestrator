@@ -32,6 +32,7 @@ const AUTO_MERGE_SWEEP_EVERY_N_CYCLES = 3;  // ~15min — same cadence as PR rev
 const SUPERVISOR_CHECK_EVERY_N_CYCLES = 3; // ~15min at default interval
 const BACKLOG_TRIAGE_EVERY_N_CYCLES = 60; // ~5h at default interval
 const CONTAINER_RESTART_EVERY_N_CYCLES = 100; // ~50min at 30s interval — prevents Docker stalls
+const AGENT_SYNC_EVERY_N_CYCLES = 10; // ~5min at default interval — recover from proxy restarts
 const STALE_ISSUE_AGE_DAYS = 7;
 
 /**
@@ -194,7 +195,16 @@ export class Daemon {
       // Fetch which agents are actually deployed on the proxy
       registeredAgents = await this.deployer.getRegisteredAgents();
 
-      // 0. Poll Telegram for operator commands (lightweight — single HTTP call)
+      // 0a. Sync agents every 10 cycles (~5 min) to recover from proxy restarts.
+      //     The management API loses agent state when the proxy restarts, so periodic
+      //     sync ensures agents are re-registered without requiring a daemon restart.
+      if (this.cycleCount % AGENT_SYNC_EVERY_N_CYCLES === 0) {
+        await this.syncAgents();
+        // Re-fetch registered agents after sync in case new ones were created
+        registeredAgents = await this.deployer.getRegisteredAgents();
+      }
+
+      // 0b. Poll Telegram for operator commands (lightweight — single HTTP call)
       await pollTelegram({ config: this.config, store: this.store, dispatcher: this.dispatcher });
 
       // 1. Check for stale dispatched tasks (stuck or crashed agents).
