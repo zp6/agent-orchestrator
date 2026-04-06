@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { createProxyClient } from "./proxy-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
-import { getAgentDir, getAgentApiKey, getAgentBaseUrl } from "../config/schema.js";
+import { getAgentDir, getAgentApiKey, getAgentBaseUrl, getAgentModel } from "../config/schema.js";
 import type { TaskType } from "../state/store.js";
 import type { StateStore } from "../state/store.js";
 
@@ -224,7 +224,7 @@ export class AgentClient {
       : `${basePrompt}${directivesSuffix}`;
 
     const response = await client.messages.create({
-      model: options?.model ?? "claude-opus-4-6",
+      model: options?.model ?? getAgentModel(this.config, agentName),
       max_tokens: 16384,
       system: systemPrompt,
       messages: [{ role: "user", content: message }],
@@ -270,7 +270,7 @@ export class AgentClient {
       : `${basePrompt}${directivesSuffix}`;
 
     const stream = client.messages.stream({
-      model: options?.model ?? "claude-opus-4-6",
+      model: options?.model ?? getAgentModel(this.config, agentName),
       max_tokens: 16384,
       system: systemPrompt,
       messages: [{ role: "user", content: message }],

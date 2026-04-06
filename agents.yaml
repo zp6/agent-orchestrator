@@ -18,6 +18,7 @@ agents:
   claude-agent-orchestrator:
     dir: "claude-agent-orchestrator"
     repo: "git@github.com:rapartlu/claude-agent-orchestrator.git"
+    model: "claude-opus-4-6"
     description: "Core orchestration infrastructure: daemon loop, state store, task dispatching, trigger polling, agent deployment, and sync. Does NOT own dashboard/CLI UI or PR review/verification quality layer — those belong to the dashboard and reviewer agents."
     capabilities: ["typescript", "orchestration", "sqlite"]
     github: "rapartlu/claude-agent-orchestrator"
@@ -31,6 +32,7 @@ agents:
   claude-orchestrator-dashboard:
     dir: "claude-orchestrator-dashboard"
     repo: "git@github.com:rapartlu/claude-orchestrator-dashboard.git"
+    model: "claude-sonnet-4-6"
     description: "Dashboard, CLI commands, and observability UI for the orchestrator. Owns all user-facing interfaces: web dashboard, status/health/metrics commands, activity views, escalation queue."
     capabilities: ["typescript", "html", "css", "express", "dashboard"]
     github: "rapartlu/claude-orchestrator-dashboard"
@@ -45,6 +47,7 @@ agents:
     dir: "claude-orchestrator-reviewer"
     repo: "git@github.com:rapartlu/claude-orchestrator-reviewer.git"
     pool: "reviewer"
+    model: "claude-sonnet-4-6"
     description: "Quality and oversight layer. PR reviewer, task verifier, supervisor, improvement detector, and escalation system (Telegram notifications). Also serves as the LLM backend for all orchestrator operations."
     capabilities: ["typescript", "llm", "review", "verification"]
     github: "rapartlu/claude-orchestrator-reviewer"
@@ -59,6 +62,7 @@ agents:
     dir: "claude-orchestrator-reviewer"
     repo: "git@github.com:rapartlu/claude-orchestrator-reviewer.git"
     pool: "reviewer"
+    model: "claude-sonnet-4-6"
     description: "Reviewer pool instance 2. Shares LLM workload with other reviewer instances."
     capabilities: ["typescript", "llm", "review", "verification"]
     owns_topics: []
@@ -72,6 +76,7 @@ agents:
     dir: "claude-orchestrator-reviewer"
     repo: "git@github.com:rapartlu/claude-orchestrator-reviewer.git"
     pool: "reviewer"
+    model: "claude-sonnet-4-6"
     description: "Reviewer pool instance 3. Shares LLM workload with other reviewer instances."
     capabilities: ["typescript", "llm", "review", "verification"]
     owns_topics: []
@@ -83,6 +88,7 @@ agents:
 
   claude-orchestrator-telegram:
     dir: "claude-agent-orchestrator"
+    model: "claude-haiku-4-5"
     description: "Dedicated lightweight instance for Telegram command handling. Not for dispatched work — only serves quick queries (status, health, summary) without blocking on long tasks."
     capabilities: ["telegram", "status"]
     owns_topics: []
@@ -94,6 +100,7 @@ agents:
 
   claude-proxy:
     dir: "claude-proxy"
+    model: "claude-opus-4-6"
     repo: "git@github.com:rapartlu/claude-proxy.git"
     description: "Development proxy server that wraps Claude Code CLI instances and exposes them via the Anthropic Messages API. Manages agent containers, Docker lifecycle, and multi-agent routing."
     capabilities: ["typescript", "docker", "proxy", "api", "infrastructure"]

@@ -28,6 +28,8 @@ export interface AgentConfig {
   repo?: string;
   /** Agents with the same pool share a capability and work is distributed across them. */
   pool?: string;
+  /** LLM model to use for this agent. Defaults to "claude-opus-4-6". */
+  model?: string;
   /**
    * Branch to watch for new commits when `repo` is set.
    * Used by the auto-redeploy check in `getStaleRepoAgents()`.
@@ -229,6 +231,10 @@ export function getAgentDir(config: OrchestratorConfig, agentName: string): stri
     return `/home/claude/workspace/${repoName}`;
   }
   return resolve(config.base_dir, agent.dir);
+}
+
+export function getAgentModel(config: OrchestratorConfig, agentName: string): string {
+  return config.agents[agentName]?.model ?? "claude-opus-4-6";
 }
 
 export function getManagerUrl(config: OrchestratorConfig): string {

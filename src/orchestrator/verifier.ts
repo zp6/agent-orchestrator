@@ -84,7 +84,7 @@ export class Verifier {
       let response;
       try {
         response = await client.messages.create({
-          model: "claude-opus-4-6",
+          model: "claude-sonnet-4-6",
           max_tokens: 1024,
           system: isResearch ? RESEARCH_SYSTEM_PROMPT : SYSTEM_PROMPT,
           messages: [{ role: "user", content: prompt }],
