@@ -83,6 +83,24 @@ export interface SupervisorDecisionRecord {
 }
 
 /**
+ * Structured dispatch rationale attached to every supervisor dispatch decision.
+ * Combines LLM-generated reasoning with system-collected metadata so operators
+ * can audit *why* any dispatch was made.
+ */
+export interface DispatchRationale {
+  /** Free-text explanation from the supervisor LLM */
+  llm_reasoning: string | null;
+  /** Issue state at the moment of dispatch (e.g. "open", "closed") */
+  issue_state_at_dispatch: string | null;
+  /** Result of the existing-PR check (e.g. "none", "open PR", "merged PR") */
+  existing_pr_check_result: string | null;
+  /** How long the target agent had been idle before this dispatch (ms), null if unknown */
+  agent_idle_duration_ms: number | null;
+  /** LLM-assigned confidence score (0–1), null if not provided */
+  confidence_score: number | null;
+}
+
+/**
  * Distribution of quality scores across verified tasks, bucketed by tier.
  * Counts are mutually exclusive and exhaustive over all verified top-level tasks.
  */
@@ -662,6 +680,24 @@ export class StateStore {
     const dispatched = this.listTasks({ status: "dispatched", agent_name: agentName, limit: 1 });
     const inProgress = this.listTasks({ status: "in_progress", agent_name: agentName, limit: 1 });
     return dispatched.length > 0 || inProgress.length > 0;
+  }
+
+  /**
+   * Return how long an agent has been idle in milliseconds, or null if
+   * the agent has never completed a task.  "Idle" means the time elapsed
+   * since the agent's most recent task reached a terminal state (done or
+   * failed).
+   */
+  getAgentIdleSinceMs(agentName: string): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT updated_at FROM tasks
+         WHERE agent_name = ? AND status IN ('done', 'failed')
+         ORDER BY updated_at DESC LIMIT 1`,
+      )
+      .get(agentName) as { updated_at: string } | undefined;
+    if (!row) return null;
+    return Date.now() - new Date(row.updated_at).getTime();
   }
 
   /**

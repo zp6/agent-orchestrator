@@ -38,6 +38,8 @@ export interface SupervisorDecision {
   message?: string;
   reason: string;
   rationale?: string;
+  /** LLM-assigned confidence score (0–1) for dispatch/follow-up decisions. */
+  confidence?: number;
 }
 
 export interface DetectedImprovement {
@@ -133,7 +135,8 @@ Respond with ONLY a JSON array of decisions (no markdown, no code fences):
     "agentName": "claude-proxy",
     "message": "Your previous task on issue #2 is done but the branch wasn't pushed. Please push branch issue-2-expand-claude-md to origin.",
     "reason": "Branch created but not pushed to remote",
-    "rationale": "Issue #2 was opened 3 days ago and has no linked PR yet. The agent completed the work in task 01ABC but the branch was never pushed, blocking the PR review cycle. A successful result is the branch pushed and a PR created that closes #2."
+    "rationale": "Issue #2 was opened 3 days ago and has no linked PR yet. The agent completed the work in task 01ABC but the branch was never pushed, blocking the PR review cycle. A successful result is the branch pushed and a PR created that closes #2.",
+    "confidence": 0.85
   }
 ]
 
@@ -141,6 +144,11 @@ For "dispatch" and "follow-up" actions, ALWAYS include a "rationale" field that 
 1. Why this issue/task was selected (recency, failure count, user impact, priority)
 2. What prior work is relevant (previous attempts, related tasks, dependencies)
 3. What a successful result looks like (expected deliverable, acceptance criteria)
+
+Also include a "confidence" field (number 0–1) indicating how confident you are that this dispatch will succeed:
+- 0.9–1.0: high confidence (clear issue, idle agent, no prior failures)
+- 0.6–0.8: moderate confidence (some uncertainty — e.g. prior failures on similar tasks)
+- 0.0–0.5: low confidence (speculative dispatch, vague requirements, or risky agent assignment)
 
 IMPORTANT PRIORITIES:
 - Do NOT dispatch to agents that already have active (dispatched) tasks — they can only handle one task at a time
@@ -486,6 +494,9 @@ export class ReviewerClient {
           message: d.message ? String(d.message) : undefined,
           reason: String(d.reason),
           rationale: d.rationale ? String(d.rationale) : undefined,
+          confidence: typeof d.confidence === "number" && d.confidence >= 0 && d.confidence <= 1
+            ? d.confidence
+            : undefined,
         }));
     } catch {
       return [];

@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { StateStore } from "../../state/store.js";
-import type { SupervisorDecisionRecord } from "../../state/store.js";
+import type { SupervisorDecisionRecord, DispatchRationale } from "../../state/store.js";
 
 /**
  * Parse a duration string (e.g. "1h", "30m", "2d", "1h30m") into milliseconds.
@@ -50,6 +50,39 @@ function outcomeColour(outcome: string): string {
   }
 }
 
+/**
+ * Try to parse a rationale field as a structured DispatchRationale JSON.
+ * Returns null if the rationale is not structured JSON.
+ */
+function parseStructuredRationale(rationale: string | null): DispatchRationale | null {
+  if (!rationale) return null;
+  try {
+    const parsed = JSON.parse(rationale);
+    if (typeof parsed === "object" && parsed !== null && "llm_reasoning" in parsed) {
+      return parsed as DispatchRationale;
+    }
+  } catch {
+    // Not structured JSON — plain-text rationale from before this feature
+  }
+  return null;
+}
+
+/**
+ * Build a one-line human-readable summary from a structured rationale.
+ * Example: "issue=open pr=none idle=12m conf=0.85"
+ */
+function formatRationaleSummary(r: DispatchRationale): string {
+  const parts: string[] = [];
+  if (r.issue_state_at_dispatch) parts.push(`issue=${r.issue_state_at_dispatch}`);
+  if (r.existing_pr_check_result) parts.push(`pr=${r.existing_pr_check_result}`);
+  if (r.agent_idle_duration_ms !== null) {
+    const mins = Math.floor(r.agent_idle_duration_ms / 60_000);
+    parts.push(`idle=${mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h${mins % 60}m`}`);
+  }
+  if (r.confidence_score !== null) parts.push(`conf=${r.confidence_score.toFixed(2)}`);
+  return parts.join(" ");
+}
+
 /** Format a single decision row for the table. */
 function formatRow(d: SupervisorDecisionRecord): string {
   const ts = d.created_at.slice(0, 16).replace("T", " ");
@@ -59,7 +92,18 @@ function formatRow(d: SupervisorDecisionRecord): string {
   const reason =
     d.reason.length > 80 ? d.reason.slice(0, 77) + "..." : d.reason;
 
-  return `  ${chalk.dim(ts)}  ${chalk.bold(d.action.padEnd(13))} ${String(agent).padEnd(32)} ${outcome.padEnd(20)} ${task}  ${reason}`;
+  let line = `  ${chalk.dim(ts)}  ${chalk.bold(d.action.padEnd(13))} ${String(agent).padEnd(32)} ${outcome.padEnd(20)} ${task}  ${reason}`;
+
+  // Append structured rationale summary for dispatch/follow-up decisions
+  const structured = parseStructuredRationale(d.rationale);
+  if (structured) {
+    const summary = formatRationaleSummary(structured);
+    if (summary) {
+      line += `\n  ${" ".repeat(18)}${chalk.dim(summary)}`;
+    }
+  }
+
+  return line;
 }
 
 /**

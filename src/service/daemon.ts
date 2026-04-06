@@ -1,5 +1,5 @@
 import { loadConfig, type OrchestratorConfig } from "../config/schema.js";
-import { StateStore } from "../state/store.js";
+import { StateStore, type DispatchRationale } from "../state/store.js";
 import { setLLMUsageRecorder } from "../client/llm-client.js";
 import { Dispatcher, MAX_RETRIES, TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS, extractRepoFromSourceRef } from "../orchestrator/dispatcher.js";
 import { ReviewerClient } from "../client/reviewer-client.js";
@@ -8,12 +8,12 @@ import { ImprovementDetector } from "../orchestrator/improvement-detector.js";
 import { ResearchLinker } from "../orchestrator/research-linker.js";
 import { IssueCreator } from "../orchestrator/issue-creator.js";
 import { Deployer } from "../orchestrator/deployer.js";
-import { Supervisor, type GateResult } from "../orchestrator/supervisor.js";
+import { Supervisor, type GateResult, extractIssueRefs } from "../orchestrator/supervisor.js";
 import { PRReviewer } from "../orchestrator/pr-reviewer.js";
 import { findOrphanBranches, createPRForBranch, deleteStaleOrphanBranches, STALE_BRANCH_BEHIND_THRESHOLD } from "../orchestrator/pr-creator.js";
 import { PRCreationRetryQueue } from "../orchestrator/pr-creation-retry-queue.js";
 import { validateGhAuth } from "../triggers/github.js";
-import { cachedIsIssueOpen, logCacheMetrics } from "../triggers/issue-state-bridge.js";
+import { cachedIsIssueOpen, cachedGetIssueState, logCacheMetrics } from "../triggers/issue-state-bridge.js";
 import {
   dispatchGitHubIssues,
   dispatchIdleAgentBacklog,
@@ -1261,6 +1261,55 @@ export class Daemon {
     }
   }
 
+  /**
+   * Build a structured dispatch rationale for a supervisor decision.
+   *
+   * Collects system-level metadata (issue state, PR check, agent idle time)
+   * and combines it with the LLM-generated reasoning and confidence score
+   * to produce a JSON rationale string stored in the decisions table.
+   */
+  private buildDispatchRationale(d: import("../client/reviewer-client.js").SupervisorDecision): string {
+    const agentName = d.agentName ?? "";
+    const agentConfig = this.config.agents[agentName];
+    const repo = agentConfig?.github;
+
+    // Collect issue state + PR check from cache (no extra API call — uses data
+    // already fetched during the hard-gate phase of this same supervisor cycle)
+    let issueState: string | null = null;
+    let prCheckResult: string | null = null;
+
+    if (repo) {
+      const issueRefs = extractIssueRefs(`${d.message ?? ""} ${d.reason ?? ""}`);
+      if (issueRefs.length > 0) {
+        const ref = issueRefs[0]; // primary issue
+        try {
+          const cached = cachedGetIssueState(repo, ref);
+          issueState = cached.state;
+          prCheckResult = cached.hasMergedPR
+            ? "merged PR"
+            : cached.hasOpenPR
+              ? "open PR"
+              : "none";
+        } catch {
+          // Cache miss or GitHub API error — leave as null
+        }
+      }
+    }
+
+    // Agent idle duration
+    const idleMs = this.store.getAgentIdleSinceMs(agentName);
+
+    const rationale: DispatchRationale = {
+      llm_reasoning: d.rationale ?? null,
+      issue_state_at_dispatch: issueState,
+      existing_pr_check_result: prCheckResult,
+      agent_idle_duration_ms: idleMs,
+      confidence_score: d.confidence ?? null,
+    };
+
+    return JSON.stringify(rationale);
+  }
+
   private async runSupervisor(time: string): Promise<void> {
     try {
       const decisions = await this.supervisor.review();
@@ -1310,6 +1359,9 @@ export class Daemon {
         }
 
         if ((d.action === "dispatch" || d.action === "follow-up") && d.agentName && d.message) {
+          // Build structured rationale (combines LLM reasoning + system metadata)
+          const structuredRationale = this.buildDispatchRationale(d);
+
           if (this.store.hasActiveTask(d.agentName)) {
             this.log.info("Skipping supervisor dispatch: agent busy", { agentName: d.agentName, reason: d.reason });
             console.log(`  ${d.action} → ${d.agentName} SKIPPED (agent busy): ${d.reason}`);
@@ -1318,7 +1370,7 @@ export class Daemon {
               agent_name: d.agentName,
               reason: d.reason,
               message: d.message,
-              rationale: d.rationale,
+              rationale: structuredRationale,
               outcome: "skipped",
             });
           } else {
@@ -1345,7 +1397,7 @@ export class Daemon {
                   agent_name: d.agentName,
                   reason: d.reason,
                   message: d.message,
-                  rationale: d.rationale,
+                  rationale: structuredRationale,
                   outcome: "dispatched",
                   task_id: result.taskId,
                 });
@@ -1356,7 +1408,7 @@ export class Daemon {
                   agent_name: d.agentName,
                   reason: d.reason,
                   message: d.message,
-                  rationale: d.rationale,
+                  rationale: structuredRationale,
                   outcome: "failed",
                 });
               });
@@ -1367,7 +1419,7 @@ export class Daemon {
                 agent_name: d.agentName,
                 reason: d.reason,
                 message: d.message,
-                rationale: d.rationale,
+                rationale: structuredRationale,
                 outcome: "failed",
               });
             }
