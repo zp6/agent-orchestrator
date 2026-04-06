@@ -80,6 +80,11 @@ function formatRationaleSummary(r: DispatchRationale): string {
     parts.push(`idle=${mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h${mins % 60}m`}`);
   }
   if (r.confidence_score !== null) parts.push(`conf=${r.confidence_score.toFixed(2)}`);
+  if (r.pre_dispatch_validation?.outcome === "blocked") {
+    parts.push(
+      `blocked=${r.pre_dispatch_validation.failure_check ?? "validation"}:${r.pre_dispatch_validation.failure_code ?? "blocked"}`,
+    );
+  }
   return parts.join(" ");
 }
 

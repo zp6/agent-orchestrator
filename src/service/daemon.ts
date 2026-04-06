@@ -1268,7 +1268,15 @@ export class Daemon {
    * and combines it with the LLM-generated reasoning and confidence score
    * to produce a JSON rationale string stored in the decisions table.
    */
-  private buildDispatchRationale(d: import("../client/reviewer-client.js").SupervisorDecision): string {
+  private buildDispatchRationale(
+    d: import("../client/reviewer-client.js").SupervisorDecision,
+    validation?: {
+      outcome: "passed" | "blocked";
+      failureCheck: string | null;
+      failureCode: string | null;
+      failureReason: string | null;
+    } | null,
+  ): string {
     const agentName = d.agentName ?? "";
     const agentConfig = this.config.agents[agentName];
     const repo = agentConfig?.github;
@@ -1305,6 +1313,14 @@ export class Daemon {
       existing_pr_check_result: prCheckResult,
       agent_idle_duration_ms: idleMs,
       confidence_score: d.confidence ?? null,
+      pre_dispatch_validation: validation
+        ? {
+            outcome: validation.outcome,
+            failure_check: validation.failureCheck,
+            failure_code: validation.failureCode,
+            failure_reason: validation.failureReason,
+          }
+        : null,
     };
 
     return JSON.stringify(rationale);
@@ -1373,8 +1389,14 @@ export class Daemon {
         }
 
         if ((d.action === "dispatch" || d.action === "follow-up") && d.agentName && d.message) {
+          const agentRepo = this.config.agents[d.agentName]?.github ?? null;
+          const issueRefs = agentRepo ? extractIssueRefs(`${d.message ?? ""} ${d.reason ?? ""}`) : [];
+          const derivedSourceRef = agentRepo && issueRefs.length > 0
+            ? `${agentRepo}#${issueRefs[0]}`
+            : undefined;
+
           // Build structured rationale (combines LLM reasoning + system metadata)
-          const structuredRationale = this.buildDispatchRationale(d);
+          const structuredRationale = this.buildDispatchRationale(d, null);
 
           if (this.store.hasActiveTask(d.agentName)) {
             this.log.info("Skipping supervisor dispatch: agent busy", { agentName: d.agentName, reason: d.reason });
@@ -1405,15 +1427,30 @@ export class Daemon {
               // Fire-and-forget: don't block the daemon cycle waiting for agent response
               this.dispatcher.dispatch(dispatchMessage, {
                 agentName: d.agentName,
+                source: derivedSourceRef ? "github" : "manual",
+                sourceRef: derivedSourceRef,
                 title: `[supervisor] ${d.reason.slice(0, 80)}`,
               }).then((result) => {
+                const rationaleWithValidation = this.buildDispatchRationale(d, result.validation ?? null);
+                if (!result.taskId) {
+                  console.log(`  ${d.action} → ${d.agentName} SKIPPED (${result.validation?.failureCode ?? "validation"}): ${d.reason}`);
+                  this.store.addSupervisorDecision({
+                    action: d.action,
+                    agent_name: d.agentName,
+                    reason: d.reason,
+                    message: d.message,
+                    rationale: rationaleWithValidation,
+                    outcome: "skipped",
+                  });
+                  return;
+                }
                 console.log(`  ${d.action} → ${d.agentName} (task ${result.taskId.slice(0, 8)}): ${d.reason}`);
                 this.store.addSupervisorDecision({
                   action: d.action,
                   agent_name: d.agentName,
                   reason: d.reason,
                   message: d.message,
-                  rationale: structuredRationale,
+                  rationale: rationaleWithValidation,
                   issue_refs: issueRefs,
                   outcome: "dispatched",
                   task_id: result.taskId,

@@ -16,6 +16,7 @@ vi.mock("./github.js", () => ({
 
 vi.mock("./reporters.js", () => ({
   reportResult: vi.fn(),
+  DEFAULT_ESCALATION_RETRY_LIMIT: 3,
 }));
 
 // Mock issue-state-bridge: default = issue is open, no PRs
@@ -87,6 +88,8 @@ describe("dispatchGitHubIssues", () => {
       clearSourceRefPriority: vi.fn(),
       // checkDuplicate calls this; return undefined by default (no prior task)
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
+      countFailuresForSourceRef: vi.fn().mockReturnValue(0),
+      addDispatchValidation: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -242,6 +245,8 @@ describe("pre-dispatch issue state validation", () => {
       isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
       clearSourceRefPriority: vi.fn(),
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
+      countFailuresForSourceRef: vi.fn().mockReturnValue(0),
+      addDispatchValidation: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -308,6 +313,8 @@ describe("duplicate PR detection before dispatch", () => {
       isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
       clearSourceRefPriority: vi.fn(),
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
+      countFailuresForSourceRef: vi.fn().mockReturnValue(0),
+      addDispatchValidation: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -503,6 +510,8 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
       clearSourceRefPriority: vi.fn(),
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
+      countFailuresForSourceRef: vi.fn().mockReturnValue(0),
+      addDispatchValidation: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -608,6 +617,8 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
       clearSourceRefPriority: vi.fn(),
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
+      countFailuresForSourceRef: vi.fn().mockReturnValue(0),
+      addDispatchValidation: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -932,6 +943,8 @@ describe("dispatchIdleAgentBacklog", () => {
       isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
       clearSourceRefPriority: vi.fn(),
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
+      countFailuresForSourceRef: vi.fn().mockReturnValue(0),
+      addDispatchValidation: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1171,6 +1184,8 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
       clearSourceRefPriority: vi.fn(),
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
+      countFailuresForSourceRef: vi.fn().mockReturnValue(0),
+      addDispatchValidation: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1295,6 +1310,8 @@ describe("in-flight branch detection", () => {
       getTask: vi.fn().mockReturnValue(null),
       addLog: vi.fn(),
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(null),
+      countFailuresForSourceRef: vi.fn().mockReturnValue(0),
+      addDispatchValidation: vi.fn(),
     } as unknown as StateStore;
 
     vi.mocked(mockStore.hasActiveTask).mockReturnValue(false);
@@ -1330,6 +1347,8 @@ describe("in-flight branch detection", () => {
       getTask: vi.fn().mockReturnValue(null),
       addLog: vi.fn(),
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(null),
+      countFailuresForSourceRef: vi.fn().mockReturnValue(0),
+      addDispatchValidation: vi.fn(),
     } as unknown as StateStore;
 
     await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1366,6 +1385,8 @@ describe("in-flight branch detection", () => {
       getTask: vi.fn().mockReturnValue(null),
       addLog: vi.fn(),
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(null),
+      countFailuresForSourceRef: vi.fn().mockReturnValue(0),
+      addDispatchValidation: vi.fn(),
     } as unknown as StateStore;
 
     const result = await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1397,6 +1418,8 @@ describe("in-flight branch detection", () => {
       getTask: vi.fn().mockReturnValue(null),
       addLog: vi.fn(),
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(null),
+      countFailuresForSourceRef: vi.fn().mockReturnValue(0),
+      addDispatchValidation: vi.fn(),
     } as unknown as StateStore;
 
     await dispatchIdleAgentBacklog(branchConfig, mockStore, mockDispatcher);
@@ -1428,6 +1451,8 @@ describe("approved PR skip logic", () => {
       isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
       clearSourceRefPriority: vi.fn(),
       findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
+      countFailuresForSourceRef: vi.fn().mockReturnValue(0),
+      addDispatchValidation: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),

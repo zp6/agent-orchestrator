@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { execSync } from "node:child_process";
-import { StateStore, type Task } from "../../state/store.js";
+import { StateStore, type DispatchValidationRecord, type Task } from "../../state/store.js";
 import { loadConfig, type OrchestratorConfig } from "../../config/schema.js";
 import { findExistingPRsForIssue, type LinkedPR } from "../../triggers/github.js";
 
@@ -46,6 +46,8 @@ export interface IssueStatusResult {
   summary: string;
   /** Other open issues that share >60% keyword overlap — potential duplicates */
   similarIssues: SimilarIssue[];
+  /** Recent pre-dispatch validation attempts for this issue, newest first */
+  validations: DispatchValidationRecord[];
 }
 
 /**
@@ -103,6 +105,7 @@ export async function getIssueStatus(
 
   // 5. Build summary line
   const summary = buildSummaryLine(issueState, issueTitle, linkedPRs, allTasks);
+  const validations = store.getDispatchValidationHistory(sourceRef, 5);
 
   return {
     repo,
@@ -113,6 +116,7 @@ export async function getIssueStatus(
     tasks,
     summary,
     similarIssues,
+    validations,
   };
 }
 
@@ -347,6 +351,18 @@ function printIssueStatus(result: IssueStatusResult): void {
 
   // Summary
   console.log(`  ${chalk.bold("Summary:")} ${result.summary}\n`);
+
+  if (result.validations.length > 0) {
+    console.log(chalk.bold("  Recent validations:"));
+    for (const validation of result.validations) {
+      const badge = validation.outcome === "blocked" ? chalk.yellow("blocked") : chalk.green("passed ");
+      const age = formatAge(validation.created_at);
+      const reason = validation.failure_reason ?? "all checks passed";
+      const check = validation.failure_check ? chalk.dim(` (${validation.failure_check})`) : "";
+      console.log(`    ${badge}${check}  ${reason}  ${chalk.dim(age)}`);
+    }
+    console.log();
+  }
 }
 
 /**

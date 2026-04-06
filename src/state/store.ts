@@ -86,6 +86,31 @@ export interface SupervisorDecisionRecord {
   created_at: string;
 }
 
+export type DispatchValidationOutcome = "passed" | "blocked";
+export type DispatchValidationCheckStatus = "passed" | "failed" | "info";
+
+export interface DispatchValidationCheck {
+  name: string;
+  status: DispatchValidationCheckStatus;
+  code: string;
+  detail: string;
+}
+
+export interface DispatchValidationRecord {
+  id: number;
+  source: string;
+  source_ref: string | null;
+  agent_name: string | null;
+  repo: string | null;
+  issue_number: number | null;
+  outcome: DispatchValidationOutcome;
+  failure_check: string | null;
+  failure_code: string | null;
+  failure_reason: string | null;
+  checklist_json: string;
+  created_at: string;
+}
+
 /**
  * Structured dispatch rationale attached to every supervisor dispatch decision.
  * Combines LLM-generated reasoning with system-collected metadata so operators
@@ -102,6 +127,13 @@ export interface DispatchRationale {
   agent_idle_duration_ms: number | null;
   /** LLM-assigned confidence score (0–1), null if not provided */
   confidence_score: number | null;
+  /** Summary of the authoritative pre-dispatch validation outcome, if any */
+  pre_dispatch_validation?: {
+    outcome: DispatchValidationOutcome;
+    failure_check: string | null;
+    failure_code: string | null;
+    failure_reason: string | null;
+  } | null;
 }
 
 function parseJsonStringArray(value: unknown): string[] {
@@ -650,6 +682,7 @@ export class StateStore {
     this.runTokenUsageMigration();
     this.runTokenUsageCacheMigration();
     this.runDispatchWasteMigration();
+    this.runDispatchValidationMigration();
   }
 
   private runPhase2Migration(): void {
@@ -2066,6 +2099,66 @@ export class StateStore {
     }));
   }
 
+  addDispatchValidation(params: {
+    source: string;
+    source_ref?: string;
+    agent_name?: string;
+    repo?: string;
+    issue_number?: number;
+    outcome: DispatchValidationOutcome;
+    failure_check?: string | null;
+    failure_code?: string | null;
+    failure_reason?: string | null;
+    checklist: DispatchValidationCheck[];
+  }): DispatchValidationRecord {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `INSERT INTO dispatch_validations
+           (source, source_ref, agent_name, repo, issue_number, outcome, failure_check, failure_code, failure_reason, checklist_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        params.source,
+        params.source_ref ?? null,
+        params.agent_name ?? null,
+        params.repo ?? null,
+        params.issue_number ?? null,
+        params.outcome,
+        params.failure_check ?? null,
+        params.failure_code ?? null,
+        params.failure_reason ?? null,
+        JSON.stringify(params.checklist),
+        now,
+      );
+
+    return this.db
+      .prepare("SELECT * FROM dispatch_validations WHERE id = ?")
+      .get(result.lastInsertRowid as number) as DispatchValidationRecord;
+  }
+
+  getRecentDispatchValidationFailures(limit = 20): DispatchValidationRecord[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM dispatch_validations
+         WHERE outcome = 'blocked'
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`,
+      )
+      .all(limit) as DispatchValidationRecord[];
+  }
+
+  getDispatchValidationHistory(sourceRef: string, limit = 10): DispatchValidationRecord[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM dispatch_validations
+         WHERE source_ref = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`,
+      )
+      .all(sourceRef, limit) as DispatchValidationRecord[];
+  }
+
   /**
    * Return retry health metrics for the last `hours` hours.
    *
@@ -3303,6 +3396,28 @@ export class StateStore {
         "ALTER TABLE daemon_cycles ADD COLUMN stale_dispatches_prevented INTEGER NOT NULL DEFAULT 0",
       );
     }
+  }
+
+  private runDispatchValidationMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS dispatch_validations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT NOT NULL,
+        source_ref TEXT,
+        agent_name TEXT,
+        repo TEXT,
+        issue_number INTEGER,
+        outcome TEXT NOT NULL,
+        failure_check TEXT,
+        failure_code TEXT,
+        failure_reason TEXT,
+        checklist_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_dispatch_validations_created ON dispatch_validations(created_at);
+      CREATE INDEX IF NOT EXISTS idx_dispatch_validations_source_ref ON dispatch_validations(source_ref);
+      CREATE INDEX IF NOT EXISTS idx_dispatch_validations_outcome ON dispatch_validations(outcome);
+    `);
   }
 
   /**

@@ -58,6 +58,24 @@ vi.mock("../triggers/issue-state-bridge.js", () => ({
   logCacheMetrics: vi.fn(),
 }));
 
+vi.mock("./pre-dispatch-validator.js", () => ({
+  runGitHubPreDispatchValidation: vi.fn().mockImplementation(({ source, agentName, issue }) => ({
+    outcome: "passed",
+    source,
+    sourceRef: `${issue.repo}#${issue.number}`,
+    agentName,
+    repo: issue.repo,
+    issueNumber: issue.number,
+    checks: [],
+    failureCheck: null,
+    failureCode: null,
+    failureReason: null,
+    blockingPRNumber: null,
+    draftPR: null,
+    existingBranch: null,
+  })),
+}));
+
 import { reportEscalation } from "../triggers/reporters.js";
 const mockReportEscalation = vi.mocked(reportEscalation);
 
@@ -71,6 +89,9 @@ const mockFindExistingPRsForIssue = vi.mocked(findExistingPRsForIssue);
 
 import { cachedValidateForDispatch } from "../triggers/issue-state-bridge.js";
 const mockCachedValidateForDispatch = vi.mocked(cachedValidateForDispatch);
+
+import { runGitHubPreDispatchValidation } from "./pre-dispatch-validator.js";
+const mockRunGitHubPreDispatchValidation = vi.mocked(runGitHubPreDispatchValidation);
 
 // Track the last mockSend across beforeEach
 let mockSend: ReturnType<typeof vi.fn>;
@@ -884,7 +905,21 @@ describe("Dispatcher.dispatch — closed-issue guard (issue #444)", () => {
   });
 
   it("skips dispatch and returns skip result when source issue is closed", async () => {
-    mockCachedValidateForDispatch.mockReturnValueOnce("issue owner/repo#99 is closed");
+    mockRunGitHubPreDispatchValidation.mockReturnValueOnce({
+      outcome: "blocked",
+      source: "github",
+      sourceRef: "owner/repo#99",
+      agentName: "test-agent",
+      repo: "owner/repo",
+      issueNumber: 99,
+      checks: [],
+      failureCheck: "issue_state",
+      failureCode: "issue_closed",
+      failureReason: "issue owner/repo#99 is closed",
+      blockingPRNumber: null,
+      draftPR: null,
+      existingBranch: null,
+    });
 
     const result = await dispatcher.dispatch("fix the bug", {
       agentName: "test-agent",
@@ -907,7 +942,6 @@ describe("Dispatcher.dispatch — closed-issue guard (issue #444)", () => {
   });
 
   it("proceeds with dispatch when source issue is open", async () => {
-    mockCachedValidateForDispatch.mockReturnValueOnce(null);
     mockSend.mockResolvedValueOnce({
       content: "done",
       usage: { input_tokens: 5, output_tokens: 5 },
@@ -934,7 +968,7 @@ describe("Dispatcher.dispatch — closed-issue guard (issue #444)", () => {
       source: "manual",
     });
 
-    expect(mockCachedValidateForDispatch).not.toHaveBeenCalled();
+    expect(mockRunGitHubPreDispatchValidation).not.toHaveBeenCalled();
     expect(mockSend).toHaveBeenCalledTimes(1);
   });
 
@@ -950,7 +984,7 @@ describe("Dispatcher.dispatch — closed-issue guard (issue #444)", () => {
       sourceRef: "owner/repo",
     });
 
-    expect(mockCachedValidateForDispatch).not.toHaveBeenCalled();
+    expect(mockRunGitHubPreDispatchValidation).not.toHaveBeenCalled();
     expect(mockSend).toHaveBeenCalledTimes(1);
   });
 });
@@ -971,7 +1005,21 @@ describe("Dispatcher.dispatch — already-resolved guard (issue #457)", () => {
   });
 
   it("skips dispatch when issue has a merged PR", async () => {
-    mockCachedValidateForDispatch.mockReturnValueOnce("issue owner/repo#99 has a merged PR");
+    mockRunGitHubPreDispatchValidation.mockReturnValueOnce({
+      outcome: "blocked",
+      source: "github",
+      sourceRef: "owner/repo#99",
+      agentName: "test-agent",
+      repo: "owner/repo",
+      issueNumber: 99,
+      checks: [],
+      failureCheck: "branch_conflicts",
+      failureCode: "merged_pr_exists",
+      failureReason: "issue owner/repo#99 has a merged PR",
+      blockingPRNumber: 10,
+      draftPR: null,
+      existingBranch: null,
+    });
 
     const result = await dispatcher.dispatch("fix the bug", {
       agentName: "test-agent",
@@ -994,7 +1042,6 @@ describe("Dispatcher.dispatch — already-resolved guard (issue #457)", () => {
   });
 
   it("proceeds with dispatch when no merged PR exists", async () => {
-    mockCachedValidateForDispatch.mockReturnValueOnce(null);
     mockSend.mockResolvedValueOnce({
       content: "done",
       usage: { input_tokens: 5, output_tokens: 5 },
@@ -1010,8 +1057,7 @@ describe("Dispatcher.dispatch — already-resolved guard (issue #457)", () => {
     expect(result.taskId).not.toBe("");
   });
 
-  it("proceeds with dispatch when cachedValidateForDispatch returns null", async () => {
-    mockCachedValidateForDispatch.mockReturnValueOnce(null);
+  it("proceeds with dispatch when pre-dispatch validation passes", async () => {
     mockSend.mockResolvedValueOnce({
       content: "done",
       usage: { input_tokens: 5, output_tokens: 5 },
@@ -1038,7 +1084,7 @@ describe("Dispatcher.dispatch — already-resolved guard (issue #457)", () => {
       source: "manual",
     });
 
-    expect(mockCachedValidateForDispatch).not.toHaveBeenCalled();
+    expect(mockRunGitHubPreDispatchValidation).not.toHaveBeenCalled();
     expect(mockSend).toHaveBeenCalledTimes(1);
   });
 });

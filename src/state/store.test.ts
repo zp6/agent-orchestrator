@@ -268,6 +268,58 @@ describe("StateStore", () => {
     });
   });
 
+  describe("dispatch validations", () => {
+    it("stores and retrieves blocked validation failures", () => {
+      store.addDispatchValidation({
+        source: "github",
+        source_ref: "owner/repo#42",
+        agent_name: "agent-a",
+        repo: "owner/repo",
+        issue_number: 42,
+        outcome: "blocked",
+        failure_check: "branch_conflicts",
+        failure_code: "open_pr_exists",
+        failure_reason: "issue owner/repo#42 already has open PR #7",
+        checklist: [
+          { name: "issue_ownership", status: "passed", code: "owned_by_agent", detail: "ok" },
+          { name: "branch_conflicts", status: "failed", code: "open_pr_exists", detail: "issue owner/repo#42 already has open PR #7" },
+        ],
+      });
+
+      const failures = store.getRecentDispatchValidationFailures(5);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatchObject({
+        source_ref: "owner/repo#42",
+        outcome: "blocked",
+        failure_check: "branch_conflicts",
+        failure_code: "open_pr_exists",
+      });
+    });
+
+    it("returns validation history for a source_ref newest first", () => {
+      store.addDispatchValidation({
+        source: "github",
+        source_ref: "owner/repo#77",
+        outcome: "passed",
+        checklist: [{ name: "agent_availability", status: "passed", code: "agent_available", detail: "ok" }],
+      });
+      store.addDispatchValidation({
+        source: "github",
+        source_ref: "owner/repo#77",
+        outcome: "blocked",
+        failure_check: "recent_failure_count",
+        failure_code: "retry_limit_exceeded",
+        failure_reason: "too many failures",
+        checklist: [{ name: "recent_failure_count", status: "failed", code: "retry_limit_exceeded", detail: "too many failures" }],
+      });
+
+      const history = store.getDispatchValidationHistory("owner/repo#77", 10);
+      expect(history).toHaveLength(2);
+      expect(history[0].outcome).toBe("blocked");
+      expect(history[1].outcome).toBe("passed");
+    });
+  });
+
   describe("task_type", () => {
     it("defaults to implementation", () => {
       const task = store.createTask({ title: "Build it", source: "manual" });

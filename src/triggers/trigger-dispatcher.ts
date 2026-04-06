@@ -1,11 +1,10 @@
-import { fetchOpenIssues, findApprovedPRForIssue, findBranchForIssue, findExistingPRsForIssue, validateGhAuth, type GitHubIssue } from "./github.js";
+import { fetchOpenIssues, validateGhAuth, type GitHubIssue } from "./github.js";
 import { reportResult } from "./reporters.js";
-import { checkDuplicate } from "./duplicate-guard.js";
-import { cachedIsIssueOpen, cachedGetIssueState, logCacheMetrics } from "./issue-state-bridge.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { createLogger } from "../service/logger.js";
+import { runGitHubPreDispatchValidation } from "../orchestrator/pre-dispatch-validator.js";
 
 const log = createLogger("trigger-dispatcher");
 
@@ -97,11 +96,22 @@ function fireAndForget(
     source: "github" | "linear" | "slack";
     sourceRef: string;
     title: string;
+    prevalidated?: boolean;
   },
   onAgentCompleted?: (agentName: string) => Promise<void>,
 ): void {
   dispatcher.dispatch(message, options).then(async (result) => {
     inFlightDispatches.delete(options.sourceRef);
+    if (!result.taskId) {
+      log.info("Fire-and-forget dispatch skipped by dispatcher", {
+        agentName: result.agentName,
+        sourceRef: options.sourceRef,
+        failureCheck: result.validation?.failureCheck,
+        failureCode: result.validation?.failureCode,
+        failureReason: result.validation?.failureReason,
+      });
+      return;
+    }
     store.markProcessed(options.source, options.sourceRef, result.taskId);
     log.info("Fire-and-forget dispatch completed", { taskId: result.taskId, agentName: result.agentName });
 
@@ -197,100 +207,50 @@ export async function dispatchGitHubIssues(
 
       const sourceRef = `${issue.repo}#${issue.number}`;
 
-      // inFlightDispatches catches same-cycle duplicates before the task
-      // record is written to the DB.  checkDuplicate queries the tasks table
-      // directly so active or recently-completed tasks are detected even after
-      // a daemon restart (when inFlightDispatches is empty).
-      const dupCheck = checkDuplicate(store, "github", sourceRef);
-      if (inFlightDispatches.has(sourceRef) || dupCheck.isDuplicate) {
-        if (dupCheck.isDuplicate) {
-          log.info("Skipping duplicate GitHub issue", { sourceRef, reason: dupCheck.reason });
+      if (inFlightDispatches.has(sourceRef)) {
+        log.info("Skipping duplicate GitHub issue already in-flight", { sourceRef });
+        result.skipped++;
+        continue;
+      }
+
+      const validation = runGitHubPreDispatchValidation({
+        config,
+        store,
+        source: "github",
+        agentName,
+        issue: { repo: issue.repo, number: issue.number },
+      });
+      if (validation.outcome === "blocked") {
+        log.info("Skipping dispatch: pre-dispatch validation blocked issue", {
+          sourceRef,
+          failureCheck: validation.failureCheck,
+          failureCode: validation.failureCode,
+          failureReason: validation.failureReason,
+        });
+        if (validation.failureCode === "issue_closed") {
+          store.markProcessed("github", sourceRef, `closed-issue-${issue.number}`);
         }
-        result.skipped++;
-        continue;
-      }
-
-      // Pre-dispatch issue state validation via cache (issue #458): re-validates
-      // issue state within 60s TTL, preventing dispatch to closed issues or
-      // issues already resolved by a merged/open PR.
-      const cachedState = cachedGetIssueState(agent.github, issue.number);
-
-      if (cachedState.state === "closed") {
-        log.info("Skipping dispatch: issue already closed (cached)", { sourceRef });
-        store.markProcessed("github", sourceRef, `closed-issue-${issue.number}`);
-        result.skipped++;
-        continue;
-      }
-
-      // Still need to call findExistingPRsForIssue for the full PR objects
-      // (the cache only tracks hasOpenPR/hasMergedPR booleans, not PR details).
-      // But skip the API call entirely when the cache says no PRs exist.
-      let existingPRs: ReturnType<typeof findExistingPRsForIssue> = [];
-      if (cachedState.hasOpenPR || cachedState.hasMergedPR) {
-        existingPRs = findExistingPRsForIssue(agent.github, issue.number);
-      }
-      const mergedPR = existingPRs.find((pr) => pr.state === "merged");
-      const openPR = existingPRs.find((pr) => pr.state === "open");
-
-      if (mergedPR) {
-        log.info("Skipping dispatch: issue already addressed by merged PR", {
-          sourceRef,
-          prNumber: mergedPR.number,
-          prUrl: mergedPR.url,
-        });
-        // Mark processed so this issue isn't re-checked on every daemon cycle
-        store.markProcessed("github", sourceRef, `merged-pr-${mergedPR.number}`);
-        result.skipped++;
-        continue;
-      }
-
-      // Skip dispatch if there is already an approved, conflict-free PR waiting
-      // to merge. Re-dispatching in this state just wastes cycles (see issue #28:
-      // three dispatches, third only confirmed the already-approved PR was fine).
-      const approvedPR = findApprovedPRForIssue(agent.github, issue.number);
-      if (approvedPR) {
-        log.info("Skipping dispatch: issue has approved PR awaiting merge", {
-          sourceRef,
-          prNumber: approvedPR.number,
-          branch: approvedPR.headRefName,
-        });
-        result.skipped++;
-        continue;
-      }
-
-      // Open-PR dispatch guard (issue #445): skip dispatch when a non-draft open
-      // PR already exists for this issue. Re-dispatching in this state causes
-      // duplicate agent work (#413). The PRReviewer flow (daemon.reviewPRs) picks
-      // up the open PR in its own cycle — no additional dispatch is needed here.
-      if (openPR && !openPR.isDraft) {
-        log.info("Skipping dispatch: redirected to review — open PR already exists for issue", {
-          sourceRef,
-          prNumber: openPR.number,
-          prUrl: openPR.url,
-          reason: `redirected to review: PR #${openPR.number} already open for issue #${issue.number}`,
-        });
+        if (validation.failureCode === "merged_pr_exists") {
+          store.markProcessed("github", sourceRef, `merged-pr-${validation.blockingPRNumber ?? issue.number}`);
+        }
         result.skipped++;
         continue;
       }
 
       let message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}`;
 
-      if (openPR) {
+      if (validation.draftPR) {
         // Draft PR: inject context so the agent can continue on the existing branch
         log.info("Draft open PR found for issue — injecting PR context", {
           sourceRef,
-          prNumber: openPR.number,
-          prUrl: openPR.url,
+          prNumber: validation.draftPR.number,
+          prUrl: validation.draftPR.url,
         });
-        message += `\n\n⚠️ This issue already has an open draft PR: #${openPR.number} (${openPR.url}). Do NOT create a new branch or open another PR. Instead, review the existing PR, make any needed fixes, and push to its branch.`;
-        message += buildExistingPRReviewChecklist(openPR.number, openPR.url);
+        message += `\n\n⚠️ This issue already has an open draft PR: #${validation.draftPR.number} (${validation.draftPR.url}). Do NOT create a new branch or open another PR. Instead, review the existing PR, make any needed fixes, and push to its branch.`;
+        message += buildExistingPRReviewChecklist(validation.draftPR.number, validation.draftPR.url);
         message += `\n\n---\nWhen done: commit your changes and push to the existing PR branch. Do NOT run \`gh pr create\`.`;
       } else {
-        // Check for an in-flight branch without a PR (e.g. agent pushed but
-        // was interrupted before opening the PR).  Inject branch context so
-        // the agent continues from the existing branch rather than starting
-        // fresh and creating a duplicate.
-        const existingBranch = findBranchForIssue(agent.github, issue.number);
+        const existingBranch = validation.existingBranch;
         if (existingBranch) {
           log.info("In-flight branch found for issue — injecting branch context", {
             sourceRef,
@@ -318,6 +278,7 @@ export async function dispatchGitHubIssues(
         source: "github",
         sourceRef,
         title: `[${issue.repo}#${issue.number}] ${issue.title}`,
+        prevalidated: true,
       }, onAgentCompleted);
       store.clearSourceRefPriority("github", sourceRef);
 
@@ -416,101 +377,53 @@ export async function dispatchIdleAgentBacklog(
           result.skipped++;
           continue;
         }
-        // Still block on genuinely active tasks (pending/dispatched/in_progress)
-        const dupCheck = checkDuplicate(store, "github", sourceRef);
-        if (dupCheck.isDuplicate && dupCheck.existingTask &&
-            ["pending", "planning", "dispatched", "in_progress"].includes(dupCheck.existingTask.status)) {
-          log.info("Idle reclaim: skipping issue with active task", { sourceRef, agentName });
-          result.skipped++;
-          continue;
-        }
-        if (dupCheck.isDuplicate) {
-          log.info("Idle reclaim: bypassing recency window for idle agent", {
-            sourceRef,
-            agentName,
-            reason: dupCheck.reason,
-          });
-        }
       } else {
-        const dupCheck = checkDuplicate(store, "github", sourceRef);
-        if (inFlightDispatches.has(sourceRef) || dupCheck.isDuplicate) {
-          if (dupCheck.isDuplicate) {
-            log.info("Idle pickup: skipping duplicate issue", { sourceRef, reason: dupCheck.reason });
-          }
+        if (inFlightDispatches.has(sourceRef)) {
+          log.info("Idle pickup: skipping duplicate issue already in-flight", { sourceRef });
           result.skipped++;
           continue;
         }
       }
 
-      // Pre-dispatch issue state validation via cache (issue #458)
-      const cachedState2 = cachedGetIssueState(agent.github, issue.number);
-
-      if (cachedState2.state === "closed") {
-        log.info("Idle pickup: skipping closed issue (cached)", { sourceRef });
-        store.markProcessed("github", sourceRef, `closed-issue-${issue.number}`);
-        result.skipped++;
-        continue;
-      }
-
-      // Fetch full PR objects only when cache indicates PRs exist
-      let existingPRs2: ReturnType<typeof findExistingPRsForIssue> = [];
-      if (cachedState2.hasOpenPR || cachedState2.hasMergedPR) {
-        existingPRs2 = findExistingPRsForIssue(agent.github, issue.number);
-      }
-      const mergedPR = existingPRs2.find((pr) => pr.state === "merged");
-      const openPR = existingPRs2.find((pr) => pr.state === "open");
-
-      if (mergedPR) {
-        log.info("Idle pickup: skipping issue with merged PR", {
+      const validation = runGitHubPreDispatchValidation({
+        config,
+        store,
+        source: "github",
+        agentName,
+        issue: { repo: issue.repo, number: issue.number },
+        allowDuplicateRecencyBypass: forceReclaim,
+      });
+      if (validation.outcome === "blocked") {
+        log.info("Idle pickup: pre-dispatch validation blocked issue", {
           sourceRef,
-          prNumber: mergedPR.number,
+          failureCheck: validation.failureCheck,
+          failureCode: validation.failureCode,
+          failureReason: validation.failureReason,
         });
-        store.markProcessed("github", sourceRef, `merged-pr-${mergedPR.number}`);
-        result.skipped++;
-        continue;
-      }
-
-      // Skip dispatch if there is already an approved, conflict-free PR waiting
-      // to merge. Re-dispatching in this state wastes cycles.
-      const approvedPR = findApprovedPRForIssue(agent.github, issue.number);
-      if (approvedPR) {
-        log.info("Idle pickup: skipping dispatch — issue has approved PR awaiting merge", {
-          sourceRef,
-          prNumber: approvedPR.number,
-          branch: approvedPR.headRefName,
-        });
-        result.skipped++;
-        continue;
-      }
-
-      // Open-PR dispatch guard (issue #445): skip dispatch when a non-draft open
-      // PR already exists for this issue — same guard as dispatchGitHubIssues.
-      if (openPR && !openPR.isDraft) {
-        log.info("Idle pickup: skipping dispatch — redirected to review, open PR already exists for issue", {
-          sourceRef,
-          prNumber: openPR.number,
-          prUrl: openPR.url,
-          reason: `redirected to review: PR #${openPR.number} already open for issue #${issue.number}`,
-        });
+        if (validation.failureCode === "issue_closed") {
+          store.markProcessed("github", sourceRef, `closed-issue-${issue.number}`);
+        }
+        if (validation.failureCode === "merged_pr_exists") {
+          store.markProcessed("github", sourceRef, `merged-pr-${validation.blockingPRNumber ?? issue.number}`);
+        }
         result.skipped++;
         continue;
       }
 
       let message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}`;
 
-      if (openPR) {
+      if (validation.draftPR) {
         // Draft PR: inject context so the agent can continue on the existing branch
         log.info("Idle pickup: draft open PR found — injecting PR context", {
           sourceRef,
-          prNumber: openPR.number,
-          prUrl: openPR.url,
+          prNumber: validation.draftPR.number,
+          prUrl: validation.draftPR.url,
         });
-        message += `\n\n⚠️ This issue already has an open draft PR: #${openPR.number} (${openPR.url}). Do NOT create a new branch or open another PR. Instead, review the existing PR, make any needed fixes, and push to its branch.`;
-        message += buildExistingPRReviewChecklist(openPR.number, openPR.url);
+        message += `\n\n⚠️ This issue already has an open draft PR: #${validation.draftPR.number} (${validation.draftPR.url}). Do NOT create a new branch or open another PR. Instead, review the existing PR, make any needed fixes, and push to its branch.`;
+        message += buildExistingPRReviewChecklist(validation.draftPR.number, validation.draftPR.url);
         message += `\n\n---\nWhen done: commit your changes and push to the existing PR branch. Do NOT run \`gh pr create\`.`;
       } else {
-        // Check for an in-flight branch without a PR
-        const existingBranch = findBranchForIssue(agent.github, issue.number);
+        const existingBranch = validation.existingBranch;
         if (existingBranch) {
           log.info("Idle pickup: in-flight branch found for issue — injecting branch context", {
             sourceRef,
@@ -532,6 +445,7 @@ export async function dispatchIdleAgentBacklog(
         source: "github",
         sourceRef,
         title: `[${issue.repo}#${issue.number}] ${issue.title}`,
+        prevalidated: true,
       });
       store.clearSourceRefPriority("github", sourceRef);
 

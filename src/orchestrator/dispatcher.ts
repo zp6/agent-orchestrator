@@ -9,12 +9,15 @@ import { ulid } from "ulid";
 import { createLogger } from "../service/logger.js";
 import { validateGhAuth, GhAuthError } from "../triggers/github.js";
 import { cachedValidateForDispatch } from "../triggers/issue-state-bridge.js";
-import { checkDuplicate } from "../triggers/duplicate-guard.js";
 import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
 import { buildRejectionHistoryBlock } from "./rejection-history.js";
 import { notifyOperator } from "../service/notify.js";
 import { resolveAgentBudget } from "../cli/commands/budget.js";
 import { detectAndCreateFollowUps, formatFollowUpNote } from "./cross-repo-tracker.js";
+import {
+  runGitHubPreDispatchValidation,
+  type PreDispatchValidationResult,
+} from "./pre-dispatch-validator.js";
 
 /** Maximum number of retry attempts for a failed dispatch. */
 export const MAX_RETRIES = 3;
@@ -234,6 +237,7 @@ export interface DispatchResult {
   taskId: string;
   agentName: string;
   response: AgentResponse;
+  validation?: PreDispatchValidationResult;
 }
 
 export class Dispatcher {
@@ -272,6 +276,7 @@ export class Dispatcher {
        * cross-repo routing logic never fires.
        */
       sourceRepo?: string;
+      prevalidated?: boolean;
     },
   ): Promise<DispatchResult> {
     // Resolve agent
@@ -393,65 +398,39 @@ export class Dispatcher {
       }
     }
 
-    // Pre-dispatch issue state guard (issues #444, #457, #458, #468): validates
-    // issue state through the 60s TTL cache.  Catches closed issues, issues with
-    // merged PRs, and issues with open PRs.  Runs for ALL dispatch sources (not
-    // just GitHub triggers) so supervisor, CLI, and Telegram dispatches that
-    // reference a GitHub issue are also caught.
-    if (options?.sourceRef) {
+    if (!options?.prevalidated && options?.sourceRef) {
       const repo = extractRepoFromSourceRef(options.sourceRef);
       const issueMatch = options.sourceRef.match(/#(\d+)$/);
       if (repo && issueMatch) {
         const issueNumber = parseInt(issueMatch[1], 10);
-        const skipReason = cachedValidateForDispatch(repo, issueNumber);
-        if (skipReason) {
-          this.log.warn("Dispatch skipped: issue state validation failed (cached)", {
+        const validation = runGitHubPreDispatchValidation({
+          config: this.config,
+          store: this.store,
+          source: options?.source ?? "manual",
+          agentName,
+          issue: { repo, number: issueNumber },
+        });
+        if (validation.outcome === "blocked") {
+          this.log.warn("Dispatch skipped: pre-dispatch validation blocked dispatch", {
             agentName,
             source: options?.source,
             sourceRef: options.sourceRef,
-            repo,
-            issueNumber,
-            reason: skipReason,
+            failureCheck: validation.failureCheck,
+            failureCode: validation.failureCode,
+            failureReason: validation.failureReason,
           });
           return {
             taskId: "",
             agentName,
             response: {
-              content: `Skipped: ${skipReason}`,
+              content: `Skipped: ${validation.failureReason ?? "pre-dispatch validation blocked dispatch"}`,
               model: "",
               usage: { input_tokens: 0, output_tokens: 0 },
               stop_reason: "skipped",
             },
+            validation,
           };
         }
-      }
-    }
-
-    // Idempotency guard (issue #469): prevent the same source_ref from being
-    // dispatched to multiple agents simultaneously.  The trigger layer already
-    // checks this via inFlightDispatches + checkDuplicate, but direct callers
-    // (supervisor, CLI, Telegram, retries) bypass the trigger layer entirely.
-    // Placing the guard here in dispatch() itself closes that gap.
-    if (options?.sourceRef && options?.source) {
-      const dupCheck = checkDuplicate(this.store, options.source, options.sourceRef);
-      if (dupCheck.isDuplicate) {
-        this.log.warn("Dispatch blocked: duplicate guard triggered", {
-          agentName,
-          source: options.source,
-          sourceRef: options.sourceRef,
-          reason: dupCheck.reason,
-          existingTaskId: dupCheck.existingTask?.id,
-        });
-        return {
-          taskId: "",
-          agentName,
-          response: {
-            content: `Duplicate: ${dupCheck.reason}`,
-            model: "",
-            usage: { input_tokens: 0, output_tokens: 0 },
-            stop_reason: "duplicate",
-          },
-        };
       }
     }
 

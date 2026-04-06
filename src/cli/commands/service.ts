@@ -145,7 +145,6 @@ export function registerServiceCommand(program: Command): void {
           const metrics = store.getMetrics();
           const qualified = store.getRecentVerified(20, minScore);
           const unverifiedCount = store.countUnverified();
-          store.close();
 
           // Last cycle timestamp
           console.log(chalk.bold("\nDaemon Cycles"));
@@ -196,6 +195,18 @@ export function registerServiceCommand(program: Command): void {
             console.log(chalk.dim(`  No pre-resolved skips yet`));
           }
 
+          const blockedValidations = store.getRecentDispatchValidationFailures(5);
+          console.log(chalk.bold("\nPre-Dispatch Validation"));
+          if (blockedValidations.length === 0) {
+            console.log(chalk.dim("  No blocked validations recorded yet"));
+          } else {
+            for (const validation of blockedValidations) {
+              const ref = validation.source_ref ?? validation.agent_name ?? "unknown";
+              const check = validation.failure_check ?? "validation";
+              console.log(`  ${chalk.yellow(ref)} ${chalk.dim(`[${check}]`)} ${validation.failure_reason ?? "blocked"}`);
+            }
+          }
+
           // --- Improvement detection stats ---
           const count = qualified.length;
           const threshold = minScore.toFixed(2);
@@ -213,6 +224,8 @@ export function registerServiceCommand(program: Command): void {
           } else {
             console.log(chalk.dim(`  ✓ Improvement detection active`));
           }
+
+          store.close();
         } catch {
           // State DB not available (first run, etc.)
         }
