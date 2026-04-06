@@ -61,7 +61,7 @@ agents:
     docker:
       port: 3480
       api_key: "cheese"
-      permissions: "bypassPermissions"
+      permissions: "bypass"
       session: "fresh"
 
   # ── Reviewer pool (Claude + Codex) ──────────────────────────────
@@ -93,7 +93,7 @@ agents:
     docker:
       port: 3481
       api_key: "cheese"
-      permissions: "bypassPermissions"
+      permissions: "bypass"
       session: "fresh"
 
   # ── Dashboard pool (Claude + Codex) ─────────────────────────────
@@ -125,7 +125,7 @@ agents:
     docker:
       port: 3482
       api_key: "cheese"
-      permissions: "bypassPermissions"
+      permissions: "bypass"
       session: "fresh"
 
   # ── Telegram ────────────────────────────────────────────────────
@@ -171,7 +171,7 @@ agents:
     docker:
       port: 3483
       api_key: "cheese"
-      permissions: "bypassPermissions"
+      permissions: "bypass"
       session: "fresh"
 
   # ── Proxy pool (Claude + Codex) ────────────────────────────────
@@ -203,5 +203,5 @@ agents:
     docker:
       port: 3484
       api_key: "cheese"
-      permissions: "bypassPermissions"
+      permissions: "bypass"
       session: "fresh"
