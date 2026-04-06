@@ -86,11 +86,10 @@ describe("ProviderConfig", () => {
     expect(provider.daily_token_limit).toBe(1000000);
   });
 
-  it("agent provider field defaults to undefined (caller defaults to claude)", () => {
+  it("agent provider field is set for all agents", () => {
     const config = loadConfig(configPath);
-    // Agents in agents.yaml don't set provider yet — it should be undefined
-    const agent = config.agents["claude-agent-orchestrator"];
-    expect(agent.provider).toBeUndefined();
+    expect(config.agents["claude-agent-orchestrator"].provider).toBe("claude");
+    expect(config.agents["codex-agent-orchestrator"].provider).toBe("openai");
   });
 });
 
