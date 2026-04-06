@@ -110,9 +110,20 @@ export function validateBranchFreshness(
         };
       }
 
+      // Try auto-rebase instead of blocking
+      if (localPath && behindBy <= 20) {
+        const rebased = tryAutoRebaseForValidator(localPath, branch);
+        if (rebased) {
+          return {
+            passed: true,
+            detail: `Branch was ${behindBy} commit(s) behind — auto-rebased and pushed.`,
+          };
+        }
+      }
+
       return {
         passed: false,
-        detail: `Branch "${branch}" is ${behindBy} commit(s) behind main. Rebase before submitting: \`git fetch origin && git rebase origin/main && git push --force-with-lease\`.`,
+        detail: `Branch "${branch}" is ${behindBy} commit(s) behind main. Auto-rebase failed — manual rebase needed.`,
       };
     } catch {
       // API call failed — fall through to local git check
@@ -130,9 +141,19 @@ export function validateBranchFreshness(
       const behindBy = parseInt(behindRaw, 10);
 
       if (behindBy > 0) {
+        // Try auto-rebase
+        if (behindBy <= 20) {
+          const rebased = tryAutoRebaseForValidator(localPath, branch);
+          if (rebased) {
+            return {
+              passed: true,
+              detail: `Branch was ${behindBy} commit(s) behind — auto-rebased and pushed.`,
+            };
+          }
+        }
         return {
           passed: false,
-          detail: `Branch is ${behindBy} commit(s) behind origin/main. Rebase before submitting: \`git rebase origin/main && git push --force-with-lease\`.`,
+          detail: `Branch is ${behindBy} commit(s) behind origin/main. Auto-rebase failed — manual rebase needed.`,
         };
       }
 
@@ -562,4 +583,39 @@ export function formatValidationSummary(result: PreSubmitValidationResult): stri
   }
 
   return lines.join("\n");
+}
+
+/**
+ * Attempt to rebase a branch onto origin/main and push.
+ * Used by the pre-submit validator to auto-fix stale branches
+ * instead of blocking PR creation.
+ */
+function tryAutoRebaseForValidator(localPath: string, branch: string): boolean {
+  const env: Record<string, string> = { ...process.env } as Record<string, string>;
+  env.GIT_TERMINAL_PROMPT = "0";
+  const opts = { cwd: localPath, encoding: "utf-8" as const, env };
+
+  let currentBranch = "main";
+  try {
+    // Clean state
+    try { execSync("git rebase --abort", { ...opts, timeout: 5000 }); } catch { /* ok */ }
+
+    currentBranch = execSync("git rev-parse --abbrev-ref HEAD", { ...opts, timeout: 5000 }).trim() || "main";
+    execSync("git fetch origin", { ...opts, timeout: 30000 });
+    execSync(`git checkout ${branch}`, { ...opts, timeout: 15000 });
+
+    try {
+      execSync("git rebase origin/main", { ...opts, timeout: 60000 });
+    } catch {
+      try { execSync("git rebase --abort", { ...opts, timeout: 5000 }); } catch { /* ok */ }
+      return false;
+    }
+
+    execSync(`git push --force-with-lease origin ${branch}`, { ...opts, timeout: 30000 });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { execSync(`git checkout ${currentBranch}`, { ...opts, timeout: 10000 }); } catch { /* ok */ }
+  }
 }
