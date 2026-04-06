@@ -1109,7 +1109,10 @@ export class StateStore {
     };
   }
 
-  getAgentStats(): Array<{ agent_name: string; total: number; done: number; failed: number; avg_score: number | null }> {
+  getAgentStats(sinceHours?: number): Array<{ agent_name: string; total: number; done: number; failed: number; avg_score: number | null }> {
+    const timeFilter = sinceHours
+      ? `AND created_at >= datetime('now', '-${Math.round(sinceHours)} hours')`
+      : "";
     return this.db.prepare(`
       SELECT agent_name,
         COUNT(*) as total,
@@ -1117,7 +1120,7 @@ export class StateStore {
         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
         AVG(quality_score) as avg_score
       FROM tasks
-      WHERE agent_name IS NOT NULL AND parent_task_id IS NULL
+      WHERE agent_name IS NOT NULL AND parent_task_id IS NULL ${timeFilter}
       GROUP BY agent_name
     `).all() as Array<{ agent_name: string; total: number; done: number; failed: number; avg_score: number | null }>;
   }

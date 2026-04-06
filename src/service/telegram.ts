@@ -340,8 +340,8 @@ help — this message`;
 async function buildStats(ctx: TelegramContext): Promise<string> {
   const repos = [...new Set(Object.values(ctx.config.agents).map((a) => a.github).filter(Boolean))] as string[];
 
-  // Per-agent stats
-  const agentStats = ctx.store.getAgentStats();
+  // Per-agent stats (last 24h)
+  const agentStats = ctx.store.getAgentStats(24);
   const agentLines = agentStats.map((a) => {
     const rate = a.done + a.failed > 0 ? Math.round((a.done / (a.done + a.failed)) * 100) : 0;
     const score = a.avg_score !== null ? ` | avg ${a.avg_score.toFixed(1)}` : "";
@@ -426,7 +426,7 @@ ${wipLines.length > 0 ? wipLines.join("\n") : "  All agents idle"}
   Last 1h: ${closed1h} | 6h: ${closed6h} | 24h: ${closed24h}
 
 *Verification*
-  ${unverified.length} pending | ${totalDone} verified total | ${successRate}% pass rate
+  ${unverified.length} pending | ${totalDone} done (24h) | ${successRate}% success
 
 ${buildPoolStats(ctx, agentStats)}`;
 }
