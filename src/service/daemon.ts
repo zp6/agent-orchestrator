@@ -3,6 +3,7 @@ import { StateStore } from "../state/store.js";
 import { Dispatcher, MAX_RETRIES, TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
 import { Verifier } from "../orchestrator/verifier.js";
 import { ImprovementDetector } from "../orchestrator/improvement-detector.js";
+import { ResearchLinker } from "../orchestrator/research-linker.js";
 import { IssueCreator } from "../orchestrator/issue-creator.js";
 import { Deployer } from "../orchestrator/deployer.js";
 import { Supervisor, isDecisionAlreadyResolved } from "../orchestrator/supervisor.js";
@@ -30,6 +31,7 @@ const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
 const AUTO_MERGE_SWEEP_EVERY_N_CYCLES = 3;  // ~15min — same cadence as PR review
 const SUPERVISOR_CHECK_EVERY_N_CYCLES = 3; // ~15min at default interval
+const RESEARCH_LINK_EVERY_N_CYCLES = 6; // ~30min — same cadence as improvement detection
 const BACKLOG_TRIAGE_EVERY_N_CYCLES = 60; // ~5h at default interval
 const CONTAINER_RESTART_EVERY_N_CYCLES = 100; // ~50min at 30s interval — prevents Docker stalls
 const AGENT_SYNC_EVERY_N_CYCLES = 10; // ~5min at default interval — recover from proxy restarts
@@ -95,6 +97,7 @@ export class Daemon {
   private dispatcher: Dispatcher;
   private verifier: Verifier;
   private detector: ImprovementDetector;
+  private researchLinker: ResearchLinker;
   private issueCreator: IssueCreator;
   private deployer: Deployer;
   private supervisor: Supervisor;
@@ -122,6 +125,7 @@ export class Daemon {
     this.verifier = new Verifier(this.config, this.store);
     this.detector = new ImprovementDetector(this.config);
     this.issueCreator = new IssueCreator(this.config);
+    this.researchLinker = new ResearchLinker(this.config, this.store, this.issueCreator);
     this.deployer = new Deployer(this.config);
     this.supervisor = new Supervisor(this.config, this.store);
     this.prReviewer = new PRReviewer(this.config, this.store);
@@ -240,6 +244,11 @@ export class Daemon {
       // 3b. Periodically detect improvements and create issues
       if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
         await this.detectImprovements(time);
+      }
+
+      // 3c. Link approved research findings to implementation issues
+      if (this.cycleCount % RESEARCH_LINK_EVERY_N_CYCLES === 0) {
+        await this.linkResearchToImplementation(time);
       }
 
       // 4. Review open PRs (kept at a slower cadence — review is more expensive)
@@ -659,6 +668,26 @@ export class Daemon {
       }
     } catch (err) {
       console.error(`[${time}] Improvement detection failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  private async linkResearchToImplementation(time: string): Promise<void> {
+    try {
+      const minScore = this.config.verification?.min_score ?? 0.7;
+      const recent = this.store.getRecentVerified(20, minScore);
+      // Filter to research tasks only — the linker does further filtering
+      const researchTasks = recent.filter((t) => t.task_type === "research");
+      if (researchTasks.length === 0) return;
+
+      const created = await this.researchLinker.linkResearchToImplementation(researchTasks);
+      if (created.length > 0) {
+        console.log(`[${time}] Research→implementation: filed ${created.length} issue(s)`);
+        for (const issue of created) {
+          console.log(`  ${issue.url}`);
+        }
+      }
+    } catch (err) {
+      console.error(`[${time}] Research linking failed: ${err instanceof Error ? err.message : err}`);
     }
   }
 
