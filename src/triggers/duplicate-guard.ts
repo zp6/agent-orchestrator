@@ -70,14 +70,31 @@ export function checkDuplicate(
     };
   }
 
-  // Escalated task — block permanently.
+  // Escalated task — block within recency window, then allow re-dispatch.
+  // Previously this was permanent, causing issues to get stuck forever once escalated.
+  // Now escalated tasks follow the same recency window as completed tasks.
   if (task.status === "escalated") {
-    log.warn("Duplicate suppressed: source_ref is escalated", { sourceRef, taskId: task.id });
-    return {
-      isDuplicate: true,
-      reason: `escalated task ${task.id} — permanently escalated, requires human intervention`,
-      existingTask: task,
-    };
+    const ageHours =
+      (Date.now() - new Date(task.updated_at).getTime()) / (1000 * 60 * 60);
+    if (ageHours < RECENCY_WINDOW_HOURS) {
+      log.warn("Duplicate suppressed: source_ref is escalated (within recency window)", {
+        sourceRef,
+        taskId: task.id,
+        ageHours: ageHours.toFixed(1),
+        windowHours: RECENCY_WINDOW_HOURS,
+      });
+      return {
+        isDuplicate: true,
+        reason: `escalated task ${task.id} — escalated ${ageHours.toFixed(1)}h ago (window: ${RECENCY_WINDOW_HOURS}h)`,
+        existingTask: task,
+      };
+    }
+    log.info("Escalated task outside recency window — allowing re-dispatch", {
+      sourceRef,
+      taskId: task.id,
+      ageHours: ageHours.toFixed(1),
+    });
+    return { isDuplicate: false };
   }
 
   // Terminal state (done / failed): allow re-dispatch if the task was
