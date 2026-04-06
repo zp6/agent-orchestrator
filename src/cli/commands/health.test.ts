@@ -53,6 +53,8 @@ function makeSnap(overrides: Partial<HealthSnapshot> = {}): HealthSnapshot {
     alerts: [],
     hasCriticalFailure: false,
     dbUnavailable: false,
+    budgetStatuses: new Map(),
+    tokenBudgetPanel: { providers: [], agents: [], top_agent_name: null },
     ...overrides,
   };
 }

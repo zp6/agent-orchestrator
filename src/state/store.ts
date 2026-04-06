@@ -519,6 +519,21 @@ export interface AgentTokenUsage {
   total_tokens: number;
 }
 
+export interface AgentTokenUsageDetail extends AgentTokenUsage {
+  provider: string;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+}
+
+export interface AgentDailyTokenUsage {
+  date: string;
+  agent_name: string;
+  provider: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+}
+
 /**
  * Per-agent health record for pool failover routing.
  * Tracks consecutive dispatch failures so the dispatcher can route around
@@ -3172,6 +3187,48 @@ export class StateStore {
       GROUP BY agent_name, provider
       ORDER BY total DESC
     `).all(windowHours) as Array<{ agent_name: string; provider: string; total: number }>;
+  }
+
+  /**
+   * Aggregate token usage per agent/provider over a rolling time window.
+   * Includes cache metrics so spend can be estimated more accurately.
+   */
+  getAgentTokenUsageDetail(windowHours: number): AgentTokenUsageDetail[] {
+    return this.db.prepare(`
+      SELECT
+        agent_name,
+        provider,
+        COALESCE(SUM(COALESCE(tokens_in, 0)), 0) AS input_tokens,
+        COALESCE(SUM(COALESCE(tokens_out, 0)), 0) AS output_tokens,
+        COALESCE(SUM(COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0)), 0) AS total_tokens,
+        COALESCE(SUM(COALESCE(cache_read_tokens, 0)), 0) AS cache_read_tokens,
+        COALESCE(SUM(COALESCE(cache_creation_tokens, 0)), 0) AS cache_creation_tokens
+      FROM token_usage
+      WHERE agent_name IS NOT NULL
+        AND recorded_at >= datetime('now', '-' || ? || ' hours')
+      GROUP BY agent_name, provider
+      ORDER BY total_tokens DESC
+    `).all(windowHours) as AgentTokenUsageDetail[];
+  }
+
+  /**
+   * Daily token totals per agent/provider for sparkline trend rendering.
+   */
+  getDailyTokenUsageByAgent(days: number): AgentDailyTokenUsage[] {
+    return this.db.prepare(`
+      SELECT
+        date(recorded_at) AS date,
+        agent_name,
+        provider,
+        COALESCE(SUM(COALESCE(tokens_in, 0)), 0) AS input_tokens,
+        COALESCE(SUM(COALESCE(tokens_out, 0)), 0) AS output_tokens,
+        COALESCE(SUM(COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0)), 0) AS total_tokens
+      FROM token_usage
+      WHERE agent_name IS NOT NULL
+        AND recorded_at >= datetime('now', '-' || ? || ' days')
+      GROUP BY date(recorded_at), agent_name, provider
+      ORDER BY date ASC, total_tokens DESC
+    `).all(days) as AgentDailyTokenUsage[];
   }
 
   // ── Stuck issues ─────────────────────────────────────────────────────────

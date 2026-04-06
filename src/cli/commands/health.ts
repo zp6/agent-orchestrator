@@ -1,9 +1,9 @@
 import { execSync } from "node:child_process";
 import type { Command } from "commander";
 import chalk from "chalk";
-import { loadConfig } from "../../config/schema.js";
+import { loadConfig, type OrchestratorConfig } from "../../config/schema.js";
 import { isRunning, readPid } from "../../service/pid.js";
-import { StateStore, type RetryMetrics } from "../../state/store.js";
+import { StateStore, type AgentDailyTokenUsage, type AgentTokenUsageDetail, type RetryMetrics } from "../../state/store.js";
 import { ManagementClient } from "../../client/management-client.js";
 import { pingAllAgents } from "./agents.js";
 import { TIMEOUT_MAX_RETRIES } from "../../service/daemon.js";
@@ -34,6 +34,35 @@ interface TimeoutEntry {
   total7d: number;
 }
 
+interface ProviderSpendSnapshot {
+  provider: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  estimated_cost_usd: number;
+  request_count: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+}
+
+interface AgentSpendSnapshot {
+  agent_name: string;
+  provider: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  estimated_cost_usd: number;
+  trend_tokens: number[];
+  anomaly_ratio: number | null;
+  is_anomalous: boolean;
+}
+
+interface TokenBudgetPanelSnapshot {
+  providers: ProviderSpendSnapshot[];
+  agents: AgentSpendSnapshot[];
+  top_agent_name: string | null;
+}
+
 export interface HealthSnapshot {
   timestamp: Date;
   daemonRunning: boolean;
@@ -56,6 +85,8 @@ export interface HealthSnapshot {
   dbUnavailable: boolean;
   /** Per-agent budget utilization (24h window). Empty when DB unavailable. */
   budgetStatuses: Map<string, AgentBudgetStatus>;
+  /** Token spend dashboard rows for operators. Empty when DB unavailable. */
+  tokenBudgetPanel: TokenBudgetPanelSnapshot;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -125,6 +156,204 @@ export function parseIntervalMs(val: string): number {
   const unit = match[2] ?? "s";
   if (unit === "m") return n * 60 * 1000;
   return n * 1000;
+}
+
+const SPARK_CHARS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+interface ModelPrice {
+  input_per_million: number;
+  output_per_million: number;
+  cached_input_per_million?: number;
+  cache_write_per_million?: number;
+}
+
+const MODEL_PRICES: Array<{ pattern: RegExp; price: ModelPrice }> = [
+  { pattern: /^gpt-5\.4$/i, price: { input_per_million: 2.5, cached_input_per_million: 0.25, output_per_million: 15 } },
+  { pattern: /^claude-opus-4-6$/i, price: { input_per_million: 5, cache_write_per_million: 6.25, cached_input_per_million: 0.5, output_per_million: 25 } },
+  { pattern: /^claude-sonnet-4-6$/i, price: { input_per_million: 3, cache_write_per_million: 3.75, cached_input_per_million: 0.3, output_per_million: 15 } },
+  { pattern: /^claude-sonnet-4-5$/i, price: { input_per_million: 3, cache_write_per_million: 3.75, cached_input_per_million: 0.3, output_per_million: 15 } },
+  { pattern: /^claude-haiku-4-5$/i, price: { input_per_million: 1, cache_write_per_million: 1.25, cached_input_per_million: 0.1, output_per_million: 5 } },
+];
+
+function sparkline(values: number[]): string {
+  if (values.length === 0 || values.every((v) => v === 0)) {
+    return chalk.dim("─".repeat(Math.max(values.length, 1)));
+  }
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+
+  return values
+    .map((v) => {
+      const idx = Math.min(SPARK_CHARS.length - 1, Math.floor(((v - min) / range) * (SPARK_CHARS.length - 1)));
+      return SPARK_CHARS[idx];
+    })
+    .join("");
+}
+
+function formatUsd(amount: number): string {
+  if (amount >= 100) return `$${amount.toFixed(0)}`;
+  if (amount >= 10) return `$${amount.toFixed(1)}`;
+  return `$${amount.toFixed(2)}`;
+}
+
+function lookupModelPrice(config: OrchestratorConfig, providerName: string, agentName?: string): ModelPrice | null {
+  const explicitModel = agentName ? config.agents[agentName]?.model : undefined;
+  const providerModel = config.providers?.[providerName]?.model;
+  const model = explicitModel ?? providerModel;
+  if (!model) return null;
+
+  for (const entry of MODEL_PRICES) {
+    if (entry.pattern.test(model)) return entry.price;
+  }
+
+  return null;
+}
+
+function estimateUsageCost(
+  config: OrchestratorConfig,
+  providerName: string,
+  inputTokens: number,
+  outputTokens: number,
+  cacheReadTokens = 0,
+  cacheCreationTokens = 0,
+  agentName?: string,
+): number {
+  const price = lookupModelPrice(config, providerName, agentName);
+  if (!price) return 0;
+
+  let cost =
+    (inputTokens / 1_000_000) * price.input_per_million +
+    (outputTokens / 1_000_000) * price.output_per_million;
+
+  if (price.cached_input_per_million !== undefined) {
+    cost += (cacheReadTokens / 1_000_000) * price.cached_input_per_million;
+  }
+  if (price.cache_write_per_million !== undefined) {
+    cost += (cacheCreationTokens / 1_000_000) * price.cache_write_per_million;
+  }
+
+  return cost;
+}
+
+function utcDateDaysAgo(daysAgo: number): string {
+  const date = new Date();
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCDate(date.getUTCDate() - daysAgo);
+  return date.toISOString().slice(0, 10);
+}
+
+function buildTokenBudgetPanel(
+  config: OrchestratorConfig,
+  providerRows: Array<{
+    provider: string;
+    total: number;
+    request_count: number;
+    cache_read_tokens: number;
+    cache_creation_tokens: number;
+  }>,
+  agentRows: AgentTokenUsageDetail[],
+  dailyRows: AgentDailyTokenUsage[],
+): TokenBudgetPanelSnapshot {
+  const providerTotals = new Map<string, {
+    input_tokens: number;
+    output_tokens: number;
+  }>();
+  for (const row of agentRows) {
+    const existing = providerTotals.get(row.provider) ?? { input_tokens: 0, output_tokens: 0 };
+    existing.input_tokens += row.input_tokens;
+    existing.output_tokens += row.output_tokens;
+    providerTotals.set(row.provider, existing);
+  }
+
+  const providerSnapshots = providerRows.map((row) => {
+    const totals = providerTotals.get(row.provider) ?? { input_tokens: 0, output_tokens: 0 };
+    return {
+      provider: row.provider,
+      input_tokens: totals.input_tokens,
+      output_tokens: totals.output_tokens,
+      total_tokens: row.total,
+      estimated_cost_usd: estimateUsageCost(
+        config,
+        row.provider,
+        totals.input_tokens,
+        totals.output_tokens,
+        row.cache_read_tokens,
+        row.cache_creation_tokens,
+      ),
+      request_count: row.request_count,
+      cache_read_tokens: row.cache_read_tokens,
+      cache_creation_tokens: row.cache_creation_tokens,
+    };
+  }).sort((a, b) => b.total_tokens - a.total_tokens);
+
+  const trendDates = Array.from({ length: 7 }, (_, idx) => utcDateDaysAgo(6 - idx));
+  const dailyTotals = new Map<string, number>();
+  for (const row of dailyRows) {
+    const key = `${row.agent_name}:${row.date}`;
+    dailyTotals.set(key, (dailyTotals.get(key) ?? 0) + row.total_tokens);
+  }
+
+  const agentTotals = new Map<string, {
+    agent_name: string;
+    providers: Set<string>;
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    estimated_cost_usd: number;
+  }>();
+  for (const row of agentRows) {
+    const existing = agentTotals.get(row.agent_name) ?? {
+      agent_name: row.agent_name,
+      providers: new Set<string>(),
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      estimated_cost_usd: 0,
+    };
+    existing.providers.add(row.provider);
+    existing.input_tokens += row.input_tokens;
+    existing.output_tokens += row.output_tokens;
+    existing.total_tokens += row.total_tokens;
+    existing.estimated_cost_usd += estimateUsageCost(
+      config,
+      row.provider,
+      row.input_tokens,
+      row.output_tokens,
+      row.cache_read_tokens,
+      row.cache_creation_tokens,
+      row.agent_name,
+    );
+    agentTotals.set(row.agent_name, existing);
+  }
+
+  const agentSnapshots = Array.from(agentTotals.values()).map((row) => {
+    const trendTokens = trendDates.map((date) => dailyTotals.get(`${row.agent_name}:${date}`) ?? 0);
+    const latest = trendTokens[trendTokens.length - 1] ?? 0;
+    const prior = trendTokens.slice(0, -1).filter((v) => v > 0);
+    const priorAvg = prior.length > 0 ? prior.reduce((sum, value) => sum + value, 0) / prior.length : 0;
+    const anomalyRatio = priorAvg > 0 ? latest / priorAvg : null;
+    const isAnomalous = anomalyRatio !== null && latest >= 50_000 && anomalyRatio >= 1.5;
+
+    return {
+      agent_name: row.agent_name,
+      provider: Array.from(row.providers).sort().join("+"),
+      input_tokens: row.input_tokens,
+      output_tokens: row.output_tokens,
+      total_tokens: row.total_tokens,
+      estimated_cost_usd: row.estimated_cost_usd,
+      trend_tokens: trendTokens,
+      anomaly_ratio: anomalyRatio,
+      is_anomalous: isAnomalous,
+    };
+  }).sort((a, b) => b.total_tokens - a.total_tokens);
+
+  return {
+    providers: providerSnapshots,
+    agents: agentSnapshots,
+    top_agent_name: agentSnapshots[0]?.agent_name ?? null,
+  };
 }
 
 // ── Snapshot gathering ────────────────────────────────────────────────────────
@@ -198,6 +427,7 @@ async function gatherHealthSnapshot(
   let agentFailures: Array<{ agent_name: string; failed: number }> = [];
   let dbUnavailable = false;
   let budgetStatuses = new Map<string, AgentBudgetStatus>();
+  let tokenBudgetPanel: TokenBudgetPanelSnapshot = { providers: [], agents: [], top_agent_name: null };
 
   try {
     const store = new StateStore();
@@ -218,6 +448,13 @@ async function gatherHealthSnapshot(
     for (const s of budgetList) {
       budgetStatuses.set(s.agent_name, s);
     }
+
+    tokenBudgetPanel = buildTokenBudgetPanel(
+      config,
+      store.getTokenUsageByProvider(24),
+      store.getAgentTokenUsageDetail(24),
+      store.getDailyTokenUsageByAgent(7),
+    );
 
     const timeoutRates24h = store.getTimeoutRates(24);
     const timeoutRates7d = store.getTimeoutRates(168);
@@ -388,6 +625,7 @@ async function gatherHealthSnapshot(
     hasCriticalFailure,
     dbUnavailable,
     budgetStatuses,
+    tokenBudgetPanel,
   };
 }
 
@@ -595,7 +833,56 @@ function printHealthSnapshot(snap: HealthSnapshot): void {
       );
     }
 
-    // 7. Alerts
+    // 7. Token budget / spend dashboard
+    console.log(chalk.bold("\n● Token Budget (last 24h)"));
+    const spend = snap.tokenBudgetPanel;
+    if (spend.agents.length === 0) {
+      console.log(chalk.dim("  No token usage recorded in the last 24h."));
+    } else {
+      const topAgent = spend.agents[0];
+      const anomalyNote = topAgent.is_anomalous && topAgent.anomaly_ratio !== null
+        ? chalk.red(`  spike ${topAgent.anomaly_ratio.toFixed(1)}x vs prior days`)
+        : "";
+      console.log(
+        `  Top spender: ${chalk.cyan(topAgent.agent_name)}  ${chalk.white(formatTokens(topAgent.total_tokens))} tokens  ` +
+          `${chalk.dim(`(${formatTokens(topAgent.input_tokens)} in / ${formatTokens(topAgent.output_tokens)} out)`)}  ` +
+          `${chalk.yellow(formatUsd(topAgent.estimated_cost_usd))}${anomalyNote}`,
+      );
+
+      console.log(chalk.dim("\n  Provider breakdown"));
+      for (const provider of spend.providers) {
+        console.log(
+          `  ${chalk.cyan(provider.provider.padEnd(12))}` +
+            ` ${chalk.white(formatTokens(provider.total_tokens).padStart(8))}` +
+            ` ${chalk.dim(`${formatTokens(provider.input_tokens)} in / ${formatTokens(provider.output_tokens)} out`).padStart(23)}` +
+            ` ${chalk.yellow(formatUsd(provider.estimated_cost_usd)).padStart(8)}` +
+            ` ${chalk.dim(`${provider.request_count} req`).padStart(9)}`,
+        );
+      }
+
+      console.log(chalk.dim("\n  Per-agent spend"));
+      console.log(
+        chalk.dim(
+          `  ${"Agent".padEnd(28)} ${"Provider".padEnd(14)} ${"Input".padStart(8)} ${"Output".padStart(8)} ${"Cost".padStart(8)}  Trend   Status`,
+        ),
+      );
+      console.log(chalk.dim(`  ${"─".repeat(88)}`));
+      for (const agent of spend.agents) {
+        const status = agent.is_anomalous && agent.anomaly_ratio !== null
+          ? chalk.red(`spike ${agent.anomaly_ratio.toFixed(1)}x`)
+          : chalk.green("normal");
+        console.log(
+          `  ${chalk.cyan(agent.agent_name.padEnd(28))}` +
+            ` ${chalk.dim(agent.provider.padEnd(14))}` +
+            ` ${chalk.white(formatTokens(agent.input_tokens).padStart(8))}` +
+            ` ${chalk.white(formatTokens(agent.output_tokens).padStart(8))}` +
+            ` ${chalk.yellow(formatUsd(agent.estimated_cost_usd)).padStart(8)}` +
+            `  ${sparkline(agent.trend_tokens).padEnd(7)} ${status}`,
+        );
+      }
+    }
+
+    // 8. Alerts
     console.log(chalk.bold("\n● Alerts"));
     if (snap.alerts.length > 0) {
       for (const alert of snap.alerts) {
@@ -607,7 +894,7 @@ function printHealthSnapshot(snap: HealthSnapshot): void {
     }
   }
 
-  // 8. Open PRs
+  // 9. Open PRs
   console.log(chalk.bold("\n● Open PRs awaiting review"));
   if (snap.openPRs.length === 0) {
     console.log(`  ${chalk.green("✓ No open PRs")}`);
@@ -617,7 +904,7 @@ function printHealthSnapshot(snap: HealthSnapshot): void {
     }
   }
 
-  // 9. Orphan branches
+  // 10. Orphan branches
   console.log(chalk.bold("\n● Orphan branches (no open PR)"));
   const totalOrphans = [...snap.orphansByRepo.values()].reduce((a, b) => a + b, 0);
   if (totalOrphans === 0) {

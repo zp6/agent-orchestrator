@@ -137,6 +137,56 @@ describe("StateStore", () => {
         total_tokens: 220,
       });
     });
+
+    it("returns detailed per-agent usage with cache metrics", () => {
+      store.recordTokenUsage("claude", "claude-agent-orchestrator", 100, 40, 500, 250);
+      store.recordTokenUsage("openai", "codex-agent-orchestrator", 200, 80);
+
+      const usage = store.getAgentTokenUsageDetail(24);
+      expect(usage).toHaveLength(2);
+      expect(usage[0]).toMatchObject({
+        agent_name: "codex-agent-orchestrator",
+        provider: "openai",
+        input_tokens: 200,
+        output_tokens: 80,
+        total_tokens: 280,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+      });
+      expect(usage[1]).toMatchObject({
+        agent_name: "claude-agent-orchestrator",
+        provider: "claude",
+        input_tokens: 100,
+        output_tokens: 40,
+        total_tokens: 140,
+        cache_read_tokens: 500,
+        cache_creation_tokens: 250,
+      });
+    });
+
+    it("returns daily token totals per agent for trend rendering", () => {
+      store.recordTokenUsage("claude", "claude-agent-orchestrator", 100, 40);
+      store.recordTokenUsage("claude", "claude-agent-orchestrator", 60, 20);
+      store.recordTokenUsage("openai", "codex-agent-orchestrator", 200, 80);
+
+      const usage = store.getDailyTokenUsageByAgent(7);
+      expect(usage).toHaveLength(2);
+      expect(usage[0]).toMatchObject({
+        agent_name: "codex-agent-orchestrator",
+        provider: "openai",
+        input_tokens: 200,
+        output_tokens: 80,
+        total_tokens: 280,
+      });
+      expect(usage[1]).toMatchObject({
+        agent_name: "claude-agent-orchestrator",
+        provider: "claude",
+        input_tokens: 160,
+        output_tokens: 60,
+        total_tokens: 220,
+      });
+      expect(typeof usage[0].date).toBe("string");
+    });
   });
 
   describe("findTaskByIssueRef", () => {
