@@ -33,7 +33,7 @@ agents:
       port: 3472
       api_key: "cheese"
       permissions: "bypassPermissions"
-      session: "continue"
+      session: "fresh"
 
   claude-orchestrator-dashboard:
     dir: "claude-orchestrator-dashboard"
@@ -47,7 +47,7 @@ agents:
       port: 3473
       api_key: "cheese"
       permissions: "bypassPermissions"
-      session: "continue"
+      session: "fresh"
 
   claude-orchestrator-reviewer:
     dir: "claude-orchestrator-reviewer"
@@ -62,7 +62,7 @@ agents:
       port: 3474
       api_key: "cheese"
       permissions: "bypassPermissions"
-      session: "continue"
+      session: "fresh"
 
   claude-orchestrator-reviewer-2:
     dir: "claude-orchestrator-reviewer"
@@ -76,7 +76,7 @@ agents:
       port: 3475
       api_key: "cheese"
       permissions: "bypassPermissions"
-      session: "continue"
+      session: "fresh"
 
   claude-orchestrator-telegram:
     dir: "claude-agent-orchestrator"
@@ -102,7 +102,7 @@ agents:
       port: 3478
       api_key: "cheese"
       permissions: "bypassPermissions"
-      session: "continue"
+      session: "fresh"
 
   claude-proxy:
     dir: "claude-proxy"
@@ -116,5 +116,5 @@ agents:
       port: 3471
       api_key: "cheese"
       permissions: "bypassPermissions"
-      session: "continue"
+      session: "fresh"
 
