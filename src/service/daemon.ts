@@ -1,6 +1,6 @@
 import { loadConfig, type OrchestratorConfig } from "../config/schema.js";
 import { StateStore } from "../state/store.js";
-import { Dispatcher, MAX_RETRIES, TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
+import { Dispatcher, MAX_RETRIES, TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS, extractRepoFromSourceRef } from "../orchestrator/dispatcher.js";
 import { Verifier } from "../orchestrator/verifier.js";
 import { ImprovementDetector } from "../orchestrator/improvement-detector.js";
 import { ResearchLinker } from "../orchestrator/research-linker.js";
@@ -10,7 +10,7 @@ import { Supervisor, isDecisionAlreadyResolved } from "../orchestrator/superviso
 import { PRReviewer } from "../orchestrator/pr-reviewer.js";
 import { findOrphanBranches, createPRForBranch, deleteStaleOrphanBranches, STALE_BRANCH_BEHIND_THRESHOLD } from "../orchestrator/pr-creator.js";
 import { PRCreationRetryQueue } from "../orchestrator/pr-creation-retry-queue.js";
-import { validateGhAuth } from "../triggers/github.js";
+import { validateGhAuth, isIssueOpen } from "../triggers/github.js";
 import {
   dispatchGitHubIssues,
   dispatchIdleAgentBacklog,
@@ -35,6 +35,7 @@ const RESEARCH_LINK_EVERY_N_CYCLES = 6; // ~30min — same cadence as improvemen
 const BACKLOG_TRIAGE_EVERY_N_CYCLES = 60; // ~5h at default interval
 const CONTAINER_RESTART_EVERY_N_CYCLES = 100; // ~50min at 30s interval — prevents Docker stalls
 const AGENT_SYNC_EVERY_N_CYCLES = 10; // ~5min at default interval — recover from proxy restarts
+const CLOSED_ISSUE_CHECK_EVERY_N_CYCLES = 3; // ~15min at default — cancel in-flight tasks for closed issues
 const STALE_ISSUE_AGE_DAYS = 7;
 
 /**
@@ -219,7 +220,13 @@ export class Daemon {
       //    rather than being permanently failed immediately.
       this.checkStaleTasks(time);
 
-      // 1b. Process tasks whose retry backoff has elapsed.
+      // 1b. Cancel in-flight tasks whose source issue has been closed externally
+      //     (issue #431). Runs periodically to avoid excessive GitHub API calls.
+      if (this.cycleCount % CLOSED_ISSUE_CHECK_EVERY_N_CYCLES === 0) {
+        this.cancelClosedIssueTasks(time);
+      }
+
+      // 1c. Process tasks whose retry backoff has elapsed.
       await this.processRetries(time);
 
       // 2. Dispatch new work from all trigger sources
@@ -476,6 +483,71 @@ export class Daemon {
           next_retry_at: nextRetryAt,
         });
       }
+    }
+  }
+
+  /**
+   * Cancel in-flight tasks whose source GitHub issue has been closed externally
+   * (issue #431). When an issue is resolved by another agent, manually closed,
+   * or auto-closed by a merged PR, any dispatched/in-progress task targeting
+   * that issue is wasted work. This sweep detects that situation and cancels
+   * the task with a "resolved externally" log entry.
+   *
+   * Only checks GitHub-sourced tasks with a valid source_ref (repo#number format).
+   * Runs periodically (CLOSED_ISSUE_CHECK_EVERY_N_CYCLES) to limit GitHub API calls.
+   */
+  private cancelClosedIssueTasks(time: string): void {
+    try {
+      const activeTasks = [
+        ...this.store.listTasks({ status: "dispatched", limit: 50 }),
+        ...this.store.listTasks({ status: "in_progress", limit: 50 }),
+      ];
+
+      const githubTasks = activeTasks.filter(
+        (t) => t.source === "github" && t.source_ref,
+      );
+
+      if (githubTasks.length === 0) return;
+
+      let cancelled = 0;
+      for (const task of githubTasks) {
+        const repo = extractRepoFromSourceRef(task.source_ref);
+        const issueMatch = task.source_ref?.match(/#(\d+)$/);
+        if (!repo || !issueMatch) continue;
+
+        const issueNumber = parseInt(issueMatch[1], 10);
+
+        if (!isIssueOpen(repo, issueNumber)) {
+          this.log.info("Cancelling in-flight task: source issue closed externally", {
+            taskId: task.id,
+            agentName: task.agent_name,
+            sourceRef: task.source_ref,
+            issueNumber,
+            previousStatus: task.status,
+          });
+          this.store.addLog({
+            task_id: task.id,
+            direction: "system",
+            content: `Resolved externally: source issue ${task.source_ref} was closed while task was ${task.status}. Task cancelled.`,
+          });
+          this.store.updateTask(task.id, {
+            status: "failed",
+            result: `Resolved externally: source issue ${task.source_ref} was closed while task was in-flight.`,
+            next_retry_at: null,
+          });
+          // Mark processed so this issue is not re-dispatched
+          this.store.markProcessed("github", task.source_ref!, `closed-externally-${task.id}`);
+          cancelled++;
+        }
+      }
+
+      if (cancelled > 0) {
+        console.log(`[${time}] Closed-issue guard: cancelled ${cancelled} in-flight task(s) for closed issues`);
+      }
+    } catch (err) {
+      this.log.error("Closed-issue task cancellation failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

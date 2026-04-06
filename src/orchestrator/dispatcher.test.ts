@@ -20,7 +20,13 @@ import type { OrchestratorConfig } from "../config/schema.js";
 // GhAuthError (and other real exports) remain accessible in tests.
 vi.mock("../triggers/github.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../triggers/github.js")>();
-  return { ...actual, validateGhAuth: vi.fn().mockReturnValue({ ok: true }) };
+  return {
+    ...actual,
+    validateGhAuth: vi.fn().mockReturnValue({ ok: true }),
+    // Default: issues are open so retryTask proceeds normally.
+    // Individual tests can override via mockIsIssueOpen.
+    isIssueOpen: vi.fn().mockReturnValue(true),
+  };
 });
 
 // Mock reporters so tests don't shell out to gh CLI when escalation fires.
@@ -40,8 +46,9 @@ const mockReportEscalation = vi.mocked(reportEscalation);
 import { notifyOperator } from "../service/notify.js";
 const mockNotifyOperator = vi.mocked(notifyOperator);
 
-import { validateGhAuth, GhAuthError } from "../triggers/github.js";
+import { validateGhAuth, GhAuthError, isIssueOpen } from "../triggers/github.js";
 const mockValidateGhAuth = vi.mocked(validateGhAuth);
+const mockIsIssueOpen = vi.mocked(isIssueOpen);
 
 // Track the last mockSend across beforeEach
 let mockSend: ReturnType<typeof vi.fn>;
@@ -819,6 +826,107 @@ describe("Dispatcher.retryTask — GH auth pre-flight", () => {
     await dispatcher.retryTask(store.getTask(task.id)!);
 
     expect(mockValidateGhAuth).not.toHaveBeenCalled();
+    expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// retryTask() — closed-issue guard (issue #431)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("Dispatcher.retryTask — closed-issue guard (issue #431)", () => {
+  let store: StateStore;
+  let dispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+    dispatcher = new Dispatcher(makeConfig(), store);
+  });
+
+  it("skips retry and marks resolved-externally when source issue is closed", async () => {
+    const task = store.createTask({
+      title: "Fix bug",
+      description: "Fix the bug",
+      source: "github",
+      source_ref: "owner/repo#99",
+      agent_name: "test-agent",
+    });
+    store.updateTask(task.id, {
+      status: "failed",
+      result: "connection refused",
+      retry_count: 1,
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    });
+
+    // Issue is now closed
+    mockIsIssueOpen.mockReturnValueOnce(false);
+
+    await dispatcher.retryTask(store.getTask(task.id)!);
+
+    // Should NOT have called send
+    expect(mockSend).not.toHaveBeenCalled();
+
+    // Task should be failed with resolved-externally message
+    const updated = store.getTask(task.id)!;
+    expect(updated.status).toBe("failed");
+    expect(updated.result).toContain("Resolved externally");
+    expect(updated.next_retry_at).toBeNull();
+  });
+
+  it("proceeds with retry when source issue is still open", async () => {
+    const task = store.createTask({
+      title: "Fix bug",
+      description: "Fix the bug",
+      source: "github",
+      source_ref: "owner/repo#99",
+      agent_name: "test-agent",
+    });
+    store.updateTask(task.id, {
+      status: "failed",
+      result: "connection refused",
+      retry_count: 1,
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    });
+
+    // Issue is still open
+    mockIsIssueOpen.mockReturnValueOnce(true);
+    mockSend.mockResolvedValueOnce({
+      content: "retry succeeded",
+      usage: { input_tokens: 5, output_tokens: 5 },
+    });
+
+    await dispatcher.retryTask(store.getTask(task.id)!);
+
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    const updated = store.getTask(task.id)!;
+    expect(updated.status).toBe("done");
+  });
+
+  it("does not check issue state for non-github tasks", async () => {
+    const task = store.createTask({
+      title: "Linear task",
+      description: "Do the linear thing",
+      source: "linear",
+      source_ref: "linear-check:test-agent:2026-01-01T00",
+      agent_name: "test-agent",
+    });
+    store.updateTask(task.id, {
+      status: "failed",
+      result: "error",
+      retry_count: 1,
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    });
+
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 5 },
+    });
+
+    await dispatcher.retryTask(store.getTask(task.id)!);
+
+    // isIssueOpen should NOT have been called for non-github tasks
+    expect(mockIsIssueOpen).not.toHaveBeenCalled();
     expect(mockSend).toHaveBeenCalledTimes(1);
   });
 });

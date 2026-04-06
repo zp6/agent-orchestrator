@@ -7,7 +7,7 @@ import { StateStore, type Task, type TaskSource, type TaskType, type AgentHealth
 import { type OrchestratorConfig, getPoolMembers } from "../config/schema.js";
 import { ulid } from "ulid";
 import { createLogger } from "../service/logger.js";
-import { validateGhAuth, GhAuthError } from "../triggers/github.js";
+import { validateGhAuth, GhAuthError, isIssueOpen } from "../triggers/github.js";
 import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
 import { buildRejectionHistoryBlock } from "./rejection-history.js";
 import { notifyOperator } from "../service/notify.js";
@@ -522,6 +522,37 @@ export class Dispatcher {
         const deferredAt = new Date(Date.now() + RETRY_DELAYS_MS[0]).toISOString();
         this.store.updateTask(task.id, { next_retry_at: deferredAt });
         return;
+      }
+    }
+
+    // Pre-retry closed-issue guard (issue #431): if the source issue has been
+    // closed since the task was originally dispatched, skip the retry entirely
+    // and mark the task as resolved externally. This prevents wasting an agent
+    // cycle on work that is no longer needed.
+    if (task.source === "github" && task.source_ref) {
+      const repo = extractRepoFromSourceRef(task.source_ref);
+      const issueMatch = task.source_ref.match(/#(\d+)$/);
+      if (repo && issueMatch) {
+        const issueNumber = parseInt(issueMatch[1], 10);
+        if (!isIssueOpen(repo, issueNumber)) {
+          this.log.info("Retry skipped: source issue closed externally", {
+            taskId: task.id,
+            agentName,
+            sourceRef: task.source_ref,
+            issueNumber,
+          });
+          this.store.addLog({
+            task_id: task.id,
+            direction: "system",
+            content: `Resolved externally: source issue ${task.source_ref} is now closed — retry cancelled.`,
+          });
+          this.store.updateTask(task.id, {
+            status: "failed",
+            result: `Resolved externally: source issue ${task.source_ref} was closed before retry.`,
+            next_retry_at: null,
+          });
+          return;
+        }
       }
     }
 
