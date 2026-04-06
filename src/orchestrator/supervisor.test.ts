@@ -19,6 +19,15 @@ vi.mock("node:child_process", () => ({
   execSync: vi.fn().mockReturnValue("[]"),
 }));
 
+// Mock issue-state-bridge so isDecisionAlreadyResolved falls through to execSync
+vi.mock("../triggers/issue-state-bridge.js", async (importOriginal) => {
+  const actual = await importOriginal() as Record<string, unknown>;
+  return {
+    ...actual,
+    cachedGetIssueState: vi.fn().mockImplementation(() => { throw new Error("cache miss"); }),
+  };
+});
+
 const config: OrchestratorConfig = {
   proxy: { url: "http://localhost:3457", timeout_ms: 5000 },
   orchestrator_dir: "/tmp/orchestrator",
