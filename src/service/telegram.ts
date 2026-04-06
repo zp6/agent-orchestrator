@@ -373,7 +373,49 @@ async function buildStats(ctx: TelegramContext): Promise<string> {
   Success: ${successRate}%
 
 *Per Agent*
-${agentLines.join("\n")}`;
+${agentLines.join("\n")}
+
+${buildPoolStats(ctx, agentStats)}`;
+}
+
+function buildPoolStats(
+  ctx: TelegramContext,
+  agentStats: Array<{ agent_name: string; total: number; done: number; failed: number; avg_score: number | null }>,
+): string {
+  // Find pools
+  const pools = new Map<string, string[]>();
+  for (const [name, agent] of Object.entries(ctx.config.agents)) {
+    if (agent.pool) {
+      const members = pools.get(agent.pool) ?? [];
+      members.push(name);
+      pools.set(agent.pool, members);
+    }
+  }
+
+  if (pools.size === 0) return "";
+
+  const lines: string[] = ["*Pool Distribution*"];
+  for (const [poolName, members] of pools) {
+    const memberStats = members.map((name) => {
+      const s = agentStats.find((a) => a.agent_name === name);
+      return { name, total: s?.total ?? 0, done: s?.done ?? 0, failed: s?.failed ?? 0 };
+    });
+    const poolTotal = memberStats.reduce((s, m) => s + m.total, 0);
+    if (poolTotal === 0) {
+      lines.push(`  ${poolName}: no tasks yet`);
+      continue;
+    }
+
+    lines.push(`  ${poolName} (${members.length} instances, ${poolTotal} tasks):`);
+    for (const m of memberStats) {
+      const pct = poolTotal > 0 ? Math.round((m.total / poolTotal) * 100) : 0;
+      const bar = "█".repeat(Math.round(pct / 10)) + "░".repeat(10 - Math.round(pct / 10));
+      const shortName = m.name.replace("claude-orchestrator-", "").replace("claude-", "");
+      lines.push(`    ${shortName}: ${bar} ${pct}% (${m.total})`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 async function buildSummary(ctx: TelegramContext): Promise<string> {
