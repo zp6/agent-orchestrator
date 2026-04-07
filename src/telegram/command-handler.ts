@@ -22,6 +22,8 @@
 
 import { createLogger } from "../service/logger.js";
 import type { ITelegramStateStore } from "../state/types.js";
+import type { ConflictStatsProvider } from "../reviewer/supervisor.js";
+export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
 const log = createLogger("telegram-commands");
 
@@ -43,7 +45,7 @@ interface TelegramGetUpdatesResponse {
 
 // ── Supported commands ────────────────────────────────────────────────────
 
-type CommandName = "status" | "health" | "pause" | "resume" | "dispatch" | "prioritize" | "queue" | "logs" | "supervisor" | "agents";
+type CommandName = "status" | "health" | "pause" | "resume" | "dispatch" | "prioritize" | "queue" | "logs" | "supervisor" | "agents" | "s";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -56,6 +58,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "logs",
   "supervisor",
   "agents",
+  "s",
 ]);
 
 interface ParsedCommand {
@@ -149,6 +152,7 @@ async function executeCommand(
   cmd: ParsedCommand,
   store: ITelegramStateStore,
   botToken: string,
+  conflictStatsProvider?: ConflictStatsProvider,
 ): Promise<string> {
   switch (cmd.command) {
     case "status":
@@ -220,6 +224,9 @@ async function executeCommand(
 
     case "agents":
       return handleAgents(store);
+
+    case "s":
+      return handleWeeklySummary(store, conflictStatsProvider);
   }
 }
 
@@ -473,6 +480,114 @@ async function handleAgents(store: ITelegramStateStore): Promise<string> {
   return lines.join("\n").trimEnd();
 }
 
+/**
+ * Build the weekly summary message (the /s command).
+ *
+ * Covers the past 7 days: task completion stats, quality scores, and —
+ * when a ConflictStatsProvider is wired — a merge-conflict cost section
+ * showing how many cycles were lost to unresolvable conflicts or stale branches.
+ */
+function handleWeeklySummary(
+  store: ITelegramStateStore,
+  conflictStatsProvider?: ConflictStatsProvider,
+): string {
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+  // Grab a generous slice of recent completions and filter to the last 7 days
+  const allRecent = store.getRecentCompleted(200);
+  const weekTasks = allRecent.filter((t) => {
+    const updated = new Date(t.updated_at);
+    return updated >= sevenDaysAgo;
+  });
+
+  const done = weekTasks.filter((t) => t.status === "done").length;
+  const failed = weekTasks.filter((t) => t.status === "failed").length;
+  const total = weekTasks.length;
+
+  const scores = weekTasks
+    .map((t) => t.quality_score)
+    .filter((s): s is number => typeof s === "number" && s > 0);
+  const avgScore =
+    scores.length > 0
+      ? (scores.reduce((a, b) => a + b, 0) / scores.length) * 100
+      : null;
+
+  // Per-agent breakdown
+  const agentStats = store.getAgentStats();
+
+  const lines: string[] = [
+    `📆 *Weekly Summary* (past 7 days)`,
+    ``,
+    `✅ Tasks completed: ${done}`,
+    `❌ Tasks failed: ${failed}`,
+    `📊 Total tasks: ${total}`,
+  ];
+
+  if (avgScore !== null) {
+    lines.push(`⭐ Avg quality score: ${avgScore.toFixed(0)}%`);
+  }
+
+  if (agentStats.length > 0) {
+    lines.push(``, `*Per-agent (all time)*`);
+    for (const s of agentStats) {
+      const score =
+        s.avg_score != null ? ` · score ${(s.avg_score * 100).toFixed(0)}%` : "";
+      lines.push(
+        `  • \`${s.agent_name}\`: ${s.done}/${s.total} done${score}`,
+      );
+    }
+  }
+
+  // Conflict cost section (issue #44) — only shown when PRReviewer is wired
+  if (conflictStatsProvider) {
+    const stats = conflictStatsProvider.getConflictStats();
+    const cycleCost = stats.totalConflictEscalations + stats.totalAutoClosedConflictPRs;
+    const totalEvents =
+      stats.totalConflictEscalations +
+      stats.totalAutoClosedConflictPRs +
+      stats.totalStaleBranchNudges;
+
+    if (totalEvents > 0) {
+      lines.push(``, `*Merge Conflict Cost*`);
+
+      if (cycleCost > 0) {
+        lines.push(`⚠️ ${cycleCost} cycle${cycleCost === 1 ? "" : "s"} lost to merge conflicts this period`);
+      }
+      if (stats.totalConflictEscalations > 0) {
+        lines.push(`  🚨 Conflict escalations (manual fix needed): ${stats.totalConflictEscalations}`);
+      }
+      if (stats.totalAutoClosedConflictPRs > 0) {
+        lines.push(`  🗑️  PRs auto-closed (persistent conflicts): ${stats.totalAutoClosedConflictPRs}`);
+      }
+      if (stats.totalStaleBranchNudges > 0) {
+        lines.push(`  📢 Stale-branch nudges issued: ${stats.totalStaleBranchNudges}`);
+      }
+
+      const conflictRepos = Object.entries(stats.perRepo)
+        .filter(([, v]) => v.escalations > 0 || v.staleNudges > 0)
+        .sort(
+          (a, b) =>
+            b[1].escalations + b[1].staleNudges - (a[1].escalations + a[1].staleNudges),
+        );
+
+      if (conflictRepos.length > 0) {
+        lines.push(`  Conflict-prone repos this period:`);
+        for (const [repo, counts] of conflictRepos) {
+          const parts: string[] = [];
+          if (counts.escalations > 0) parts.push(`${counts.escalations} escalation(s)`);
+          if (counts.autoCloses > 0) parts.push(`${counts.autoCloses} auto-close(s)`);
+          if (counts.staleNudges > 0) parts.push(`${counts.staleNudges} stale-nudge(s)`);
+          lines.push(`    • \`${repo}\`: ${parts.join(", ")}`);
+        }
+      }
+    } else {
+      lines.push(``, `✨ No merge conflicts this period`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
 // ── TelegramCommandHandler class ──────────────────────────────────────────
 
 /**
@@ -482,10 +597,15 @@ async function handleAgents(store: ITelegramStateStore): Promise<string> {
 export class TelegramCommandHandler {
   private store: ITelegramStateStore;
   private pollIntervalMs: number;
+  private conflictStatsProvider?: ConflictStatsProvider;
 
-  constructor(store: ITelegramStateStore, opts: { pollIntervalMs?: number } = {}) {
+  constructor(
+    store: ITelegramStateStore,
+    opts: { pollIntervalMs?: number; conflictStatsProvider?: ConflictStatsProvider } = {},
+  ) {
     this.store = store;
     this.pollIntervalMs = opts.pollIntervalMs ?? 1_000;
+    this.conflictStatsProvider = opts.conflictStatsProvider;
   }
 
   /**
@@ -519,7 +639,7 @@ export class TelegramCommandHandler {
             log.info("Received Telegram command", { command: cmd.command, args: cmd.args });
 
             try {
-              const reply = await executeCommand(cmd, this.store, config.botToken);
+              const reply = await executeCommand(cmd, this.store, config.botToken, this.conflictStatsProvider);
               await sendMessage(config.botToken, cmd.chatId, reply);
             } catch (err) {
               log.error("Error executing command", {

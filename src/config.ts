@@ -27,6 +27,8 @@ export interface ReviewerConfig {
   pr_review?: {
     /** How many change-request rounds before auto-escalating (default: 3) */
     feedback_ceiling?: number;
+    /** Hours behind main before a branch is flagged as stale (default: 48) */
+    stale_branch_threshold_hours?: number;
   };
   /** Map of agent names to their config */
   agents: Record<string, AgentConfig>;

@@ -34,6 +34,25 @@ export interface PRInfo {
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
 }
 
+/**
+ * Category for why a re-dispatch was triggered.  The orchestrator uses this
+ * to build the dispatch-efficiency breakdown:
+ *
+ *   - `quality-revision`    — code review requested changes (normal feedback loop)
+ *   - `conflict-redispatch` — PR closed due to persistent merge conflicts,
+ *                             issue re-dispatched to agent for a fresh start
+ *   - `conflict-escalation` — merge conflict could not be auto-resolved,
+ *                             escalated to human
+ *   - `stale-branch-nudge`  — branch was >48 h behind main; agent nudged to
+ *                             rebase before opening a PR
+ */
+export type RedispatchCategory =
+  | "quality-revision"
+  | "conflict-redispatch"
+  | "conflict-escalation"
+  | "stale-branch-nudge"
+  | null;
+
 export interface PRReviewResult {
   decision: "approve" | "request-changes" | "escalate";
   comment: string;
@@ -44,6 +63,18 @@ export interface PRReviewResult {
    * persistently conflicting PR and re-dispatch the linked issue.
    */
   conflictEscalation?: boolean;
+  /**
+   * Categorises the reason behind the review outcome so the orchestrator can
+   * attribute the cycle cost: quality issue vs. merge conflict vs. stale branch.
+   * Null when the review is a straightforward approve or first-time review.
+   */
+  redispatchCategory?: RedispatchCategory;
+  /**
+   * How many hours behind `origin/main` the branch was at the time of review.
+   * The orchestrator uses this to surface a "conflict-prone branches" indicator
+   * and to compute cycles lost to merge conflicts in the weekly summary.
+   */
+  branchStalenessHours?: number;
 }
 
 const SYSTEM_PROMPT = `You are a code reviewer for a multi-agent system. Your job is to catch real bugs and security issues, NOT to enforce style preferences.
@@ -169,9 +200,29 @@ async function findMatchingIssueNumber(
 
 // ── PRReviewer ────────────────────────────────────────────────────────────────
 
+/**
+ * Aggregate conflict-related statistics exposed via `getConflictStats()`.
+ * The orchestrator feeds these into the weekly summary and the dashboard's
+ * dispatch-efficiency chart.
+ */
+export interface ConflictStats {
+  /** Number of unique PRs that hit conflict escalation since last reset */
+  totalConflictEscalations: number;
+  /** Number of PRs auto-closed due to persistent conflicts */
+  totalAutoClosedConflictPRs: number;
+  /** Number of stale-branch nudges issued (branch >48 h behind main) */
+  totalStaleBranchNudges: number;
+  /** Per-repo breakdown of conflict escalation counts */
+  perRepo: Record<string, { escalations: number; autoCloses: number; staleNudges: number }>;
+}
+
 export class PRReviewer {
   private log = createLogger("pr-reviewer");
   private conflictEscalationCount = new Map<string, number>();
+
+  // ── Conflict tracking counters (for ConflictStats) ─────────────────────
+  private conflictAutoCloseCount = new Map<string, number>();
+  private staleBranchNudgeCount = new Map<string, number>();
 
   /**
    * Optional callback invoked after a PR merge so the orchestrator daemon can
@@ -179,12 +230,16 @@ export class PRReviewer {
    */
   private onAgentRestart: (repo: string) => Promise<void>;
 
+  /** Threshold in hours before a branch is considered stale (default 48h). */
+  private staleBranchThresholdHours: number;
+
   constructor(
     private config: ReviewerConfig,
     private store: IStateStore,
     opts: { onAgentRestart?: (repo: string) => Promise<void> } = {},
   ) {
     this.onAgentRestart = opts.onAgentRestart ?? (async () => {});
+    this.staleBranchThresholdHours = config.pr_review?.stale_branch_threshold_hours ?? 48;
   }
 
   async reviewPR(repo: string, prNumber: number): Promise<PRReviewResult> {
@@ -211,6 +266,7 @@ export class PRReviewer {
             comment: `This PR has merge conflicts and auto-rebase onto \`origin/main\` failed (real conflicts need manual resolution).\n\n\`\`\`\ngit fetch origin\ngit rebase origin/main\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``,
             reason: "Merge conflict — auto-rebase failed, escalating to human",
             conflictEscalation: true,
+            redispatchCategory: "conflict-escalation",
           };
           this.log.warn("Auto-rebase failed, escalating PR to human", {
             repo,
@@ -230,6 +286,7 @@ export class PRReviewer {
           comment: `This PR has merge conflicts. No local repository found for auto-rebase. Please rebase manually:\n\n\`\`\`\ngit fetch origin\ngit rebase origin/main\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``,
           reason: "Merge conflict — no local repo for auto-rebase, escalating to human",
           conflictEscalation: true,
+          redispatchCategory: "conflict-escalation",
         };
         this.log.info("PR has merge conflicts and no local repo found, escalating", {
           repo,
@@ -250,6 +307,42 @@ export class PRReviewer {
           branch: pr.branch,
           outcome: rebaseOutcome,
         });
+      }
+    }
+
+    // ── Branch staleness check ─────────────────────────────────────────────
+    const stalenessHours = this.measureBranchStaleness(repo, pr.branch);
+
+    if (stalenessHours !== null && stalenessHours > this.staleBranchThresholdHours) {
+      const repoKey = repo.split("/").pop() ?? repo;
+      this.staleBranchNudgeCount.set(
+        repoKey,
+        (this.staleBranchNudgeCount.get(repoKey) ?? 0) + 1,
+      );
+      this.log.warn("Branch is stale — nudging agent to rebase", {
+        repo,
+        prNumber,
+        branch: pr.branch,
+        stalenessHours: Math.round(stalenessHours),
+        thresholdHours: this.staleBranchThresholdHours,
+      });
+      // Post a nudge comment but don't block the review — the review
+      // still proceeds normally.  The orchestrator can use branchStalenessHours
+      // in the result to track cycles lost.
+      try {
+        execSync(
+          `gh pr comment ${prNumber} --repo ${shellEscape(repo)} --body ${shellEscape(
+            `**[orchestrator] Stale branch warning** ⚠️\n\n` +
+            `This branch is ~${Math.round(stalenessHours)} hours behind \`main\`. ` +
+            `Branches that drift for more than ${this.staleBranchThresholdHours}h are ` +
+            `much more likely to hit merge conflicts.\n\n` +
+            `Consider rebasing before pushing more commits:\n` +
+            `\`\`\`\ngit fetch origin && git rebase origin/main && git push --force-with-lease\n\`\`\``,
+          )}`,
+          { encoding: "utf-8", timeout: 30000 },
+        );
+      } catch {
+        // Best effort — don't fail the review for a nudge
       }
     }
 
@@ -442,11 +535,28 @@ export class PRReviewer {
         .join("");
 
       const result = this.parseResponse(text);
+
+      // Annotate with staleness & re-dispatch category
+      if (stalenessHours !== null) {
+        result.branchStalenessHours = stalenessHours;
+      }
+      if (result.decision === "request-changes") {
+        result.redispatchCategory = "quality-revision";
+      }
+      if (
+        stalenessHours !== null &&
+        stalenessHours > this.staleBranchThresholdHours
+      ) {
+        result.redispatchCategory = "stale-branch-nudge";
+      }
+
       this.log.info("PR review complete", {
         repo,
         prNumber,
         decision: result.decision,
         reason: result.reason,
+        branchStalenessHours: result.branchStalenessHours,
+        redispatchCategory: result.redispatchCategory,
       });
 
       await this.executeDecision(repo, prNumber, result, pr.branch);
@@ -701,6 +811,14 @@ export class PRReviewer {
         { repo, prNumber, branch, conflictCount },
       );
       this.store.recordPRReview(repo, prNumber, "escalate");
+
+      // Track for conflict stats
+      const repoKey = repo.split("/").pop() ?? repo;
+      this.conflictAutoCloseCount.set(
+        repoKey,
+        (this.conflictAutoCloseCount.get(repoKey) ?? 0) + 1,
+      );
+
       return true;
     } catch (err) {
       this.log.error("Failed to auto-close conflicting PR", {
@@ -918,6 +1036,90 @@ export class PRReviewer {
       // orchestrator_dir has no git remote — skip
     }
     return null;
+  }
+
+  /**
+   * Return aggregate conflict/staleness statistics since the last daemon
+   * restart.  The orchestrator feeds these into the weekly summary ("X cycles
+   * lost to merge conflicts") and the dashboard's dispatch-efficiency chart.
+   */
+  getConflictStats(): ConflictStats {
+    let totalEscalations = 0;
+    let totalAutoCloses = 0;
+    let totalNudges = 0;
+    const perRepo: ConflictStats["perRepo"] = {};
+
+    // Aggregate escalation counts (keyed by "repo#prNumber")
+    for (const [key, count] of this.conflictEscalationCount) {
+      const repo = key.split("#")[0].split("/").pop() ?? key;
+      if (!perRepo[repo]) perRepo[repo] = { escalations: 0, autoCloses: 0, staleNudges: 0 };
+      perRepo[repo].escalations += count;
+      totalEscalations += count;
+    }
+
+    for (const [repo, count] of this.conflictAutoCloseCount) {
+      if (!perRepo[repo]) perRepo[repo] = { escalations: 0, autoCloses: 0, staleNudges: 0 };
+      perRepo[repo].autoCloses += count;
+      totalAutoCloses += count;
+    }
+
+    for (const [repo, count] of this.staleBranchNudgeCount) {
+      if (!perRepo[repo]) perRepo[repo] = { escalations: 0, autoCloses: 0, staleNudges: 0 };
+      perRepo[repo].staleNudges += count;
+      totalNudges += count;
+    }
+
+    return {
+      totalConflictEscalations: totalEscalations,
+      totalAutoClosedConflictPRs: totalAutoCloses,
+      totalStaleBranchNudges: totalNudges,
+      perRepo,
+    };
+  }
+
+  /** Reset all conflict counters (e.g. after a weekly summary is generated). */
+  resetConflictStats(): void {
+    this.conflictAutoCloseCount.clear();
+    this.staleBranchNudgeCount.clear();
+    // Note: conflictEscalationCount is NOT reset here because it's also
+    // used for the auto-close-after-N-escalations logic in the daemon.
+  }
+
+  /**
+   * Measure how many hours behind `origin/main` the given branch is.
+   * Returns null if the measurement fails (no local repo, git error, etc.).
+   *
+   * Uses the commit timestamp of `origin/main` that is NOT an ancestor of
+   * the branch — i.e. how long ago main diverged from the branch point.
+   */
+  private measureBranchStaleness(repo: string, branch: string): number | null {
+    const localPath = this.findLocalRepoPath(repo);
+    if (!localPath) return null;
+
+    try {
+      // Get the timestamp of the merge-base (where branch diverged from main)
+      const mergeBase = execSync(
+        `git merge-base origin/main ${branch}`,
+        { cwd: localPath, encoding: "utf-8", timeout: 10000 },
+      ).trim();
+
+      if (!mergeBase) return null;
+
+      // Get the timestamp of the merge-base commit
+      const baseTimestamp = execSync(
+        `git show -s --format=%ct ${mergeBase}`,
+        { cwd: localPath, encoding: "utf-8", timeout: 10000 },
+      ).trim();
+
+      const baseTime = parseInt(baseTimestamp, 10) * 1000; // to ms
+      if (isNaN(baseTime)) return null;
+
+      const hoursOld = (Date.now() - baseTime) / (1000 * 60 * 60);
+      return hoursOld;
+    } catch {
+      // Git not available or branch doesn't exist locally — fail open
+      return null;
+    }
   }
 
   private async tryAutoRebase(localPath: string, branch: string): Promise<"success" | "up-to-date" | "failed"> {

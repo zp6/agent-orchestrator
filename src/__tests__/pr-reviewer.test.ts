@@ -4,7 +4,9 @@ import {
   extractChecklistItems,
   buildFeedbackTaskMessage,
   validateClosesReferences,
+  PRReviewer,
 } from "../reviewer/pr-reviewer.js";
+import type { ConflictStats, RedispatchCategory, PRReviewResult } from "../reviewer/pr-reviewer.js";
 
 describe("enforceChecklist", () => {
   it("returns unchanged when already numbered", () => {
@@ -236,5 +238,142 @@ describe("validateClosesReferences", () => {
     const issues = validateClosesReferences(prRepo, body, issueRepo);
     expect(issues).toHaveLength(2);
     expect(issues.every((i) => i.number === 373)).toBe(true);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// RedispatchCategory type & PRReviewResult shape (issue #41)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("PRReviewResult redispatch metadata", () => {
+  it("accepts all valid redispatch categories", () => {
+    const categories: RedispatchCategory[] = [
+      "quality-revision",
+      "conflict-redispatch",
+      "conflict-escalation",
+      "stale-branch-nudge",
+      null,
+    ];
+    // TypeScript type-level check — if this compiles, the types are correct
+    for (const cat of categories) {
+      const result: PRReviewResult = {
+        decision: "approve",
+        comment: "LGTM",
+        reason: "test",
+        redispatchCategory: cat,
+      };
+      expect(result.redispatchCategory).toBe(cat);
+    }
+  });
+
+  it("supports branchStalenessHours on PRReviewResult", () => {
+    const result: PRReviewResult = {
+      decision: "request-changes",
+      comment: "needs work",
+      reason: "test",
+      branchStalenessHours: 72.5,
+      redispatchCategory: "stale-branch-nudge",
+    };
+    expect(result.branchStalenessHours).toBe(72.5);
+    expect(result.redispatchCategory).toBe("stale-branch-nudge");
+  });
+
+  it("defaults to undefined when redispatch fields are omitted", () => {
+    const result: PRReviewResult = {
+      decision: "approve",
+      comment: "LGTM",
+      reason: "test",
+    };
+    expect(result.redispatchCategory).toBeUndefined();
+    expect(result.branchStalenessHours).toBeUndefined();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// ConflictStats (issue #41)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("ConflictStats shape", () => {
+  it("can be constructed with per-repo breakdown", () => {
+    const stats: ConflictStats = {
+      totalConflictEscalations: 5,
+      totalAutoClosedConflictPRs: 1,
+      totalStaleBranchNudges: 3,
+      perRepo: {
+        "agent-orchestrator": { escalations: 3, autoCloses: 1, staleNudges: 2 },
+        "agent-dashboard": { escalations: 2, autoCloses: 0, staleNudges: 1 },
+      },
+    };
+    expect(stats.totalConflictEscalations).toBe(5);
+    expect(stats.perRepo["agent-orchestrator"].autoCloses).toBe(1);
+    expect(stats.perRepo["agent-dashboard"].staleNudges).toBe(1);
+  });
+
+  it("supports empty per-repo map (no conflicts)", () => {
+    const stats: ConflictStats = {
+      totalConflictEscalations: 0,
+      totalAutoClosedConflictPRs: 0,
+      totalStaleBranchNudges: 0,
+      perRepo: {},
+    };
+    expect(Object.keys(stats.perRepo)).toHaveLength(0);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// PRReviewer.getConflictStats() (issue #41)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("PRReviewer conflict stats", () => {
+  function makeReviewer() {
+    // Minimal config & store stubs for unit testing stat tracking only
+    const config = {
+      base_dir: "/tmp",
+      orchestrator_dir: "/tmp",
+      agents: {},
+    };
+    const store = {
+      queuePRForMerge: () => ({ repo: "", pr_number: 0, branch: "", status: "queued" as const, position: 0 }),
+      getMergeQueue: () => [],
+      isPRInMergeQueue: () => false,
+      markQueuedPRMerging: () => {},
+      markQueuedPRMerged: () => {},
+      markQueuedPRFailed: () => {},
+      removeFromMergeQueue: () => {},
+      recordPRReview: () => {},
+      getTask: () => null,
+      updateTask: () => {},
+      hasActiveTask: () => false,
+      listTasks: () => [],
+      getRecentCompleted: () => [],
+      getUnverified: () => [],
+      getAgentStats: () => [],
+      getAgentHealthBatch: () => [],
+      getRecentSupervisorDecisions: () => [],
+      querySupervisorDecisions: () => [],
+      pruneOldSupervisorDecisions: () => 0,
+      recordSupervisorDecision: () => {},
+    };
+    return new PRReviewer(config, store);
+  }
+
+  it("returns zeroed stats when no conflicts have occurred", () => {
+    const reviewer = makeReviewer();
+    const stats = reviewer.getConflictStats();
+    expect(stats.totalConflictEscalations).toBe(0);
+    expect(stats.totalAutoClosedConflictPRs).toBe(0);
+    expect(stats.totalStaleBranchNudges).toBe(0);
+    expect(Object.keys(stats.perRepo)).toHaveLength(0);
+  });
+
+  it("resetConflictStats clears auto-close and nudge counters", () => {
+    const reviewer = makeReviewer();
+    // Simulate escalation tracking (public API)
+    // The conflict escalation count is tracked per "repo#prNumber" key
+    // but auto-close and nudge are repo-keyed. We test the reset method.
+    reviewer.resetConflictStats();
+    const stats = reviewer.getConflictStats();
+    expect(stats.totalAutoClosedConflictPRs).toBe(0);
+    expect(stats.totalStaleBranchNudges).toBe(0);
   });
 });

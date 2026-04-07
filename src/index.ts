@@ -17,13 +17,13 @@
 
 // Core reviewer modules
 export { PRReviewer, enforceChecklist, validateClosesReferences } from "./reviewer/pr-reviewer.js";
-export type { PRInfo, PRReviewResult, CrossRepoCloseIssue } from "./reviewer/pr-reviewer.js";
+export type { PRInfo, PRReviewResult, RedispatchCategory, ConflictStats, CrossRepoCloseIssue } from "./reviewer/pr-reviewer.js";
 
 export { Verifier } from "./reviewer/verifier.js";
 export type { VerificationResult } from "./reviewer/verifier.js";
 
-export { Supervisor, extractIssueRefs, isDecisionAlreadyResolved, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo } from "./reviewer/supervisor.js";
-export type { SupervisorDecision } from "./reviewer/supervisor.js";
+export { Supervisor, extractIssueRefs, isDecisionAlreadyResolved, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo, formatConflictStatsSection } from "./reviewer/supervisor.js";
+export type { SupervisorDecision, ConflictStatsProvider } from "./reviewer/supervisor.js";
 
 export { ImprovementDetector } from "./reviewer/improvement-detector.js";
 export type { DetectedImprovement } from "./reviewer/improvement-detector.js";

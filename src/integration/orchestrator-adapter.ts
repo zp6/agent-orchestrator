@@ -56,10 +56,14 @@ export function createReviewerInstances(
   store: IStateStore,
   opts: CreateReviewerOptions = {},
 ): ReviewerInstances {
+  // Create reviewer first so it can be wired as the conflict-stats provider
+  // for the supervisor (issue #44).
+  const reviewer = new PRReviewer(config, store, { onAgentRestart: opts.onAgentRestart });
+
   return {
-    reviewer: new PRReviewer(config, store, { onAgentRestart: opts.onAgentRestart }),
+    reviewer,
     verifier: new Verifier(store),
-    supervisor: new Supervisor(config, store),
+    supervisor: new Supervisor(config, store, { conflictStatsProvider: reviewer }),
     detector: new ImprovementDetector(config),
     issueCreator: new IssueCreator(config),
   };

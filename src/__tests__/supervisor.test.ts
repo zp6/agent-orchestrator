@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { extractIssueRefs, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo } from "../reviewer/supervisor.js";
+import { extractIssueRefs, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo, formatConflictStatsSection } from "../reviewer/supervisor.js";
 import type { AgentHealth } from "../state/types.js";
+import type { ConflictStats } from "../reviewer/pr-reviewer.js";
 
 describe("extractIssueRefs", () => {
   it("extracts a single issue ref", () => {
@@ -175,5 +176,77 @@ describe("formatTimeAgo", () => {
 
   it("returns 'just now' for invalid timestamps", () => {
     expect(formatTimeAgo("not-a-date")).toBe("just now");
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// formatConflictStatsSection (issue #44)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("formatConflictStatsSection", () => {
+  function makeStats(overrides: Partial<ConflictStats> = {}): ConflictStats {
+    return {
+      totalConflictEscalations: 0,
+      totalAutoClosedConflictPRs: 0,
+      totalStaleBranchNudges: 0,
+      perRepo: {},
+      ...overrides,
+    };
+  }
+
+  it("returns empty array when there are no conflict events", () => {
+    expect(formatConflictStatsSection(makeStats())).toEqual([]);
+  });
+
+  it("includes totals when there are escalations", () => {
+    const lines = formatConflictStatsSection(
+      makeStats({ totalConflictEscalations: 2 }),
+    );
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.some((l) => l.includes("Conflict escalations"))).toBe(true);
+    expect(lines.some((l) => l.includes("Estimated cycles lost"))).toBe(true);
+  });
+
+  it("includes stale-branch nudges in the summary", () => {
+    const lines = formatConflictStatsSection(
+      makeStats({ totalStaleBranchNudges: 3 }),
+    );
+    expect(lines.some((l) => l.includes("Stale-branch nudges"))).toBe(true);
+  });
+
+  it("does NOT add cycle-cost line when only stale nudges exist (no direct cycle loss)", () => {
+    const lines = formatConflictStatsSection(
+      makeStats({ totalStaleBranchNudges: 3 }),
+    );
+    // Stale nudges alone don't count as cycles lost (they're preventive)
+    expect(lines.some((l) => l.includes("Estimated cycles lost"))).toBe(false);
+  });
+
+  it("lists conflict-prone repos sorted by total event count", () => {
+    const stats = makeStats({
+      totalConflictEscalations: 5,
+      totalStaleBranchNudges: 2,
+      perRepo: {
+        "agent-proxy": { escalations: 1, autoCloses: 0, staleNudges: 1 },
+        "agent-dashboard": { escalations: 4, autoCloses: 0, staleNudges: 1 },
+      },
+    });
+    const lines = formatConflictStatsSection(stats);
+    const repoLines = lines.filter((l) => l.includes("•"));
+    // dashboard (5) should appear before proxy (2)
+    expect(repoLines[0]).toContain("agent-dashboard");
+    expect(repoLines[1]).toContain("agent-proxy");
+  });
+
+  it("omits repos with zero escalations and zero stale nudges", () => {
+    const stats = makeStats({
+      totalAutoClosedConflictPRs: 1,
+      perRepo: {
+        "agent-proxy": { escalations: 0, autoCloses: 1, staleNudges: 0 },
+      },
+    });
+    const lines = formatConflictStatsSection(stats);
+    // Repos only contributing auto-closes (not escalations or nudges) are omitted
+    expect(lines.some((l) => l.includes("agent-proxy"))).toBe(false);
   });
 });

@@ -15,6 +15,15 @@ import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
 import type { IStateStore, Task, AgentHealth, SupervisorDecisionRecord } from "../state/types.js";
+import type { ConflictStats } from "./pr-reviewer.js";
+
+/**
+ * Minimal interface for providing conflict stats to the supervisor.
+ * Satisfied by `PRReviewer` (or any stub in tests).
+ */
+export interface ConflictStatsProvider {
+  getConflictStats(): ConflictStats;
+}
 
 export interface SupervisorDecision {
   action: "dispatch" | "verify" | "redeploy" | "create-issue" | "follow-up" | "none";
@@ -73,6 +82,12 @@ You have memory of your recent decisions in "## Recent Supervisor Decisions". Us
 - Avoid repeating actions that have already been taken (especially failed ones)
 - Track whether your dispatches produced results
 - Identify patterns of repeated failures and escalate to issue creation instead
+
+CONFLICT-AWARE DISPATCH (when "## Merge Conflict Stats" is present):
+- Repos with high stale-branch-nudge counts are conflict-prone — their agents need to rebase more often
+- When dispatching to an agent whose repo has stale-nudge or escalation counts > 0, include a reminder: "Before opening a PR, run: git fetch origin && git rebase origin/main"
+- If conflict escalations are high for a repo (≥2 this period), consider creating an issue to investigate the root cause rather than continuing to dispatch direct work
+- Cycles lost to conflicts are wasted — use the stats to prioritise rebasing and conflict prevention over new feature work
 
 Be specific and actionable. Only suggest actions that address real gaps. Return [] if everything is on track.`;
 
@@ -251,13 +266,61 @@ export function formatTimeAgo(isoTimestamp: string): string {
   return `${days}d ago`;
 }
 
+/**
+ * Format a `ConflictStats` snapshot into human-readable supervisor context lines.
+ *
+ * Returns an empty array when there are no conflict events (no section needed).
+ * Exported for unit testing.
+ */
+export function formatConflictStatsSection(stats: ConflictStats): string[] {
+  const totalEvents =
+    stats.totalConflictEscalations +
+    stats.totalAutoClosedConflictPRs +
+    stats.totalStaleBranchNudges;
+
+  if (totalEvents === 0) return [];
+
+  const lines: string[] = [
+    `- Conflict escalations (unresolvable): ${stats.totalConflictEscalations}`,
+    `- PRs auto-closed due to conflicts: ${stats.totalAutoClosedConflictPRs}`,
+    `- Stale-branch nudges issued: ${stats.totalStaleBranchNudges}`,
+  ];
+
+  const cycleCost =
+    stats.totalConflictEscalations + stats.totalAutoClosedConflictPRs;
+  if (cycleCost > 0) {
+    lines.push(`- ⚠️  Estimated cycles lost to merge conflicts: ${cycleCost}`);
+  }
+
+  const conflictRepos = Object.entries(stats.perRepo)
+    .filter(([, v]) => v.escalations > 0 || v.staleNudges > 0)
+    .sort((a, b) => (b[1].escalations + b[1].staleNudges) - (a[1].escalations + a[1].staleNudges));
+
+  if (conflictRepos.length > 0) {
+    lines.push(`- Conflict-prone repos:`);
+    for (const [repo, counts] of conflictRepos) {
+      const parts: string[] = [];
+      if (counts.escalations > 0) parts.push(`${counts.escalations} escalation(s)`);
+      if (counts.autoCloses > 0) parts.push(`${counts.autoCloses} auto-close(s)`);
+      if (counts.staleNudges > 0) parts.push(`${counts.staleNudges} stale-nudge(s)`);
+      lines.push(`    • ${repo}: ${parts.join(", ")}`);
+    }
+  }
+
+  return lines;
+}
+
 export class Supervisor {
   private log = createLogger("supervisor");
+  private conflictStatsProvider?: ConflictStatsProvider;
 
   constructor(
     private config: ReviewerConfig,
     private store: IStateStore,
-  ) {}
+    opts: { conflictStatsProvider?: ConflictStatsProvider } = {},
+  ) {
+    this.conflictStatsProvider = opts.conflictStatsProvider;
+  }
 
   async review(): Promise<SupervisorDecision[]> {
     const context = this.buildContext();
@@ -449,6 +512,15 @@ export class Supervisor {
         })
         .join("\n");
       sections.push(`## Agent Performance\n${lines}`);
+    }
+
+    // Merge conflict stats (from PRReviewer, when wired via ConflictStatsProvider)
+    if (this.conflictStatsProvider) {
+      const conflictStats = this.conflictStatsProvider.getConflictStats();
+      const conflictLines = formatConflictStatsSection(conflictStats);
+      if (conflictLines.length > 0) {
+        sections.push(`## Merge Conflict Stats\n${conflictLines.join("\n")}`);
+      }
     }
 
     return sections.join("\n\n");
