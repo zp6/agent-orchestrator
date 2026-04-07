@@ -32,11 +32,15 @@ export interface ManagementResponse {
 
 export class ManagementClient {
   private baseUrl: string;
+  /** Timeout for management API calls (stop, start, update). Much shorter than
+   *  the proxy dispatch timeout — a management call should complete in seconds,
+   *  not minutes. Using the full proxy timeout (900s) caused cycle deadlocks
+   *  when a container restart hung. */
   private timeout: number;
 
   constructor(proxyConfig: ProxyConfig) {
     this.baseUrl = proxyConfig.manager_url ?? "http://localhost:3400";
-    this.timeout = proxyConfig.timeout_ms;
+    this.timeout = Math.min(proxyConfig.timeout_ms, 30_000); // cap at 30s
   }
 
   async listAgents(): Promise<ProxyAgentStatus[]> {
