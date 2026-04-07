@@ -138,4 +138,76 @@ describe("handleCommand telegram operator controls", () => {
       }),
     );
   });
+
+  it("de-escalates a GitHub issue via the ack command and clears processed trigger state", async () => {
+    const task = store.createTask({
+      title: "Escalated issue 42",
+      source: "github",
+      source_ref: "owner/repo-a#42",
+      agent_name: "agent-a",
+    });
+    store.updateTask(task.id, { status: "escalated" });
+    store.markProcessed("github", "owner/repo-a#42", task.id);
+
+    const reply = await handleCommand("ack 42", {
+      config,
+      store,
+      dispatcher: { dispatch: vi.fn() } as never,
+    });
+
+    expect(reply).toContain("owner/repo-a#42");
+    expect(store.findEscalatedTask("owner/repo-a#42")).toBeUndefined();
+    expect(store.getProcessedTriggerInfo("github", "owner/repo-a#42")).toBeUndefined();
+    expect(store.getLogs(task.id).some((entry) => entry.content.includes("Telegram ack command"))).toBe(true);
+    expect(store.findAllTasksBySourceRef("owner/repo-a#42")[0].status).toBe("failed");
+  });
+
+  it("de-escalates a health-check escalation via resolve without stripping the colon", async () => {
+    const task = store.createTask({
+      title: "Health check failed: agent-a",
+      source: "manual",
+      source_ref: "health-check-fail:agent-a",
+      agent_name: "agent-a",
+    });
+    store.updateTask(task.id, { status: "escalated" });
+
+    const reply = await handleCommand("/resolve health-check-fail:agent-a", {
+      config,
+      store,
+      dispatcher: { dispatch: vi.fn() } as never,
+    });
+
+    expect(reply).toContain("health-check-fail:agent-a");
+    expect(store.findEscalatedTask("health-check-fail:agent-a")).toBeUndefined();
+    expect(store.findAllTasksBySourceRef("health-check-fail:agent-a")[0].status).toBe("failed");
+  });
+
+  it("de-escalates all active escalations when asked", async () => {
+    const first = store.createTask({
+      title: "Escalated issue 42",
+      source: "github",
+      source_ref: "owner/repo-a#42",
+      agent_name: "agent-a",
+    });
+    const second = store.createTask({
+      title: "Health check failed: agent-a",
+      source: "manual",
+      source_ref: "health-check-fail:agent-a",
+      agent_name: "agent-a",
+    });
+    store.updateTask(first.id, { status: "escalated" });
+    store.updateTask(second.id, { status: "escalated" });
+
+    const reply = await handleCommand("dismiss all", {
+      config,
+      store,
+      dispatcher: { dispatch: vi.fn() } as never,
+    });
+
+    expect(reply).toContain("2 task(s)");
+    expect(store.findEscalatedTask("owner/repo-a#42")).toBeUndefined();
+    expect(store.findEscalatedTask("health-check-fail:agent-a")).toBeUndefined();
+    expect(store.findAllTasksBySourceRef("owner/repo-a#42")[0].status).toBe("failed");
+    expect(store.findAllTasksBySourceRef("health-check-fail:agent-a")[0].status).toBe("failed");
+  });
 });

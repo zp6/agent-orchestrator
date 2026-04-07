@@ -27,4 +27,8 @@ describe("normaliseSourceRef", () => {
   it("handles a bare repo#N ref", () => {
     expect(normaliseSourceRef("repo#42")).toBe("repo#42");
   });
+
+  it("leaves non-whitelisted colon-prefixed refs intact", () => {
+    expect(normaliseSourceRef("health-check-fail:agent-a")).toBe("health-check-fail:agent-a");
+  });
 });

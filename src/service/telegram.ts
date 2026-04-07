@@ -10,6 +10,7 @@ import { AgentClient } from "../client/agent-client.js";
 import { ulid } from "ulid";
 import { findBranchForIssue, findExistingPRsForIssue, type GitHubIssue } from "../triggers/github.js";
 import { getProviderStates } from "../service/provider-state.js";
+import { deescalateAllEscalatedTasks, deescalateEscalatedTask, normaliseSourceRef } from "../cli/commands/deescalate.js";
 
 const log = createLogger("telegram");
 
@@ -133,6 +134,8 @@ interface ResolvedIssueRef {
   sourceRef: string;
 }
 
+const DEESCALATE_COMMANDS = new Set(["ack", "/ack", "dismiss", "/dismiss", "resolve", "/resolve", "deescalate", "/deescalate"]);
+
 async function resolveIssueRef(rawIssueRef: string, repos: string[]): Promise<ResolvedIssueRef | null> {
   const trimmed = rawIssueRef.trim();
   const fullRefMatch = trimmed.match(/^([\w.-]+\/[\w.-]+)#(\d+)$/);
@@ -181,6 +184,69 @@ async function fetchIssueDetails(repo: string, issueNumber: number): Promise<(Gi
   }
 }
 
+function formatEscalatedTaskList(tasks: Array<{ source_ref: string | null; agent_name: string | null; title: string }>): string {
+  return tasks.slice(0, 5).map((task) => {
+    const ref = task.source_ref ?? task.title;
+    const agent = task.agent_name ?? "unassigned";
+    return `${ref} (${agent})`;
+  }).join(", ");
+}
+
+async function handleTelegramDeescalation(
+  text: string,
+  ctx: TelegramContext,
+  repos: string[],
+  command: string,
+): Promise<string> {
+  const parts = text.trim().split(/\s+/);
+  const rawTarget = parts.slice(1).join(" ").trim();
+  const reason = `Telegram ${command.replace(/^\//, "")} command`;
+
+  if (!rawTarget) {
+    const escalated = ctx.store.findAllEscalatedTasks();
+    if (escalated.length === 0) {
+      return "No escalated tasks found.";
+    }
+    if (escalated.length > 1) {
+      return `Multiple escalations are active: ${formatEscalatedTaskList(escalated)}. Use "${command.replace(/^\//, "")} <source_ref>" or "${command.replace(/^\//, "")} all".`;
+    }
+
+    if (!escalated[0].source_ref) {
+      return `❌ The active escalation does not have a source_ref. Use "${command.replace(/^\//, "")} all" or specify a source_ref explicitly.`;
+    }
+
+    try {
+      const task = deescalateEscalatedTask(ctx.store, escalated[0].source_ref, reason);
+      return `✅ De-escalated ${task.source_ref ?? task.title} (${task.id.slice(0, 8)})`;
+    } catch (err) {
+      return err instanceof Error ? `❌ ${err.message}` : `❌ ${String(err)}`;
+    }
+  }
+
+  if (rawTarget.toLowerCase() === "all") {
+    try {
+      const count = deescalateAllEscalatedTasks(ctx.store, reason);
+      return `✅ De-escalated ${count} task(s).`;
+    } catch (err) {
+      return err instanceof Error ? `❌ ${err.message}` : `❌ ${String(err)}`;
+    }
+  }
+
+  const issueLike = /^\d+$/.test(rawTarget) || /^[\w.-]+\/[\w.-]+#\d+$/.test(rawTarget);
+  const resolved = issueLike ? await resolveIssueRef(rawTarget, repos) : null;
+  if (issueLike && !resolved) {
+    return `❌ Could not resolve issue "${rawTarget}" in configured repos.`;
+  }
+  const sourceRef = resolved?.sourceRef ?? normaliseSourceRef(rawTarget);
+
+  try {
+    const task = deescalateEscalatedTask(ctx.store, sourceRef, reason);
+    return `✅ De-escalated ${task.source_ref ?? sourceRef} (${task.id.slice(0, 8)})`;
+  } catch (err) {
+    return err instanceof Error ? `❌ ${err.message}` : `❌ ${String(err)}`;
+  }
+}
+
 function buildGitHubIssueDispatchMessage(agentName: string, issue: GitHubIssue): string {
   let message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}`;
 
@@ -205,6 +271,10 @@ function buildGitHubIssueDispatchMessage(agentName: string, issue: GitHubIssue):
 export async function handleCommand(text: string, ctx: TelegramContext): Promise<string> {
   const cmd = text.trim().toLowerCase();
   const repos = [...new Set(Object.values(ctx.config.agents).map((a) => a.github).filter(Boolean))] as string[];
+
+  if (DEESCALATE_COMMANDS.has(cmd.split(/\s+/)[0])) {
+    return await handleTelegramDeescalation(text, ctx, repos, cmd.split(/\s+/)[0]);
+  }
 
   // Summary — the main command
   if (cmd === "summary" || cmd === "/summary" || cmd === "s") {
@@ -496,6 +566,7 @@ issue <idea> — create issue from rough idea
 dispatch <agent> <msg> — send task
 /reassign <issue> <agent> — reroute issue now
 /prioritize <issue> — move issue to front next cycle
+ack|dismiss|resolve <ref|all> — de-escalate an active alert or task
 help — this message`;
   }
 
