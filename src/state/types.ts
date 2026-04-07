@@ -32,6 +32,39 @@ export interface Task {
   updated_at: string;
 }
 
+/**
+ * Structured rationale for a supervisor dispatch decision.
+ *
+ * Stored as JSON in the `rationale` column of `supervisor_decisions`.
+ * The orchestrator builds this when dispatching; the reviewer reads it
+ * for display in `orch supervisor-log` / `orch decisions` CLI output.
+ */
+export interface DispatchRationale {
+  /** Free-text explanation from the supervisor LLM */
+  llm_reasoning: string | null;
+  /** Issue state at the moment of dispatch (e.g. "open", "closed") */
+  issue_state_at_dispatch: string | null;
+  /** Result of the existing-PR check (e.g. "none", "open PR", "merged PR") */
+  existing_pr_check_result: string | null;
+  /** How long the target agent had been idle before this dispatch (ms), null if unknown */
+  agent_idle_duration_ms: number | null;
+  /** LLM-assigned confidence score (0–1), null if not provided */
+  confidence_score: number | null;
+  /**
+   * True when this dispatch is a borrow — an agent working on an issue outside
+   * its normal domain.  Annotated here so `orch decisions --search borrow` and
+   * the improvement detector can surface borrow-heavy patterns.
+   */
+  borrow?: boolean;
+  /** Summary of the authoritative pre-dispatch validation outcome, if any */
+  pre_dispatch_validation?: {
+    outcome: "passed" | "blocked";
+    failure_check: string | null;
+    failure_code: string | null;
+    failure_reason: string | null;
+  } | null;
+}
+
 export interface SupervisorDecisionRecord {
   id: number | string;
   action: string;
@@ -41,6 +74,11 @@ export interface SupervisorDecisionRecord {
   reason: string;
   message?: string | null;
   outcome: string;
+  /**
+   * JSON-encoded `DispatchRationale`.  Present on dispatch and borrow-blocked
+   * events; null for verify/redeploy/none actions.
+   */
+  rationale?: string | null;
   created_at: string;
 }
 
@@ -139,6 +177,24 @@ export interface IStateStore {
   getRecentSupervisorDecisions(limit: number): SupervisorDecisionRecord[];
   querySupervisorDecisions(opts: SupervisorDecisionQuery): SupervisorDecisionRecord[];
   pruneOldSupervisorDecisions(daysOld?: number): number;
+  /**
+   * Persist a supervisor decision.  Called by both the reviewer (for
+   * dispatch/verify/none actions) and the orchestrator (for borrow-blocked
+   * and other policy events) to keep a unified audit log.
+   */
+  recordSupervisorDecision(
+    action: string,
+    reason: string,
+    opts?: {
+      agentName?: string;
+      taskId?: string;
+      outcome?: string;
+      message?: string;
+      issueRef?: string;
+      /** JSON-encoded DispatchRationale, e.g. '{"borrow":true,...}' */
+      rationale?: string;
+    },
+  ): void;
 
   // PR merge queue
   queuePRForMerge(repo: string, prNumber: number, branch: string): MergeQueueEntry;

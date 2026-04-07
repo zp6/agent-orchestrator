@@ -113,6 +113,14 @@ export class StateStore implements ITelegramStateStore {
       // Column already exists — ignore
     }
 
+    // Add rationale column to supervisor_decisions (idempotent).
+    // Stores a JSON-encoded DispatchRationale including borrow annotation.
+    try {
+      this.db.exec("ALTER TABLE supervisor_decisions ADD COLUMN rationale TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+
     // Create index for efficient time-ordered lookups (idempotent)
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_supervisor_decisions_created_at
@@ -248,13 +256,21 @@ export class StateStore implements ITelegramStateStore {
   recordSupervisorDecision(
     action: string,
     reason: string,
-    opts: { agentName?: string; taskId?: string; outcome?: string; message?: string; issueRef?: string } = {},
+    opts: {
+      agentName?: string;
+      taskId?: string;
+      outcome?: string;
+      message?: string;
+      issueRef?: string;
+      /** JSON-encoded DispatchRationale (e.g. '{"borrow":true,...}'). */
+      rationale?: string;
+    } = {},
   ): void {
     this.db
       .prepare(
         `INSERT INTO supervisor_decisions
-           (id, action, agent_name, task_id, reason, outcome, message, issue_ref)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, action, agent_name, task_id, reason, outcome, message, issue_ref, rationale)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         ulid(),
@@ -265,6 +281,7 @@ export class StateStore implements ITelegramStateStore {
         opts.outcome ?? "pending",
         opts.message ?? null,
         opts.issueRef ?? null,
+        opts.rationale ?? null,
       );
   }
 
