@@ -61,6 +61,14 @@ function loadTelegramConfig(): TelegramConfig | null {
 }
 
 /**
+ * Clear the rate-limit entry for a given key so the next notifyOperator call
+ * with that key is guaranteed to fire (used for recovery notifications).
+ */
+export function clearNotifyRateLimit(key: string): void {
+  rateLimitMap.delete(key);
+}
+
+/**
  * Send a notification to the operator via Telegram.
  * Silently no-ops if Telegram is not configured.
  * Rate-limited: max 1 message per rateLimitKey per 15 minutes.

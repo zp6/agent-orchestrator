@@ -27,7 +27,7 @@ import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { ManagementClient } from "../client/management-client.js";
 import { planSync, executeSync } from "../orchestrator/sync.js";
-import { notifyOperator, setTelegramRateLimitMs } from "./notify.js";
+import { notifyOperator, clearNotifyRateLimit, setTelegramRateLimitMs } from "./notify.js";
 import { setRecencyWindowHours } from "../triggers/duplicate-guard.js";
 import { startTelegramPolling, stopTelegramPolling, pollTelegram } from "./telegram.js";
 import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.js";
@@ -141,6 +141,16 @@ export class Daemon {
    * window is blocking all available issues.
    */
   private idleCyclesSinceDispatch = new Map<string, number>();
+
+  /**
+   * Tracks agents currently in a health-check-failing state (in-memory; does
+   * not persist across daemon restarts).  Used to:
+   *   1. Deduplicate failure alerts — only fire once per failure streak.
+   *   2. Fire a recovery notification when the agent passes a health check
+   *      after having been in this set.
+   *   3. Auto-resolve dashboard health-check escalation entries on recovery.
+   */
+  private healthFailingAgents = new Set<string>();
 
   /** Tracks when the daily Slack digest was last sent (re-arms on new calendar day). */
   private digestState: DigestSchedulerState = { lastDigestDate: null };
@@ -1139,6 +1149,75 @@ export class Daemon {
     }
   }
 
+  /**
+   * Called when an agent passes a health check after previously failing one.
+   * Fires a recovery Telegram notification, clears the rate-limit key so the
+   * message is never suppressed, and auto-resolves any open dashboard escalation
+   * task that was created for this agent's health-check failure.
+   */
+  private onHealthCheckRecovered(agentName: string): void {
+    this.healthFailingAgents.delete(agentName);
+    // Clear rate-limit so the recovery notification fires immediately even if a
+    // failure alert was sent recently.
+    clearNotifyRateLimit(`health-fail:${agentName}`);
+    this.log.info("Agent recovered from health-check failure", { agentName });
+    console.log(`  ${agentName}: ✅ health-check recovered`);
+    notifyOperator(
+      `Agent ${agentName} recovered`,
+      `✅ Agent ${agentName} recovered (was failing health check)`,
+      "info",
+    ).catch(() => {});
+    // Auto-resolve any open dashboard escalation task for this health failure.
+    const sourceRef = `health-check-fail:${agentName}`;
+    const escalated = this.store.findEscalatedTask(sourceRef);
+    if (escalated) {
+      this.store.updateTask(escalated.id, {
+        status: "done",
+        result: `Agent ${agentName} recovered — health check passing again.`,
+      });
+      this.log.info("Auto-resolved health-check escalation on recovery", { agentName, taskId: escalated.id });
+    }
+  }
+
+  /**
+   * Called when an agent fails a health check.  Deduplicates alerts so only
+   * one Telegram notification fires per failure streak (not once per daemon
+   * cycle).  Also creates an escalated dashboard task on the first failure so
+   * the operator can see the issue without waiting for a Telegram message.
+   */
+  private onHealthCheckFailed(agentName: string, detail: string): void {
+    if (this.healthFailingAgents.has(agentName)) {
+      // Already tracking this failure — don't re-alert.
+      return;
+    }
+    this.healthFailingAgents.add(agentName);
+    notifyOperator(
+      `Health check failed: ${agentName}`,
+      `Agent ${agentName} failed health check. May be broken. Detail: ${detail}`,
+      "critical",
+      `health-fail:${agentName}`,
+    ).catch(() => {});
+    // Create an escalated task so the dashboard surfaces the failure.
+    // Use a stable source_ref so we can find and resolve it on recovery.
+    const sourceRef = `health-check-fail:${agentName}`;
+    const existing = this.store.findEscalatedTask(sourceRef);
+    if (!existing) {
+      const task = this.store.createTask({
+        title: `Health check failed: ${agentName}`,
+        description: `Agent ${agentName} is not responding to health checks. Detail: ${detail}`,
+        source: "manual",
+        source_ref: sourceRef,
+        agent_name: agentName,
+        task_type: "implementation",
+      });
+      this.store.updateTask(task.id, {
+        status: "escalated",
+        result: `Health check failed: ${detail}`,
+      });
+      this.log.info("Created health-check escalation task", { agentName, taskId: task.id });
+    }
+  }
+
   private async redeployStale(time: string, registeredAgents?: Set<string>): Promise<void> {
     try {
       const staleLocal = this.deployer.getStaleAgents(registeredAgents);
@@ -1160,15 +1239,17 @@ export class Daemon {
       for (const r of results) {
         if (r.action === "redeployed") {
           console.log(`  ${r.agentName}: redeployed`);
+          // If this agent was previously failing health checks, fire a recovery notification.
+          if (this.healthFailingAgents.has(r.agentName)) {
+            this.onHealthCheckRecovered(r.agentName);
+          }
         } else if (r.action === "health-check-failed") {
           console.error(`  ${r.agentName}: ⚠ deployed but health check failed — agent may be broken. ${r.detail}`);
           this.log.warn("Agent health check failed after deploy", { agentName: r.agentName, detail: r.detail });
-          notifyOperator(
-            `Deploy health check failed: ${r.agentName}`,
-            `Agent ${r.agentName} was redeployed but failed health check. May be broken.`,
-            "critical",
-            `health-fail:${r.agentName}`,
-          ).catch(() => {});
+          this.onHealthCheckFailed(
+            r.agentName,
+            r.detail ?? "Container rebuild triggered but agent did not respond to health check",
+          );
         } else if (r.action === "error") {
           console.error(`  ${r.agentName}: ${r.detail}`);
         }
@@ -1196,6 +1277,15 @@ export class Daemon {
         const result = await this.deployer.restartAgent(name);
         if (result.action === "health-check-failed") {
           this.log.warn("Agent unhealthy after preventive restart", { agentName: name });
+          this.onHealthCheckFailed(
+            name,
+            result.detail ?? "Container restarted but agent did not respond to health check",
+          );
+        } else if (result.action === "redeployed") {
+          // If the agent was previously failing health checks, fire a recovery notification.
+          if (this.healthFailingAgents.has(name)) {
+            this.onHealthCheckRecovered(name);
+          }
         }
       } catch (err) {
         this.log.error("Preventive restart failed", { agentName: name, error: err instanceof Error ? err.message : String(err) });
