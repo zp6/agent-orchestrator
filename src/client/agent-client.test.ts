@@ -238,6 +238,10 @@ describe("buildResearchPrompt", () => {
 
   it("includes research structure guidance", () => {
     const prompt = buildResearchPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("Clarification note");
+    expect(prompt).toContain("what you interpreted it to mean");
+    expect(prompt).toContain("when the request uses an ambiguous referent");
+    expect(prompt).toContain("Telegram handler");
     expect(prompt).toContain("Summary");
     expect(prompt).toContain("Analysis");
     expect(prompt).toContain("Alternatives");

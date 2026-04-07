@@ -115,8 +115,10 @@ Your task is to provide a thorough research analysis. You should:
 - Provide a structured, well-reasoned answer with concrete evidence
 - Be honest about uncertainty, limitations, and what you don't know
 - Include effort estimates and dependencies where relevant
+- If the request uses an ambiguous referent like "this", start with a brief clarification note that states what you interpreted it to refer to before the Summary. For example: "I don't have context for what specific issue you're referring to — I searched for open problems in the Telegram handler and found the following."
 
 Structure your response as:
+0. **Clarification note** — when the request uses an ambiguous referent like "this", explicitly state what you interpreted it to mean before the findings. Example: "I don't have context for what specific issue you're referring to — I searched for open problems in the Telegram handler and found the following."
 1. **Summary** — one-paragraph answer to the question
 2. **Analysis** — detailed findings, evidence, and reasoning
 3. **Alternatives** — other approaches considered and why they were ranked lower
