@@ -26,6 +26,7 @@ import { planSync, executeSync } from "../orchestrator/sync.js";
 import { notifyOperator } from "./notify.js";
 import { startTelegramPolling, stopTelegramPolling, pollTelegram } from "./telegram.js";
 import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.js";
+import { maybeRunDailySecurityScan, type SecurityScanState } from "../orchestrator/security-scanner.js";
 import {
   type GateResult,
   detectImprovements,
@@ -138,6 +139,7 @@ export class Daemon {
 
   /** Tracks when the daily Slack digest was last sent (re-arms on new calendar day). */
   private digestState: DigestSchedulerState = { lastDigestDate: null };
+  private securityScanState: SecurityScanState = { lastScanDate: null };
 
   constructor(configPath?: string, pollIntervalMs?: number) {
     this.config = loadConfig(configPath);
@@ -337,6 +339,9 @@ export class Daemon {
 
       // 9. Daily Slack digest — posts once per day at the configured wall-clock time
       await maybePostDailyDigest(this.digestState, this.store, this.config);
+
+      // 10. Daily security scan — checks agent repos for plaintext secrets (issue #544)
+      await maybeRunDailySecurityScan(this.securityScanState, this.config);
     } finally {
       this.store.recordCycleEnd(cycleId, cycleStartedAt);
       const durationMs = Date.now() - cycleStartedAt.getTime();
