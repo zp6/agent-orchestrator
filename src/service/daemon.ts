@@ -47,6 +47,14 @@ const CLOSED_ISSUE_CHECK_EVERY_N_CYCLES = 3; // ~15min at default — cancel in-
 const STALE_ISSUE_AGE_DAYS = 7;
 
 /**
+ * Default quality-score floor for reviewer-pool approvals.  Any completed
+ * task from a reviewer-pool agent that is approved but scores below this
+ * value triggers a Telegram alert and a supervisor follow-up dispatch.
+ * Configurable via `verification.reviewer_low_score_threshold` in agents.yaml.
+ */
+const DEFAULT_REVIEWER_LOW_SCORE_THRESHOLD = 0.80;
+
+/**
  * Tasks in 'done' state with no recorded result older than this threshold are
  * considered silent failures and will be flagged as 'result_missing'.
  */
@@ -894,6 +902,31 @@ export class Daemon {
             if (!result.approved && result.revision) {
               console.log(`  Needs revision: ${result.revision.slice(0, 100)}`);
             }
+
+            // Meta-review guard (issue #545): a reviewer-pool task that is
+            // approved but scores below the calibration threshold indicates
+            // shallow review work.  Alert the operator immediately and dispatch
+            // a supervisor follow-up within the same cycle so it never passes
+            // silently.
+            if (result.approved) {
+              const threshold =
+                this.config.verification?.reviewer_low_score_threshold ??
+                DEFAULT_REVIEWER_LOW_SCORE_THRESHOLD;
+              const agentConf = task.agent_name
+                ? this.config.agents[task.agent_name]
+                : undefined;
+              // Exclude [meta-review] tasks (follow-ups dispatched by this
+              // guard) to prevent an infinite escalation loop.
+              const isMetaReview = task.title.startsWith("[meta-review]");
+              if (
+                !isMetaReview &&
+                threshold > 0 &&
+                result.score < threshold &&
+                agentConf?.pool === "reviewer"
+              ) {
+                await this.flagLowScoreReviewerApproval(time, task, result.score, threshold);
+              }
+            }
           }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -915,6 +948,95 @@ export class Daemon {
     } catch (err) {
       console.error(`[${time}] Verification step failed: ${err instanceof Error ? err.message : err}`);
     }
+  }
+
+  /**
+   * Meta-review guard for reviewer-pool approvals that fall below the
+   * calibration threshold (default 0.80, issue #545).
+   *
+   * When a reviewer-pool agent's own completed task is approved but its
+   * quality_score is below the threshold, the review may have been shallow —
+   * weak reviewer output undermines the entire oversight chain.  This method:
+   *
+   *   1. Logs a prominent warning to the daemon console and structured log.
+   *   2. Fires a Telegram alert (rate-limited per task) with the task ID,
+   *      agent, score, and source reference so an operator can investigate.
+   *   3. Dispatches a "manual" supervisor follow-up task to the reviewer pool
+   *      asking it to second-pass the low-scoring work within the same cycle.
+   *
+   * The follow-up task title is prefixed with "[meta-review]" so that if it is
+   * itself verified it will not re-trigger this guard (we skip the pool check
+   * for tasks already tagged as meta-reviews).
+   */
+  private async flagLowScoreReviewerApproval(
+    time: string,
+    task: import("../state/store.js").Task,
+    score: number,
+    threshold: number,
+  ): Promise<void> {
+    const agentLabel = task.agent_name ?? "unknown";
+    const ref = task.source_ref ?? task.title;
+    const scoreStr = (score * 100).toFixed(0);
+    const thresholdStr = (threshold * 100).toFixed(0);
+
+    console.warn(
+      `[${time}] Low-score reviewer approval: task ${task.id.slice(0, 8)} ` +
+      `(${agentLabel}) scored ${scoreStr}% — below ${thresholdStr}% threshold. Dispatching supervisor follow-up.`,
+    );
+    this.log.warn("Reviewer-pool task approved below calibration threshold", {
+      taskId: task.id,
+      agentName: agentLabel,
+      score,
+      threshold,
+      sourceRef: ref,
+    });
+
+    // 1. Telegram alert — rate-limited per task so repeated daemon cycles
+    //    don't spam the operator if the follow-up task stays unverified.
+    await notifyOperator(
+      "Reviewer calibration alert — shallow approval",
+      `Reviewer task \`${task.id.slice(0, 8)}\` (agent: ${agentLabel}) was approved with a score of ${scoreStr}% — below the ${thresholdStr}% threshold.\n\n` +
+      `Source: \`${ref}\`\n` +
+      `Title: ${task.title}\n\n` +
+      "The review quality may be shallow. A supervisor follow-up has been dispatched for a second pass.",
+      "warning",
+      `reviewer-low-score:${task.id}`,
+    );
+
+    // 2. Supervisor follow-up dispatch — send to the reviewer pool so a
+    //    second agent (or the same one when it next picks up work) re-examines
+    //    the output.  Fire-and-forget; failures are logged but not fatal.
+    const followUpMessage =
+      `## Supervisor Follow-up: Low-Score Reviewer Approval\n\n` +
+      `Reviewer task \`${task.id.slice(0, 8)}\` by **${agentLabel}** was approved with ` +
+      `a quality score of **${scoreStr}%** — below the calibration threshold of **${thresholdStr}%**.\n\n` +
+      `**Source:** \`${ref}\`\n` +
+      `**Task title:** ${task.title}\n\n` +
+      `Please perform a second-pass review of this work. Specifically:\n` +
+      `- Assess whether the review output was substantive or superficial\n` +
+      `- If the review missed real issues, post a follow-up comment on the relevant PR(s)\n` +
+      `- If the output was acceptable despite the low score, document why in a brief note\n\n` +
+      `This follow-up was auto-dispatched by the quality calibration guard.`;
+
+    this.dispatcher.dispatch(followUpMessage, {
+      source: "manual",
+      sourceRef: task.source_ref ?? undefined,
+      title: `[meta-review] Low-score reviewer approval: ${task.id.slice(0, 8)} (${scoreStr}%)`,
+    }).then((r) => {
+      this.log.info("Supervisor follow-up dispatched for low-score reviewer approval", {
+        originalTaskId: task.id,
+        followUpTaskId: r.taskId,
+        score,
+      });
+      console.log(
+        `[${time}] Meta-review follow-up dispatched: task ${r.taskId.slice(0, 8)} for low-score approval ${task.id.slice(0, 8)}`,
+      );
+    }).catch((err) => {
+      this.log.error("Failed to dispatch supervisor follow-up for low-score reviewer approval", {
+        taskId: task.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
 
   private async detectImprovements(time: string): Promise<void> {

@@ -124,6 +124,20 @@ export interface VerificationConfig {
    * Defaults to 10.
    */
   verify_per_cycle?: number;
+
+  /**
+   * Quality score floor for reviewer-pool agent approvals.  When a task
+   * completed by a reviewer-pool agent is approved but its quality_score
+   * falls below this value, the daemon immediately fires a Telegram alert
+   * and dispatches a supervisor follow-up task within the same cycle.
+   *
+   * This prevents weak reviews from silently entering the approval record:
+   * a reviewer task that barely passes still gets flagged for a second look.
+   *
+   * Set to 0 to disable the check entirely.
+   * Defaults to 0.80 when omitted.
+   */
+  reviewer_low_score_threshold?: number;
 }
 
 export interface ProxyConfig {
