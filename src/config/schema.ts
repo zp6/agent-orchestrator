@@ -66,6 +66,53 @@ export interface TokenBudgetConfig {
   pause_on_exceeded?: boolean;
 }
 
+/**
+ * Declarative policy controlling when an agent is allowed to "borrow" work
+ * from a GitHub repo it does not own (i.e. the task's source_ref repo differs
+ * from the agent's own `github` field).
+ *
+ * Without a borrow config an agent can still be cross-dispatched — the policy
+ * only ADDS enforcement when explicitly configured.  This preserves backward
+ * compatibility with existing ad-hoc supervisor cross-dispatches.
+ *
+ * Example (in agents.yaml):
+ *   claude-proxy:
+ *     borrow:
+ *       enabled: true
+ *       can_work_on:
+ *         - rapartlu/agent-orchestrator
+ *       min_idle_minutes: 5
+ *       max_concurrent_borrowed: 1
+ */
+export interface BorrowConfig {
+  /**
+   * Set to true to opt this agent into the borrow policy.
+   * When false (or absent) the agent may still be cross-dispatched but the
+   * additional guards below are not applied.
+   */
+  enabled?: boolean;
+
+  /**
+   * Explicit allowlist of GitHub repos this agent may borrow from.
+   * When omitted (but enabled=true) the agent can borrow from any repo.
+   * Example: ["rapartlu/agent-orchestrator", "rapartlu/agent-dashboard"]
+   */
+  can_work_on?: string[];
+
+  /**
+   * Minimum number of minutes this agent must have been idle (no active task
+   * on its own repo) before it becomes eligible to borrow external work.
+   * Defaults to 0 (no minimum) when omitted.
+   */
+  min_idle_minutes?: number;
+
+  /**
+   * Maximum number of borrowed (cross-repo) tasks this agent may hold
+   * simultaneously.  Defaults to 1 when omitted.
+   */
+  max_concurrent_borrowed?: number;
+}
+
 export interface AgentConfig {
   dir: string;
   repo?: string;
@@ -99,6 +146,12 @@ export interface AgentConfig {
    * Set to 0 or omit to disable.
    */
   auto_reroute_rejection_threshold?: number;
+  /**
+   * Declarative borrow policy: controls when this agent may be dispatched to
+   * issues in repos it doesn't own.  Omit to allow ad-hoc cross-dispatching
+   * (legacy behaviour).  Set `enabled: true` to enforce the guards below.
+   */
+  borrow?: BorrowConfig;
 }
 
 export interface VerificationConfig {

@@ -855,6 +855,58 @@ export class StateStore {
     return Date.now() - new Date(row.updated_at).getTime();
   }
 
+  // ---------------------------------------------------------------------------
+  // Agent-borrow tracking (issue #448)
+  // A "borrowed" task is one where the assigned agent's own GitHub repo
+  // (agent.github) differs from the source_ref's repo.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Count active (in-flight) tasks assigned to `agentName` whose source_ref
+   * belongs to a repo OTHER than `agentRepo` (the agent's own github repo).
+   * Used to enforce `borrow.max_concurrent_borrowed` limits.
+   */
+  countActiveBorrowedTasks(agentName: string, agentRepo: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS cnt FROM tasks
+         WHERE agent_name = ?
+           AND status IN ('pending', 'planning', 'dispatched', 'in_progress')
+           AND parent_task_id IS NULL
+           AND source_ref IS NOT NULL
+           AND source_ref NOT LIKE ?`,
+      )
+      .get(agentName, `${agentRepo}#%`) as { cnt: number };
+    return row.cnt;
+  }
+
+  /**
+   * Return all active (in-flight) top-level tasks that are "borrowed" —
+   * i.e. the assigned agent's github repo does not match the source_ref repo.
+   *
+   * @param agentRepoMap  A map from agent_name → agent's github repo string,
+   *                      used to detect mismatches without loading config here.
+   */
+  getActiveBorrowedTasks(agentRepoMap: Map<string, string>): Task[] {
+    const active = this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE status IN ('pending', 'planning', 'dispatched', 'in_progress')
+           AND parent_task_id IS NULL
+           AND source_ref IS NOT NULL
+           AND agent_name IS NOT NULL
+         ORDER BY created_at ASC`,
+      )
+      .all() as Task[];
+
+    return active.filter((t) => {
+      const agentRepo = t.agent_name ? agentRepoMap.get(t.agent_name) : undefined;
+      if (!agentRepo) return false; // agent has no github repo — skip
+      const taskRepo = t.source_ref!.split("#")[0];
+      return taskRepo !== agentRepo;
+    });
+  }
+
   /**
    * Returns true if there is already a pending/dispatched/in-progress
    * "pr-feedback" task for the given repo + PR number.  Used to prevent

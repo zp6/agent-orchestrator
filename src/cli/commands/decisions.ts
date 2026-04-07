@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { StateStore } from "../../state/store.js";
 import type { SupervisorDecisionRecord, DispatchRationale } from "../../state/store.js";
+import { loadConfig, type OrchestratorConfig } from "../../config/schema.js";
 
 /**
  * Parse a duration string (e.g. "1h", "30m", "2d", "1h30m") into milliseconds.
@@ -95,8 +96,26 @@ function formatRationaleText(d: SupervisorDecisionRecord): string | null {
   return text.length > 140 ? `${text.slice(0, 137)}...` : text;
 }
 
+/**
+ * Detect whether a supervisor decision represents a cross-domain (borrowed)
+ * dispatch: the agent's own github repo differs from the issue's repo.
+ * Returns a short label like "↩ borrow: agent-proxy → agent-orchestrator",
+ * or null when it's not a borrow or can't be determined.
+ */
+function detectBorrowLabel(d: SupervisorDecisionRecord, config: OrchestratorConfig | null): string | null {
+  if (!config || !d.agent_name || d.issue_refs.length === 0) return null;
+  const agentRepo = config.agents[d.agent_name]?.github;
+  if (!agentRepo) return null;
+  // Pull the repo from the first issue_ref (e.g. "rapartlu/agent-orchestrator#123")
+  const issueRepo = d.issue_refs[0].split("#")[0];
+  if (!issueRepo || issueRepo === agentRepo) return null;
+  // Shorten to the last path segment for readability
+  const short = (r: string) => r.split("/").pop() ?? r;
+  return `↩ borrow: ${short(agentRepo)} → ${short(issueRepo)}`;
+}
+
 /** Format a single decision row for the table. */
-function formatRow(d: SupervisorDecisionRecord): string {
+function formatRow(d: SupervisorDecisionRecord, config: OrchestratorConfig | null = null): string {
   const ts = d.created_at.slice(0, 16).replace("T", " ");
   const agent = d.agent_name ?? chalk.dim("—");
   const task = d.task_id ? chalk.dim(d.task_id.slice(0, 8)) : chalk.dim("—");
@@ -117,6 +136,12 @@ function formatRow(d: SupervisorDecisionRecord): string {
 
   if (d.issue_refs.length > 0) {
     line += `\n  ${" ".repeat(18)}${chalk.cyan(`issues: ${d.issue_refs.join(", ")}`)}`;
+  }
+
+  // Borrow rationale: flag cross-domain dispatches (issue #448)
+  const borrowLabel = detectBorrowLabel(d, config);
+  if (borrowLabel) {
+    line += `\n  ${" ".repeat(18)}${chalk.magenta(borrowLabel)}`;
   }
 
   const rationaleText = formatRationaleText(d);
@@ -232,6 +257,12 @@ export function registerDecisionsCommand(program: Command): void {
           }
         }
 
+        // Load config for borrow detection (optional — decisions still work without it)
+        let config: OrchestratorConfig | null = null;
+        try {
+          config = loadConfig(program.opts().config);
+        } catch { /* config unavailable — borrow labels disabled */ }
+
         let store: StateStore;
         try {
           store = new StateStore();
@@ -306,7 +337,7 @@ export function registerDecisionsCommand(program: Command): void {
         console.log(chalk.dim("  " + "─".repeat(120)));
 
         for (const d of decisions) {
-          console.log(formatRow(d));
+          console.log(formatRow(d, config));
         }
 
         console.log();

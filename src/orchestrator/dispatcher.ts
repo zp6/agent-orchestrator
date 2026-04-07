@@ -619,6 +619,64 @@ export class Dispatcher {
       }
     }
 
+    // Borrow policy enforcement (issue #448).
+    // A "borrow" occurs when the agent's own github repo differs from the
+    // source_ref's repo.  If the agent has a borrow config, enforce the
+    // declared rules before proceeding.  Agents without borrow config are
+    // allowed cross-domain dispatches unchanged (backward compatibility).
+    if (options?.sourceRef) {
+      const taskRepo = options.sourceRef.split("#")[0] ?? null;
+      const agentConf = this.config.agents[agentName];
+      const agentRepo = agentConf?.github ?? null;
+      const isBorrowed = taskRepo && agentRepo && taskRepo !== agentRepo;
+
+      if (isBorrowed) {
+        const borrow = agentConf?.borrow;
+        if (borrow?.enabled) {
+          // 1. Allowlist check
+          const allowList = borrow.can_work_on;
+          if (allowList && allowList.length > 0 && !allowList.includes(taskRepo)) {
+            throw new Error(
+              `Agent "${agentName}" borrow policy blocks dispatch to "${taskRepo}": ` +
+              `allowed repos are [${allowList.join(", ")}]. ` +
+              `Add "${taskRepo}" to borrow.can_work_on to permit this.`,
+            );
+          }
+
+          // 2. Minimum idle time
+          const minIdleMs = (borrow.min_idle_minutes ?? 0) * 60_000;
+          if (minIdleMs > 0) {
+            const idleMs = this.store.getAgentIdleSinceMs(agentName);
+            if (idleMs === null || idleMs < minIdleMs) {
+              const actualMin = idleMs !== null ? Math.floor(idleMs / 60_000) : 0;
+              throw new Error(
+                `Agent "${agentName}" borrow policy requires ${borrow.min_idle_minutes}m idle ` +
+                `before borrowing "${taskRepo}", but agent has been idle for ${actualMin}m.`,
+              );
+            }
+          }
+
+          // 3. Max concurrent borrowed tasks
+          const maxConcurrent = borrow.max_concurrent_borrowed ?? 1;
+          const activeBorrowed = this.store.countActiveBorrowedTasks(agentName, agentRepo);
+          if (activeBorrowed >= maxConcurrent) {
+            throw new Error(
+              `Agent "${agentName}" is at borrow limit: ${activeBorrowed}/${maxConcurrent} ` +
+              `active borrowed task(s). Wait for a borrowed task to complete before dispatching another.`,
+            );
+          }
+        }
+
+        this.log.info("Cross-domain (borrowed) dispatch", {
+          agentName,
+          agentRepo,
+          taskRepo,
+          sourceRef: options.sourceRef,
+          policyApplied: !!agentConf?.borrow?.enabled,
+        });
+      }
+    }
+
     if (!options?.prevalidated && options?.sourceRef) {
       const repo = extractRepoFromSourceRef(options.sourceRef);
       const issueMatch = options.sourceRef.match(/#(\d+)$/);
