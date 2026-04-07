@@ -11,6 +11,7 @@ import type { AgentHealth, StateStore, SupervisorDecisionRecord, Task } from "..
 import { createLogger } from "./logger.js";
 import { notifyOperator } from "./notify.js";
 import { cachedGetIssueState, liveValidateForDispatch } from "../triggers/issue-state-bridge.js";
+import { loadGoals, measureGoalProgress, buildGoalsContext } from "../orchestrator/goals.js";
 
 const verifierLog = createLogger("verifier");
 const supervisorLog = createLogger("supervisor");
@@ -363,6 +364,13 @@ export function buildSupervisorContext(config: OrchestratorConfig, store: StateS
       return `- ${s.agent_name}: ${s.done}/${s.total} done (${rate}%), ${s.failed} failed`;
     }).join("\n");
     sections.push(`## Agent Performance\n${lines}`);
+  }
+
+  // Inject monthly goals so the supervisor prioritizes goal-aligned work
+  const goals = loadGoals(config.orchestrator_dir);
+  if (goals.goals.length > 0) {
+    const progress = measureGoalProgress(goals, store);
+    sections.unshift(buildGoalsContext(progress));
   }
 
   return sections.join("\n\n");

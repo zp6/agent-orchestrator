@@ -10,6 +10,7 @@ import { AgentClient } from "../client/agent-client.js";
 import { ulid } from "ulid";
 import { findBranchForIssue, findExistingPRsForIssue, type GitHubIssue } from "../triggers/github.js";
 import { getProviderStates } from "../service/provider-state.js";
+import { loadGoals, measureGoalProgress, formatGoalsForTelegram } from "../orchestrator/goals.js";
 import { deescalateAllEscalatedTasks, deescalateEscalatedTask, normaliseSourceRef } from "../cli/commands/deescalate.js";
 
 const log = createLogger("telegram");
@@ -705,7 +706,9 @@ ${wipLines.length > 0 ? wipLines.join("\n") : "  All agents idle"}
 
 ${buildPoolStats(ctx, agentStats)}
 
-${buildTokenStats(ctx)}`;
+${buildTokenStats(ctx)}
+
+${buildGoalsSummary(ctx)}`;
 }
 
 /**
@@ -822,6 +825,13 @@ function buildTokenStats(ctx: TelegramContext): string {
   }
 
   return lines.join("\n");
+}
+
+function buildGoalsSummary(ctx: TelegramContext): string {
+  const goals = loadGoals(ctx.config.orchestrator_dir);
+  if (goals.goals.length === 0) return "";
+  const progress = measureGoalProgress(goals, ctx.store);
+  return formatGoalsForTelegram(progress);
 }
 
 function buildPoolStats(
