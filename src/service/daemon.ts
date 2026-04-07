@@ -1,4 +1,6 @@
 import { loadConfig, type OrchestratorConfig } from "../config/schema.js";
+import { validateConfig } from "../config/validator.js";
+import { ConfigWatcher, type ConfigChange } from "../config/watcher.js";
 import { StateStore, type DispatchRationale } from "../state/store.js";
 import { setLLMUsageRecorder } from "../client/llm-client.js";
 import { ReviewerClient, type SupervisorDecision } from "../client/reviewer-client.js";
@@ -21,6 +23,8 @@ import {
 import { writePid, removePid } from "./pid.js";
 import { createLogger } from "./logger.js";
 import { execSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { ManagementClient } from "../client/management-client.js";
 import { planSync, executeSync } from "../orchestrator/sync.js";
 import { notifyOperator } from "./notify.js";
@@ -141,8 +145,22 @@ export class Daemon {
   private digestState: DigestSchedulerState = { lastDigestDate: null };
   private securityScanState: SecurityScanState = { lastScanDate: null };
 
+  /** Resolved path to agents.yaml — stored for hot-reload. */
+  private configPath: string | undefined;
+  /** Watches agents.yaml for changes and triggers hot-reload. */
+  private configWatcher: ConfigWatcher | null = null;
+
   constructor(configPath?: string, pollIntervalMs?: number) {
+    this.configPath = configPath;
     this.config = loadConfig(configPath);
+
+    // Validate config at startup — abort on errors
+    const validationErrors = validateConfig(this.config);
+    if (validationErrors.length > 0) {
+      const details = validationErrors.map((e) => `  ${e.path}: ${e.message}`).join("\n");
+      throw new Error(`Config validation failed:\n${details}`);
+    }
+
     this.store = new StateStore();
     setLLMUsageRecorder(this.store.recordTokenUsage.bind(this.store));
     this.dispatcher = new Dispatcher(this.config, this.store);
@@ -166,6 +184,23 @@ export class Daemon {
     };
     process.on("SIGINT", handleSignal);
     process.on("SIGTERM", handleSignal);
+
+    // SIGUSR1 triggers a config reload (used by `orch config reload`)
+    process.on("SIGUSR1", () => {
+      this.log.info("Received SIGUSR1 — reloading config");
+      console.log("[config] SIGUSR1 received — reloading agents.yaml...");
+      if (this.configWatcher) {
+        const result = this.configWatcher.reload();
+        if (result.success) {
+          console.log(`[config] Reload successful: ${result.changes.length} change(s) applied`);
+        } else {
+          console.log(`[config] Reload rejected: ${result.errors.length} validation error(s)`);
+        }
+      }
+    });
+
+    // Start config file watcher for hot-reload
+    this.startConfigWatcher();
 
     const githubRepos = Object.entries(this.config.agents)
       .filter(([, a]) => a.github)
@@ -1757,9 +1792,81 @@ export class Daemon {
 
   private cleanup(): void {
     stopTelegramPolling();
+    if (this.configWatcher) {
+      this.configWatcher.stop();
+      this.configWatcher = null;
+    }
     removePid();
     this.store.close();
     console.log("Daemon stopped.");
+  }
+
+  /**
+   * Start watching agents.yaml for changes.  On change, validates the new
+   * config and applies it to all subsystems that hold a config reference.
+   */
+  private startConfigWatcher(): void {
+    // Resolve the actual path that loadConfig used
+    const resolvedPath = this.resolveConfigPath();
+    if (!resolvedPath) {
+      this.log.warn("Config watcher: could not resolve agents.yaml path — file watching disabled");
+      return;
+    }
+
+    this.configWatcher = new ConfigWatcher(resolvedPath, this.config, (newConfig, changes) => {
+      this.applyConfigChanges(newConfig, changes);
+    });
+    this.configWatcher.start();
+  }
+
+  /**
+   * Resolve the config file path (same search order as loadConfig).
+   */
+  private resolveConfigPath(): string | null {
+    if (this.configPath) return this.configPath;
+
+    // Replicate findConfig search order
+    const cwd = resolve(process.cwd(), "agents.yaml");
+    if (existsSync(cwd)) return cwd;
+
+    const home = resolve(process.env.HOME ?? "~", ".claude-orchestrator", "agents.yaml");
+    if (existsSync(home)) return home;
+
+    return null;
+  }
+
+  /**
+   * Apply a validated config to all subsystems.  Called by the ConfigWatcher
+   * when agents.yaml changes, or by SIGUSR1 handler.
+   */
+  private applyConfigChanges(newConfig: OrchestratorConfig, changes: ConfigChange[]): void {
+    const changedPaths = changes.map((c) => c.path);
+    this.log.info("Applying config changes", { paths: changedPaths });
+
+    // Update the master config reference
+    this.config = newConfig;
+
+    // Rebuild subsystems that hold their own config reference
+    this.dispatcher = new Dispatcher(this.config, this.store);
+    this.reviewerClient = new ReviewerClient(this.config);
+    this.issueCreator = new IssueCreator(this.config);
+    this.researchLinker = new ResearchLinker(this.config, this.store, this.issueCreator);
+    this.deployer = new Deployer(this.config);
+    this.prReviewer = new PRReviewer(this.config, this.store, this.reviewerClient);
+
+    // Log each change for operator visibility
+    for (const change of changes) {
+      const oldStr = change.oldValue === undefined ? "(unset)" : JSON.stringify(change.oldValue);
+      const newStr = change.newValue === undefined ? "(removed)" : JSON.stringify(change.newValue);
+      this.log.info(`Config changed: ${change.path}`, { old: oldStr, new: newStr });
+      console.log(`[config] ${change.path}: ${oldStr} → ${newStr}`);
+    }
+
+    // Notify operator via Telegram about the reload
+    notifyOperator(
+      `Config reloaded: ${changes.length} change(s) applied`,
+      `Changed: ${changedPaths.join(", ")}`,
+    ).catch(() => { /* best-effort */ });
   }
 
   private cleanupStaleIssues(time: string): void {

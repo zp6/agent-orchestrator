@@ -10,6 +10,9 @@ import {
   type ConfigEntry,
 } from "../../config/catalog.js";
 import { loadConfig } from "../../config/schema.js";
+import { validateConfig } from "../../config/validator.js";
+import { diffConfig } from "../../config/watcher.js";
+import { isRunning, readPid } from "../../service/pid.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -209,5 +212,107 @@ export function registerConfigCommand(program: Command): void {
       console.log(
         `\n${chalk.dim(`${CONFIG_CATALOG.length} parameters total`)}`,
       );
+    });
+
+  // ── orch config validate ──────────────────────────────────────────────────
+  configCmd
+    .command("validate")
+    .description("Validate agents.yaml without applying changes")
+    .action(() => {
+      const configPath = (program.opts() as { config?: string }).config;
+      try {
+        const config = loadConfig(configPath);
+        const errors = validateConfig(config);
+
+        if (errors.length === 0) {
+          console.log(chalk.green("✓ Config is valid."));
+        } else {
+          console.log(chalk.red(`✗ ${errors.length} validation error(s):\n`));
+          for (const err of errors) {
+            console.log(`  ${chalk.red("•")} ${chalk.cyan(err.path)}: ${err.message}`);
+          }
+          process.exit(1);
+        }
+      } catch (err) {
+        console.error(chalk.red(`Failed to load config: ${err instanceof Error ? err.message : String(err)}`));
+        process.exit(1);
+      }
+    });
+
+  // ── orch config reload ────────────────────────────────────────────────────
+  configCmd
+    .command("reload")
+    .description("Reload agents.yaml on the running daemon (sends SIGUSR1)")
+    .option("--dry-run", "Show what would change without applying")
+    .action((opts: { dryRun?: boolean }) => {
+      const configPath = (program.opts() as { config?: string }).config;
+
+      if (opts.dryRun) {
+        // Dry-run: load current + new config, diff and validate, show changes
+        try {
+          const currentConfig = loadConfig(configPath);
+          // Force a fresh read (same path, but re-reads the file)
+          const newConfig = loadConfig(configPath);
+
+          const errors = validateConfig(newConfig);
+          if (errors.length > 0) {
+            console.log(chalk.red(`✗ ${errors.length} validation error(s) — reload would be rejected:\n`));
+            for (const err of errors) {
+              console.log(`  ${chalk.red("•")} ${chalk.cyan(err.path)}: ${err.message}`);
+            }
+            process.exit(1);
+          }
+
+          const changes = diffConfig(currentConfig, newConfig);
+          if (changes.length === 0) {
+            console.log(chalk.dim("No changes detected."));
+          } else {
+            console.log(chalk.bold(`\n${changes.length} change(s) would be applied:\n`));
+            for (const change of changes) {
+              const oldStr = change.oldValue === undefined ? chalk.dim("(unset)") : chalk.red(JSON.stringify(change.oldValue));
+              const newStr = change.newValue === undefined ? chalk.dim("(removed)") : chalk.green(JSON.stringify(change.newValue));
+              console.log(`  ${chalk.cyan(change.path)}: ${oldStr} → ${newStr}`);
+            }
+          }
+
+          console.log(chalk.green("\n✓ Config is valid — safe to reload."));
+        } catch (err) {
+          console.error(chalk.red(`Failed: ${err instanceof Error ? err.message : String(err)}`));
+          process.exit(1);
+        }
+        return;
+      }
+
+      // Live reload: send SIGUSR1 to the running daemon
+      const pid = readPid();
+      if (!pid || !isRunning()) {
+        console.error(chalk.red("Daemon is not running. Start it with `orch service start`."));
+        process.exit(1);
+      }
+
+      // Validate first before signaling
+      try {
+        const config = loadConfig(configPath);
+        const errors = validateConfig(config);
+        if (errors.length > 0) {
+          console.log(chalk.red(`✗ ${errors.length} validation error(s) — not sending reload signal:\n`));
+          for (const err of errors) {
+            console.log(`  ${chalk.red("•")} ${chalk.cyan(err.path)}: ${err.message}`);
+          }
+          process.exit(1);
+        }
+      } catch (err) {
+        console.error(chalk.red(`Config load failed: ${err instanceof Error ? err.message : String(err)}`));
+        process.exit(1);
+      }
+
+      try {
+        process.kill(pid, "SIGUSR1");
+        console.log(chalk.green(`✓ Sent SIGUSR1 to daemon (PID ${pid}) — config reload triggered.`));
+        console.log(chalk.dim("Check daemon logs for reload results."));
+      } catch (err) {
+        console.error(chalk.red(`Failed to signal daemon: ${err instanceof Error ? err.message : String(err)}`));
+        process.exit(1);
+      }
     });
 }
