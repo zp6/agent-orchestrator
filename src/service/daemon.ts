@@ -122,6 +122,28 @@ export const TIMEOUT_MAX_RETRIES = 2;
  */
 export const TIMEOUT_RETRY_DELAY_MS = 2 * 60 * 1000; // 2 minutes
 
+/**
+ * Number of consecutive passing health checks required before a previously
+ * failing agent is considered recovered.
+ */
+export const HEALTH_RECOVERY_CONFIRM_CYCLES = 3;
+
+/**
+ * Format a health-failure duration for console and Telegram output.
+ * Seconds are used below a minute, minutes below an hour, and `h m` beyond.
+ */
+export function formatHealthDuration(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
 export class Daemon {
   private running = false;
   private config: OrchestratorConfig;
@@ -150,10 +172,14 @@ export class Daemon {
    * not persist across daemon restarts).  Used to:
    *   1. Deduplicate failure alerts — only fire once per failure streak.
    *   2. Fire a recovery notification when the agent passes a health check
-   *      after having been in this set.
+   *      after having been in this set and passing the confirmation window.
    *   3. Auto-resolve dashboard health-check escalation entries on recovery.
    */
   private healthFailingAgents = new Set<string>();
+  /** Records when the current health-failure incident started for each agent. */
+  private healthFailureStartTimes = new Map<string, number>();
+  /** Tracks consecutive passing health checks for recovery debounce. */
+  private healthRecoveryConfirmCycles = new Map<string, number>();
 
   /** Tracks when the daily Slack digest was last sent (re-arms on new calendar day). */
   private digestState: DigestSchedulerState = { lastDigestDate: null };
@@ -323,6 +349,9 @@ export class Daemon {
 
       // 0b. Poll Telegram for operator commands (lightweight — single HTTP call)
       await pollTelegram({ config: this.config, store: this.store, dispatcher: this.dispatcher });
+
+      // 0c. Confirm recovery for agents that were previously failing health checks.
+      await this.checkHealthRecoveries();
 
       // 1. Check for stale dispatched tasks (stuck or crashed agents).
       //    Timeout failures are scheduled for retry (up to TIMEOUT_RETRY_MAX times)
@@ -1185,21 +1214,30 @@ export class Daemon {
 
   /**
    * Called when an agent passes a health check after previously failing one.
-   * Fires a recovery Telegram notification, clears the rate-limit key so the
-   * message is never suppressed, and auto-resolves any open dashboard escalation
-   * task that was created for this agent's health-check failure.
+   * Fires a recovery Telegram notification with the incident duration, clears
+   * the rate-limit key so the message is never suppressed, and auto-resolves
+   * any open dashboard escalation task that was created for this agent's
+   * health-check failure.
    */
   private onHealthCheckRecovered(agentName: string): void {
+    const failureStartedAt = this.healthFailureStartTimes.get(agentName);
+    const durationMs = failureStartedAt !== undefined ? Date.now() - failureStartedAt : 0;
+    const duration = formatHealthDuration(durationMs);
+
     this.healthFailingAgents.delete(agentName);
+    this.healthFailureStartTimes.delete(agentName);
+    this.healthRecoveryConfirmCycles.delete(agentName);
     // Clear rate-limit so the recovery notification fires immediately even if a
     // failure alert was sent recently.
     clearNotifyRateLimit(`health-fail:${agentName}`);
+    clearNotifyRateLimit(`health-recovery:${agentName}`);
     this.log.info("Agent recovered from health-check failure", { agentName });
-    console.log(`  ${agentName}: ✅ health-check recovered`);
+    console.log(`  ${agentName}: ✅ health-check recovered after ${duration}`);
     notifyOperator(
       `Agent ${agentName} recovered`,
-      `✅ Agent ${agentName} recovered (was failing health check)`,
+      `✅ ${agentName} recovered after ${duration}. Health checks are passing again.`,
       "info",
+      `health-recovery:${agentName}`,
     ).catch(() => {});
     // Auto-resolve any open dashboard escalation task for this health failure.
     const sourceRef = `health-check-fail:${agentName}`;
@@ -1220,11 +1258,15 @@ export class Daemon {
    * the operator can see the issue without waiting for a Telegram message.
    */
   private onHealthCheckFailed(agentName: string, detail: string): void {
+    this.healthRecoveryConfirmCycles.set(agentName, 0);
+    clearNotifyRateLimit(`health-recovery:${agentName}`);
+
     if (this.healthFailingAgents.has(agentName)) {
       // Already tracking this failure — don't re-alert.
       return;
     }
     this.healthFailingAgents.add(agentName);
+    this.healthFailureStartTimes.set(agentName, Date.now());
     notifyOperator(
       `Health check failed: ${agentName}`,
       `Agent ${agentName} failed health check. May be broken. Detail: ${detail}`,
@@ -1249,6 +1291,30 @@ export class Daemon {
         result: `Health check failed: ${detail}`,
       });
       this.log.info("Created health-check escalation task", { agentName, taskId: task.id });
+    }
+  }
+
+  /**
+   * Confirm recovery for agents currently tracked as failing health checks.
+   * Each passing health check increments a debounce counter; any failure resets
+   * the counter. Once the agent passes `HEALTH_RECOVERY_CONFIRM_CYCLES`
+   * consecutive checks, the incident is closed and Telegram is notified.
+   */
+  private async checkHealthRecoveries(): Promise<void> {
+    if (this.healthFailingAgents.size === 0) return;
+
+    for (const agentName of [...this.healthFailingAgents]) {
+      const healthy = await this.deployer.healthCheck(agentName, { maxRetries: 1, delaysMs: [0] });
+      if (!healthy) {
+        this.healthRecoveryConfirmCycles.set(agentName, 0);
+        continue;
+      }
+
+      const passes = (this.healthRecoveryConfirmCycles.get(agentName) ?? 0) + 1;
+      this.healthRecoveryConfirmCycles.set(agentName, passes);
+      if (passes >= HEALTH_RECOVERY_CONFIRM_CYCLES) {
+        this.onHealthCheckRecovered(agentName);
+      }
     }
   }
 
