@@ -297,6 +297,31 @@ export interface DispatchWasteMetrics {
 }
 
 /**
+ * Per-provider aggregated metrics for the Claude vs Codex fleet comparison panel.
+ * Provider is inferred from agent_name prefix: "claude-" → "claude", "codex-" → "openai".
+ */
+export interface FleetProviderMetrics {
+  /** Provider identifier: "claude" | "openai" | "other" */
+  provider: string;
+  /** Number of distinct agents that contributed tasks in this window */
+  agent_count: number;
+  /** Total top-level tasks assigned in the window */
+  total_tasks: number;
+  /** Tasks completed successfully (status = 'done') */
+  done: number;
+  /** Tasks that failed (status = 'failed') */
+  failed: number;
+  /** Success rate: done / total * 100, or null if no tasks */
+  success_rate_pct: number | null;
+  /** Average quality score from verified tasks, or null */
+  avg_quality_score: number | null;
+  /** Average ms from task creation → done for completed tasks, or null */
+  avg_duration_ms: number | null;
+  /** Total tokens consumed by this provider in the window (from token_usage table) */
+  total_tokens: number;
+}
+
+/**
  * Time-series metrics over a rolling N-day window, plus Δ deltas
  * comparing that window to the equally-sized prior window.
  */
@@ -3977,6 +4002,86 @@ export class StateStore {
       )
       .get() as ConfigReloadRecord | undefined;
     return row ?? null;
+  }
+
+  // ── Fleet comparison (Claude vs Codex) ──────────────────────────────────
+
+  /**
+   * Aggregate per-provider task metrics for the fleet comparison panel.
+   *
+   * Provider is inferred from the agent_name column using a naming convention:
+   *   - Names starting with "claude-"  → provider "claude"
+   *   - Names starting with "codex-"   → provider "openai"
+   *   - Everything else                → provider "other"
+   *
+   * Token data comes from the token_usage table which does record provider
+   * explicitly, so we join on agent_name for the token totals.
+   *
+   * @param days  Rolling window in days (default: 7)
+   */
+  getFleetComparisonMetrics(days = 7): FleetProviderMetrics[] {
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const sinceHours = days * 24;
+
+    // Task metrics grouped by inferred provider
+    const taskRows = this.db.prepare(`
+      SELECT
+        CASE
+          WHEN agent_name LIKE 'claude-%' THEN 'claude'
+          WHEN agent_name LIKE 'codex-%'  THEN 'openai'
+          ELSE 'other'
+        END AS provider,
+        COUNT(DISTINCT agent_name) AS agent_count,
+        COUNT(*) AS total_tasks,
+        COALESCE(SUM(CASE WHEN status = 'done'   THEN 1 ELSE 0 END), 0) AS done,
+        COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+        AVG(CASE
+          WHEN status = 'done'
+          THEN (julianday(updated_at) - julianday(created_at)) * 86400000.0
+        END) AS avg_duration_ms,
+        AVG(CASE WHEN verification_status IS NOT NULL THEN quality_score END) AS avg_quality_score
+      FROM tasks
+      WHERE agent_name IS NOT NULL
+        AND parent_task_id IS NULL
+        AND created_at >= ?
+      GROUP BY 1
+      ORDER BY done DESC
+    `).all(since) as Array<{
+      provider: string;
+      agent_count: number;
+      total_tasks: number;
+      done: number;
+      failed: number;
+      avg_duration_ms: number | null;
+      avg_quality_score: number | null;
+    }>;
+
+    // Token usage grouped by provider from the token_usage table
+    const tokenRows = this.db.prepare(`
+      SELECT
+        provider,
+        COALESCE(SUM(tokens_in + tokens_out), 0) AS total_tokens
+      FROM token_usage
+      WHERE recorded_at >= datetime('now', '-' || ? || ' hours')
+      GROUP BY provider
+    `).all(sinceHours) as Array<{ provider: string; total_tokens: number }>;
+
+    const tokenByProvider = new Map<string, number>();
+    for (const tr of tokenRows) {
+      tokenByProvider.set(tr.provider, tr.total_tokens);
+    }
+
+    return taskRows.map((r) => ({
+      provider: r.provider,
+      agent_count: r.agent_count,
+      total_tasks: r.total_tasks,
+      done: r.done,
+      failed: r.failed,
+      success_rate_pct: r.total_tasks > 0 ? (r.done / r.total_tasks) * 100 : null,
+      avg_quality_score: r.avg_quality_score,
+      avg_duration_ms: r.avg_duration_ms,
+      total_tokens: tokenByProvider.get(r.provider) ?? 0,
+    }));
   }
 
   close(): void {

@@ -27,6 +27,7 @@ import { registerDispatchEfficiencyCommand } from "./commands/dispatch-efficienc
 import { registerSupervisorLogCommand } from "./commands/supervisor-log.js";
 import { registerConfigCommand } from "./commands/config.js";
 import { registerBorrowCommand } from "./commands/borrow.js";
+import { registerFleetCommand } from "./commands/fleet.js";
 
 const program = new Command();
 
@@ -63,5 +64,6 @@ registerDispatchEfficiencyCommand(program);
 registerSupervisorLogCommand(program);
 registerConfigCommand(program);
 registerBorrowCommand(program);
+registerFleetCommand(program);
 
 program.parse();
