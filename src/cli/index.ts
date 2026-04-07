@@ -25,6 +25,7 @@ import { registerBudgetCommand } from "./commands/budget.js";
 import { registerIssueStatusCommand } from "./commands/issue-status.js";
 import { registerDispatchEfficiencyCommand } from "./commands/dispatch-efficiency.js";
 import { registerSupervisorLogCommand } from "./commands/supervisor-log.js";
+import { registerConfigCommand } from "./commands/config.js";
 
 const program = new Command();
 
@@ -59,5 +60,6 @@ registerBudgetCommand(program);
 registerIssueStatusCommand(program);
 registerDispatchEfficiencyCommand(program);
 registerSupervisorLogCommand(program);
+registerConfigCommand(program);
 
 program.parse();
