@@ -32,6 +32,7 @@ import { setRecencyWindowHours } from "../triggers/duplicate-guard.js";
 import { startTelegramPolling, stopTelegramPolling, pollTelegram } from "./telegram.js";
 import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.js";
 import { maybeRunDailySecurityScan, type SecurityScanState } from "../orchestrator/security-scanner.js";
+import { runTeamMeeting } from "../orchestrator/team-meeting.js";
 import {
   type GateResult,
   detectImprovements,
@@ -51,6 +52,7 @@ const CONTAINER_RESTART_EVERY_N_CYCLES = 100; // ~50min at 30s interval — prev
 const AGENT_SYNC_EVERY_N_CYCLES = 10; // ~5min at default interval — recover from proxy restarts
 const CLOSED_ISSUE_CHECK_EVERY_N_CYCLES = 3; // ~15min at default — cancel in-flight tasks for closed issues
 const STALE_ISSUE_AGE_DAYS = 7;
+const TEAM_MEETING_EVERY_N_CYCLES = 288; // ~24h at 5min interval
 
 /**
  * Default quality-score floor for reviewer-pool approvals.  Any completed
@@ -357,7 +359,12 @@ export class Daemon {
         await this.detectImprovements(time);
       }
 
-      // 3c. Link approved research findings to implementation issues
+      // 3c. Daily team meeting — agents share perspectives, supervisor synthesises
+      if (this.cycleCount % TEAM_MEETING_EVERY_N_CYCLES === 0) {
+        await this.runTeamMeeting(time);
+      }
+
+      // 3d. Link approved research findings to implementation issues
       if (this.cycleCount % RESEARCH_LINK_EVERY_N_CYCLES === 0) {
         await this.linkResearchToImplementation(time);
       }
@@ -1126,6 +1133,16 @@ export class Daemon {
       }
     } catch (err) {
       console.error(`[${time}] Improvement detection failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  private async runTeamMeeting(time: string): Promise<void> {
+    try {
+      console.log(`[${time}] Starting daily team meeting...`);
+      const summary = await runTeamMeeting(this.config, this.store);
+      console.log(`[${time}] Team meeting complete: ${summary.actionItems.length} action items, ${summary.perspectives.filter((p) => p.response).length} agents participated`);
+    } catch (err) {
+      console.error(`[${time}] Team meeting failed: ${err instanceof Error ? err.message : err}`);
     }
   }
 

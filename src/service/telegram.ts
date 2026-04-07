@@ -11,6 +11,7 @@ import { ulid } from "ulid";
 import { findBranchForIssue, findExistingPRsForIssue, type GitHubIssue } from "../triggers/github.js";
 import { getProviderStates } from "../service/provider-state.js";
 import { loadGoals, measureGoalProgress, formatGoalsForTelegram } from "../orchestrator/goals.js";
+import { runTeamMeeting } from "../orchestrator/team-meeting.js";
 import { deescalateAllEscalatedTasks, deescalateEscalatedTask, normaliseSourceRef } from "../cli/commands/deescalate.js";
 
 const log = createLogger("telegram");
@@ -497,6 +498,16 @@ Steps:
   }
 
   // Dispatch (fire-and-forget — reply immediately, don't block polling)
+  // Team meeting (fire-and-forget — takes a few minutes)
+  if (cmd === "meeting" || cmd === "/meeting") {
+    runTeamMeeting(ctx.config, ctx.store)
+      .then((summary) => sendReply(
+        `✅ Team meeting complete\n${summary.actionItems.length} action items\n${summary.perspectives.filter((p) => p.response).length} agents participated`,
+      ))
+      .catch((e) => sendReply(`❌ Team meeting failed: ${e instanceof Error ? e.message : String(e)}`));
+    return "🤝 Starting team meeting — querying all agents...";
+  }
+
   if (cmd.startsWith("dispatch ") || cmd.startsWith("/dispatch ")) {
     const parts = text.trim().split(/\s+/);
     const agentName = parts[1];
