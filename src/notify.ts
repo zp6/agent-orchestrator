@@ -14,9 +14,11 @@
  *   await notify.escalation("owner/repo", 42, "Diff too large");
  *   await notify.taskRejected("task-id", "claude-proxy", 0.3, "Missing auth check");
  *   await notify.notifyOperator("Deploy failed", "claude-proxy is down", "high");
+ *   await notify.healthRecovery("claude-proxy", 12 * 60 * 1000);
  */
 
 import { createLogger } from "./service/logger.js";
+import { formatDurationShort } from "./health-recovery.js";
 
 const log = createLogger("notify");
 
@@ -45,6 +47,12 @@ export interface Notifier {
     reason: string,
     opts?: { agentName?: string; message?: string; issueRef?: string; outcome?: string },
   ): Promise<void>;
+  /**
+   * Send a recovery notice when an agent transitions from failing to passing.
+   * This path is deliberately not rate-limited; the recovery tracker ensures
+   * one notification per incident.
+   */
+  healthRecovery(agentName: string, degradedForMs: number, confirmationCycles?: number): Promise<void>;
   /** Returns true if the notifier is configured (has bot token + chat ID). */
   isConfigured(): boolean;
 }
@@ -194,6 +202,32 @@ export function createNotifier(
       if (opts.outcome && opts.outcome !== "pending") lines.push(`*Outcome:* ${opts.outcome}`);
 
       await this.send(lines.join("\n"));
+    },
+
+    async healthRecovery(
+      agentName: string,
+      degradedForMs: number,
+      confirmationCycles: number = 3,
+    ): Promise<void> {
+      if (!resolved) {
+        log.warn("Telegram notifier not configured — skipping healthRecovery", {
+          agentName,
+          confirmationCycles,
+        });
+        return;
+      }
+
+      const degradedFor = formatDurationShort(degradedForMs);
+      const text = [
+        `✅ *${agentName} recovered after ${degradedFor}*`,
+        ``,
+        `*Agent:* \`${agentName}\``,
+        `*Degraded for:* ${degradedFor}`,
+        `*Status:* now passing`,
+        `*Confirmation:* ${confirmationCycles} consecutive healthy checks`,
+      ].join("\n");
+
+      await this.send(text);
     },
 
     async notifyOperator(

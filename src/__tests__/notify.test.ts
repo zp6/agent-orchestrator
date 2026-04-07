@@ -180,3 +180,33 @@ describe("supervisorDecision", () => {
     ).resolves.toBeUndefined();
   });
 });
+
+describe("healthRecovery", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("formats a recovery notification with duration and confirmation window", async () => {
+    let capturedText = "";
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      capturedText = JSON.parse(init?.body as string).text as string;
+      return new Response("{}", { status: 200 });
+    });
+
+    const notifier = createNotifier({ botToken: "tok", chatId: "42" });
+    await notifier.healthRecovery("claude-orchestrator-telegram", 12 * 60 * 1000, 3);
+
+    expect(capturedText).toContain("✅");
+    expect(capturedText).toContain("claude-orchestrator-telegram");
+    expect(capturedText).toContain("12m");
+    expect(capturedText).toContain("now passing");
+    expect(capturedText).toContain("3 consecutive healthy checks");
+  });
+
+  it("resolves without throwing when not configured", async () => {
+    const notifier = createNotifier();
+    await expect(
+      notifier.healthRecovery("claude-orchestrator-telegram", 12 * 60 * 1000),
+    ).resolves.toBeUndefined();
+  });
+});

@@ -16,7 +16,7 @@ Quality and oversight layer for the [Claude Agent Orchestrator](https://github.c
 | `Supervisor` | Strategic reasoning about system state; drives dispatch decisions |
 | `ImprovementDetector` | Analyses task patterns and creates GitHub issues for detected improvements |
 | `IssueCreator` | Programmatically opens GitHub issues on agent repos |
-| `createNotifier` | Sends Telegram escalation alerts |
+| `createNotifier` | Sends Telegram escalation alerts and health recovery notices |
 | `TelegramCommandHandler` | Two-way Telegram bot wired to the live `state.db` |
 
 ---
@@ -120,7 +120,7 @@ for (const item of improvements) {
 | Variable | Required | Description |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Only for notifications | Telegram bot token from BotFather |
-| `TELEGRAM_CHAT_ID` | Only for notifications | Telegram chat ID to receive escalation alerts |
+| `TELEGRAM_CHAT_ID` | Only for notifications | Telegram chat ID to receive escalation and recovery alerts |
 | `STATE_DB_PATH` | — | Override path to shared SQLite DB (default: `~/.claude-orchestrator/state.db`) |
 
 Copy `.env.example` to `~/.claude-orchestrator/.env` and fill in the values.
@@ -145,6 +145,8 @@ Supported commands (sent to your Telegram bot):
 | `/status` | Current system state and active tasks |
 | `/tasks` | List pending and in-progress tasks |
 | `/approve <task-id>` | Manually approve a task |
+
+For proactive recovery alerts, use `HealthRecoveryTracker` together with `createNotifier().healthRecovery(...)`. The tracker waits for the configured confirmation window before sending a single recovery message per incident, which prevents oscillating health checks from spamming Telegram.
 
 ---
 

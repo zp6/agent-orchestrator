@@ -34,6 +34,8 @@ export type { CreatedIssue } from "./reviewer/issue-creator.js";
 // Telegram notifications
 export { createNotifier } from "./notify.js";
 export type { Notifier, NotifyUrgency } from "./notify.js";
+export { HealthRecoveryTracker, formatDurationShort } from "./health-recovery.js";
+export type { HealthRecoveryEvent, HealthRecoveryObservation } from "./health-recovery.js";
 
 // Telegram command handler (two-way, wired to live state.db)
 export { TelegramCommandHandler } from "./telegram/command-handler.js";
