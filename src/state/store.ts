@@ -763,6 +763,7 @@ export class StateStore {
     this.runDispatchValidationMigration();
     this.runIssueClaimsMigration();
     this.runConfigReloadsMigration();
+    this.runIssueCacheMigration();
   }
 
   private runPhase2Migration(): void {
@@ -3941,6 +3942,63 @@ export class StateStore {
       CREATE INDEX IF NOT EXISTS idx_config_reloads_timestamp
         ON config_reloads (timestamp DESC);
     `);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Issue-state cache persistence (issue #590)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Create the issue_state_cache table if it doesn't exist.
+   *
+   * This table is written by the orchestrator each time it fetches issue state
+   * from GitHub (via issue-state-bridge). The dashboard's getStuckIssues()
+   * query reads from this table to filter out closed issues.
+   */
+  private runIssueCacheMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS issue_state_cache (
+        source_ref TEXT PRIMARY KEY,
+        state      TEXT NOT NULL,
+        cached_at  TEXT NOT NULL,
+        ttl_ms     INTEGER NOT NULL DEFAULT 60000
+      );
+      CREATE INDEX IF NOT EXISTS idx_issue_state_cache_cached_at
+        ON issue_state_cache (cached_at);
+    `);
+  }
+
+  /**
+   * Persist (or refresh) one entry in the issue-state cache table.
+   *
+   * Called by the orchestrator whenever it fetches or re-fetches an issue's
+   * state from GitHub. The dashboard reads this table to filter closed issues
+   * out of the stuck-issues panel.
+   *
+   * @param source_ref  The canonical source ref, e.g. "owner/repo#42".
+   * @param state       "open" or "closed".
+   * @param ttl_ms      Entry TTL in ms (default 60 000).
+   */
+  upsertIssueCacheEntry(params: {
+    source_ref: string;
+    state: string;
+    ttl_ms?: number;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO issue_state_cache (source_ref, state, cached_at, ttl_ms)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(source_ref) DO UPDATE SET
+           state     = excluded.state,
+           cached_at = excluded.cached_at,
+           ttl_ms    = excluded.ttl_ms`,
+      )
+      .run(
+        params.source_ref,
+        params.state,
+        new Date().toISOString(),
+        params.ttl_ms ?? 60_000,
+      );
   }
 
   /**

@@ -12,7 +12,7 @@ import { PRReviewer } from "../orchestrator/pr-reviewer.js";
 import { findOrphanBranches, createPRForBranch, deleteStaleOrphanBranches, STALE_BRANCH_BEHIND_THRESHOLD } from "../orchestrator/pr-creator.js";
 import { PRCreationRetryQueue } from "../orchestrator/pr-creation-retry-queue.js";
 import { validateGhAuth } from "../triggers/github.js";
-import { cachedIsIssueOpen, cachedGetIssueState, logCacheMetrics } from "../triggers/issue-state-bridge.js";
+import { cachedIsIssueOpen, cachedGetIssueState, logCacheMetrics, initIssueCachePersistence } from "../triggers/issue-state-bridge.js";
 import {
   dispatchGitHubIssues,
   dispatchIdleAgentBacklog,
@@ -176,6 +176,12 @@ export class Daemon {
 
     this.store = new StateStore();
     setLLMUsageRecorder(this.store.recordTokenUsage.bind(this.store));
+
+    // Wire up SQLite persistence for the issue-state cache (issue #590).
+    // This ensures every fresh GitHub fetch is also written to the
+    // issue_state_cache table so the dashboard can filter closed issues
+    // out of the stuck-issues panel.
+    initIssueCachePersistence(this.store);
 
     // Apply config overrides to modules that use module-level state
     setRecencyWindowHours(this.config.triggers?.recency_window_hours);

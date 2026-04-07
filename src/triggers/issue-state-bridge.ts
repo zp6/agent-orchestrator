@@ -18,25 +18,69 @@
 import { isIssueOpen, findExistingPRsForIssue } from "./github.js";
 import { getIssueStateCache, type IssueFetcher, type CachedIssueState } from "./issue-state-cache.js";
 import { createLogger } from "../service/logger.js";
+import type { StateStore } from "../state/store.js";
 
 const log = createLogger("issue-state-bridge");
+
+// ---------------------------------------------------------------------------
+// SQLite persistence (issue #590)
+// ---------------------------------------------------------------------------
+
+/**
+ * Optional reference to the state store, set at daemon startup via
+ * `initIssueCachePersistence()`.  When set, every fresh GitHub fetch is
+ * mirrored to the `issue_state_cache` SQLite table so the dashboard's
+ * stuck-issues panel can filter out closed issues even after the 60 s
+ * in-memory TTL has expired.
+ */
+let _store: StateStore | null = null;
+
+/**
+ * Wire up SQLite persistence for the issue-state cache.
+ *
+ * Call this once at daemon startup, passing the shared StateStore.
+ * After this, every GitHub API fetch will also write to the
+ * `issue_state_cache` table, making issue state visible to the dashboard.
+ *
+ * @param store  The orchestrator's StateStore instance.
+ */
+export function initIssueCachePersistence(store: StateStore): void {
+  _store = store;
+  log.info("Issue state cache persistence initialised (SQLite backend enabled)");
+}
 
 /**
  * The default IssueFetcher backed by real GitHub API calls.
  * Wraps `isIssueOpen()` + `findExistingPRsForIssue()` into the
  * `IssueFetcher` interface expected by the cache.
+ *
+ * When `initIssueCachePersistence()` has been called, also mirrors the
+ * fetched state to the `issue_state_cache` SQLite table so the dashboard
+ * can filter out closed issues from the stuck-issues panel (issue #590).
  */
 export const gitHubFetcher: IssueFetcher = (repo: string, issueNumber: number) => {
   const open = isIssueOpen(repo, issueNumber);
   const existingPRs = findExistingPRsForIssue(repo, issueNumber);
   const hasOpenPR = existingPRs.some((pr) => pr.state === "open" && !pr.isDraft);
   const hasMergedPR = existingPRs.some((pr) => pr.state === "merged");
+  const state = open ? ("open" as const) : ("closed" as const);
 
-  return {
-    state: open ? ("open" as const) : ("closed" as const),
-    hasOpenPR,
-    hasMergedPR,
-  };
+  // Persist to SQLite so the dashboard's stuck-issues panel can filter
+  // out closed issues even after the in-memory TTL has expired.
+  if (_store) {
+    try {
+      _store.upsertIssueCacheEntry({ source_ref: `${repo}#${issueNumber}`, state });
+    } catch (err) {
+      log.warn("Failed to persist issue state to SQLite cache", {
+        repo,
+        issueNumber,
+        state,
+        err,
+      });
+    }
+  }
+
+  return { state, hasOpenPR, hasMergedPR };
 };
 
 /**
