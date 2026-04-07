@@ -19,6 +19,7 @@ import type { IStateStore, Task, AgentHealth, SupervisorDecisionRecord } from ".
 export interface SupervisorDecision {
   action: "dispatch" | "verify" | "redeploy" | "create-issue" | "follow-up" | "none";
   agentName?: string;
+  taskId?: string;
   message?: string;
   reason: string;
 }
@@ -36,10 +37,9 @@ You have these capabilities:
 Respond with ONLY a JSON array of decisions (no markdown, no code fences):
 [
   {
-    "action": "follow-up",
-    "agentName": "claude-proxy",
-    "message": "Your previous task on issue #2 is done but the branch wasn't pushed. Please push branch issue-2-expand-claude-md to origin.",
-    "reason": "Branch created but not pushed to remote"
+    "action": "verify",
+    "taskId": "01KNJDAK",
+    "reason": "PR #522 was scored 0.8 and remains unverified in the queue"
   }
 ]
 
@@ -65,6 +65,9 @@ CRITICAL — IDLE AGENT DISPATCH RULES (strictly enforced):
 - The open GitHub issues per agent are listed in the context under "## Open Issues". Pick one and dispatch it.
 - If an agent is idle and has no open issues, prefer action "none" over a vague dispatch — do not invent busywork
 - A dispatch message that will result in a pure status check or "system looks healthy" report is a quality failure and wastes a task slot
+- For action "verify", you MUST include a "taskId" field using the exact task id shown in the context (the 8-character prefix is acceptable)
+- For action "redeploy", you MUST include "agentName"
+- For action "create-issue", you MUST include "agentName" and put the concrete issue request in "message"
 
 You have memory of your recent decisions in "## Recent Supervisor Decisions". Use this to:
 - Avoid repeating actions that have already been taken (especially failed ones)
@@ -75,6 +78,7 @@ Be specific and actionable. Only suggest actions that address real gaps. Return 
 
 /** Regex to detect issue references like #42 or owner/repo#42 */
 const ISSUE_REF_RE = /#\d+/;
+const TASK_REF_RE = /\b(?:task(?::|\s+id\s*:?\s*|\s+)?|\[task:)([0-9A-Z]{8,26})\]?/gi;
 
 /**
  * Extract all unique issue/PR numbers referenced in a text string.
@@ -85,6 +89,16 @@ export function extractIssueRefs(text: string): number[] {
     refs.add(parseInt(match[1], 10));
   }
   return [...refs];
+}
+
+/**
+ * Extract the first task id or task-id prefix referenced in free text.
+ */
+export function extractTaskRef(text: string): string | undefined {
+  if (!text) return undefined;
+  const match = TASK_REF_RE.exec(text);
+  TASK_REF_RE.lastIndex = 0;
+  return match?.[1];
 }
 
 /**
@@ -300,6 +314,38 @@ export class Supervisor {
    */
   private filterVagueDispatches(decisions: SupervisorDecision[]): SupervisorDecision[] {
     return decisions.filter((d) => {
+      if (d.action === "verify") {
+        const taskId = d.taskId ?? extractTaskRef(`${d.message ?? ""} ${d.reason}`);
+        if (!taskId) {
+          this.log.warn("Dropping verify decision without task target", {
+            reason: d.reason,
+            message: d.message?.slice(0, 120),
+          });
+          return false;
+        }
+        d.taskId = taskId;
+        return true;
+      }
+
+      if (d.action === "redeploy") {
+        if (!d.agentName) {
+          this.log.warn("Dropping redeploy decision without agentName", { reason: d.reason });
+          return false;
+        }
+        return true;
+      }
+
+      if (d.action === "create-issue") {
+        if (!d.agentName || !d.message) {
+          this.log.warn("Dropping create-issue decision missing agentName or message", {
+            agentName: d.agentName,
+            reason: d.reason,
+          });
+          return false;
+        }
+        return true;
+      }
+
       if (d.action !== "dispatch" && d.action !== "follow-up") return true;
       if (!d.agentName || !d.message) return true;
 
@@ -455,6 +501,7 @@ export class Supervisor {
         .map((d: Record<string, unknown>) => ({
           action: String(d.action) as SupervisorDecision["action"],
           agentName: d.agentName ? String(d.agentName) : undefined,
+          taskId: d.taskId ? String(d.taskId) : extractTaskRef(`${String(d.message ?? "")} ${String(d.reason ?? "")}`),
           message: d.message ? String(d.message) : undefined,
           reason: String(d.reason),
         }));
