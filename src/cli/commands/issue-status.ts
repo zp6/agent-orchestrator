@@ -22,6 +22,44 @@ export interface SimilarIssue {
  *
  * Designed for both CLI rendering and Telegram display.
  */
+/**
+ * A single entry in the per-issue dispatch history table.
+ * Represents one top-level task (dispatch attempt) for the issue, enriched
+ * with outcome classification and reroute detection.
+ */
+export interface DispatchEntry {
+  /** Short task ID (first 10 chars of ULID) */
+  taskId: string;
+  /** Full ULID — used for deep linking */
+  taskIdFull: string;
+  /** Agent that was assigned this task (null if never assigned) */
+  agent: string | null;
+  /** ISO timestamp when the task was first created / dispatched */
+  dispatchedAt: string;
+  /**
+   * Consolidated outcome label:
+   *   "active"           — task still running (pending/dispatched/in_progress)
+   *   "approved"         — done + verification_status=approved
+   *   "rejected"         — done + verification_status=rejected
+   *   "unverified"       — done but not yet verified
+   *   "failed"           — task status=failed
+   *   "escalated"        — task status=escalated
+   *   "result_missing"   — task status=result_missing
+   */
+  outcome: "active" | "approved" | "rejected" | "unverified" | "failed" | "escalated" | "result_missing";
+  /** Numeric quality score from verifier, null if not yet scored */
+  qualityScore: number | null;
+  /** First 100 chars of the task result, null if no result yet */
+  resultSnippet: string | null;
+  /**
+   * True when the task title contains "[auto-reroute]", indicating the
+   * dispatcher reassigned this issue from a previous agent.
+   */
+  isReroute: boolean;
+  /** Number of internal retries within this task record (0 = first attempt) */
+  retryCount: number;
+}
+
 export interface IssueStatusResult {
   repo: string;
   issueNumber: number;
@@ -42,6 +80,29 @@ export interface IssueStatusResult {
     createdAt: string;
     updatedAt: string;
   }>;
+  /**
+   * Per-issue dispatch history in chronological order (oldest → newest).
+   * Each entry represents one top-level task dispatched for this issue,
+   * with outcome classification, quality score, result snippet, and
+   * reroute detection.
+   */
+  dispatchHistory: DispatchEntry[];
+  /**
+   * Name of the agent that currently holds an active task for this issue,
+   * or null if no task is currently in-flight.
+   */
+  currentClaim: string | null;
+  /**
+   * Total number of dispatch attempts across all task records, counting
+   * each retry within a task as a separate attempt
+   * (sum of retry_count + 1 per task).
+   */
+  totalAttemptCount: number;
+  /**
+   * True if any dispatch entry for this issue was an auto-reroute
+   * (task title contains "[auto-reroute]").
+   */
+  wasRerouted: boolean;
   /** Summary line for quick display */
   summary: string;
   /** Other open issues that share >60% keyword overlap — potential duplicates */
@@ -97,6 +158,58 @@ export async function getIssueStatus(
     updatedAt: t.updated_at,
   }));
 
+  // 3b. Build per-issue dispatch history (chronological: oldest first).
+  //     allTasks is ordered newest-first (ORDER BY rowid DESC) so we reverse.
+  const dispatchHistory: DispatchEntry[] = [...allTasks].reverse().map((t: Task) => {
+    const isActive = ["pending", "planning", "dispatched", "in_progress"].includes(t.status);
+    let outcome: DispatchEntry["outcome"];
+    if (isActive) {
+      outcome = "active";
+    } else if (t.status === "done") {
+      if (t.verification_status === "approved") outcome = "approved";
+      else if (t.verification_status === "rejected") outcome = "rejected";
+      else outcome = "unverified";
+    } else if (t.status === "failed") {
+      outcome = "failed";
+    } else if (t.status === "escalated") {
+      outcome = "escalated";
+    } else if (t.status === "result_missing") {
+      outcome = "result_missing";
+    } else {
+      outcome = "unverified";
+    }
+
+    const resultSnippet = t.result ? t.result.slice(0, 100).replace(/\n/g, " ") : null;
+    const isReroute = t.title.includes("[auto-reroute]");
+
+    return {
+      taskId: t.id.slice(0, 10),
+      taskIdFull: t.id,
+      agent: t.agent_name,
+      dispatchedAt: t.created_at,
+      outcome,
+      qualityScore: t.quality_score,
+      resultSnippet,
+      isReroute,
+      retryCount: t.retry_count,
+    };
+  });
+
+  // Current claim: agent with an active task (most recent wins if >1 somehow)
+  const activeTasks = allTasks.filter((t: Task) =>
+    ["pending", "planning", "dispatched", "in_progress"].includes(t.status),
+  );
+  const currentClaim = activeTasks.length > 0 ? (activeTasks[0].agent_name ?? null) : null;
+
+  // Total attempt count: each task counts as (retry_count + 1) dispatch attempts
+  const totalAttemptCount = allTasks.reduce(
+    (sum: number, t: Task) => sum + (t.retry_count ?? 0) + 1,
+    0,
+  );
+
+  // Was rerouted: any task title contains "[auto-reroute]"
+  const wasRerouted = allTasks.some((t: Task) => t.title.includes("[auto-reroute]"));
+
   // 4. Find similar open issues via keyword overlap (only when issue is open)
   const similarIssues: SimilarIssue[] =
     issueState === "open"
@@ -114,6 +227,10 @@ export async function getIssueStatus(
     issueTitle,
     linkedPRs,
     tasks,
+    dispatchHistory,
+    currentClaim,
+    totalAttemptCount,
+    wasRerouted,
     summary,
     similarIssues,
     validations,
@@ -294,38 +411,60 @@ function printIssueStatus(result: IssueStatusResult): void {
     console.log(chalk.dim("  No linked PRs found.\n"));
   }
 
-  // Task history
-  if (result.tasks.length > 0) {
-    console.log(chalk.bold("  Task history:"));
-    for (const task of result.tasks) {
-      const statusColor: Record<string, (s: string) => string> = {
-        pending: chalk.yellow,
-        planning: chalk.magenta,
-        dispatched: chalk.blue,
-        in_progress: chalk.cyan,
-        done: chalk.green,
-        failed: chalk.red,
-        escalated: chalk.red,
-      };
-      const colorFn = statusColor[task.status] ?? chalk.white;
-      const verif =
-        task.verificationStatus === "approved"
-          ? chalk.green(" ✓ approved")
-          : task.verificationStatus === "rejected"
-            ? chalk.red(" ✗ rejected")
-            : "";
+  // Dispatch history — chronological table (oldest first)
+  if (result.dispatchHistory.length > 0) {
+    const attemptLabel = result.totalAttemptCount === 1 ? "1 attempt" : `${result.totalAttemptCount} attempts`;
+    const rerouteFlag = result.wasRerouted ? chalk.yellow("  ↩ rerouted") : "";
+    console.log(chalk.bold(`  Dispatch history:`) + chalk.dim(`  (${attemptLabel})`) + rerouteFlag);
+
+    if (result.currentClaim) {
+      console.log(
+        `  ${chalk.bold("Current claim:")} ${chalk.cyan(result.currentClaim)}\n`,
+      );
+    }
+
+    const outcomeColor: Record<string, (s: string) => string> = {
+      active:        chalk.cyan,
+      approved:      chalk.green,
+      rejected:      chalk.yellow,
+      unverified:    chalk.dim,
+      failed:        chalk.red,
+      escalated:     chalk.red,
+      result_missing: chalk.magenta,
+    };
+    const outcomeIcon: Record<string, string> = {
+      active:        "🔵",
+      approved:      "✅",
+      rejected:      "🔄",
+      unverified:    "⏳",
+      failed:        "❌",
+      escalated:     "🚨",
+      result_missing: "❓",
+    };
+
+    for (let i = 0; i < result.dispatchHistory.length; i++) {
+      const entry = result.dispatchHistory[i];
+      const num = chalk.dim(`#${String(i + 1).padStart(2)}`);
+      const icon = outcomeIcon[entry.outcome] ?? "⚪";
+      const colorFn = outcomeColor[entry.outcome] ?? chalk.white;
+      const outcomeLabel = colorFn(entry.outcome.padEnd(14));
+      const agentLabel = entry.agent ? chalk.cyan(entry.agent) : chalk.dim("unassigned");
       const score =
-        task.qualityScore !== null
-          ? chalk.dim(` (score: ${task.qualityScore.toFixed(2)})`)
+        entry.qualityScore !== null
+          ? (entry.qualityScore >= 0.8
+              ? chalk.green(` score:${entry.qualityScore.toFixed(2)}`)
+              : chalk.yellow(` score:${entry.qualityScore.toFixed(2)}`))
           : "";
-      const retry = task.retryCount > 0 ? chalk.yellow(` retry×${task.retryCount}`) : "";
-      const agent = task.agent ? chalk.dim(` → ${task.agent}`) : "";
-      const age = formatAge(task.createdAt);
+      const rerouteTag = entry.isReroute ? chalk.yellow(" [reroute]") : "";
+      const retryTag = entry.retryCount > 0 ? chalk.dim(` +${entry.retryCount} retry`) : "";
+      const age = formatAge(entry.dispatchedAt);
 
       console.log(
-        `    ${chalk.dim(task.id.slice(0, 10))}  ${colorFn(task.status.padEnd(12))}${agent}${verif}${score}${retry}  ${chalk.dim(age)}`,
+        `    ${num} ${icon}  ${outcomeLabel}  ${agentLabel}${score}${rerouteTag}${retryTag}  ${chalk.dim(entry.taskId)}  ${chalk.dim(age)}`,
       );
-      console.log(`    ${chalk.dim(task.title.slice(0, 70))}`);
+      if (entry.resultSnippet) {
+        console.log(`       ${chalk.dim(entry.resultSnippet)}`);
+      }
     }
     console.log();
   } else {
@@ -398,20 +537,28 @@ export function formatIssueStatusTelegram(result: IssueStatusResult): string {
     lines.push("");
   }
 
-  if (result.tasks.length > 0) {
-    lines.push(`*Tasks:* (${result.tasks.length} total)`);
-    // Show last 5 tasks
-    for (const task of result.tasks.slice(0, 5)) {
-      const icon =
-        task.status === "done" ? "✅" :
-        task.status === "failed" ? "❌" :
-        task.status === "escalated" ? "🚨" :
-        ["pending", "planning", "dispatched", "in_progress"].includes(task.status) ? "🔵" : "⚪";
-      const agent = task.agent ? ` → ${task.agent.replace("claude-", "")}` : "";
-      lines.push(`  ${icon} ${task.status}${agent} (${formatAge(task.createdAt)})`);
+  if (result.dispatchHistory.length > 0) {
+    const rerouteFlag = result.wasRerouted ? " ↩ rerouted" : "";
+    lines.push(`*Dispatch history* (${result.totalAttemptCount} attempt(s)${rerouteFlag}):`);
+    if (result.currentClaim) {
+      lines.push(`Active claim: ${result.currentClaim}`);
     }
-    if (result.tasks.length > 5) {
-      lines.push(`  ... and ${result.tasks.length - 5} more`);
+    const outcomeIcon: Record<string, string> = {
+      active: "🔵", approved: "✅", rejected: "🔄", unverified: "⏳",
+      failed: "❌", escalated: "🚨", result_missing: "❓",
+    };
+    // Show all entries (capped at 8 for Telegram readability)
+    const entries = result.dispatchHistory.slice(-8);
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      const icon = outcomeIcon[entry.outcome] ?? "⚪";
+      const agent = entry.agent ? entry.agent.replace("claude-", "c-").replace("codex-", "x-") : "?";
+      const score = entry.qualityScore !== null ? ` ${(entry.qualityScore * 100).toFixed(0)}%` : "";
+      const reroute = entry.isReroute ? " ↩" : "";
+      lines.push(`  ${icon} ${entry.outcome}${score}  ${agent}${reroute}  (${formatAge(entry.dispatchedAt)})`);
+    }
+    if (result.dispatchHistory.length > 8) {
+      lines.push(`  … and ${result.dispatchHistory.length - 8} earlier attempt(s)`);
     }
     lines.push("");
   }
