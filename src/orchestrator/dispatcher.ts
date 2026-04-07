@@ -21,6 +21,7 @@ import {
   isProviderAvailable,
   parseResetTime,
 } from "../service/provider-state.js";
+import { routeModel } from "./model-router.js";
 import { detectAndCreateFollowUps, formatFollowUpNote } from "./cross-repo-tracker.js";
 import {
   runGitHubPreDispatchValidation,
@@ -787,11 +788,21 @@ export class Dispatcher {
       content: messageToSend,
     });
 
+    // Smart model routing: pick cheapest model that can handle this task
+    const provider = this.config.agents[agentName]?.provider ?? "claude";
+    const isRevision = message.includes("[revision]") || message.includes("[PR feedback]");
+    const modelRoute = routeModel(provider, message, {
+      taskType,
+      isRevision,
+      sourceRef: options?.sourceRef,
+    });
+
     try {
-      // Send to agent
+      // Send to agent with complexity-routed model
       const response = await this.client.send(agentName, messageToSend, {
         conversationId,
         taskType,
+        model: modelRoute.model,
         signal: options?.signal,
       });
 
@@ -806,7 +817,6 @@ export class Dispatcher {
       });
 
       // Record token usage for provider tracking (including cache stats)
-      const provider = this.config.agents[agentName]?.provider ?? "claude";
       this.store.recordTokenUsage(
         provider, agentName,
         response.usage.input_tokens, response.usage.output_tokens,
@@ -815,7 +825,11 @@ export class Dispatcher {
       );
 
       // Update task to done
-      this.log.info("Task completed", { taskId: task.id, agentName, tokensIn: response.usage.input_tokens, tokensOut: response.usage.output_tokens });
+      this.log.info("Task completed", {
+        taskId: task.id, agentName,
+        model: modelRoute.model, tier: modelRoute.tier, complexity: modelRoute.complexity.toFixed(2),
+        tokensIn: response.usage.input_tokens, tokensOut: response.usage.output_tokens,
+      });
 
       // Guard: another claim may have superseded this task while the HTTP call
       // was running (e.g. the claim TTL expired and a new agent claimed the
