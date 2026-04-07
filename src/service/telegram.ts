@@ -192,6 +192,32 @@ function formatEscalatedTaskList(tasks: Array<{ source_ref: string | null; agent
   }).join(", ");
 }
 
+function formatEscalatedTaskDetails(tasks: Array<{
+  id: string;
+  source_ref: string | null;
+  agent_name: string | null;
+  title: string;
+  updated_at: string;
+}>): string {
+  const lines = tasks.map((task) => {
+    const ref = task.source_ref ?? "no ref";
+    const agent = task.agent_name ?? "unassigned";
+    const ageHours = Math.round((Date.now() - new Date(task.updated_at).getTime()) / 3_600_000);
+    const ageStr = ageHours < 1 ? "<1h ago" : `${ageHours}h ago`;
+    return `  • ${task.id.slice(0, 8)} ${task.title.slice(0, 60)} — ${agent} — ${ref} — ${ageStr}`;
+  });
+
+  return `⚠️ *Escalated Tasks (${tasks.length})*\n\n${lines.join("\n")}\n\nUse \`deescalate <source_ref>\` or \`deescalate all\` to unblock.`;
+}
+
+async function handleTelegramEscalatedList(ctx: TelegramContext): Promise<string> {
+  const escalated = ctx.store.findAllEscalatedTasks();
+  if (escalated.length === 0) {
+    return "No escalated tasks found.";
+  }
+  return formatEscalatedTaskDetails(escalated);
+}
+
 async function handleTelegramDeescalation(
   text: string,
   ctx: TelegramContext,
@@ -274,6 +300,10 @@ export async function handleCommand(text: string, ctx: TelegramContext): Promise
 
   if (DEESCALATE_COMMANDS.has(cmd.split(/\s+/)[0])) {
     return await handleTelegramDeescalation(text, ctx, repos, cmd.split(/\s+/)[0]);
+  }
+
+  if (cmd === "escalated" || cmd === "/escalated") {
+    return await handleTelegramEscalatedList(ctx);
   }
 
   // Summary — the main command
@@ -567,6 +597,8 @@ dispatch <agent> <msg> — send task
 /reassign <issue> <agent> — reroute issue now
 /prioritize <issue> — move issue to front next cycle
 ack|dismiss|resolve <ref|all> — de-escalate an active alert or task
+escalated — list active escalations
+deescalate <ref|all> — unblock escalated tasks
 help — this message`;
   }
 

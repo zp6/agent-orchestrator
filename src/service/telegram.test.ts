@@ -210,4 +210,32 @@ describe("handleCommand telegram operator controls", () => {
     expect(store.findAllTasksBySourceRef("owner/repo-a#42")[0].status).toBe("failed");
     expect(store.findAllTasksBySourceRef("health-check-fail:agent-a")[0].status).toBe("failed");
   });
+
+  it("lists currently escalated tasks from Telegram", async () => {
+    const first = store.createTask({
+      title: "Escalated issue 42",
+      source: "github",
+      source_ref: "owner/repo-a#42",
+      agent_name: "agent-a",
+    });
+    const second = store.createTask({
+      title: "Health check failed: agent-a",
+      source: "manual",
+      source_ref: "health-check-fail:agent-a",
+      agent_name: "agent-b",
+    });
+    store.updateTask(first.id, { status: "escalated" });
+    store.updateTask(second.id, { status: "escalated" });
+
+    const reply = await handleCommand("escalated", {
+      config,
+      store,
+      dispatcher: { dispatch: vi.fn() } as never,
+    });
+
+    expect(reply).toContain("Escalated Tasks (2)");
+    expect(reply).toContain("owner/repo-a#42");
+    expect(reply).toContain("health-check-fail:agent-a");
+    expect(reply).toContain("deescalate <source_ref>");
+  });
 });
