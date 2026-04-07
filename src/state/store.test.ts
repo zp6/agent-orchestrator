@@ -2828,4 +2828,97 @@ describe("StateStore", () => {
       expect(store.getTask(child.id)!.status).toBe("dispatched");
     });
   });
+
+  // ── Config reload audit trail (issue #572) ─────────────────────────────────
+
+  describe("recordConfigReload / getRecentConfigReloads / getLastSuccessfulConfigReload", () => {
+    it("records a successful startup reload with no changes", () => {
+      store.recordConfigReload({
+        timestamp: "2026-04-07T10:00:00.000Z",
+        success: true,
+        changes: [],
+        errors: [],
+        triggeredBy: "startup",
+      });
+      const reloads = store.getRecentConfigReloads(10);
+      expect(reloads).toHaveLength(1);
+      expect(reloads[0].success).toBe(1);
+      expect(reloads[0].change_count).toBe(0);
+      expect(reloads[0].changes_json).toBeNull();
+      expect(reloads[0].errors_json).toBeNull();
+      expect(reloads[0].triggered_by).toBe("startup");
+    });
+
+    it("records a successful signal reload with changes", () => {
+      store.recordConfigReload({
+        timestamp: "2026-04-07T11:00:00.000Z",
+        success: true,
+        changes: ["proxy.timeout_ms", "verification.min_score"],
+        errors: [],
+        triggeredBy: "signal",
+      });
+      const reloads = store.getRecentConfigReloads(10);
+      expect(reloads[0].success).toBe(1);
+      expect(reloads[0].change_count).toBe(2);
+      const paths = JSON.parse(reloads[0].changes_json!) as string[];
+      expect(paths).toEqual(["proxy.timeout_ms", "verification.min_score"]);
+      expect(reloads[0].triggered_by).toBe("signal");
+    });
+
+    it("records a failed reload with errors", () => {
+      store.recordConfigReload({
+        timestamp: "2026-04-07T12:00:00.000Z",
+        success: false,
+        changes: [],
+        errors: ["proxy.timeout_ms: must be positive"],
+        triggeredBy: "file-watcher",
+      });
+      const reloads = store.getRecentConfigReloads(10);
+      expect(reloads[0].success).toBe(0);
+      expect(reloads[0].change_count).toBe(0);
+      expect(reloads[0].errors_json).not.toBeNull();
+      const errs = JSON.parse(reloads[0].errors_json!) as string[];
+      expect(errs).toContain("proxy.timeout_ms: must be positive");
+    });
+
+    it("returns reloads newest-first", () => {
+      store.recordConfigReload({ timestamp: "2026-04-07T09:00:00.000Z", success: true, changes: [], errors: [], triggeredBy: "startup" });
+      store.recordConfigReload({ timestamp: "2026-04-07T10:00:00.000Z", success: true, changes: ["a.b"], errors: [], triggeredBy: "signal" });
+      store.recordConfigReload({ timestamp: "2026-04-07T11:00:00.000Z", success: false, changes: [], errors: ["bad"], triggeredBy: "file-watcher" });
+      const reloads = store.getRecentConfigReloads(10);
+      expect(reloads[0].timestamp).toBe("2026-04-07T11:00:00.000Z");
+      expect(reloads[1].timestamp).toBe("2026-04-07T10:00:00.000Z");
+      expect(reloads[2].timestamp).toBe("2026-04-07T09:00:00.000Z");
+    });
+
+    it("respects the limit parameter", () => {
+      for (let i = 0; i < 5; i++) {
+        store.recordConfigReload({ timestamp: `2026-04-07T0${i}:00:00.000Z`, success: true, changes: [], errors: [], triggeredBy: "startup" });
+      }
+      const reloads = store.getRecentConfigReloads(3);
+      expect(reloads).toHaveLength(3);
+    });
+
+    it("getLastSuccessfulConfigReload ignores startup and failed entries", () => {
+      // startup entry (excluded)
+      store.recordConfigReload({ timestamp: "2026-04-07T09:00:00.000Z", success: true, changes: [], errors: [], triggeredBy: "startup" });
+      // failed entry (excluded)
+      store.recordConfigReload({ timestamp: "2026-04-07T10:00:00.000Z", success: false, changes: [], errors: ["err"], triggeredBy: "signal" });
+      // successful signal reload (included)
+      store.recordConfigReload({ timestamp: "2026-04-07T11:00:00.000Z", success: true, changes: ["a.b"], errors: [], triggeredBy: "signal" });
+      // later successful file-watcher reload (this should be returned — newest non-startup success)
+      store.recordConfigReload({ timestamp: "2026-04-07T12:00:00.000Z", success: true, changes: ["c.d"], errors: [], triggeredBy: "file-watcher" });
+
+      const last = store.getLastSuccessfulConfigReload();
+      expect(last).not.toBeNull();
+      expect(last!.timestamp).toBe("2026-04-07T12:00:00.000Z");
+      expect(last!.triggered_by).toBe("file-watcher");
+    });
+
+    it("getLastSuccessfulConfigReload returns null when no non-startup success exists", () => {
+      store.recordConfigReload({ timestamp: "2026-04-07T09:00:00.000Z", success: true, changes: [], errors: [], triggeredBy: "startup" });
+      store.recordConfigReload({ timestamp: "2026-04-07T10:00:00.000Z", success: false, changes: [], errors: ["err"], triggeredBy: "signal" });
+      expect(store.getLastSuccessfulConfigReload()).toBeNull();
+    });
+  });
 });

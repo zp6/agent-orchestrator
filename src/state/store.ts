@@ -4,6 +4,28 @@ import { join, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { ulid } from "ulid";
 
+// ── Config reload audit types ─────────────────────────────────────────────────
+
+/** What triggered a config reload event. */
+export type ConfigReloadTrigger = "startup" | "file-watcher" | "signal";
+
+/** A single config reload event as persisted in the `config_reloads` table. */
+export interface ConfigReloadRecord {
+  id: number;
+  /** ISO timestamp of the reload attempt. */
+  timestamp: string;
+  /** 1 = success, 0 = failure. */
+  success: number;
+  /** Number of config fields that changed (0 = reload was no-op). */
+  change_count: number;
+  /** JSON-encoded string[] of changed field paths, e.g. ["proxy.timeout_ms"]. */
+  changes_json: string | null;
+  /** JSON-encoded string[] of validation error messages on failure. */
+  errors_json: string | null;
+  /** What triggered this reload: startup | file-watcher | signal. */
+  triggered_by: ConfigReloadTrigger;
+}
+
 export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed" | "escalated" | "result_missing" | "superseded";
 export type TaskSource = "github" | "linear" | "slack" | "manual" | "pr-feedback";
 export type TaskType = "implementation" | "research";
@@ -715,6 +737,7 @@ export class StateStore {
     this.runDispatchWasteMigration();
     this.runDispatchValidationMigration();
     this.runIssueClaimsMigration();
+    this.runConfigReloadsMigration();
   }
 
   private runPhase2Migration(): void {
@@ -3821,6 +3844,87 @@ export class StateStore {
     }
 
     return cancelled;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Config reload audit trail (issue #572)
+  // ---------------------------------------------------------------------------
+
+  private runConfigReloadsMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS config_reloads (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp   TEXT    NOT NULL,
+        success     INTEGER NOT NULL DEFAULT 1,
+        change_count INTEGER NOT NULL DEFAULT 0,
+        changes_json TEXT,
+        errors_json  TEXT,
+        triggered_by TEXT NOT NULL DEFAULT 'signal'
+      );
+      CREATE INDEX IF NOT EXISTS idx_config_reloads_timestamp
+        ON config_reloads (timestamp DESC);
+    `);
+  }
+
+  /**
+   * Persist a config reload event (success or failure) to the audit trail.
+   *
+   * @param timestamp   ISO timestamp of the reload attempt.
+   * @param success     Whether the reload was applied successfully.
+   * @param changes     List of changed field paths (empty for no-op reloads).
+   * @param errors      Validation error messages (non-empty only on failure).
+   * @param triggeredBy What initiated the reload.
+   */
+  recordConfigReload(params: {
+    timestamp: string;
+    success: boolean;
+    changes: string[];
+    errors: string[];
+    triggeredBy: ConfigReloadTrigger;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO config_reloads
+           (timestamp, success, change_count, changes_json, errors_json, triggered_by)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        params.timestamp,
+        params.success ? 1 : 0,
+        params.changes.length,
+        params.changes.length > 0 ? JSON.stringify(params.changes) : null,
+        params.errors.length > 0 ? JSON.stringify(params.errors) : null,
+        params.triggeredBy,
+      );
+  }
+
+  /**
+   * Return the N most recent config reload events, newest first.
+   */
+  getRecentConfigReloads(limit = 20): ConfigReloadRecord[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM config_reloads
+         ORDER BY timestamp DESC
+         LIMIT ?`,
+      )
+      .all(limit) as ConfigReloadRecord[];
+  }
+
+  /**
+   * Return the most recent successful (non-startup) config reload, or null
+   * if no reload has ever been applied.  Used by drift detection.
+   */
+  getLastSuccessfulConfigReload(): ConfigReloadRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM config_reloads
+         WHERE success = 1 AND triggered_by != 'startup'
+         ORDER BY timestamp DESC
+         LIMIT 1`,
+      )
+      .get() as ConfigReloadRecord | undefined;
+    return row ?? null;
   }
 
   close(): void {

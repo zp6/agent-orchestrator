@@ -474,6 +474,11 @@ Steps:
   }
 
   // Help
+  // Config — show reload history and current config snapshot
+  if (cmd === "config" || cmd === "/config") {
+    return buildConfigStatus(ctx);
+  }
+
   if (cmd === "help" || cmd === "/help" || cmd === "/start") {
     return `🤖 *Commands*
 
@@ -483,6 +488,7 @@ status — agent status
 health — ping containers
 issues — open issues
 prs — open PRs
+config — config reload history & status
 chat <agent> <msg> — talk to agent (persistent)
 newchat <agent> — reset conversation
 issue <N> — pre-dispatch issue inspection
@@ -597,6 +603,57 @@ ${wipLines.length > 0 ? wipLines.join("\n") : "  All agents idle"}
 ${buildPoolStats(ctx, agentStats)}
 
 ${buildTokenStats(ctx)}`;
+}
+
+/**
+ * Build the /config Telegram response: recent reload history and a compact
+ * snapshot of the live config.
+ */
+function buildConfigStatus(ctx: TelegramContext): string {
+  const reloads = ctx.store.getRecentConfigReloads(5);
+
+  // Recent reload history
+  const historyLines: string[] = [];
+  if (reloads.length === 0) {
+    historyLines.push("  No reload history recorded yet.");
+  } else {
+    for (const r of reloads) {
+      const ts = new Date(r.timestamp).toISOString().replace("T", " ").slice(0, 16);
+      const icon = r.success ? "✅" : "❌";
+      const trigger = r.triggered_by === "startup" ? "startup" : r.triggered_by;
+      if (!r.success) {
+        const errs = r.errors_json ? (JSON.parse(r.errors_json) as string[]).slice(0, 2).join("; ") : "validation failed";
+        historyLines.push(`  ${icon} ${ts} [${trigger}] — ${errs}`);
+      } else if (r.change_count === 0) {
+        historyLines.push(`  ${icon} ${ts} [${trigger}] — no changes`);
+      } else {
+        const paths = r.changes_json ? (JSON.parse(r.changes_json) as string[]).join(", ") : `${r.change_count} change(s)`;
+        historyLines.push(`  ${icon} ${ts} [${trigger}] — ${paths}`);
+      }
+    }
+  }
+
+  // Compact config snapshot
+  const agentCount = Object.keys(ctx.config.agents).length;
+  const verificationOn = ctx.config.verification?.enabled !== false;
+  const providerNames = Object.keys(ctx.config.providers ?? {});
+  const providerStr = providerNames.length > 0 ? providerNames.join(", ") : "claude (default)";
+  const timeoutSec = Math.round((ctx.config.proxy.timeout_ms ?? 120000) / 1000);
+
+  const configLines = [
+    `  Agents: ${agentCount}`,
+    `  Verification: ${verificationOn ? "enabled" : "disabled"}`,
+    `  Providers: ${providerStr}`,
+    `  Proxy timeout: ${timeoutSec}s`,
+  ];
+
+  return `🔧 *Config Status*
+
+*Recent Reloads*
+${historyLines.join("\n")}
+
+*Live Config*
+${configLines.join("\n")}`;
 }
 
 function buildTokenStats(ctx: TelegramContext): string {

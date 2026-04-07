@@ -1,7 +1,7 @@
 import { loadConfig, type OrchestratorConfig } from "../config/schema.js";
 import { validateConfig } from "../config/validator.js";
 import { ConfigWatcher, type ConfigChange } from "../config/watcher.js";
-import { StateStore, type DispatchRationale } from "../state/store.js";
+import { StateStore, type DispatchRationale, type ConfigReloadTrigger } from "../state/store.js";
 import { setLLMUsageRecorder } from "../client/llm-client.js";
 import { ReviewerClient, type SupervisorDecision } from "../client/reviewer-client.js";
 import { Dispatcher, MAX_RETRIES, TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS, extractRepoFromSourceRef } from "../orchestrator/dispatcher.js";
@@ -23,7 +23,7 @@ import {
 import { writePid, removePid } from "./pid.js";
 import { createLogger } from "./logger.js";
 import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { ManagementClient } from "../client/management-client.js";
 import { planSync, executeSync } from "../orchestrator/sync.js";
@@ -201,11 +201,25 @@ export class Daemon {
         } else {
           console.log(`[config] Reload rejected: ${result.errors.length} validation error(s)`);
         }
+        this.recordConfigReload(result, "signal");
       }
     });
 
     // Start config file watcher for hot-reload
     this.startConfigWatcher();
+
+    // Record the startup config snapshot in the audit trail so the /config
+    // Telegram command and orch audit can show when the daemon last (re)started.
+    this.store.recordConfigReload({
+      timestamp: new Date().toISOString(),
+      success: true,
+      changes: [],
+      errors: [],
+      triggeredBy: "startup",
+    });
+
+    // Drift detection: warn if agents.yaml was edited after the last reload.
+    this.checkConfigDrift();
 
     const githubRepos = Object.entries(this.config.agents)
       .filter(([, a]) => a.github)
@@ -1820,6 +1834,14 @@ export class Daemon {
 
     this.configWatcher = new ConfigWatcher(resolvedPath, this.config, (newConfig, changes) => {
       this.applyConfigChanges(newConfig, changes);
+      // Persist the successful file-watcher reload to the audit trail
+      this.store.recordConfigReload({
+        timestamp: new Date().toISOString(),
+        success: true,
+        changes: changes.map((c) => c.path),
+        errors: [],
+        triggeredBy: "file-watcher",
+      });
     });
     this.configWatcher.start();
   }
@@ -1872,6 +1894,66 @@ export class Daemon {
       `Config reloaded: ${changes.length} change(s) applied`,
       `Changed: ${changedPaths.join(", ")}`,
     ).catch(() => { /* best-effort */ });
+  }
+
+  /**
+   * Persist a reload result to the config_reloads audit table.
+   * Centralises the mapping from ReloadResult → store params.
+   */
+  private recordConfigReload(
+    result: { success: boolean; changes: ConfigChange[]; errors: Array<{ path: string; message: string }>; timestamp: string },
+    triggeredBy: ConfigReloadTrigger,
+  ): void {
+    try {
+      this.store.recordConfigReload({
+        timestamp: result.timestamp,
+        success: result.success,
+        changes: result.changes.map((c) => c.path),
+        errors: result.errors.map((e) => `${e.path}: ${e.message}`),
+        triggeredBy,
+      });
+    } catch (err) {
+      this.log.warn("Failed to persist config reload to audit trail", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Startup drift detection: checks whether agents.yaml has been modified
+   * since the last recorded config reload.  If so, warns the operator that
+   * the running config may not reflect the file on disk.
+   *
+   * Called once during daemon startup, after the config watcher is initialised.
+   */
+  private checkConfigDrift(): void {
+    const resolvedPath = this.resolveConfigPath();
+    if (!resolvedPath) return;
+
+    let fileMtimeMs: number;
+    try {
+      fileMtimeMs = statSync(resolvedPath).mtimeMs;
+    } catch {
+      // File not found or unreadable — skip drift check
+      return;
+    }
+
+    const lastReload = this.store.getLastSuccessfulConfigReload();
+    if (!lastReload) return; // No prior reload recorded — nothing to compare against
+
+    const lastReloadMs = new Date(lastReload.timestamp).getTime();
+    if (fileMtimeMs <= lastReloadMs) return; // File unchanged since last reload — no drift
+
+    const driftSeconds = Math.round((fileMtimeMs - lastReloadMs) / 1000);
+    const msg =
+      `agents.yaml was modified ${driftSeconds}s after the last config reload ` +
+      `(${lastReload.triggered_by} at ${lastReload.timestamp}). ` +
+      `The running config may not reflect the current file. Run \`orch config reload\` to apply.`;
+
+    this.log.warn("Config drift detected at startup", { driftSeconds, lastReloadAt: lastReload.timestamp });
+    console.warn(`[config] ⚠️  ${msg}`);
+
+    notifyOperator("Config drift detected", msg, "warning", "config-drift").catch(() => {});
   }
 
   private cleanupStaleIssues(time: string): void {
