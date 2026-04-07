@@ -9,6 +9,7 @@ import type { OrchestratorConfig } from "../config/schema.js";
 import { AgentClient } from "../client/agent-client.js";
 import { ulid } from "ulid";
 import { findBranchForIssue, findExistingPRsForIssue, type GitHubIssue } from "../triggers/github.js";
+import { getProviderStates } from "../service/provider-state.js";
 
 const log = createLogger("telegram");
 
@@ -602,6 +603,7 @@ function buildTokenStats(ctx: TelegramContext): string {
   const providerUsage = ctx.store.getTokenUsageByProvider(24);
   if (providerUsage.length === 0) return "";
 
+  const providerStates = getProviderStates();
   const providers = ctx.config.providers ?? {};
   const lines: string[] = ["*Token Usage*"];
 
@@ -629,12 +631,18 @@ function buildTokenStats(ctx: TelegramContext): string {
       windows.push(`${Math.round(weekTotal / 1000)}K/${Math.round(limits.weekly / 1000)}K/w (${weekPct}%)`);
     }
 
-    // Overall status icon based on highest usage %
+    // Overall status icon — exhausted providers get a special indicator
+    const provState = providerStates.get(usage.provider);
     const dayLimit = limits?.daily ?? prov?.daily_token_limit;
     const pct = dayLimit ? Math.round((usage.total / dayLimit) * 100) : null;
-    const icon = pct !== null && pct >= 80 ? "🔴" : pct !== null && pct >= 50 ? "🟡" : "🟢";
+    const icon = provState?.exhausted
+      ? "⛔"
+      : pct !== null && pct >= 80 ? "🔴" : pct !== null && pct >= 50 ? "🟡" : "🟢";
+    const exhaustedStr = provState?.exhausted
+      ? ` RATE LIMITED${provState.resetAt ? ` (resets ${provState.resetAt.toLocaleTimeString()})` : ""}`
+      : "";
 
-    lines.push(`  ${icon} ${usage.provider}: ${windows.join(" | ")}`);
+    lines.push(`  ${icon} ${usage.provider}: ${windows.join(" | ")}${exhaustedStr}`);
     // Show cache stats — helps explain why Claude input tokens are low
     const cacheTotal = usage.cache_read_tokens + usage.cache_creation_tokens;
     const cacheStr = cacheTotal > 0

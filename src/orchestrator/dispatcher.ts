@@ -14,6 +14,13 @@ import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/re
 import { buildRejectionHistoryBlock } from "./rejection-history.js";
 import { notifyOperator } from "../service/notify.js";
 import { resolveAgentBudget } from "../cli/commands/budget.js";
+import {
+  isRateLimitError,
+  markProviderExhausted,
+  markProviderAvailable,
+  isProviderAvailable,
+  parseResetTime,
+} from "../service/provider-state.js";
 import { detectAndCreateFollowUps, formatFollowUpNote } from "./cross-repo-tracker.js";
 import {
   runGitHubPreDispatchValidation,
@@ -481,11 +488,19 @@ export class Dispatcher {
     // Pool resolution: if the selected agent belongs to a pool, pick the
     // healthiest idle member instead of just the first idle one.  This prevents
     // routing to an instance that is 503-ing (issue #385).
-    const poolMembers = getPoolMembers(this.config, agentName);
-    if (poolMembers.length > 1) {
-      const healthRecords = this.store.getAgentHealthBatch(poolMembers);
+    const allPoolMembers = getPoolMembers(this.config, agentName);
+    // Filter out members whose provider is rate-limited / exhausted
+    const poolMembers = allPoolMembers.filter((name) => {
+      const provider = this.config.agents[name]?.provider ?? "claude";
+      return isProviderAvailable(provider);
+    });
+    // If ALL providers are exhausted, fall back to full list (let it fail naturally)
+    const effectiveMembers = poolMembers.length > 0 ? poolMembers : allPoolMembers;
+
+    if (effectiveMembers.length > 1) {
+      const healthRecords = this.store.getAgentHealthBatch(effectiveMembers);
       const selected = selectHealthiestPoolInstance(
-        poolMembers,
+        effectiveMembers,
         healthRecords,
         (name) => this.store.hasActiveTask(name),
       );
@@ -757,6 +772,8 @@ export class Dispatcher {
 
       // Record healthy dispatch for pool failover routing
       this.store.recordAgentSuccess(agentName);
+      // Clear provider exhaustion on success (auto-recovery)
+      markProviderAvailable(this.config.agents[agentName]?.provider ?? "claude");
 
       if (failureReroute) {
         await this.recordFailureReroute(failureReroute, message, task.id);
@@ -769,6 +786,20 @@ export class Dispatcher {
 
       // Record failure for pool failover routing
       this.store.recordAgentFailure(agentName, errorMsg);
+
+      // Rate limit detection: mark the provider as exhausted so pool selection
+      // skips all agents on this provider until the limit resets.
+      if (isRateLimitError(err)) {
+        const provider = this.config.agents[agentName]?.provider ?? "claude";
+        const resetAt = parseResetTime(err);
+        markProviderExhausted(provider, errorMsg, resetAt ?? undefined);
+        this.log.warn("Rate limit detected — provider marked exhausted", {
+          taskId: task.id,
+          agentName,
+          provider,
+          resetAt: resetAt?.toISOString(),
+        });
+      }
 
       if (isConnectionError(err)) {
         // Connection errors are transient — retry with exponential backoff.

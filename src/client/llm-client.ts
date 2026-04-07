@@ -3,6 +3,12 @@ import { createProxyClient } from "./proxy-client.js";
 import type { OrchestratorConfig, LLMTaskKind } from "../config/schema.js";
 import { getAgentDir, getAgentBaseUrl, getPoolMembers } from "../config/schema.js";
 import { createLogger } from "../service/logger.js";
+import {
+  isRateLimitError,
+  markProviderExhausted,
+  markProviderAvailable,
+  parseResetTime,
+} from "../service/provider-state.js";
 
 const log = createLogger("llm-client");
 
@@ -133,7 +139,18 @@ function wrapClientWithUsageTracking(
 
   const wrappedMessages = Object.create(originalMessages);
   wrappedMessages.create = async function (...args: Parameters<typeof originalCreate>) {
-    const response = await originalCreate(...args);
+    let response;
+    try {
+      response = await originalCreate(...args);
+    } catch (err) {
+      if (isRateLimitError(err)) {
+        const resetAt = parseResetTime(err);
+        markProviderExhausted(provider, err instanceof Error ? err.message : String(err), resetAt ?? undefined);
+        log.warn("LLM rate limit — provider exhausted", { provider, agentName });
+      }
+      throw err;
+    }
+    markProviderAvailable(provider);
     try {
       const usage = (response as Anthropic.Message).usage;
       if (usage && usageRecorder) {
