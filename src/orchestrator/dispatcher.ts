@@ -467,6 +467,13 @@ export class Dispatcher {
       /** Internal escape hatch for orchestrator-managed auto-reroutes. */
       skipDuplicateCheck?: boolean;
       prevalidated?: boolean;
+      /**
+       * AbortSignal that cancels the in-flight HTTP call to the agent.
+       * When the claim-lock supersession system aborts a duplicate task,
+       * this signal interrupts the long-running Anthropic API call so the
+       * agent's compute is freed as soon as possible.
+       */
+      signal?: AbortSignal;
     },
   ): Promise<DispatchResult> {
     // Resolve agent
@@ -724,6 +731,7 @@ export class Dispatcher {
       const response = await this.client.send(agentName, messageToSend, {
         conversationId,
         taskType,
+        signal: options?.signal,
       });
 
       // Log the response
@@ -747,6 +755,21 @@ export class Dispatcher {
 
       // Update task to done
       this.log.info("Task completed", { taskId: task.id, agentName, tokensIn: response.usage.input_tokens, tokensOut: response.usage.output_tokens });
+
+      // Guard: another claim may have superseded this task while the HTTP call
+      // was running (e.g. the claim TTL expired and a new agent claimed the
+      // issue).  Do NOT overwrite "superseded" with "done" — the task has
+      // already been marked terminal by cancelSupersededTasks().
+      {
+        const latestTask = this.store.getTask(task.id);
+        if (latestTask?.status === "superseded") {
+          this.log.info("Task was superseded while running — skipping done update", {
+            taskId: task.id,
+            agentName,
+          });
+          return { taskId: task.id, agentName, response };
+        }
+      }
 
       // Detect cross-repo follow-ups: if the task description mentions work
       // that belongs to a peer repo, create a child issue there so the
@@ -783,6 +806,22 @@ export class Dispatcher {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       const newRetryCount = (task.retry_count ?? 0) + 1;
+
+      // Guard: if the task was superseded (claim lock cancelled it) while the
+      // HTTP call was in-flight, the abort signal causes the call to throw.
+      // Do NOT overwrite "superseded" with "failed" — the task is already in
+      // the correct terminal state.
+      {
+        const latestTask = this.store.getTask(task.id);
+        if (latestTask?.status === "superseded") {
+          this.log.info("Task was superseded while running (abort); skipping failed update", {
+            taskId: task.id,
+            agentName,
+            error: errorMsg,
+          });
+          throw err; // propagate so fireAndForget catch handler runs claim release
+        }
+      }
 
       // Record failure for pool failover routing
       this.store.recordAgentFailure(agentName, errorMsg);

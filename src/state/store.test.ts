@@ -2741,4 +2741,91 @@ describe("StateStore", () => {
       expect(store.isResearchLinked(research.id)).toBe(false);
     });
   });
+
+  describe("cancelSupersededTasks (issue #557)", () => {
+    function makeInFlight(status: "dispatched" | "in_progress", agentName: string, sourceRef: string) {
+      const t = store.createTask({
+        title: "test task",
+        source: "github",
+        source_ref: sourceRef,
+        agent_name: agentName,
+        task_type: "implementation",
+      });
+      store.updateTask(t.id, { status });
+      return t;
+    }
+
+    it("returns 0 when there are no in-flight tasks for the source_ref", () => {
+      const count = store.cancelSupersededTasks("github", "owner/repo#1", "agent-a");
+      expect(count).toBe(0);
+    });
+
+    it("returns 0 when the only in-flight task belongs to the claiming agent", () => {
+      makeInFlight("dispatched", "agent-a", "owner/repo#2");
+      const count = store.cancelSupersededTasks("github", "owner/repo#2", "agent-a");
+      expect(count).toBe(0);
+    });
+
+    it("cancels an in-flight task owned by a different agent", () => {
+      const t = makeInFlight("dispatched", "agent-b", "owner/repo#3");
+      const count = store.cancelSupersededTasks("github", "owner/repo#3", "agent-a");
+      expect(count).toBe(1);
+      const updated = store.getTask(t.id);
+      expect(updated!.status).toBe("superseded");
+    });
+
+    it("sets the result message explaining why it was superseded", () => {
+      const t = makeInFlight("in_progress", "agent-b", "owner/repo#4");
+      store.cancelSupersededTasks("github", "owner/repo#4", "agent-a");
+      const updated = store.getTask(t.id);
+      expect(updated!.result).toMatch(/superseded/i);
+      expect(updated!.result).toContain("agent-a");
+    });
+
+    it("cancels both dispatched and in_progress tasks", () => {
+      const t1 = makeInFlight("dispatched", "agent-b", "owner/repo#5");
+      const t2 = makeInFlight("in_progress", "agent-c", "owner/repo#5");
+      const count = store.cancelSupersededTasks("github", "owner/repo#5", "agent-a");
+      expect(count).toBe(2);
+      expect(store.getTask(t1.id)!.status).toBe("superseded");
+      expect(store.getTask(t2.id)!.status).toBe("superseded");
+    });
+
+    it("does not affect tasks with a different source_ref", () => {
+      const t = makeInFlight("dispatched", "agent-b", "owner/repo#99");
+      store.cancelSupersededTasks("github", "owner/repo#6", "agent-a");
+      expect(store.getTask(t.id)!.status).toBe("dispatched");
+    });
+
+    it("does not affect tasks in terminal states (done, failed)", () => {
+      const done = store.createTask({ title: "done task", source: "github", source_ref: "owner/repo#7", agent_name: "agent-b", task_type: "implementation" });
+      store.updateTask(done.id, { status: "done" });
+      const failed = store.createTask({ title: "failed task", source: "github", source_ref: "owner/repo#7", agent_name: "agent-b", task_type: "implementation" });
+      store.updateTask(failed.id, { status: "failed" });
+
+      const count = store.cancelSupersededTasks("github", "owner/repo#7", "agent-a");
+      expect(count).toBe(0);
+      expect(store.getTask(done.id)!.status).toBe("done");
+      expect(store.getTask(failed.id)!.status).toBe("failed");
+    });
+
+    it("does not cancel child tasks (parent_task_id IS NOT NULL)", () => {
+      const parent = makeInFlight("dispatched", "agent-b", "owner/repo#8");
+      const child = store.createSubTask({
+        parent_task_id: parent.id,
+        step_id: "step-1",
+        title: "child step",
+        description: "a sub-step",
+        source: "github",
+        agent_name: "agent-b",
+      });
+      store.updateTask(child.id, { status: "dispatched" });
+
+      const count = store.cancelSupersededTasks("github", "owner/repo#8", "agent-a");
+      // Only the parent should be cancelled; child is excluded
+      expect(count).toBe(1);
+      expect(store.getTask(parent.id)!.status).toBe("superseded");
+      expect(store.getTask(child.id)!.status).toBe("dispatched");
+    });
+  });
 });

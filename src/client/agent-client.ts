@@ -211,6 +211,8 @@ export class AgentClient {
       systemPrompt?: string;
       model?: string;
       taskType?: TaskType;
+      /** AbortSignal to cancel the in-flight HTTP call (e.g. when task is superseded). */
+      signal?: AbortSignal;
     },
   ): Promise<AgentResponse> {
     const workingDir = getAgentDir(this.config, agentName);
@@ -231,12 +233,15 @@ export class AgentClient {
       ? `${basePrompt}\n\n${options.systemPrompt}${directivesSuffix}`
       : `${basePrompt}${directivesSuffix}`;
 
-    const response = await client.messages.create({
-      model: options?.model ?? getAgentModel(this.config, agentName),
-      max_tokens: 16384,
-      system: systemPrompt,
-      messages: [{ role: "user", content: message }],
-    });
+    const response = await client.messages.create(
+      {
+        model: options?.model ?? getAgentModel(this.config, agentName),
+        max_tokens: 16384,
+        system: systemPrompt,
+        messages: [{ role: "user", content: message }],
+      },
+      options?.signal ? { signal: options.signal } : undefined,
+    );
 
     const textContent = response.content
       .filter((block): block is Anthropic.TextBlock => block.type === "text")

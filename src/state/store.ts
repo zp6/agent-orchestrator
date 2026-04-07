@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { ulid } from "ulid";
 
-export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed" | "escalated" | "result_missing";
+export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed" | "escalated" | "result_missing" | "superseded";
 export type TaskSource = "github" | "linear" | "slack" | "manual" | "pr-feedback";
 export type TaskType = "implementation" | "research";
 
@@ -3750,6 +3750,77 @@ export class StateStore {
       .prepare(`DELETE FROM issue_claims WHERE expires_at <= ?`)
       .run(now);
     return result.changes;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Duplicate-task cancellation (issue #557)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * When the claim lock for `(source, sourceRef)` is newly acquired by
+   * `newAgentName`, cancel any older tasks that are still in-flight for the
+   * same issue.  This prevents two agents from working on the same issue
+   * simultaneously even when one started before the claim system existed or
+   * before the old claim expired.
+   *
+   * Only top-level tasks (`parent_task_id IS NULL`) in an active state
+   * (`dispatched` or `in_progress`) are cancelled.  Tasks that have already
+   * reached a terminal state are left alone.
+   *
+   * Each cancelled task is:
+   *   - Updated to status `"superseded"` with a descriptive result
+   *   - Given `next_retry_at = NULL` to suppress automatic retries
+   *   - Annotated with a system log entry explaining the cancellation
+   *
+   * @returns The number of tasks that were cancelled.
+   */
+  cancelSupersededTasks(
+    source: string,
+    sourceRef: string,
+    newAgentName: string,
+  ): number {
+    const activeTasks = this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE source = ?
+           AND source_ref = ?
+           AND parent_task_id IS NULL
+           AND status IN ('dispatched', 'in_progress')
+         ORDER BY created_at ASC`,
+      )
+      .all(source, sourceRef) as Task[];
+
+    if (activeTasks.length === 0) return 0;
+
+    let cancelled = 0;
+    for (const task of activeTasks) {
+      // Skip if the task is already owned by the new agent (same agent re-
+      // dispatching after a retry or reclaim — don't cancel their own work).
+      if (task.agent_name === newAgentName) continue;
+
+      this.updateTask(task.id, {
+        status: "superseded",
+        result:
+          `Task superseded: a newer dispatch by ${newAgentName} acquired the ` +
+          `exclusive claim for ${sourceRef}. This task (${task.id}) was in ` +
+          `status "${task.status}" and has been cancelled to avoid duplicate work.`,
+        next_retry_at: null,
+      });
+
+      this.addLog({
+        task_id: task.id,
+        direction: "system",
+        content:
+          `[claim-lock] Task superseded by newer agent claim.\n` +
+          `New agent: ${newAgentName}\n` +
+          `Issue: ${sourceRef}\n` +
+          `This task was in status "${task.status}" when it was cancelled.`,
+      });
+
+      cancelled++;
+    }
+
+    return cancelled;
   }
 
   close(): void {

@@ -11,9 +11,11 @@ import { runGitHubPreDispatchValidation } from "../orchestrator/pre-dispatch-val
 
 const log = createLogger("trigger-dispatcher");
 
-// In-memory set of source refs currently being dispatched (prevents duplicates
-// while dispatch is in-flight, without violating DB foreign key constraints)
-const inFlightDispatches = new Set<string>();
+// In-memory registry of source refs currently being dispatched.
+// Keyed by sourceRef → AbortController so the claim-lock supersession logic
+// can both detect duplicates (has() check) and send a cancellation signal to
+// the running HTTP call (abort()) when a newer dispatch claims the same issue.
+const inFlightDispatches = new Map<string, AbortController>();
 
 function sortIssuesForDispatch(store: StateStore, issues: GitHubIssue[]): GitHubIssue[] {
   return [...issues].sort((a, b) => {
@@ -107,8 +109,14 @@ function fireAndForget(
    */
   claimOwner: string | undefined,
   onAgentCompleted?: (agentName: string) => Promise<void>,
+  /**
+   * AbortController for this dispatch.  The caller registers it in
+   * `inFlightDispatches` so that if a newer claim supersedes this task, the
+   * signal is aborted to interrupt the long-running HTTP call immediately.
+   */
+  controller?: AbortController,
 ): void {
-  dispatcher.dispatch(message, options).then(async (result) => {
+  dispatcher.dispatch(message, { ...options, signal: controller?.signal }).then(async (result) => {
     inFlightDispatches.delete(options.sourceRef);
     // Release the issue claim now that the dispatch has settled
     if (claimOwner) {
@@ -314,8 +322,36 @@ export async function dispatchGitHubIssues(
         continue;
       }
 
-      // Mark processed immediately to prevent duplicate dispatches
-      inFlightDispatches.add(sourceRef);
+      // Cancel any older in-flight tasks for the same issue (issue #557).
+      // When the claim lock is newly acquired, any task started before this
+      // dispatch (by a different agent) is now duplicate work — mark it
+      // superseded immediately so it cannot be verified or retried.
+      const supersededCount = store.cancelSupersededTasks("github", sourceRef, agentName);
+      if (supersededCount > 0) {
+        // Also abort the HTTP call for the superseded in-flight dispatch so the
+        // old agent's long-running Anthropic API call is interrupted immediately.
+        // This is a best-effort signal: if the old dispatch has already completed
+        // or its entry was already cleaned up, the abort is a no-op.
+        const supersededController = inFlightDispatches.get(sourceRef);
+        if (supersededController) {
+          supersededController.abort();
+          log.info("Sent abort signal to superseded in-flight dispatch", {
+            sourceRef,
+            agentName,
+          });
+        }
+        log.info("Cancelled duplicate in-flight tasks for newly claimed issue", {
+          sourceRef,
+          agentName,
+          supersededCount,
+        });
+      }
+
+      // Create a fresh AbortController for this new dispatch and register it.
+      // The controller is stored in inFlightDispatches so future supersession
+      // can abort this call if another claim is acquired before it completes.
+      const controller = new AbortController();
+      inFlightDispatches.set(sourceRef, controller);
 
       // Fire and forget — don't block the daemon cycle.
       // Pass sourceRepo (not agentName) so the router can detect cross-repo
@@ -330,7 +366,7 @@ export async function dispatchGitHubIssues(
         sourceRef,
         title: `[${issue.repo}#${issue.number}] ${issue.title}`,
         prevalidated: true,
-      }, agentName, onAgentCompleted);
+      }, agentName, onAgentCompleted, controller);
       store.clearSourceRefPriority("github", sourceRef);
 
       result.dispatched++;
@@ -500,7 +536,26 @@ export async function dispatchIdleAgentBacklog(
         continue;
       }
 
-      inFlightDispatches.add(sourceRef);
+      // Cancel any older in-flight tasks for the same issue (issue #557).
+      const supersededCount = store.cancelSupersededTasks("github", sourceRef, agentName);
+      if (supersededCount > 0) {
+        const supersededController = inFlightDispatches.get(sourceRef);
+        if (supersededController) {
+          supersededController.abort();
+          log.info("Idle pickup: sent abort signal to superseded in-flight dispatch", {
+            sourceRef,
+            agentName,
+          });
+        }
+        log.info("Idle pickup: cancelled duplicate in-flight tasks for newly claimed issue", {
+          sourceRef,
+          agentName,
+          supersededCount,
+        });
+      }
+
+      const controller = new AbortController();
+      inFlightDispatches.set(sourceRef, controller);
 
       // Pass sourceRepo instead of agentName so the router can detect cross-repo
       // destinations (same rationale as dispatchGitHubIssues above).
@@ -510,7 +565,7 @@ export async function dispatchIdleAgentBacklog(
         sourceRef,
         title: `[${issue.repo}#${issue.number}] ${issue.title}`,
         prevalidated: true,
-      }, agentName);
+      }, agentName, undefined, controller);
       store.clearSourceRefPriority("github", sourceRef);
 
       log.info(forceReclaim ? "Idle reclaim: dispatched issue to long-idle agent" : "Idle pickup: dispatched highest-priority issue to idle agent", {
@@ -569,14 +624,15 @@ export async function dispatchLinearChecks(
 
 Report back what you found and what you did.`;
 
-    inFlightDispatches.add(sourceRef);
+    const linearController = new AbortController();
+    inFlightDispatches.set(sourceRef, linearController);
 
     fireAndForget(dispatcher, store, config, message, {
       agentName,
       source: "linear",
       sourceRef,
       title: `[linear] Check issues for ${agentName}`,
-    }, undefined);
+    }, undefined, undefined, linearController);
 
     result.dispatched++;
   }
@@ -620,14 +676,15 @@ export async function dispatchSlackChecks(
 
 Report back what you found and what you did.`;
 
-    inFlightDispatches.add(sourceRef);
+    const slackController = new AbortController();
+    inFlightDispatches.set(sourceRef, slackController);
 
     fireAndForget(dispatcher, store, config, message, {
       agentName,
       source: "slack",
       sourceRef,
       title: `[slack] Check messages for ${agentName}`,
-    }, undefined);
+    }, undefined, undefined, slackController);
 
     result.dispatched++;
   }

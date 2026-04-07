@@ -96,6 +96,7 @@ describe("dispatchGitHubIssues", () => {
       getActiveClaim: vi.fn().mockReturnValue(undefined),
       releaseIssueClaim: vi.fn(),
       updateClaimTaskId: vi.fn(),
+      cancelSupersededTasks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -259,6 +260,7 @@ describe("pre-dispatch issue state validation", () => {
       getActiveClaim: vi.fn().mockReturnValue(undefined),
       releaseIssueClaim: vi.fn(),
       updateClaimTaskId: vi.fn(),
+      cancelSupersededTasks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -333,6 +335,7 @@ describe("duplicate PR detection before dispatch", () => {
       getActiveClaim: vi.fn().mockReturnValue(undefined),
       releaseIssueClaim: vi.fn(),
       updateClaimTaskId: vi.fn(),
+      cancelSupersededTasks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -536,6 +539,7 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       getActiveClaim: vi.fn().mockReturnValue(undefined),
       releaseIssueClaim: vi.fn(),
       updateClaimTaskId: vi.fn(),
+      cancelSupersededTasks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -649,6 +653,7 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       getActiveClaim: vi.fn().mockReturnValue(undefined),
       releaseIssueClaim: vi.fn(),
       updateClaimTaskId: vi.fn(),
+      cancelSupersededTasks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -981,6 +986,7 @@ describe("dispatchIdleAgentBacklog", () => {
       getActiveClaim: vi.fn().mockReturnValue(undefined),
       releaseIssueClaim: vi.fn(),
       updateClaimTaskId: vi.fn(),
+      cancelSupersededTasks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1228,6 +1234,7 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       getActiveClaim: vi.fn().mockReturnValue(undefined),
       releaseIssueClaim: vi.fn(),
       updateClaimTaskId: vi.fn(),
+      cancelSupersededTasks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1360,6 +1367,7 @@ describe("in-flight branch detection", () => {
       getActiveClaim: vi.fn().mockReturnValue(undefined),
       releaseIssueClaim: vi.fn(),
       updateClaimTaskId: vi.fn(),
+      cancelSupersededTasks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
 
     vi.mocked(mockStore.hasActiveTask).mockReturnValue(false);
@@ -1403,6 +1411,7 @@ describe("in-flight branch detection", () => {
       getActiveClaim: vi.fn().mockReturnValue(undefined),
       releaseIssueClaim: vi.fn(),
       updateClaimTaskId: vi.fn(),
+      cancelSupersededTasks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
 
     await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1447,6 +1456,7 @@ describe("in-flight branch detection", () => {
       getActiveClaim: vi.fn().mockReturnValue(undefined),
       releaseIssueClaim: vi.fn(),
       updateClaimTaskId: vi.fn(),
+      cancelSupersededTasks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
 
     const result = await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1486,6 +1496,7 @@ describe("in-flight branch detection", () => {
       getActiveClaim: vi.fn().mockReturnValue(undefined),
       releaseIssueClaim: vi.fn(),
       updateClaimTaskId: vi.fn(),
+      cancelSupersededTasks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
 
     await dispatchIdleAgentBacklog(branchConfig, mockStore, mockDispatcher);
@@ -1525,6 +1536,7 @@ describe("approved PR skip logic", () => {
       getActiveClaim: vi.fn().mockReturnValue(undefined),
       releaseIssueClaim: vi.fn(),
       updateClaimTaskId: vi.fn(),
+      cancelSupersededTasks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
