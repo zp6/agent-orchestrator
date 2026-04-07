@@ -427,18 +427,51 @@ export class ReviewerClient {
   // ─── Response parsers ──────────────────────────────────────────────────────
 
   private parseVerificationResponse(text: string): VerificationResult {
-    const cleaned = text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim();
-    try {
-      const parsed = JSON.parse(cleaned);
-      return {
-        approved: Boolean(parsed.approved),
-        score: Math.min(Math.max(Number(parsed.score) || 0, 0), 1),
-        notes: String(parsed.notes ?? ""),
-        revision: parsed.revision ? String(parsed.revision) : undefined,
-      };
-    } catch {
-      return { approved: false, score: 0, notes: "Failed to parse verification response" };
+    // Try multiple extraction strategies — Codex and Claude format JSON differently.
+    const strategies = [
+      // 1. Strip code fences and parse directly
+      () => JSON.parse(text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim()),
+      // 2. Extract first JSON object containing "score" from anywhere in the text
+      () => {
+        const match = text.match(/\{[\s\S]*?"score"[\s\S]*?\}/);
+        if (!match) throw new Error("No JSON with score found");
+        return JSON.parse(match[0]);
+      },
+      // 3. Find JSON between code fences specifically
+      () => {
+        const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (!match) throw new Error("No code fence found");
+        return JSON.parse(match[1].trim());
+      },
+      // 4. Extract score from plain text like "Score: 0.8" or "score=0.8"
+      () => {
+        const scoreMatch = text.match(/score[:\s=]+([0-9.]+)/i);
+        const approvedMatch = text.match(/approved[:\s=]+(true|false)/i);
+        if (!scoreMatch) throw new Error("No score in text");
+        return {
+          score: parseFloat(scoreMatch[1]),
+          approved: approvedMatch ? approvedMatch[1].toLowerCase() === "true" : parseFloat(scoreMatch[1]) >= 0.7,
+          notes: text.slice(0, 200),
+        };
+      },
+    ];
+
+    for (const strategy of strategies) {
+      try {
+        const parsed = strategy();
+        return {
+          approved: Boolean(parsed.approved),
+          score: Math.min(Math.max(Number(parsed.score) || 0, 0), 1),
+          notes: String(parsed.notes ?? ""),
+          revision: parsed.revision ? String(parsed.revision) : undefined,
+        };
+      } catch {
+        continue;
+      }
     }
+
+    this.log.warn("All verification parse strategies failed", { textLength: text.length, preview: text.slice(0, 200) });
+    return { approved: false, score: 0, notes: "Failed to parse verification response" };
   }
 
   private parsePRReviewResponse(text: string): PRReviewResult {
