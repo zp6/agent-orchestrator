@@ -9,6 +9,10 @@ export interface CreatedIssue {
   url: string;
 }
 
+/**
+ * Default max open issues the orchestrator can auto-create per repo.
+ * Configurable via `triggers.max_open_orchestrator_issues` in agents.yaml.
+ */
 const MAX_OPEN_ORCHESTRATOR_ISSUES = 10;
 
 /** Minimum word-overlap Jaccard similarity to consider two issue titles duplicates. */
@@ -137,9 +141,10 @@ export class IssueCreator {
 
       // Throttle: skip if repo already has too many open orchestrator issues
       const openCount = this.getOpenOrchestratorIssueCount(agent.github);
-      if (openCount >= MAX_OPEN_ORCHESTRATOR_ISSUES) {
+      const maxIssues = this.config.triggers?.max_open_orchestrator_issues ?? MAX_OPEN_ORCHESTRATOR_ISSUES;
+      if (openCount >= maxIssues) {
         this.log.warn("Skipping issue creation: too many open orchestrator issues", {
-          repo: agent.github, openCount, threshold: MAX_OPEN_ORCHESTRATOR_ISSUES,
+          repo: agent.github, openCount, threshold: maxIssues,
         });
         continue;
       }

@@ -5,7 +5,10 @@ import type { StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { createLogger } from "../service/logger.js";
 
-/** Default TTL for issue claims: 2 hours (matches agents.yaml stale_timeout_ms conventions). */
+/**
+ * Default TTL for issue claims: 2 hours (matches agents.yaml stale_timeout_ms conventions).
+ * Configurable via `triggers.issue_claim_ttl_ms` in agents.yaml.
+ */
 export const ISSUE_CLAIM_TTL_MS = 7_200_000;
 import { runGitHubPreDispatchValidation } from "../orchestrator/pre-dispatch-validator.js";
 
@@ -310,7 +313,8 @@ export async function dispatchGitHubIssues(
       // Atomically acquire a claim for this issue before dispatching.
       // If another daemon instance or poll cycle already claimed the issue,
       // skip it — two agents can never hold an active claim simultaneously.
-      const claimAcquired = store.tryClaimIssue("github", sourceRef, agentName, ISSUE_CLAIM_TTL_MS);
+      const claimTtl = config.triggers?.issue_claim_ttl_ms ?? ISSUE_CLAIM_TTL_MS;
+      const claimAcquired = store.tryClaimIssue("github", sourceRef, agentName, claimTtl);
       if (!claimAcquired) {
         const existingClaim = store.getActiveClaim("github", sourceRef);
         log.info("Skipping dispatch: issue already claimed by another agent", {
@@ -524,7 +528,8 @@ export async function dispatchIdleAgentBacklog(
       }
 
       // Atomically acquire a claim before dispatching (same guard as dispatchGitHubIssues).
-      const claimAcquired = store.tryClaimIssue("github", sourceRef, agentName, ISSUE_CLAIM_TTL_MS);
+      const idleClaimTtl = config.triggers?.issue_claim_ttl_ms ?? ISSUE_CLAIM_TTL_MS;
+      const claimAcquired = store.tryClaimIssue("github", sourceRef, agentName, idleClaimTtl);
       if (!claimAcquired) {
         const existingClaim = store.getActiveClaim("github", sourceRef);
         log.info("Idle pickup: skipping dispatch — issue already claimed by another agent", {

@@ -27,7 +27,8 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { ManagementClient } from "../client/management-client.js";
 import { planSync, executeSync } from "../orchestrator/sync.js";
-import { notifyOperator } from "./notify.js";
+import { notifyOperator, setTelegramRateLimitMs } from "./notify.js";
+import { setRecencyWindowHours } from "../triggers/duplicate-guard.js";
 import { startTelegramPolling, stopTelegramPolling, pollTelegram } from "./telegram.js";
 import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.js";
 import { maybeRunDailySecurityScan, type SecurityScanState } from "../orchestrator/security-scanner.js";
@@ -163,6 +164,10 @@ export class Daemon {
 
     this.store = new StateStore();
     setLLMUsageRecorder(this.store.recordTokenUsage.bind(this.store));
+
+    // Apply config overrides to modules that use module-level state
+    setRecencyWindowHours(this.config.triggers?.recency_window_hours);
+    setTelegramRateLimitMs(this.config.notifications?.telegram_rate_limit_ms);
     this.dispatcher = new Dispatcher(this.config, this.store);
 
     this.reviewerClient = new ReviewerClient(this.config);
@@ -171,7 +176,7 @@ export class Daemon {
     this.deployer = new Deployer(this.config);
     this.prReviewer = new PRReviewer(this.config, this.store, this.reviewerClient);
     this.prRetryQueue = new PRCreationRetryQueue(this.store);
-    this.pollInterval = pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    this.pollInterval = pollIntervalMs ?? this.config.daemon?.poll_interval_ms ?? DEFAULT_POLL_INTERVAL_MS;
   }
 
   async start(): Promise<void> {

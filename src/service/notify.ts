@@ -5,9 +5,29 @@ import { createLogger } from "./logger.js";
 
 const log = createLogger("notify");
 
-// Rate limiting: max 1 message per key per 15 minutes
+// Rate limiting: max 1 message per key per configured interval
 const rateLimitMap = new Map<string, number>();
-const RATE_LIMIT_MS = 15 * 60 * 1000;
+
+/**
+ * Default rate limit: 15 minutes between repeated notifications for the same key.
+ * Configurable via `notifications.telegram_rate_limit_ms` in agents.yaml.
+ */
+const DEFAULT_RATE_LIMIT_MS = 15 * 60 * 1000;
+
+/** Module-level override set from agents.yaml. */
+let configuredRateLimitMs: number | undefined;
+
+/**
+ * Set the Telegram notification rate limit from the loaded config.
+ * Called once at daemon startup.
+ */
+export function setTelegramRateLimitMs(ms: number | undefined): void {
+  configuredRateLimitMs = ms;
+}
+
+function getRateLimitMs(): number {
+  return configuredRateLimitMs ?? DEFAULT_RATE_LIMIT_MS;
+}
 
 interface TelegramConfig {
   botToken: string;
@@ -57,7 +77,7 @@ export async function notifyOperator(
   // Rate limiting
   if (rateLimitKey) {
     const lastSent = rateLimitMap.get(rateLimitKey);
-    if (lastSent && Date.now() - lastSent < RATE_LIMIT_MS) return;
+    if (lastSent && Date.now() - lastSent < getRateLimitMs()) return;
   }
 
   const emoji = urgency === "critical" ? "🚨" : urgency === "warning" ? "⚠️" : "🔔";

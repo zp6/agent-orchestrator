@@ -309,6 +309,65 @@ export interface DashboardConfig {
   budget?: GlobalBudgetConfig;
 }
 
+export interface DaemonConfig {
+  /**
+   * Main daemon poll cycle interval in milliseconds.
+   * Defaults to 300000 (5 minutes) when omitted.
+   */
+  poll_interval_ms?: number;
+}
+
+export interface TriggersConfig {
+  /**
+   * Hours after a task completes before the same source_ref can be dispatched
+   * again.  Prevents double-dispatch when an issue isn't closed before the next
+   * poll cycle picks it up.
+   * Defaults to 24 when omitted.
+   */
+  recency_window_hours?: number;
+
+  /**
+   * How long (ms) an agent can hold an issue claim before it expires and the
+   * issue becomes available for dispatch to another agent.
+   * Defaults to 7200000 (2 hours) when omitted.
+   */
+  issue_claim_ttl_ms?: number;
+
+  /**
+   * Maximum number of issues the orchestrator can auto-create per repo.
+   * Prevents flooding a repo with orchestrator-generated issues.
+   * Defaults to 10 when omitted.
+   */
+  max_open_orchestrator_issues?: number;
+}
+
+export interface NotificationsConfig {
+  /**
+   * Minimum interval (ms) between repeated Telegram notifications for the
+   * same notification key.  Rate-limits noisy alerts.
+   * Defaults to 900000 (15 minutes) when omitted.
+   */
+  telegram_rate_limit_ms?: number;
+}
+
+export interface DeployConfig {
+  /**
+   * Warmup time (ms) after a container restart before dispatching work.
+   * Gives the entrypoint time to finish git pull, CLI init, and temp-file setup.
+   * Defaults to 5000 (5 seconds) when omitted.
+   */
+  post_restart_warmup_ms?: number;
+}
+
+export interface DispatchConfig {
+  /**
+   * Backoff delays in milliseconds for each general retry attempt.
+   * Index 0 is the delay before the 1st retry, index 1 before the 2nd, etc.
+   * Defaults to [30000, 120000, 600000] (30s → 2min → 10min) when omitted.
+   */
+  retry_delays_ms?: number[];
+}
+
 export interface OrchestratorConfig {
   proxy: ProxyConfig;
   llm?: LLMConfig;
@@ -319,6 +378,11 @@ export interface OrchestratorConfig {
   pr_review?: PRReviewConfig;
   escalation?: EscalationConfig;
   retry?: RetryConfig;
+  daemon?: DaemonConfig;
+  triggers?: TriggersConfig;
+  notifications?: NotificationsConfig;
+  deploy?: DeployConfig;
+  dispatch?: DispatchConfig;
   dashboard?: DashboardConfig;
   agents: Record<string, AgentConfig>;
 }

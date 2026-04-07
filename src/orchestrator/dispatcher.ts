@@ -31,7 +31,10 @@ import {
 export const MAX_RETRIES = 3;
 export const FAILURE_REROUTE_THRESHOLD = 3;
 
-/** Backoff delays in milliseconds for each retry attempt (index = retry_count - 1). */
+/**
+ * Default backoff delays in milliseconds for each retry attempt (index = retry_count - 1).
+ * Configurable via `dispatch.retry_delays_ms` in agents.yaml.
+ */
 export const RETRY_DELAYS_MS = [30_000, 120_000, 600_000] as const;
 
 /**
@@ -951,7 +954,8 @@ export class Dispatcher {
         });
         // Restore next_retry_at so the task is eligible for the next cycle
         // without consuming a retry attempt.
-        const deferredAt = new Date(Date.now() + RETRY_DELAYS_MS[0]).toISOString();
+        const retryDelays = this.config.dispatch?.retry_delays_ms ?? RETRY_DELAYS_MS;
+        const deferredAt = new Date(Date.now() + (retryDelays[0] ?? RETRY_DELAYS_MS[0])).toISOString();
         this.store.updateTask(task.id, { next_retry_at: deferredAt });
         return;
       }

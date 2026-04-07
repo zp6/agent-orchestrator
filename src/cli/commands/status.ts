@@ -3,7 +3,7 @@ import chalk from "chalk";
 import { StateStore, type Task, type SystemMetrics, type ScoreDistribution, type ScoreTrend, type MetricsTrend, type PRMetrics, type RetryMetrics, type IssueClaim } from "../../state/store.js";
 import { loadConfig } from "../../config/schema.js";
 import { MAX_RETRIES } from "../../orchestrator/dispatcher.js";
-import { checkDuplicate, RECENCY_WINDOW_HOURS } from "../../triggers/duplicate-guard.js";
+import { checkDuplicate, getRecencyWindowHours } from "../../triggers/duplicate-guard.js";
 
 const STATUS_COLORS: Record<string, (s: string) => string> = {
   pending: chalk.yellow,
@@ -615,7 +615,7 @@ export function registerStatusCommand(program: Command): void {
             );
           }
         } else {
-          console.log(chalk.green("✓ Dispatch allowed") + chalk.dim(` — no active/recent task within ${RECENCY_WINDOW_HOURS}h window`));
+          console.log(chalk.green("✓ Dispatch allowed") + chalk.dim(` — no active/recent task within ${getRecencyWindowHours()}h window`));
         }
 
         // Processed-trigger record
