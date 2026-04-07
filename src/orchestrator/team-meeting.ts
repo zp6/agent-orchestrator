@@ -1,16 +1,19 @@
 /**
- * Team Meeting — periodic alignment session where every agent contributes
- * their perspective and a supervisor synthesises decisions.
+ * Team Meeting — periodic alignment sessions where agents contribute
+ * perspectives across multiple rounds of discussion.
  *
- * Flow:
- *   1. Query each agent in parallel: blockers, opportunities, suggestions
- *   2. Synthesise all responses into aligned priorities and action items
- *   3. File a meeting summary issue, notify via Telegram
- *   4. Optionally update goals based on team input
+ * Two meeting types:
+ *   - standup: blockers, opportunities, action items (daily)
+ *   - bluesky: creative ideation, "what if" thinking, bold proposals (daily)
  *
- * Designed to run weekly (configurable). Each agent speaks from its own
- * domain expertise — the proxy agent sees infrastructure issues the
- * orchestrator doesn't, the research agent surfaces findings, etc.
+ * Multi-round flow:
+ *   Round 1: Each agent shares initial perspective (parallel)
+ *   Round 2: Each agent sees all Round 1 responses and reacts (parallel)
+ *   Round 3+: Optional — supervisor can ask follow-up questions
+ *   Final: Supervisor synthesises all rounds into outcomes
+ *
+ * Each round is parallel (all agents queried simultaneously).
+ * Conversation builds because each round's context includes all prior rounds.
  */
 import { AgentClient } from "../client/agent-client.js";
 import { createLLMClient, getLLMModel } from "../client/llm-client.js";
@@ -25,9 +28,13 @@ import { homedir } from "node:os";
 
 const log = createLogger("team-meeting");
 
-const DEFAULT_LLM_TIMEOUT_MS = 180_000; // 3 min for synthesis
+const DEFAULT_LLM_TIMEOUT_MS = 180_000;
 
-export interface AgentPerspective {
+// ── Types ───────────────────────────────────────────────────────────────────
+
+export type MeetingType = "standup" | "bluesky";
+
+export interface RoundEntry {
   agentName: string;
   provider: string;
   pool: string | undefined;
@@ -35,12 +42,10 @@ export interface AgentPerspective {
   error: string | null;
 }
 
-export interface MeetingSummary {
-  date: string;
-  perspectives: AgentPerspective[];
-  synthesis: string;
-  actionItems: ActionItem[];
-  goalAdjustments: string[];
+export interface MeetingRound {
+  roundNumber: number;
+  prompt: string;
+  entries: RoundEntry[];
 }
 
 export interface ActionItem {
@@ -49,53 +54,120 @@ export interface ActionItem {
   priority: "high" | "medium" | "low";
 }
 
-const AGENT_PROMPT = `You are participating in a team meeting. Your role is to share your unique perspective as an agent working on this codebase.
+export interface MeetingSummary {
+  date: string;
+  type: MeetingType;
+  rounds: MeetingRound[];
+  synthesis: string;
+  actionItems: ActionItem[];
+  goalAdjustments: string[];
+}
 
-Answer concisely (under 200 words total):
+export interface MeetingOptions {
+  type?: MeetingType;
+  rounds?: number;
+}
 
-1. **Blockers**: What's preventing you from doing your best work? (tooling issues, missing context, recurring failures, unclear requirements)
-2. **Opportunities**: What improvements could make the biggest impact in your domain? What patterns have you noticed that could be automated or improved?
-3. **Suggestions for the team**: What should other agents know? Any cross-repo insights, shared pain points, or coordination improvements?
+// ── Prompts per meeting type ────────────────────────────────────────────────
 
-Be specific and actionable — not generic. Reference actual issues, PRs, or patterns you've encountered.`;
+const STANDUP_ROUND1 = `You are in a daily standup. Share your perspective concisely (under 200 words):
 
-const SYNTHESIS_PROMPT = `You are the supervisor synthesising a team meeting for an autonomous AI agent fleet.
+1. **Blockers**: What's preventing you from doing your best work?
+2. **Opportunities**: What improvements could make the biggest impact in your domain?
+3. **Suggestions for the team**: What should other agents know?
 
-You'll receive perspectives from each agent about their blockers, opportunities, and suggestions. Your job:
+Be specific — reference actual issues, PRs, or patterns.`;
 
-1. **Cross-cutting themes**: Identify patterns that multiple agents mention — these are systemic issues worth prioritising
-2. **Action items**: Concrete next steps with clear owners. Each action should be specific enough to become a GitHub issue
-3. **Goal adjustments**: Based on team input, should any monthly goals be updated, added, or deprioritised?
-4. **Resource allocation**: Are any agents under/over-utilised? Should work be redistributed?
+const STANDUP_ROUND2 = `Round 2: You've seen what every other agent said. Now react (under 150 words):
 
-Respond with ONLY a JSON object (no markdown, no code fences):
+1. **Agree/build**: Which points from other agents resonate? How can you help?
+2. **Disagree/clarify**: Anything you see differently?
+3. **Cross-team opportunity**: Any collaboration that would multiply impact?
+
+Don't repeat your Round 1 points. Focus on what's new from seeing others' perspectives.`;
+
+const BLUESKY_ROUND1 = `This is a blue-sky thinking session. No constraints, no "but we can't because..." — just possibilities.
+
+In under 200 words, propose 1-2 bold ideas:
+
+1. **What if**: What capability would be game-changing for this system? Think 10x, not 10%.
+2. **Wild connection**: What would happen if we combined two things that haven't been combined? (e.g. "what if the research agent could propose its own experiments?")
+3. **Inspiration from elsewhere**: What do other systems (biological, social, industrial) do that we should steal?
+
+Be creative and specific. Bad ideas are welcome — they often lead to good ones.`;
+
+const BLUESKY_ROUND2 = `Round 2: You've seen everyone's blue-sky ideas. Now build on them (under 200 words):
+
+1. **Extend**: Pick someone else's idea and make it bigger/better
+2. **Combine**: What happens if you merge two ideas from different agents?
+3. **First step**: For the most exciting idea, what's the smallest experiment that would test it?
+
+Don't critique — build. There are no bad ideas in this round.`;
+
+const BLUESKY_ROUND3 = `Round 3: Final convergence. You've seen two rounds of ideas and reactions.
+
+In under 100 words: What's the ONE idea from this session that you'd bet on? Why? What would it take to prototype it this week?`;
+
+const PROMPTS: Record<MeetingType, string[]> = {
+  standup: [STANDUP_ROUND1, STANDUP_ROUND2],
+  bluesky: [BLUESKY_ROUND1, BLUESKY_ROUND2, BLUESKY_ROUND3],
+};
+
+const SYNTHESIS_PROMPTS: Record<MeetingType, string> = {
+  standup: `You are synthesising a daily standup for an autonomous AI agent fleet.
+
+Produce a JSON object (no markdown, no code fences):
 {
-  "themes": ["theme 1", "theme 2"],
-  "action_items": [
-    {"description": "specific action", "owner": "agent-name or pool", "priority": "high|medium|low"}
-  ],
-  "goal_adjustments": ["adjustment 1"],
-  "resource_notes": "any rebalancing observations",
-  "summary": "2-3 sentence executive summary of the meeting"
-}`;
+  "themes": ["cross-cutting theme 1", "theme 2"],
+  "action_items": [{"description": "specific action", "owner": "agent or pool", "priority": "high|medium|low"}],
+  "goal_adjustments": ["adjustment if any"],
+  "resource_notes": "rebalancing observations",
+  "summary": "2-3 sentence executive summary"
+}`,
 
-/**
- * Query a single agent for their perspective.
- * Uses a lightweight prompt — agent responds from its domain context.
- */
-async function gatherPerspective(
+  bluesky: `You are synthesising a blue-sky thinking session for an autonomous AI agent fleet.
+
+The agents proposed bold ideas across multiple rounds, building on each other's thinking. Your job:
+1. Identify the 3-5 most promising ideas (the ones with energy from multiple agents)
+2. For each, describe what it would look like if implemented and what the first prototype step would be
+3. Flag any ideas that could be started this week with minimal effort
+
+Produce a JSON object (no markdown, no code fences):
+{
+  "themes": ["big idea 1", "big idea 2"],
+  "action_items": [{"description": "prototype or investigation step", "owner": "agent or pool", "priority": "high|medium|low"}],
+  "goal_adjustments": ["proposed new goal or adjustment"],
+  "resource_notes": "which agents are best positioned for which ideas",
+  "summary": "2-3 sentence summary of the most exciting outcomes"
+}`,
+};
+
+// ── Core meeting logic ──────────────────────────────────────────────────────
+
+function selectAgents(config: OrchestratorConfig): string[] {
+  const seenPools = new Set<string>();
+  const agents: string[] = [];
+  for (const [name, agent] of Object.entries(config.agents)) {
+    if (!agent.docker?.port) continue;
+    if (name.includes("telegram")) continue;
+    const poolKey = agent.pool ?? name;
+    if (seenPools.has(poolKey)) continue;
+    seenPools.add(poolKey);
+    agents.push(name);
+  }
+  return agents;
+}
+
+async function queryAgent(
   client: AgentClient,
+  config: OrchestratorConfig,
   agentName: string,
-  goalsContext: string,
-): Promise<AgentPerspective> {
-  const config = (client as unknown as { config: OrchestratorConfig }).config;
+  prompt: string,
+  systemPrompt: string,
+): Promise<RoundEntry> {
   const agent = config.agents[agentName];
-
   try {
-    const response = await client.send(agentName, AGENT_PROMPT + "\n\n" + goalsContext, {
-      systemPrompt: `You are ${agentName}. Your domain: ${agent?.description ?? "unknown"}. Capabilities: ${agent?.capabilities?.join(", ") ?? "general"}.`,
-    });
-
+    const response = await client.send(agentName, prompt, { systemPrompt });
     return {
       agentName,
       provider: agent?.provider ?? "claude",
@@ -104,7 +176,7 @@ async function gatherPerspective(
       error: null,
     };
   } catch (err) {
-    log.warn("Failed to gather perspective from agent", {
+    log.warn("Agent failed to respond in meeting", {
       agentName,
       error: err instanceof Error ? err.message : String(err),
     });
@@ -118,22 +190,53 @@ async function gatherPerspective(
   }
 }
 
-/**
- * Synthesise all agent perspectives into a meeting summary.
- */
-async function synthesise(
+function formatPriorRounds(rounds: MeetingRound[]): string {
+  if (rounds.length === 0) return "";
+
+  return rounds.map((r) => {
+    const entries = r.entries
+      .filter((e) => e.response)
+      .map((e) => `**${e.agentName}**: ${e.response}`)
+      .join("\n\n");
+    return `## Round ${r.roundNumber}\n${entries}`;
+  }).join("\n\n---\n\n");
+}
+
+async function runRound(
+  client: AgentClient,
   config: OrchestratorConfig,
-  perspectives: AgentPerspective[],
+  agents: string[],
+  roundNumber: number,
+  roundPrompt: string,
+  priorRounds: MeetingRound[],
+  goalsContext: string,
+): Promise<MeetingRound> {
+  const priorContext = formatPriorRounds(priorRounds);
+  const fullPrompt = priorContext
+    ? `${goalsContext}\n\n${priorContext}\n\n---\n\n${roundPrompt}`
+    : `${goalsContext}\n\n${roundPrompt}`;
+
+  const entries = await Promise.all(
+    agents.map((name) => {
+      const agent = config.agents[name];
+      const systemPrompt = `You are ${name}. Domain: ${agent?.description ?? "unknown"}. Capabilities: ${agent?.capabilities?.join(", ") ?? "general"}.`;
+      return queryAgent(client, config, name, fullPrompt, systemPrompt);
+    }),
+  );
+
+  return { roundNumber, prompt: roundPrompt, entries };
+}
+
+async function synthesiseMeeting(
+  config: OrchestratorConfig,
+  meetingType: MeetingType,
+  rounds: MeetingRound[],
   goalsContext: string,
 ): Promise<{ synthesis: string; actionItems: ActionItem[]; goalAdjustments: string[] }> {
   const { client, model } = createLLMClient(config, "supervisor");
 
-  const perspectiveText = perspectives
-    .filter((p) => p.response)
-    .map((p) => `### ${p.agentName} (${p.provider}, pool: ${p.pool ?? "none"})\n${p.response}`)
-    .join("\n\n");
-
-  const prompt = `${goalsContext}\n\n## Agent Perspectives\n\n${perspectiveText}`;
+  const fullTranscript = formatPriorRounds(rounds);
+  const prompt = `${goalsContext}\n\n${fullTranscript}`;
 
   const abortController = new AbortController();
   const timer = setTimeout(() => abortController.abort(), DEFAULT_LLM_TIMEOUT_MS);
@@ -144,7 +247,7 @@ async function synthesise(
       response = await client.messages.create({
         model: getLLMModel(config, "supervisor") ?? model,
         max_tokens: 4096,
-        system: SYNTHESIS_PROMPT,
+        system: SYNTHESIS_PROMPTS[meetingType],
         messages: [{ role: "user", content: prompt }],
       }, { signal: abortController.signal });
     } finally {
@@ -162,7 +265,7 @@ async function synthesise(
       error: err instanceof Error ? err.message : String(err),
     });
     return {
-      synthesis: "Synthesis failed — see agent perspectives for raw input.",
+      synthesis: "Synthesis failed — see round transcripts for raw input.",
       actionItems: [],
       goalAdjustments: [],
     };
@@ -203,106 +306,65 @@ function parseSynthesis(text: string): {
   return { synthesis: text.slice(0, 500), actionItems: [], goalAdjustments: [] };
 }
 
+// ── Public API ──────────────────────────────────────────────────────────────
+
 /**
- * Run a full team meeting: gather perspectives, synthesise, file summary.
+ * Run a multi-round team meeting.
+ *
+ * @param options.type - "standup" (blockers/actions) or "bluesky" (creative ideation)
+ * @param options.rounds - number of discussion rounds (default: per type)
  */
 export async function runTeamMeeting(
   config: OrchestratorConfig,
   store: StateStore,
+  options?: MeetingOptions,
 ): Promise<MeetingSummary> {
-  log.info("Starting team meeting");
+  const meetingType = options?.type ?? "standup";
+  const roundPrompts = PROMPTS[meetingType];
+  const numRounds = options?.rounds ?? roundPrompts.length;
+
+  log.info("Starting team meeting", { type: meetingType, rounds: numRounds });
 
   const goals = loadGoals(config.orchestrator_dir);
   const progress = goals.goals.length > 0 ? measureGoalProgress(goals, store) : [];
   const goalsContext = buildGoalsContext(progress);
 
   const client = new AgentClient(config);
+  const agents = selectAgents(config);
 
-  // Pick one agent per pool (avoid querying duplicates)
-  const seenPools = new Set<string>();
-  const agentsToQuery: string[] = [];
-  for (const [name, agent] of Object.entries(config.agents)) {
-    if (!agent.docker?.port) continue;
-    // Skip Telegram handler — not a coding agent
-    if (name.includes("telegram")) continue;
-    // One per pool
-    const poolKey = agent.pool ?? name;
-    if (seenPools.has(poolKey)) continue;
-    seenPools.add(poolKey);
-    agentsToQuery.push(name);
+  log.info("Meeting participants", { agents, type: meetingType });
+
+  // Run rounds sequentially (each round needs prior round context)
+  const rounds: MeetingRound[] = [];
+  for (let i = 0; i < numRounds; i++) {
+    const prompt = roundPrompts[i] ?? roundPrompts[roundPrompts.length - 1];
+    log.info(`Starting round ${i + 1}/${numRounds}`, { type: meetingType });
+
+    const round = await runRound(client, config, agents, i + 1, prompt, rounds, goalsContext);
+    rounds.push(round);
+
+    const responded = round.entries.filter((e) => e.response).length;
+    log.info(`Round ${i + 1} complete`, { responded, total: round.entries.length });
   }
 
-  log.info("Gathering agent perspectives", { agents: agentsToQuery });
-
-  // Query all agents in parallel
-  const perspectivePromises = agentsToQuery.map((name) =>
-    gatherPerspective(client, name, goalsContext),
-  );
-  const perspectives = await Promise.all(perspectivePromises);
-
-  const responded = perspectives.filter((p) => p.response).length;
-  const failed = perspectives.filter((p) => p.error).length;
-  log.info("Perspectives gathered", { responded, failed, total: perspectives.length });
-
-  // Synthesise
-  const { synthesis, actionItems, goalAdjustments } = await synthesise(
-    config, perspectives, goalsContext,
+  // Synthesise all rounds
+  const { synthesis, actionItems, goalAdjustments } = await synthesiseMeeting(
+    config, meetingType, rounds, goalsContext,
   );
 
   const summary: MeetingSummary = {
     date: new Date().toISOString().slice(0, 10),
-    perspectives,
+    type: meetingType,
+    rounds,
     synthesis,
     actionItems,
     goalAdjustments,
   };
 
-  // File meeting summary as GitHub issue
-  try {
-    const issueCreator = new IssueCreator(config);
-    const perspectivesSection = perspectives
-      .filter((p) => p.response)
-      .map((p) => `### ${p.agentName}\n${p.response}`)
-      .join("\n\n");
+  // File as GitHub issue
+  fileMeetingIssue(config, summary);
 
-    const actionSection = actionItems.length > 0
-      ? actionItems.map((a) => `- [${a.priority.toUpperCase()}] ${a.description} (owner: ${a.owner})`).join("\n")
-      : "No action items identified.";
-
-    const goalSection = goalAdjustments.length > 0
-      ? goalAdjustments.map((g) => `- ${g}`).join("\n")
-      : "No goal adjustments proposed.";
-
-    const body = `## Team Meeting — ${summary.date}
-
-### Executive Summary
-${synthesis}
-
-### Action Items
-${actionSection}
-
-### Goal Adjustments
-${goalSection}
-
-### Agent Perspectives
-${perspectivesSection}
-
----
-*Auto-generated by the team meeting system. Review action items and create follow-up issues as needed.*`;
-
-    issueCreator.createIssue(
-      "rapartlu/agent-orchestrator",
-      `[Team Meeting] ${summary.date} — ${actionItems.length} action items`,
-      body,
-      ["team-meeting"],
-    );
-  } catch (err) {
-    log.warn("Failed to file meeting summary issue", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-
-  // Send full meeting report via Telegram (multiple messages to fit limits)
+  // Send full Telegram report
   await sendMeetingToTelegram(summary).catch((err) => {
     log.warn("Failed to send meeting report to Telegram", {
       error: err instanceof Error ? err.message : String(err),
@@ -310,12 +372,64 @@ ${perspectivesSection}
   });
 
   log.info("Team meeting complete", {
-    perspectives: responded,
+    type: meetingType,
+    rounds: rounds.length,
     actionItems: actionItems.length,
-    goalAdjustments: goalAdjustments.length,
   });
 
   return summary;
+}
+
+// ── GitHub issue filing ─────────────────────────────────────────────────────
+
+function fileMeetingIssue(config: OrchestratorConfig, summary: MeetingSummary): void {
+  try {
+    const issueCreator = new IssueCreator(config);
+    const typeLabel = summary.type === "bluesky" ? "🚀 Blue Sky" : "📋 Standup";
+
+    const roundSections = summary.rounds.map((r) => {
+      const entries = r.entries
+        .filter((e) => e.response)
+        .map((e) => `#### ${e.agentName}\n${e.response}`)
+        .join("\n\n");
+      return `### Round ${r.roundNumber}\n${entries}`;
+    }).join("\n\n---\n\n");
+
+    const actionSection = summary.actionItems.length > 0
+      ? summary.actionItems.map((a) => `- [${a.priority.toUpperCase()}] ${a.description} (owner: ${a.owner})`).join("\n")
+      : "No action items.";
+
+    const goalSection = summary.goalAdjustments.length > 0
+      ? summary.goalAdjustments.map((g) => `- ${g}`).join("\n")
+      : "No adjustments proposed.";
+
+    const body = `## ${typeLabel} — ${summary.date}
+
+### Synthesis
+${summary.synthesis}
+
+### Action Items
+${actionSection}
+
+### Goal Adjustments
+${goalSection}
+
+${roundSections}
+
+---
+*Auto-generated ${summary.rounds.length}-round ${summary.type} meeting.*`;
+
+    issueCreator.createIssue(
+      "rapartlu/agent-orchestrator",
+      `[${typeLabel}] ${summary.date} — ${summary.actionItems.length} action items`,
+      body,
+      ["team-meeting", summary.type],
+    );
+  } catch (err) {
+    log.warn("Failed to file meeting issue", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 // ── Telegram full report ────────────────────────────────────────────────────
@@ -331,36 +445,35 @@ function loadTelegramConfig(): { botToken: string; chatId: string } | null {
   return null;
 }
 
-async function sendTelegramText(config: { botToken: string; chatId: string }, text: string): Promise<void> {
-  await fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
+async function sendTelegramText(tgConfig: { botToken: string; chatId: string }, text: string): Promise<void> {
+  await fetch(`https://api.telegram.org/bot${tgConfig.botToken}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: config.chatId, text, parse_mode: "Markdown" }),
+    body: JSON.stringify({ chat_id: tgConfig.chatId, text, parse_mode: "Markdown" }),
   });
 }
 
-/**
- * Send the full meeting report as a series of Telegram messages:
- *   1. Header + synthesis + action items
- *   2. Each agent's perspective (one message per agent)
- */
 async function sendMeetingToTelegram(summary: MeetingSummary): Promise<void> {
-  const config = loadTelegramConfig();
-  if (!config) return;
+  const tgConfig = loadTelegramConfig();
+  if (!tgConfig) return;
 
-  // Message 1: Summary + actions
+  const typeEmoji = summary.type === "bluesky" ? "🚀" : "🤝";
+  const typeLabel = summary.type === "bluesky" ? "Blue Sky Session" : "Team Standup";
+
+  // Message 1: Header + synthesis + actions
   const actionLines = summary.actionItems.length > 0
     ? summary.actionItems.map((a) => `  [${a.priority.toUpperCase()}] ${a.description} → ${a.owner}`).join("\n")
-    : "  None identified.";
+    : "  None.";
 
   const goalLines = summary.goalAdjustments.length > 0
     ? summary.goalAdjustments.map((g) => `  • ${g}`).join("\n")
-    : "  No changes proposed.";
+    : "  No changes.";
 
-  const responded = summary.perspectives.filter((p) => p.response).length;
+  const totalResponded = summary.rounds[0]?.entries.filter((e) => e.response).length ?? 0;
+  const totalAgents = summary.rounds[0]?.entries.length ?? 0;
 
-  const header = `🤝 *Team Meeting — ${summary.date}*
-${responded}/${summary.perspectives.length} agents participated
+  const header = `${typeEmoji} *${typeLabel} — ${summary.date}*
+${summary.rounds.length} rounds, ${totalResponded}/${totalAgents} agents
 
 *Synthesis:*
 ${summary.synthesis}
@@ -371,22 +484,24 @@ ${actionLines}
 *Goal Adjustments:*
 ${goalLines}`;
 
-  await sendTelegramText(config, header);
+  await sendTelegramText(tgConfig, header);
 
-  // Message 2+: Agent perspectives (batched to stay under 4096 chars)
-  let batch = "*Agent Perspectives:*\n";
-  for (const p of summary.perspectives) {
-    const entry = p.response
-      ? `\n*${p.agentName}* (${p.provider}):\n${p.response.slice(0, 600)}\n`
-      : `\n*${p.agentName}*: ❌ no response\n`;
+  // Messages 2+: Each round's perspectives
+  for (const round of summary.rounds) {
+    let batch = `*Round ${round.roundNumber}:*\n`;
+    for (const entry of round.entries) {
+      const text = entry.response
+        ? `\n*${entry.agentName}*:\n${entry.response.slice(0, 500)}\n`
+        : `\n*${entry.agentName}*: ❌ no response\n`;
 
-    if (batch.length + entry.length > 3800) {
-      await sendTelegramText(config, batch);
-      batch = "";
+      if (batch.length + text.length > 3800) {
+        await sendTelegramText(tgConfig, batch);
+        batch = "";
+      }
+      batch += text;
     }
-    batch += entry;
-  }
-  if (batch.trim()) {
-    await sendTelegramText(config, batch);
+    if (batch.trim()) {
+      await sendTelegramText(tgConfig, batch);
+    }
   }
 }

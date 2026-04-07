@@ -1744,6 +1744,16 @@ export class StateStore {
   }
 
   /**
+   * Get the total number of daemon cycles ever recorded.
+   * Used to resume cycleCount on daemon restart so modulo-based
+   * scheduling (meetings, sync, improvements) doesn't reset.
+   */
+  getTotalCycleCount(): number {
+    const row = this.db.prepare("SELECT COUNT(*) as count FROM daemon_cycles").get() as { count: number };
+    return row?.count ?? 0;
+  }
+
+  /**
    * Mark a cycle as finished, recording duration and dispatch waste delta.
    *
    * @param staleDispatchesPrevented Number of dispatches blocked by the issue-state

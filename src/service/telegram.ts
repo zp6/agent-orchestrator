@@ -497,15 +497,25 @@ Steps:
     return ""; // Don't send another reply — "thinking..." is already sent
   }
 
-  // Dispatch (fire-and-forget — reply immediately, don't block polling)
-  // Team meeting (fire-and-forget — takes a few minutes)
-  if (cmd === "meeting" || cmd === "/meeting") {
-    runTeamMeeting(ctx.config, ctx.store)
-      .then((summary) => sendReply(
-        `✅ Team meeting complete\n${summary.actionItems.length} action items\n${summary.perspectives.filter((p) => p.response).length} agents participated`,
-      ))
-      .catch((e) => sendReply(`❌ Team meeting failed: ${e instanceof Error ? e.message : String(e)}`));
-    return "🤝 Starting team meeting — querying all agents...";
+  // Team meetings (fire-and-forget — takes a few minutes)
+  if (cmd === "meeting" || cmd === "/meeting" || cmd === "standup" || cmd === "/standup") {
+    runTeamMeeting(ctx.config, ctx.store, { type: "standup" })
+      .then((summary) => {
+        const responded = summary.rounds[0]?.entries.filter((p) => p.response).length ?? 0;
+        sendReply(`✅ Standup complete — ${summary.rounds.length} rounds, ${summary.actionItems.length} actions, ${responded} agents`);
+      })
+      .catch((e) => sendReply(`❌ Standup failed: ${e instanceof Error ? e.message : String(e)}`));
+    return "🤝 Starting standup — querying all agents...";
+  }
+
+  if (cmd === "bluesky" || cmd === "/bluesky") {
+    runTeamMeeting(ctx.config, ctx.store, { type: "bluesky" })
+      .then((summary) => {
+        const responded = summary.rounds[0]?.entries.filter((p) => p.response).length ?? 0;
+        sendReply(`✅ Blue sky complete — ${summary.rounds.length} rounds, ${summary.actionItems.length} ideas, ${responded} agents`);
+      })
+      .catch((e) => sendReply(`❌ Blue sky failed: ${e instanceof Error ? e.message : String(e)}`));
+    return "🚀 Starting blue sky session — 3 rounds of creative thinking...";
   }
 
   if (cmd.startsWith("dispatch ") || cmd.startsWith("/dispatch ")) {

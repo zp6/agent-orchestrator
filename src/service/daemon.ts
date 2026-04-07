@@ -52,7 +52,8 @@ const CONTAINER_RESTART_EVERY_N_CYCLES = 100; // ~50min at 30s interval — prev
 const AGENT_SYNC_EVERY_N_CYCLES = 10; // ~5min at default interval — recover from proxy restarts
 const CLOSED_ISSUE_CHECK_EVERY_N_CYCLES = 3; // ~15min at default — cancel in-flight tasks for closed issues
 const STALE_ISSUE_AGE_DAYS = 7;
-const TEAM_MEETING_EVERY_N_CYCLES = 288; // ~24h at 5min interval
+const STANDUP_MEETING_EVERY_N_CYCLES = 288;  // ~24h at 5min interval
+const BLUESKY_MEETING_EVERY_N_CYCLES = 2016; // ~7 days at 5min interval
 
 /**
  * Default quality-score floor for reviewer-pool approvals.  Any completed
@@ -175,6 +176,9 @@ export class Daemon {
     }
 
     this.store = new StateStore();
+    // Resume cycle count from DB so modulo-based scheduling (meetings,
+    // improvements, sync) survives daemon restarts.
+    this.cycleCount = this.store.getTotalCycleCount();
     setLLMUsageRecorder(this.store.recordTokenUsage.bind(this.store));
 
     // Wire up SQLite persistence for the issue-state cache (issue #590).
@@ -365,9 +369,14 @@ export class Daemon {
         await this.detectImprovements(time);
       }
 
-      // 3c. Daily team meeting — agents share perspectives, supervisor synthesises
-      if (this.cycleCount % TEAM_MEETING_EVERY_N_CYCLES === 0) {
-        await this.runTeamMeeting(time);
+      // 3c. Daily standup — blockers, opportunities, action items
+      if (this.cycleCount % STANDUP_MEETING_EVERY_N_CYCLES === 0) {
+        await this.runMeeting(time, "standup");
+      }
+
+      // 3d. Weekly blue sky — creative ideation, bold proposals
+      if (this.cycleCount % BLUESKY_MEETING_EVERY_N_CYCLES === 0) {
+        await this.runMeeting(time, "bluesky");
       }
 
       // 3d. Link approved research findings to implementation issues
@@ -1142,13 +1151,15 @@ export class Daemon {
     }
   }
 
-  private async runTeamMeeting(time: string): Promise<void> {
+  private async runMeeting(time: string, type: "standup" | "bluesky"): Promise<void> {
+    const label = type === "bluesky" ? "blue sky session" : "standup";
     try {
-      console.log(`[${time}] Starting daily team meeting...`);
-      const summary = await runTeamMeeting(this.config, this.store);
-      console.log(`[${time}] Team meeting complete: ${summary.actionItems.length} action items, ${summary.perspectives.filter((p) => p.response).length} agents participated`);
+      console.log(`[${time}] Starting ${label}...`);
+      const summary = await runTeamMeeting(this.config, this.store, { type });
+      const responded = summary.rounds[0]?.entries.filter((e) => e.response).length ?? 0;
+      console.log(`[${time}] ${label} complete: ${summary.rounds.length} rounds, ${summary.actionItems.length} action items, ${responded} agents`);
     } catch (err) {
-      console.error(`[${time}] Team meeting failed: ${err instanceof Error ? err.message : err}`);
+      console.error(`[${time}] ${label} failed: ${err instanceof Error ? err.message : err}`);
     }
   }
 
