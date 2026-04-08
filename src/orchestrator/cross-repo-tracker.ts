@@ -51,6 +51,101 @@ function hasImplVerb(text: string): boolean {
 }
 
 /**
+ * Parse a GitHub source ref in the form `owner/repo#123`.
+ * Returns undefined when the ref is missing or not a GitHub issue ref.
+ */
+function parseGithubIssueRef(sourceRef: string | undefined | null): { repo: string; issueNumber: number } | undefined {
+  if (!sourceRef) return undefined;
+  const hashIdx = sourceRef.lastIndexOf("#");
+  if (hashIdx <= 0) return undefined;
+
+  const repo = sourceRef.slice(0, hashIdx);
+  const issueNumber = Number.parseInt(sourceRef.slice(hashIdx + 1), 10);
+  if (!repo.includes("/") || !Number.isFinite(issueNumber)) return undefined;
+
+  return { repo, issueNumber };
+}
+
+/**
+ * Check whether an open PR already references the source issue with a closing
+ * keyword. If so, the issue is already in the merge queue and filing a new
+ * cross-repo follow-up would be stale.
+ *
+ * Returns the PR number when a qualifying open PR is found, otherwise null.
+ * On any API error, fail open so we do not suppress real follow-ups because
+ * of a transient CLI or network failure.
+ */
+function findOpenPRClosingSourceIssue(sourceRef: string | undefined | null): number | null {
+  const parsed = parseGithubIssueRef(sourceRef);
+  if (!parsed) return null;
+
+  const closingPattern = new RegExp(
+    `\\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\\s+#${parsed.issueNumber}\\b`,
+    "i",
+  );
+
+  try {
+    const raw = execFileSync(
+      "gh",
+      [
+        "pr",
+        "list",
+        "--repo",
+        parsed.repo,
+        "--state",
+        "open",
+        "--json",
+        "number,body",
+        "-L",
+        "100",
+      ],
+      { encoding: "utf-8", timeout: 15_000 },
+    ).trim();
+
+    if (!raw) return null;
+
+    const prs = JSON.parse(raw) as Array<{ number: number; body: string | null }>;
+    const match = prs.find((pr) => closingPattern.test(pr.body ?? ""));
+    return match?.number ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check whether the source issue is still open before creating follow-ups.
+ * Returns false when GitHub reports the issue as closed. On any API error,
+ * fail open so we do not suppress real follow-ups because of a transient CLI
+ * or network failure.
+ */
+function isSourceIssueOpen(sourceRef: string | undefined | null): boolean {
+  const parsed = parseGithubIssueRef(sourceRef);
+  if (!parsed) return true;
+
+  try {
+    const raw = execFileSync(
+      "gh",
+      [
+        "issue",
+        "view",
+        String(parsed.issueNumber),
+        "--repo",
+        parsed.repo,
+        "--json",
+        "state",
+        "-q",
+        ".state",
+      ],
+      { encoding: "utf-8", timeout: 15_000 },
+    ).trim();
+
+    return raw.toUpperCase() === "OPEN";
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Extract the sentence(s) from `text` that mention `needle`, giving ±1
  * sentence of context.  Used to build a meaningful child issue body.
  */
@@ -185,11 +280,18 @@ function isDuplicateIssue(repo: string, title: string): boolean {
  * Returns an array of created follow-ups (empty array if none needed or all
  * creations failed).  This function never throws — all errors are logged and
  * the function returns a partial result.
+ *
+ * @param onAvoided  Optional callback invoked when a follow-up is **skipped
+ *   because an open PR already closes the source issue** (AC#3: improvement
+ *   detector can track this as a positive efficiency metric).  Not called for
+ *   the closed-source-issue path since that is not an avoidance — no follow-up
+ *   would have been useful in that case.
  */
 export function detectAndCreateFollowUps(
   task: Task,
   agentName: string,
   config: OrchestratorConfig,
+  onAvoided?: () => void,
 ): CrossRepoFollowUp[] {
   // Only fire for implementation tasks — research tasks mention many repos
   // in passing and should not trigger issue creation.
@@ -197,6 +299,30 @@ export function detectAndCreateFollowUps(
 
   // Only fire for tasks that completed successfully (status "done").
   // Called right after the store update, so caller ensures this.
+
+  if (!isSourceIssueOpen(task.source_ref)) {
+    log.info("Skipping cross-repo follow-ups: source issue is closed", {
+      taskId: task.id,
+      agentName,
+      sourceRef: task.source_ref,
+    });
+    return [];
+  }
+
+  const blockingPRNumber = findOpenPRClosingSourceIssue(task.source_ref);
+  if (blockingPRNumber !== null) {
+    const sourceIssue = parseGithubIssueRef(task.source_ref);
+    log.info(`skipped cross-repo follow-up for #${sourceIssue?.issueNumber ?? "?"} — already linked in PR #${blockingPRNumber}`, {
+      taskId: task.id,
+      agentName,
+      sourceRef: task.source_ref,
+      blockingPRNumber,
+    });
+    // Notify the caller so it can increment the "follow_ups_avoided" metric
+    // (acceptance criterion #3: improvement detector tracks this as positive).
+    onAvoided?.();
+    return [];
+  }
 
   const description = `${task.title} ${task.description ?? ""}`;
   const descLower = description.toLowerCase();

@@ -852,7 +852,16 @@ export class Dispatcher {
       const completedTask = this.store.getTask(task.id);
       let finalResult = response.content;
       if (completedTask) {
-        const followUps = detectAndCreateFollowUps(completedTask, agentName, this.config);
+        const followUps = detectAndCreateFollowUps(
+          completedTask,
+          agentName,
+          this.config,
+          // AC#3: increment the "follow_ups_avoided" counter whenever a
+          // cross-repo follow-up is skipped because an open PR already closes
+          // the parent issue.  The improvement detector surfaces this count as
+          // a positive efficiency signal in the supervisor context.
+          () => { this.store.incrementStat("follow_ups_avoided"); },
+        );
         if (followUps.length > 0) {
           finalResult += formatFollowUpNote(followUps);
           this.log.info("Cross-repo follow-ups created", {

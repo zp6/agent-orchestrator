@@ -73,6 +73,30 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+function mockOpenSourceIssue(): void {
+  mockExecFileSync.mockReturnValueOnce("OPEN\n" as unknown as Buffer);
+}
+
+function mockOpenSourceIssueWithNoBlockingPR(): void {
+  mockExecFileSync
+    .mockReturnValueOnce("OPEN\n" as unknown as Buffer)
+    .mockReturnValueOnce(JSON.stringify([]) as unknown as Buffer);
+}
+
+function mockOpenSourceIssueWithBlockingPR(prNumber = 5): void {
+  mockExecFileSync
+    .mockReturnValueOnce("OPEN\n" as unknown as Buffer)
+    .mockReturnValueOnce(
+      JSON.stringify([
+        { number: prNumber, body: "Implements the fix.\n\nCloses #369" },
+      ]) as unknown as Buffer,
+    );
+}
+
+function mockClosedSourceIssue(): void {
+  mockExecFileSync.mockReturnValueOnce("CLOSED\n" as unknown as Buffer);
+}
+
 describe("detectAndCreateFollowUps", () => {
   it("returns empty array for research tasks", () => {
     const task = makeTask({ task_type: "research" });
@@ -82,6 +106,7 @@ describe("detectAndCreateFollowUps", () => {
   });
 
   it("creates a follow-up issue when peer repo is mentioned with action verb", () => {
+    mockOpenSourceIssueWithNoBlockingPR();
     // dedup check returns empty list → no duplicate
     mockExecFileSync
       .mockReturnValueOnce(JSON.stringify([]) as unknown as Buffer) // gh issue list (dedup)
@@ -108,6 +133,7 @@ describe("detectAndCreateFollowUps", () => {
   });
 
   it("does NOT create a follow-up for mentions of own repo", () => {
+    mockOpenSourceIssueWithNoBlockingPR();
     const task = makeTask({
       description:
         "Update the reviewer state layer (rapartlu/agent-reviewer) to track supervisor decisions.",
@@ -116,10 +142,11 @@ describe("detectAndCreateFollowUps", () => {
 
     const followUps = detectAndCreateFollowUps(task, "claude-orchestrator-reviewer", config);
     expect(followUps).toEqual([]);
-    expect(mockExecFileSync).not.toHaveBeenCalled();
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
   });
 
   it("does NOT create follow-up when peer repo is mentioned without action verb", () => {
+    mockOpenSourceIssueWithNoBlockingPR();
     const task = makeTask({
       description:
         "See also: the dashboard repo rapartlu/agent-dashboard provides CLI context for reference.",
@@ -132,6 +159,7 @@ describe("detectAndCreateFollowUps", () => {
   });
 
   it("skips creation when a duplicate issue already exists", () => {
+    mockOpenSourceIssueWithNoBlockingPR();
     // dedup check finds an existing issue with a similar title
     mockExecFileSync.mockReturnValueOnce(
       JSON.stringify([
@@ -150,6 +178,7 @@ describe("detectAndCreateFollowUps", () => {
   });
 
   it("returns empty when execSync fails (fail-open)", () => {
+    mockOpenSourceIssueWithNoBlockingPR();
     mockExecFileSync
       .mockReturnValueOnce(JSON.stringify([]) as unknown as Buffer) // dedup
       .mockImplementationOnce(() => { throw new Error("gh: auth error"); }); // create fails
@@ -160,6 +189,7 @@ describe("detectAndCreateFollowUps", () => {
   });
 
   it("uses short agent name format in issue title", () => {
+    mockOpenSourceIssueWithNoBlockingPR();
     mockExecFileSync
       .mockReturnValueOnce(JSON.stringify([]) as unknown as Buffer)
       .mockReturnValueOnce("https://github.com/rapartlu/agent-dashboard/issues/99\n" as unknown as Buffer);
@@ -182,6 +212,7 @@ describe("detectAndCreateFollowUps", () => {
   });
 
   it("detects peer repo by agent name (short form)", () => {
+    mockOpenSourceIssueWithNoBlockingPR();
     mockExecFileSync
       .mockReturnValueOnce(JSON.stringify([]) as unknown as Buffer)
       .mockReturnValueOnce("https://github.com/rapartlu/agent-dashboard/issues/5\n" as unknown as Buffer);
@@ -196,6 +227,93 @@ describe("detectAndCreateFollowUps", () => {
     const followUps = detectAndCreateFollowUps(task, "claude-orchestrator-reviewer", config);
     expect(followUps).toHaveLength(1);
     expect(followUps[0]!.repo).toBe("rapartlu/agent-dashboard");
+  });
+
+  it("skips follow-up filing when the source issue is closed", () => {
+    mockClosedSourceIssue();
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const task = makeTask();
+    const followUps = detectAndCreateFollowUps(task, "claude-orchestrator-reviewer", config);
+
+    expect(followUps).toEqual([]);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+    expect(mockExecFileSync.mock.calls[0]?.[1]).toEqual([
+      "issue",
+      "view",
+      "369",
+      "--repo",
+      "rapartlu/agent-reviewer",
+      "--json",
+      "state",
+      "-q",
+      ".state",
+    ]);
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Skipping cross-repo follow-ups: source issue is closed"),
+    );
+    consoleSpy.mockRestore();
+  });
+
+  it("skips follow-up filing when an open PR already closes the source issue", () => {
+    mockOpenSourceIssueWithBlockingPR(11);
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const task = makeTask();
+    const followUps = detectAndCreateFollowUps(task, "claude-orchestrator-reviewer", config);
+
+    expect(followUps).toEqual([]);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    expect(mockExecFileSync.mock.calls[1]?.[1]).toEqual([
+      "pr",
+      "list",
+      "--repo",
+      "rapartlu/agent-reviewer",
+      "--state",
+      "open",
+      "--json",
+      "number,body",
+      "-L",
+      "100",
+    ]);
+    expect(consoleSpy.mock.calls[0]?.[0]).toContain("already linked in PR #11");
+    expect(consoleSpy.mock.calls[0]?.[0]).toContain("claude-orchestrator-reviewer");
+    expect(consoleSpy.mock.calls[0]?.[0]).toContain("rapartlu/agent-reviewer#369");
+    consoleSpy.mockRestore();
+  });
+
+  it("invokes onAvoided callback when a blocking PR skips follow-up creation (AC#3)", () => {
+    mockOpenSourceIssueWithBlockingPR(11);
+    const onAvoided = vi.fn();
+
+    const task = makeTask();
+    const followUps = detectAndCreateFollowUps(task, "claude-orchestrator-reviewer", config, onAvoided);
+
+    expect(followUps).toEqual([]);
+    expect(onAvoided).toHaveBeenCalledOnce();
+  });
+
+  it("does NOT invoke onAvoided when source issue is closed (not an avoidance)", () => {
+    mockClosedSourceIssue();
+    const onAvoided = vi.fn();
+
+    const task = makeTask();
+    detectAndCreateFollowUps(task, "claude-orchestrator-reviewer", config, onAvoided);
+
+    expect(onAvoided).not.toHaveBeenCalled();
+  });
+
+  it("does NOT invoke onAvoided when no follow-up is needed (no peer repo mention)", () => {
+    mockOpenSourceIssueWithNoBlockingPR();
+    const onAvoided = vi.fn();
+
+    const task = makeTask({
+      description: "Internal orchestrator change only — no peer repos involved.",
+      title: "Refactor internal state",
+    });
+    detectAndCreateFollowUps(task, "claude-orchestrator-reviewer", config, onAvoided);
+
+    expect(onAvoided).not.toHaveBeenCalled();
   });
 });
 

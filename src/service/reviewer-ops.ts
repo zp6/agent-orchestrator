@@ -373,6 +373,16 @@ export function buildSupervisorContext(config: OrchestratorConfig, store: StateS
     sections.unshift(buildGoalsContext(progress));
   }
 
+  // Surface positive efficiency metrics so the improvement detector can
+  // recognise what's working well, not just what's failing (issue #595).
+  const followUpsAvoided = store.getStat("follow_ups_avoided");
+  if (followUpsAvoided > 0) {
+    sections.push(
+      `## Orchestrator Efficiency\n` +
+      `- follow_ups_avoided: ${followUpsAvoided} cross-repo follow-up issue(s) skipped because an open PR already closes the parent issue`,
+    );
+  }
+
   return sections.join("\n\n");
 }
 
