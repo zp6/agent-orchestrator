@@ -48,7 +48,7 @@ export interface DispatchRationale {
   existing_pr_check_result: string | null;
   /** How long the target agent had been idle before this dispatch (ms), null if unknown */
   agent_idle_duration_ms: number | null;
-  /** LLM-assigned confidence score (0–1), null if not provided */
+  /** LLM-assigned confidence score (0-1), null if not provided */
   confidence_score: number | null;
   /**
    * True when this dispatch is a borrow — an agent working on an issue outside
@@ -117,6 +117,43 @@ export interface AgentStats {
   avg_score?: number | null;
 }
 
+/** One calendar day's task-completion efficiency for a given scope. */
+export interface EfficiencyTrendPoint {
+  /** "YYYY-MM-DD" calendar date. */
+  date: string;
+  /** Tasks that reached "done" on this day. */
+  done: number;
+  /** Tasks that reached "failed" on this day. */
+  failed: number;
+  /** done + failed */
+  total: number;
+  /**
+   * done / (done + failed) as a 0-1 fraction, or null when there were no
+   * completed or failed tasks on this day.
+   */
+  efficiency_rate: number | null;
+}
+
+/** A 7-day (or N-day) efficiency time series for one agent. */
+export interface EfficiencyTrendSeries {
+  agent_name: string;
+  days: EfficiencyTrendPoint[];
+}
+
+/** Full response from `getEfficiencyTrend()`. */
+export interface EfficiencyTrend {
+  /** Number of days in the look-back window. */
+  days: number;
+  /** 0-1 rate below which a day is highlighted as a warning. */
+  warning_threshold: number;
+  /** 0-1 rate below which a day is highlighted as critical. */
+  critical_threshold: number;
+  /** System-wide daily points (all agents combined). */
+  system: EfficiencyTrendPoint[];
+  /** Per-agent series, one entry per agent that had any activity in the window. */
+  per_agent: EfficiencyTrendSeries[];
+}
+
 /**
  * Per-agent health record from the `agent_health` table.
  * Written by the orchestrator's dispatcher on dispatch success/failure;
@@ -169,6 +206,11 @@ export interface IStateStore {
   getRecentCompleted(limit: number): Task[];
   getUnverified(limit: number): Task[];
   getAgentStats(): AgentStats[];
+  getEfficiencyTrend(
+    days?: number,
+    warningThreshold?: number,
+    criticalThreshold?: number,
+  ): EfficiencyTrend;
 
   // Agent health (reads from orchestrator's agent_health table)
   getAgentHealthBatch(agentNames: string[]): AgentHealth[];

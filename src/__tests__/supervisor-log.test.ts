@@ -14,6 +14,13 @@ function makeStore(decisions: SupervisorDecisionRecord[]): IStateStore {
     getRecentCompleted: () => [],
     getUnverified: () => [],
     getAgentStats: () => [],
+    getEfficiencyTrend: () => ({
+      days: 7,
+      warning_threshold: 0.75,
+      critical_threshold: 0.5,
+      system: [],
+      per_agent: [],
+    }),
     getRecentSupervisorDecisions: () => [],
     pruneOldSupervisorDecisions: () => 0,
     queuePRForMerge: () => ({ repo: "", pr_number: 0, branch: "", status: "queued", position: 0, created_at: "" }),

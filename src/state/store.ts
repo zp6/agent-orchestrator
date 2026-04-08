@@ -13,6 +13,9 @@ import type {
   TaskStatus,
   MergeQueueEntry,
   AgentStats,
+  EfficiencyTrend,
+  EfficiencyTrendPoint,
+  EfficiencyTrendSeries,
   AgentHealth,
   SupervisorDecisionRecord,
   SupervisorDecisionQuery,
@@ -192,6 +195,127 @@ export class StateStore implements ITelegramStateStore {
         GROUP BY agent_name
       `)
       .all() as AgentStats[];
+  }
+
+  /**
+   * Return day-by-day dispatch efficiency for the past `days` calendar days.
+   *
+   * "Efficiency" is defined as `done / (done + failed)` over terminal tasks.
+   * Days with no terminal activity get `efficiency_rate = null`.
+   *
+   * The query generates all dates in the window via a recursive CTE so that
+   * days with no work still appear in the series (filled with zeros).
+   */
+  getEfficiencyTrend(
+    days = 7,
+    warningThreshold = 0.75,
+    criticalThreshold = 0.50,
+  ): EfficiencyTrend {
+    const lookbackDays = Number.isFinite(days) && days >= 1 ? Math.floor(days) : 7;
+    const offsetArg = `-${lookbackDays - 1} days`;
+    const dateCte = `
+      WITH RECURSIVE dates(d) AS (
+        SELECT DATE('now', ?)
+        UNION ALL
+        SELECT DATE(d, '+1 day') FROM dates WHERE d < DATE('now')
+      )
+    `;
+
+    const systemRows = this.db
+      .prepare(
+        `${dateCte}
+         SELECT
+           d.d                                          AS date,
+           COALESCE(t.done, 0)                          AS done,
+           COALESCE(t.failed, 0)                        AS failed,
+           COALESCE(t.done, 0) + COALESCE(t.failed, 0) AS total
+         FROM dates d
+         LEFT JOIN (
+           SELECT
+             DATE(updated_at) AS day,
+             SUM(CASE WHEN status = 'done'   THEN 1 ELSE 0 END) AS done,
+             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+           FROM tasks
+           WHERE status IN ('done', 'failed')
+             AND DATE(updated_at) >= DATE('now', ?)
+           GROUP BY DATE(updated_at)
+         ) t ON t.day = d.d
+         ORDER BY d.d ASC`,
+      )
+      .all(offsetArg, offsetArg) as Array<{
+        date: string;
+        done: number;
+        failed: number;
+        total: number;
+      }>;
+
+    const systemPoints: EfficiencyTrendPoint[] = systemRows.map((r) => ({
+      date: r.date,
+      done: r.done,
+      failed: r.failed,
+      total: r.total,
+      efficiency_rate: r.total > 0 ? r.done / r.total : null,
+    }));
+
+    const activeAgents = this.db
+      .prepare(
+        `SELECT DISTINCT COALESCE(agent_name, 'unassigned') AS agent_name
+         FROM tasks
+         WHERE status IN ('done', 'failed')
+           AND DATE(updated_at) >= DATE('now', ?)
+         ORDER BY agent_name ASC`,
+      )
+      .all(offsetArg) as Array<{ agent_name: string }>;
+
+    const perAgent: EfficiencyTrendSeries[] = activeAgents.map(({ agent_name }) => {
+      const agentRows = this.db
+        .prepare(
+          `${dateCte}
+           SELECT
+             d.d                                          AS date,
+             COALESCE(t.done, 0)                          AS done,
+             COALESCE(t.failed, 0)                        AS failed,
+             COALESCE(t.done, 0) + COALESCE(t.failed, 0) AS total
+           FROM dates d
+           LEFT JOIN (
+             SELECT
+               DATE(updated_at) AS day,
+               SUM(CASE WHEN status = 'done'   THEN 1 ELSE 0 END) AS done,
+               SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+             FROM tasks
+             WHERE status IN ('done', 'failed')
+               AND COALESCE(agent_name, 'unassigned') = ?
+               AND DATE(updated_at) >= DATE('now', ?)
+             GROUP BY DATE(updated_at)
+           ) t ON t.day = d.d
+           ORDER BY d.d ASC`,
+        )
+        .all(offsetArg, agent_name, offsetArg) as Array<{
+          date: string;
+          done: number;
+          failed: number;
+          total: number;
+        }>;
+
+      return {
+        agent_name,
+        days: agentRows.map((r) => ({
+          date: r.date,
+          done: r.done,
+          failed: r.failed,
+          total: r.total,
+          efficiency_rate: r.total > 0 ? r.done / r.total : null,
+        })),
+      };
+    });
+
+    return {
+      days: lookbackDays,
+      warning_threshold: warningThreshold,
+      critical_threshold: criticalThreshold,
+      system: systemPoints,
+      per_agent: perAgent,
+    };
   }
 
   // ── Agent health (reads from orchestrator's agent_health table) ───────────

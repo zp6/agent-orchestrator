@@ -24,6 +24,13 @@ function makeStore(): IStateStore {
     getRecentCompleted: () => [],
     getUnverified: () => [],
     getAgentStats: () => [],
+    getEfficiencyTrend: () => ({
+      days: 7,
+      warning_threshold: 0.75,
+      critical_threshold: 0.5,
+      system: [],
+      per_agent: [],
+    }),
     getAgentHealthBatch: () => [],
     getRecentSupervisorDecisions: () => [],
     querySupervisorDecisions: () => [],
