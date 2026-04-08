@@ -3,10 +3,18 @@ import * as childProcess from "node:child_process";
 import { detectAndCreateFollowUps, formatFollowUpNote } from "./cross-repo-tracker.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { Task } from "../state/store.js";
+import { findExistingPRsForIssue, isIssueOpen } from "../triggers/github.js";
 
 vi.mock("node:child_process");
 
+vi.mock("../triggers/github.js", () => ({
+  isIssueOpen: vi.fn().mockReturnValue(true),
+  findExistingPRsForIssue: vi.fn().mockReturnValue([]),
+}));
+
 const mockExecFileSync = vi.mocked(childProcess.execFileSync);
+const mockIsIssueOpen = vi.mocked(isIssueOpen);
+const mockFindExistingPRsForIssue = vi.mocked(findExistingPRsForIssue);
 
 // Minimal config with three agents across different repos
 const config: OrchestratorConfig = {
@@ -102,6 +110,35 @@ describe("detectAndCreateFollowUps", () => {
     const task = makeTask({ task_type: "research" });
     const result = detectAndCreateFollowUps(task, "claude-orchestrator-reviewer", config);
     expect(result).toEqual([]);
+    expect(mockExecFileSync).not.toHaveBeenCalled();
+  });
+
+  it("skips follow-up creation when the source issue already has a linked PR", () => {
+    mockFindExistingPRsForIssue.mockReturnValueOnce([
+      {
+        number: 88,
+        title: "Close out parent issue",
+        url: "https://github.com/rapartlu/agent-reviewer/pull/88",
+        state: "open",
+        isDraft: false,
+      },
+    ]);
+
+    const followUps = detectAndCreateFollowUps(makeTask(), "claude-orchestrator-reviewer", config);
+
+    expect(followUps).toEqual([]);
+    expect(mockIsIssueOpen).not.toHaveBeenCalled();
+    expect(mockExecFileSync).not.toHaveBeenCalled();
+  });
+
+  it("skips follow-up creation when the source issue is closed", () => {
+    mockFindExistingPRsForIssue.mockReturnValueOnce([]);
+    mockIsIssueOpen.mockReturnValueOnce(false);
+
+    const followUps = detectAndCreateFollowUps(makeTask(), "claude-orchestrator-reviewer", config);
+
+    expect(followUps).toEqual([]);
+    expect(mockIsIssueOpen).toHaveBeenCalledWith("rapartlu/agent-reviewer", 369);
     expect(mockExecFileSync).not.toHaveBeenCalled();
   });
 

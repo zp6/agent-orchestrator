@@ -21,6 +21,7 @@
 import { execFileSync } from "node:child_process";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { Task } from "../state/store.js";
+import { findExistingPRsForIssue, isIssueOpen } from "../triggers/github.js";
 import { createLogger } from "../service/logger.js";
 
 const log = createLogger("cross-repo-tracker");
@@ -214,6 +215,63 @@ function buildChildIssueBody(
 }
 
 /**
+ * Parse a GitHub source ref like `owner/repo#42`.
+ *
+ * Returns null for non-GitHub refs so we only run the guard when the parent
+ * task actually originated from GitHub.
+ */
+function parseGitHubSourceRef(
+  sourceRef: string | null | undefined,
+): { repo: string; issueNumber: number } | null {
+  if (!sourceRef) return null;
+
+  const match = sourceRef.match(/^(.+)#(\d+)$/);
+  if (!match) return null;
+
+  const repo = match[1]!;
+  if (!repo.includes("/")) return null;
+
+  return { repo, issueNumber: Number(match[2]) };
+}
+
+/**
+ * Return true when we should skip creating follow-ups because the parent
+ * GitHub issue is no longer a live dispatch target.
+ *
+ * We fail open on lookup errors, but if GitHub tells us the issue is closed or
+ * already linked in a PR body, we stop before creating any follow-up issues.
+ */
+function shouldSkipFollowUps(task: Task): boolean {
+  const sourceIssue = parseGitHubSourceRef(task.source_ref);
+  if (!sourceIssue) return false;
+
+  const linkedPRs = findExistingPRsForIssue(sourceIssue.repo, sourceIssue.issueNumber);
+  const linkedPR = linkedPRs.find((pr) => pr.state === "open" || pr.state === "merged");
+  if (linkedPR) {
+    log.info("Skipped cross-repo follow-up; source issue is already linked in a PR", {
+      sourceRef: task.source_ref,
+      repo: sourceIssue.repo,
+      issueNumber: sourceIssue.issueNumber,
+      linkedPR: linkedPR.number,
+      linkedPRState: linkedPR.state,
+      linkedPRUrl: linkedPR.url,
+    });
+    return true;
+  }
+
+  if (!isIssueOpen(sourceIssue.repo, sourceIssue.issueNumber)) {
+    log.info("Skipped cross-repo follow-up; source issue is closed", {
+      sourceRef: task.source_ref,
+      repo: sourceIssue.repo,
+      issueNumber: sourceIssue.issueNumber,
+    });
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Safely run `gh issue create` and parse the result URL.
  * Returns null on error (fail-open: don't block the parent task).
  */
@@ -296,6 +354,11 @@ export function detectAndCreateFollowUps(
   // Only fire for implementation tasks — research tasks mention many repos
   // in passing and should not trigger issue creation.
   if (task.task_type === "research") return [];
+
+  // Before creating any follow-ups, ensure the parent issue is still a live
+  // GitHub target. If the issue is already closed or linked in a PR, creating
+  // a fresh cross-repo issue would be stale and redundant.
+  if (shouldSkipFollowUps(task)) return [];
 
   // Only fire for tasks that completed successfully (status "done").
   // Called right after the store update, so caller ensures this.
