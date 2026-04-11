@@ -27,48 +27,33 @@ export class PlanExecutor {
   async execute(plan: Plan, parentTaskId: string): Promise<ExecutionResult> {
     const results = new Map<string, StepResult>();
     const stepResults: StepResult[] = [];
-    const layers = this.buildLayers(plan.steps);
-
-    for (const layer of layers) {
-      const layerPromises = layer.map(async (step) => {
-        const message = this.buildStepMessage(step, results);
-
-        // Create sub-task
-        const subTask = this.store.createSubTask({
-          parent_task_id: parentTaskId,
-          step_id: step.id,
-          title: `[${step.id}] ${step.task.slice(0, 80)}`,
-          description: step.task,
-          source: "manual",
-          agent_name: step.agent,
-        });
-
-        try {
-          const result = await this.dispatcher.dispatch(message, {
-            agentName: step.agent,
-            title: subTask.title,
-          });
-
-          const stepResult: StepResult = {
-            stepId: step.id,
-            taskId: result.taskId,
-            agentName: step.agent,
-            response: result.response,
-          };
-          results.set(step.id, stepResult);
-          return stepResult;
-        } catch (err) {
-          this.store.updateTask(subTask.id, { status: "failed", result: String(err) });
-          throw new StepError(step.id, step.agent, err instanceof Error ? err.message : String(err));
-        }
+    const { parallel, sequential } = this.normalizePlan(plan);
+    const parallelResults = await this.executeBatch(parallel, parentTaskId, results, true);
+    if (parallelResults instanceof StepError) {
+      this.store.updateTask(parentTaskId, {
+        status: "failed",
+        result: `Failed at ${parallelResults.stepId}: ${parallelResults.message}`,
       });
+      return {
+        parentTaskId,
+        stepResults,
+        status: "failed",
+        failedStep: parallelResults.stepId,
+        error: parallelResults.message,
+      };
+    }
+    stepResults.push(...parallelResults);
+    for (const stepResult of parallelResults) {
+      results.set(stepResult.stepId, stepResult);
+    }
 
+    for (const step of sequential) {
       try {
-        const layerResults = await Promise.all(layerPromises);
-        stepResults.push(...layerResults);
+        const stepResult = await this.executeStep(step, parentTaskId, results);
+        results.set(step.id, stepResult);
+        stepResults.push(stepResult);
       } catch (err) {
         if (err instanceof StepError) {
-          // Update parent task
           this.store.updateTask(parentTaskId, {
             status: "failed",
             result: `Failed at ${err.stepId}: ${err.message}`,
@@ -98,32 +83,55 @@ export class PlanExecutor {
     return { parentTaskId, stepResults, status: "done" };
   }
 
-  /** Group steps into parallel execution layers via topological sort. */
-  private buildLayers(steps: PlanStep[]): PlanStep[][] {
-    const layers: PlanStep[][] = [];
-    const completed = new Set<string>();
-    const remaining = new Map(steps.map((s) => [s.id, s]));
+  private normalizePlan(plan: Plan): { parallel: PlanStep[]; sequential: PlanStep[] } {
+    const steps = plan.steps ?? [];
+    const stepOrder = new Map(steps.map((step, index) => [step.id, index]));
+    const sortByPlanOrder = (items: PlanStep[]): PlanStep[] =>
+      [...items].sort((a, b) => (stepOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (stepOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER));
 
-    while (remaining.size > 0) {
-      const layer: PlanStep[] = [];
-      for (const [id, step] of remaining) {
-        if (step.depends_on.every((dep) => completed.has(dep))) {
-          layer.push(step);
-        }
-      }
-
-      if (layer.length === 0) {
-        throw new Error("Deadlock: no steps can execute (dependency cycle?)");
-      }
-
-      for (const step of layer) {
-        remaining.delete(step.id);
-        completed.add(step.id);
-      }
-      layers.push(layer);
+    if (steps.length > 0) {
+      return {
+        parallel: sortByPlanOrder(steps.filter((step) => step.depends_on.length === 0)),
+        sequential: sortByPlanOrder(steps.filter((step) => step.depends_on.length > 0)),
+      };
     }
 
-    return layers;
+    return {
+      parallel: sortByPlanOrder(plan.parallel ?? []),
+      sequential: sortByPlanOrder(plan.sequential ?? []),
+    };
+  }
+
+  private async executeBatch(
+    steps: PlanStep[],
+    parentTaskId: string,
+    results: Map<string, StepResult>,
+    parallel: boolean,
+  ): Promise<StepResult[] | StepError> {
+    if (steps.length === 0) return [];
+
+    const controller = parallel ? new AbortController() : null;
+    const promises = steps.map((step) =>
+      this.executeStep(step, parentTaskId, results, controller?.signal).catch((err) => {
+        if (controller && isAbortError(err)) {
+          return null;
+        }
+        if (controller && !controller.signal.aborted) {
+          controller.abort();
+        }
+        throw err;
+      }),
+    );
+
+    try {
+      const settled = await Promise.all(promises);
+      return settled.filter((step): step is StepResult => step !== null);
+    } catch (err) {
+      if (err instanceof StepError) {
+        return err;
+      }
+      throw err;
+    }
   }
 
   /** Build the message for a step, injecting context from completed dependencies. */
@@ -146,6 +154,37 @@ export class PlanExecutor {
 
     return `${contextParts.join("\n\n")}\n\n---\n\nYour task: ${step.task}`;
   }
+
+  private async executeStep(
+    step: PlanStep,
+    parentTaskId: string,
+    results: Map<string, StepResult>,
+    signal?: AbortSignal,
+  ): Promise<StepResult> {
+    const message = this.buildStepMessage(step, results);
+
+    try {
+      const result = await this.dispatcher.dispatch(message, {
+        agentName: step.agent,
+        title: `[${step.id}] ${step.task.slice(0, 80)}`,
+        parentTaskId,
+        stepId: step.id,
+        signal,
+      });
+
+      return {
+        stepId: step.id,
+        taskId: result.taskId,
+        agentName: step.agent,
+        response: result.response,
+      };
+    } catch (err) {
+      if (signal?.aborted && isAbortError(err)) {
+        throw err;
+      }
+      throw new StepError(step.id, step.agent, err instanceof Error ? err.message : String(err));
+    }
+  }
 }
 
 class StepError extends Error {
@@ -157,4 +196,8 @@ class StepError extends Error {
     super(message);
     this.name = "StepError";
   }
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && (err.name === "AbortError" || err.message.toLowerCase().includes("aborted"));
 }

@@ -66,15 +66,46 @@ async function handlePlanDispatch(
   console.log(chalk.dim("Planning...\n"));
 
   const plan = await dispatcher.planTask(message);
+  const parallel = plan.parallel ?? plan.steps.filter((step) => step.depends_on.length === 0);
+  const sequential = plan.sequential ?? plan.steps.filter((step) => step.depends_on.length > 0);
 
   // Display the plan
-  console.log(chalk.bold(`Plan: ${plan.is_multi_agent ? "multi-agent" : "single-agent"} (${plan.steps.length} step${plan.steps.length > 1 ? "s" : ""})\n`));
-  for (const step of plan.steps) {
-    const deps = step.depends_on.length > 0
-      ? chalk.dim(` (after ${step.depends_on.join(", ")})`)
-      : "";
-    console.log(`  ${chalk.cyan(step.id)} ${chalk.yellow(step.agent)}${deps}`);
-    console.log(`    ${step.task}\n`);
+  console.log(
+    chalk.bold(
+      `Plan: ${plan.is_multi_agent ? "multi-agent" : "single-agent"} (` +
+      `${parallel.length} parallel, ${sequential.length} sequential)\n`,
+    ),
+  );
+
+  if (parallel.length > 0) {
+    console.log(chalk.bold("Parallel batch"));
+    for (const step of parallel) {
+      console.log(`  ${chalk.cyan(step.id)} ${chalk.yellow(step.agent)}`);
+      console.log(`    ${step.task}\n`);
+    }
+  }
+
+  if (sequential.length > 0) {
+    console.log(chalk.bold("Sequential follow-up"));
+    for (const step of sequential) {
+      const deps = step.depends_on.length > 0
+        ? chalk.dim(` (after ${step.depends_on.join(", ")})`)
+        : "";
+      console.log(`  ${chalk.cyan(step.id)} ${chalk.yellow(step.agent)}${deps}`);
+      console.log(`    ${step.task}\n`);
+    }
+  }
+
+  if (parallel.length === 0 && sequential.length === 0) {
+    for (const step of plan.steps) {
+      const deps = step.depends_on.length > 0
+        ? chalk.dim(` (after ${step.depends_on.join(", ")})`)
+        : "";
+      console.log(`  ${chalk.cyan(step.id)} ${chalk.yellow(step.agent)}${deps}`);
+      console.log(`    ${step.task}\n`);
+    }
+  } else if (plan.steps.length > 0) {
+    console.log(chalk.dim(`Normalized execution order: ${plan.steps.map((step) => step.id).join(" -> ")}\n`));
   }
 
   if (opts.dryRun) {

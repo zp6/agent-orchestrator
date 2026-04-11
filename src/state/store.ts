@@ -894,14 +894,28 @@ export class StateStore {
     source_ref?: string;
     agent_name?: string;
     task_type?: TaskType;
+    parent_task_id?: string | null;
+    step_id?: string | null;
   }): Task {
     const now = new Date().toISOString();
     const id = ulid();
     const stmt = this.db.prepare(`
-      INSERT INTO tasks (id, title, description, source, source_ref, status, agent_name, task_type, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+      INSERT INTO tasks (id, title, description, source, source_ref, status, agent_name, parent_task_id, step_id, task_type, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
     `);
-    stmt.run(id, params.title, params.description ?? null, params.source, params.source_ref ?? null, params.agent_name ?? null, params.task_type ?? "implementation", now, now);
+    stmt.run(
+      id,
+      params.title,
+      params.description ?? null,
+      params.source,
+      params.source_ref ?? null,
+      params.agent_name ?? null,
+      params.parent_task_id ?? null,
+      params.step_id ?? null,
+      params.task_type ?? "implementation",
+      now,
+      now,
+    );
     return this.getTask(id)!;
   }
 
@@ -1040,13 +1054,14 @@ export class StateStore {
     source: TaskSource;
     agent_name: string;
   }): Task {
-    const now = new Date().toISOString();
-    const id = ulid();
-    this.db.prepare(`
-      INSERT INTO tasks (id, title, description, source, status, agent_name, parent_task_id, step_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
-    `).run(id, params.title, params.description, params.source, params.agent_name, params.parent_task_id, params.step_id, now, now);
-    return this.getTask(id)!;
+    return this.createTask({
+      title: params.title,
+      description: params.description,
+      source: params.source,
+      agent_name: params.agent_name,
+      parent_task_id: params.parent_task_id,
+      step_id: params.step_id,
+    });
   }
 
   getSubTasks(parentTaskId: string): Task[] {

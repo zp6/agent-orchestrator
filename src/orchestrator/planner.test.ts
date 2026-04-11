@@ -125,4 +125,28 @@ describe("Planner.validate (via plan parsing)", () => {
     };
     expect(() => (planner as any).validate(plan)).not.toThrow();
   });
+
+  it("rejects more than four parallel steps", () => {
+    const plan = {
+      id: "test",
+      original_task: "test",
+      is_multi_agent: true,
+      parallel: [
+        { id: "step-1", agent: "blog-articles", task: "A", depends_on: [] },
+        { id: "step-2", agent: "ravio-mcp", task: "B", depends_on: [] },
+        { id: "step-3", agent: "temporal", task: "C", depends_on: [] },
+        { id: "step-4", agent: "blog-articles", task: "D", depends_on: [] },
+        { id: "step-5", agent: "ravio-mcp", task: "E", depends_on: [] },
+      ],
+      sequential: [],
+      steps: [
+        { id: "step-1", agent: "blog-articles", task: "A", depends_on: [] },
+        { id: "step-2", agent: "ravio-mcp", task: "B", depends_on: [] },
+        { id: "step-3", agent: "temporal", task: "C", depends_on: [] },
+        { id: "step-4", agent: "blog-articles", task: "D", depends_on: [] },
+        { id: "step-5", agent: "ravio-mcp", task: "E", depends_on: [] },
+      ],
+    };
+    expect(() => (planner as any).validate(plan)).toThrow("maximum is 4");
+  });
 });

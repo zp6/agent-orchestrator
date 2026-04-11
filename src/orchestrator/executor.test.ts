@@ -135,6 +135,10 @@ describe("PlanExecutor", () => {
       id: "plan-4",
       original_task: "test",
       is_multi_agent: true,
+      parallel: [
+        { id: "step-1", agent: "agent-a", task: "Do A", depends_on: [] },
+      ],
+      sequential: [],
       steps: [
         { id: "step-1", agent: "agent-a", task: "Do A", depends_on: [] },
       ],
@@ -143,10 +147,20 @@ describe("PlanExecutor", () => {
     const parentTask = store.createTask({ title: "Parent", source: "manual" });
 
     const mockDispatcher = {
-      dispatch: vi.fn().mockResolvedValue({
-        taskId: "sub-task-1",
-        agentName: "agent-a",
-        response: mockResponse("Done"),
+      dispatch: vi.fn().mockImplementation(async (_msg: string, opts: any) => {
+        const child = store.createTask({
+          title: opts.title,
+          description: _msg,
+          source: "manual",
+          agent_name: opts.agentName,
+          parent_task_id: opts.parentTaskId,
+          step_id: opts.stepId,
+        });
+        return {
+          taskId: child.id,
+          agentName: opts.agentName,
+          response: mockResponse("Done"),
+        };
       }),
     } as unknown as Dispatcher;
 
@@ -158,6 +172,10 @@ describe("PlanExecutor", () => {
     expect(subTasks[0].step_id).toBe("step-1");
     expect(subTasks[0].agent_name).toBe("agent-a");
     expect(subTasks[0].parent_task_id).toBe(parentTask.id);
+    expect(mockDispatcher.dispatch.mock.calls[0][1]).toMatchObject({
+      parentTaskId: parentTask.id,
+      stepId: "step-1",
+    });
   });
 
   it("passes no context to steps without dependencies", async () => {

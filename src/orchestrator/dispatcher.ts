@@ -479,6 +479,10 @@ export class Dispatcher {
        * agent's compute is freed as soon as possible.
        */
       signal?: AbortSignal;
+      /** Optional parent task id when creating a child task record. */
+      parentTaskId?: string;
+      /** Optional step id when this dispatch is part of a plan execution. */
+      stepId?: string;
     },
   ): Promise<DispatchResult> {
     // Resolve agent
@@ -751,6 +755,8 @@ export class Dispatcher {
       source_ref: options?.sourceRef,
       agent_name: agentName,
       task_type: taskType,
+      parent_task_id: options?.parentTaskId,
+      step_id: options?.stepId,
     });
 
     // Update to dispatched

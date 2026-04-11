@@ -15,6 +15,8 @@ export interface Plan {
   id: string;
   original_task: string;
   is_multi_agent: boolean;
+  parallel?: PlanStep[];
+  sequential?: PlanStep[];
   steps: PlanStep[];
 }
 
@@ -55,64 +57,117 @@ export class Planner {
       )
       .join("\n");
 
-    return `You are a task planner for a multi-agent system. Analyze the given task and decide whether it needs one agent or multiple agents working together.
-
-Available agents:
-${agentList}
-
-Respond with ONLY a JSON object (no markdown, no code fences):
-{
-  "is_multi_agent": true/false,
-  "steps": [
-    {
-      "id": "step-1",
-      "agent": "<agent-name>",
-      "task": "<clear instruction for this agent>",
-      "depends_on": []
-    },
-    {
-      "id": "step-2",
-      "agent": "<agent-name>",
-      "task": "<instruction, may reference output from prior steps>",
-      "depends_on": ["step-1"]
-    }
-  ]
-}
-
-Rules:
-- For simple tasks that one agent can handle, set is_multi_agent to false with a single step.
-- For complex tasks, break them into discrete steps with clear dependencies.
-- Steps with no dependencies can run in parallel.
-- Each step's task should be self-contained and actionable.
-- Only use agent names from the list above.`;
+    return [
+      "You are a task planner for a multi-agent system. Analyze the given task and decide whether it needs one agent or multiple agents working together.",
+      "",
+      "Available agents:",
+      agentList,
+      "",
+      "Respond with ONLY a JSON object (no markdown, no code fences):",
+      "{",
+      '  "is_multi_agent": true/false,',
+      '  "parallel": [',
+      "    {",
+      '      "id": "step-1",',
+      '      "agent": "<agent-name>",',
+      '      "task": "<clear instruction for this agent>",',
+      '      "depends_on": []',
+      "    }",
+      "  ],",
+      '  "sequential": [',
+      "    {",
+      '      "id": "step-2",',
+      '      "agent": "<agent-name>",',
+      '      "task": "<instruction that runs after the parallel batch>",',
+      '      "depends_on": ["step-1"]',
+      "    }",
+      "  ]",
+      "}",
+      "",
+      "Rules:",
+      "- For simple tasks that one agent can handle, set is_multi_agent to false with a single step.",
+      "- For complex tasks, break them into a parallel batch plus any sequential follow-up steps.",
+      '- Put at most 4 independent steps in "parallel".',
+      '- Each item in "parallel" must have an empty "depends_on" array.',
+      '- "sequential" steps may depend on "parallel" results and/or earlier sequential steps.',
+      "- Each step's task should be self-contained and actionable.",
+      "- Only use agent names from the list above.",
+    ].join("\n");
   }
 
   private parseResponse(text: string, originalTask: string): Plan {
     const cleaned = text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim();
 
-    let parsed: { is_multi_agent: boolean; steps: PlanStep[] };
+    let parsed: {
+      is_multi_agent?: boolean;
+      parallel?: PlanStep[];
+      sequential?: PlanStep[];
+      steps?: PlanStep[];
+    };
     try {
       parsed = JSON.parse(cleaned);
     } catch {
       throw new Error(`Failed to parse planner response as JSON: ${cleaned.slice(0, 200)}`);
     }
 
-    if (!Array.isArray(parsed.steps) || parsed.steps.length === 0) {
+    const { parallel, sequential, steps } = this.normalizePlanShape(parsed);
+    if (parallel.length + sequential.length === 0) {
       throw new Error("Planner returned empty or invalid steps");
     }
 
+    const combined = [...parallel, ...sequential];
     return {
       id: ulid(),
       original_task: originalTask,
-      is_multi_agent: parsed.is_multi_agent ?? parsed.steps.length > 1,
-      steps: parsed.steps,
+      is_multi_agent: parsed.is_multi_agent ?? combined.length > 1,
+      parallel,
+      sequential,
+      steps: steps ?? this.topologicalSort(combined),
     };
   }
 
-  private validate(plan: Plan): void {
-    const stepIds = new Set(plan.steps.map((s) => s.id));
+  private normalizePlanShape(parsed: {
+    parallel?: PlanStep[];
+    sequential?: PlanStep[];
+    steps?: PlanStep[];
+  }): { parallel: PlanStep[]; sequential: PlanStep[]; steps?: PlanStep[] } {
+    if (Array.isArray(parsed.parallel) || Array.isArray(parsed.sequential)) {
+      const parallel = this.normalizeSteps(parsed.parallel ?? []);
+      const sequential = this.normalizeSteps(parsed.sequential ?? []);
+      return { parallel, sequential };
+    }
 
-    for (const step of plan.steps) {
+    const legacySteps = this.normalizeSteps(parsed.steps ?? []);
+    const parallel = legacySteps.filter((step) => step.depends_on.length === 0);
+    const sequential = legacySteps.filter((step) => step.depends_on.length > 0);
+    return { parallel, sequential };
+  }
+
+  private normalizeSteps(steps: PlanStep[]): PlanStep[] {
+    return steps.map((step) => ({
+      id: step.id,
+      agent: step.agent,
+      task: step.task,
+      depends_on: Array.from(new Set(step.depends_on ?? [])),
+    }));
+  }
+
+  private validate(plan: Plan): void {
+    const legacySteps = Array.isArray(plan.steps) && plan.steps.length > 0 ? plan.steps : [];
+    const parallel = Array.isArray(plan.parallel) && plan.parallel.length > 0
+      ? plan.parallel
+      : legacySteps.filter((step) => step.depends_on.length === 0);
+    const sequential = Array.isArray(plan.sequential) && plan.sequential.length > 0
+      ? plan.sequential
+      : legacySteps.filter((step) => step.depends_on.length > 0);
+    const allSteps = legacySteps.length > 0 ? legacySteps : [...parallel, ...sequential];
+    const stepIds = new Set(allSteps.map((s) => s.id));
+
+    if (parallel.length > 4) {
+      throw new Error(`Planner returned ${parallel.length} parallel steps; maximum is 4`);
+    }
+
+    for (const step of allSteps) {
       // Validate agent exists
       if (!this.config.agents[step.agent]) {
         throw new Error(
@@ -128,8 +183,14 @@ Rules:
       }
     }
 
+    for (const step of parallel) {
+      if (step.depends_on.length > 0) {
+        throw new Error(`Parallel step "${step.id}" cannot declare dependencies`);
+      }
+    }
+
     // Validate DAG (no cycles) via topological sort
-    this.topologicalSort(plan.steps);
+    this.topologicalSort(allSteps);
   }
 
   /** Returns steps in topological order. Throws if there's a cycle. */
