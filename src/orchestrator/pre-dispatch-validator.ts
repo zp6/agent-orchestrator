@@ -10,6 +10,7 @@ import {
   findApprovedPRForIssue,
   findBranchForIssue,
   findExistingPRsForIssue,
+  countOpenPRs,
   type LinkedPR,
 } from "../triggers/github.js";
 import { DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
@@ -67,6 +68,10 @@ function makeFailedResult(
     blockingPRNumber: null,
     checks: [...base.checks, { name, status: "failed", code, detail }],
   };
+}
+
+function resolveRepoPrCap(config: OrchestratorConfig, agentName: string): number {
+  return config.agents[agentName]?.max_open_prs ?? config.dispatch?.max_open_prs ?? 3;
 }
 
 /**
@@ -190,6 +195,49 @@ export function runGitHubPreDispatchValidation(params: {
     return failed;
   }
   checks.push(makePassedCheck("agent_availability", "agent_available", `agent "${agentName}" is available`));
+
+  const repoPrCap = resolveRepoPrCap(config, agentName);
+  if (repoPrCap > 0) {
+    const openPrCount = countOpenPRs(issue.repo);
+    if (openPrCount !== null) {
+      if (openPrCount >= repoPrCap) {
+        const failed = makeFailedResult(
+          base,
+          "repo_pr_capacity",
+          "repo_at_pr_capacity",
+          `repo ${issue.repo} already has ${openPrCount} open PR(s), which meets or exceeds the cap of ${repoPrCap}`,
+        );
+        store.addDispatchValidation({
+          source,
+          source_ref: sourceRef,
+          agent_name: agentName,
+          repo: issue.repo,
+          issue_number: issue.number,
+          outcome: failed.outcome,
+          failure_check: failed.failureCheck,
+          failure_code: failed.failureCode,
+          failure_reason: failed.failureReason,
+          checklist: failed.checks,
+        });
+        return failed;
+      }
+      checks.push(
+        makePassedCheck(
+          "repo_pr_capacity",
+          "within_pr_cap",
+          `repo ${issue.repo} has ${openPrCount} open PR(s), below cap ${repoPrCap}`,
+        ),
+      );
+    } else {
+      checks.push(
+        makeInfoCheck(
+          "repo_pr_capacity",
+          "open_pr_count_unavailable",
+          `could not determine open PR count for ${issue.repo}; continuing`,
+        ),
+      );
+    }
+  }
 
   const dupCheck = checkDuplicate(store, "github", sourceRef);
   const bypassableDuplicate =

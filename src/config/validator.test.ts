@@ -105,4 +105,19 @@ describe("validateConfig", () => {
     const errors = validateConfig(config);
     expect(errors.some((e) => e.path.includes("stale_timeout_ms"))).toBe(true);
   });
+
+  it("should catch negative dispatch.max_open_prs", () => {
+    const config = loadConfig(configPath);
+    config.dispatch = { max_open_prs: -1 };
+    const errors = validateConfig(config);
+    expect(errors.some((e) => e.path === "dispatch.max_open_prs")).toBe(true);
+  });
+
+  it("should catch negative agent.max_open_prs", () => {
+    const config = loadConfig(configPath);
+    const firstAgentName = Object.keys(config.agents)[0];
+    config.agents[firstAgentName].max_open_prs = -1;
+    const errors = validateConfig(config);
+    expect(errors.some((e) => e.path.includes("max_open_prs"))).toBe(true);
+  });
 });

@@ -236,6 +236,14 @@ export const CONFIG_CATALOG: readonly ConfigEntry[] = [
     category: "dispatch",
   },
   {
+    key: "dispatch.max_open_prs",
+    source: "agents.yaml",
+    type: "number",
+    default: "3",
+    description: "Maximum open PRs allowed per repo before dispatching more work.",
+    category: "dispatch",
+  },
+  {
     key: "dispatch.timeout_retry_max",
     source: "hardcoded",
     type: "number",
@@ -639,6 +647,14 @@ export const CONFIG_CATALOG: readonly ConfigEntry[] = [
     type: "number",
     default: "(unlimited)",
     description: "Maximum parallel tasks for this agent.",
+    category: "agent",
+  },
+  {
+    key: "agents.<name>.max_open_prs",
+    source: "agents.yaml",
+    type: "number",
+    default: "3 (inherits dispatch.max_open_prs)",
+    description: "Maximum open PRs allowed for this agent's repo before dispatching more work.",
     category: "agent",
   },
   {

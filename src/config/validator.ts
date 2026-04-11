@@ -159,6 +159,12 @@ export function validateConfig(config: OrchestratorConfig): ValidationError[] {
     requireNumberArray(raw, "retry.connection_error_delays_ms", errors);
   }
 
+  // ── Dispatch ────────────────────────────────────────────────────────────
+  if (config.dispatch) {
+    requirePositiveNumber(raw, "dispatch.max_open_prs", errors);
+    requireNumberArray(raw, "dispatch.retry_delays_ms", errors);
+  }
+
   // ── LLM ──────────────────────────────────────────────────────────────────
   if (config.llm) {
     requireEnum(raw, "llm.provider", ["auto", "claude", "codex"], errors);
@@ -209,6 +215,9 @@ export function validateConfig(config: OrchestratorConfig): ValidationError[] {
 
     if (agent.max_concurrent !== undefined) {
       requirePositiveNumber(raw, `${prefix}.max_concurrent`, errors);
+    }
+    if (agent.max_open_prs !== undefined) {
+      requirePositiveNumber(raw, `${prefix}.max_open_prs`, errors);
     }
     if (agent.stale_timeout_ms !== undefined) {
       requirePositiveNumber(raw, `${prefix}.stale_timeout_ms`, errors);
