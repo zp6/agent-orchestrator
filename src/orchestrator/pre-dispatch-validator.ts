@@ -13,6 +13,7 @@ import {
   type LinkedPR,
 } from "../triggers/github.js";
 import { DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
+import { assessConflictRisk, buildConflictHeatMap } from "./conflict-risk.js";
 
 export interface PreDispatchIssueRef {
   repo: string;
@@ -79,8 +80,12 @@ export function runGitHubPreDispatchValidation(params: {
   agentName: string;
   issue: PreDispatchIssueRef;
   allowDuplicateRecencyBypass?: boolean;
+  /** Issue title — used for conflict-risk fingerprinting. */
+  issueTitle?: string;
+  /** Issue body — used for conflict-risk fingerprinting. */
+  issueBody?: string;
 }): PreDispatchValidationResult {
-  const { config, store, source, agentName, issue, allowDuplicateRecencyBypass = false } = params;
+  const { config, store, source, agentName, issue, allowDuplicateRecencyBypass = false, issueTitle = "", issueBody = "" } = params;
   const sourceRef = `${issue.repo}#${issue.number}`;
   const checks: DispatchValidationCheck[] = [];
   const base = {
@@ -383,6 +388,91 @@ export function runGitHubPreDispatchValidation(params: {
       );
     } else {
       checks.push(makePassedCheck("branch_conflicts", "no_branch_conflict", `no blocking PR or branch conflict for ${sourceRef}`));
+    }
+  }
+
+  // ── Conflict-risk check ───────────────────────────────────────────────────
+  const conflictRiskEnabled = config.conflict_risk?.enabled !== false;
+  if (conflictRiskEnabled && (issueTitle || issueBody)) {
+    const blockThreshold = config.conflict_risk?.block_threshold ?? 0.5;
+    const warnThreshold = config.conflict_risk?.warn_threshold ?? 0.25;
+
+    try {
+      const risk = assessConflictRisk(issue.repo, issueTitle, issueBody);
+
+      // Persist the heat map snapshot so the dashboard can display it
+      try {
+        const heatMap = buildConflictHeatMap(issue.repo);
+        if (heatMap.length > 0) {
+          store.upsertConflictHeatMap(
+            issue.repo,
+            heatMap.map((e) => ({
+              filePath: e.filePath,
+              openPrCount: e.openPrCount,
+              prNumbers: e.prNumbers,
+              assessedAt: e.assessedAt,
+            })),
+          );
+        }
+      } catch {
+        // Heat map storage is best-effort — don't fail dispatch over it
+      }
+
+      if (risk.score >= blockThreshold) {
+        const hotSummary = risk.hotFiles.slice(0, 3).join(", ");
+        const prList = risk.overlappingPRs.join(", #");
+        const failed = makeFailedResult(
+          base,
+          "conflict_risk",
+          "conflict_risk_high",
+          `conflict-risk score ${(risk.score * 100).toFixed(0)}% >= threshold ${(blockThreshold * 100).toFixed(0)}%` +
+            (risk.overlappingPRs.length > 0 ? ` — overlaps with open PR(s): #${prList}` : "") +
+            (hotSummary ? `; hot files: ${hotSummary}` : ""),
+        );
+        store.addDispatchValidation({
+          source,
+          source_ref: sourceRef,
+          agent_name: agentName,
+          repo: issue.repo,
+          issue_number: issue.number,
+          outcome: failed.outcome,
+          failure_check: failed.failureCheck,
+          failure_code: failed.failureCode,
+          failure_reason: failed.failureReason,
+          checklist: failed.checks,
+        });
+        return failed;
+      }
+
+      if (risk.score >= warnThreshold) {
+        const prList = risk.overlappingPRs.join(", #");
+        checks.push(
+          makeInfoCheck(
+            "conflict_risk",
+            "conflict_risk_moderate",
+            `conflict-risk score ${(risk.score * 100).toFixed(0)}% is elevated` +
+              (risk.overlappingPRs.length > 0 ? ` — may overlap with open PR(s): #${prList}` : "") +
+              "; consider rebasing frequently",
+          ),
+        );
+      } else {
+        checks.push(
+          makePassedCheck(
+            "conflict_risk",
+            "conflict_risk_low",
+            `conflict-risk score ${(risk.score * 100).toFixed(0)}% is below warn threshold`,
+          ),
+        );
+      }
+    } catch {
+      // Conflict-risk check failure must not block dispatch
+      checks.push(
+        makeInfoCheck(
+          "conflict_risk",
+          "conflict_risk_unavailable",
+          "conflict-risk check skipped (could not fetch open PR files)",
+        ),
+      );
     }
   }
 

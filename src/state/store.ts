@@ -816,6 +816,7 @@ export class StateStore {
     this.runConfigReloadsMigration();
     this.runIssueCacheMigration();
     this.runLearnedRulesMigration();
+    this.runConflictHeatMapMigration();
   }
 
   private runPhase2Migration(): void {
@@ -4500,5 +4501,78 @@ export class StateStore {
 
   close(): void {
     this.db.close();
+  }
+
+  // ── Conflict heat map ─────────────────────────────────────────────────────
+
+  private runConflictHeatMapMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS conflict_heat_map (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        open_pr_count INTEGER NOT NULL DEFAULT 0,
+        pr_numbers_json TEXT NOT NULL DEFAULT '[]',
+        assessed_at TEXT NOT NULL,
+        UNIQUE(repo, file_path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_conflict_heat_map_repo ON conflict_heat_map(repo);
+      CREATE INDEX IF NOT EXISTS idx_conflict_heat_map_pr_count ON conflict_heat_map(repo, open_pr_count DESC);
+    `);
+  }
+
+  /**
+   * Upsert the conflict heat map for a repo.
+   *
+   * Replaces all existing entries for the repo with the new snapshot so the
+   * table always reflects the current state of open PRs.
+   */
+  upsertConflictHeatMap(
+    repo: string,
+    entries: Array<{ filePath: string; openPrCount: number; prNumbers: number[]; assessedAt: string }>,
+  ): void {
+    const tx = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM conflict_heat_map WHERE repo = ?").run(repo);
+      const insert = this.db.prepare(`
+        INSERT INTO conflict_heat_map (repo, file_path, open_pr_count, pr_numbers_json, assessed_at)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      for (const entry of entries) {
+        insert.run(repo, entry.filePath, entry.openPrCount, JSON.stringify(entry.prNumbers), entry.assessedAt);
+      }
+    });
+    tx();
+  }
+
+  /**
+   * Return the conflict heat map for a repo, sorted by PR count descending.
+   * Returns all repos when `repo` is omitted.
+   */
+  getConflictHeatMap(repo?: string): Array<{
+    repo: string;
+    filePath: string;
+    openPrCount: number;
+    prNumbers: number[];
+    assessedAt: string;
+  }> {
+    const rows = repo
+      ? (this.db
+          .prepare(
+            "SELECT repo, file_path, open_pr_count, pr_numbers_json, assessed_at FROM conflict_heat_map WHERE repo = ? ORDER BY open_pr_count DESC",
+          )
+          .all(repo) as Array<{ repo: string; file_path: string; open_pr_count: number; pr_numbers_json: string; assessed_at: string }>)
+      : (this.db
+          .prepare(
+            "SELECT repo, file_path, open_pr_count, pr_numbers_json, assessed_at FROM conflict_heat_map ORDER BY open_pr_count DESC",
+          )
+          .all() as Array<{ repo: string; file_path: string; open_pr_count: number; pr_numbers_json: string; assessed_at: string }>);
+
+    return rows.map((r) => ({
+      repo: r.repo,
+      filePath: r.file_path,
+      openPrCount: r.open_pr_count,
+      prNumbers: JSON.parse(r.pr_numbers_json) as number[],
+      assessedAt: r.assessed_at,
+    }));
   }
 }

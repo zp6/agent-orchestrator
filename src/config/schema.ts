@@ -270,6 +270,36 @@ export interface LLMConfig {
   task_providers?: Partial<Record<LLMTaskKind, "claude" | "codex" | "auto">>;
 }
 
+/**
+ * Configuration for the pre-dispatch conflict-risk scoring check.
+ *
+ * Before a task is dispatched, the orchestrator computes an overlap score
+ * between the issue's likely touched files and all open PRs' changed files.
+ * If the score exceeds `block_threshold`, dispatch is blocked (queued for
+ * a later cycle when the lane is clear).  If it exceeds `warn_threshold`
+ * only, the check passes with an informational annotation.
+ */
+export interface ConflictRiskConfig {
+  /**
+   * Set to false to disable the check entirely.
+   * Defaults to true.
+   */
+  enabled?: boolean;
+
+  /**
+   * Score above which dispatch is blocked (a "conflict-risk-high" gate failure).
+   * Value is a 0–1 fraction of the issue's fingerprint tokens that overlap with
+   * in-flight PR files.  Defaults to 0.5 (50 % overlap).
+   */
+  block_threshold?: number;
+
+  /**
+   * Score above which a warning annotation is added to the pre-dispatch
+   * checklist but dispatch still proceeds.  Defaults to 0.25.
+   */
+  warn_threshold?: number;
+}
+
 export interface PRReviewConfig {
   /**
    * Maximum number of pr-feedback dispatch rounds before the daemon stops
@@ -429,6 +459,7 @@ export interface OrchestratorConfig {
   providers?: Record<string, ProviderConfig>;
   verification?: VerificationConfig;
   pr_review?: PRReviewConfig;
+  conflict_risk?: ConflictRiskConfig;
   escalation?: EscalationConfig;
   retry?: RetryConfig;
   daemon?: DaemonConfig;
