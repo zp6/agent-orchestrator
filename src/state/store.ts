@@ -651,6 +651,27 @@ export interface AgentDailyTokenUsage {
   total_tokens: number;
 }
 
+export type FleetComparisonProvider = "claude" | "codex";
+
+export interface FleetComparisonEntry {
+  provider: FleetComparisonProvider;
+  label: string;
+  tasks_completed: number;
+  tasks_failed: number;
+  tasks_attempted: number;
+  success_rate: number | null;
+  avg_quality_score: number | null;
+  tokens_in: number;
+  tokens_out: number;
+  total_tokens: number;
+  records: number;
+}
+
+export interface FleetComparisonMetrics {
+  days: number;
+  rows: FleetComparisonEntry[];
+}
+
 /**
  * An atomic claim record written before any dispatch to prevent two agents
  * being dispatched to the same issue simultaneously (issue #539).
@@ -3593,6 +3614,132 @@ export class StateStore {
       GROUP BY date(recorded_at), agent_name, provider
       ORDER BY date ASC, total_tokens DESC
     `).all(days) as AgentDailyTokenUsage[];
+  }
+
+  private static inferFleet(agentName: string | null, provider: string | null): FleetComparisonProvider | null {
+    const lowerAgent = agentName?.toLowerCase() ?? "";
+    if (lowerAgent.startsWith("claude")) return "claude";
+    if (lowerAgent.startsWith("codex")) return "codex";
+
+    const lowerProvider = provider?.toLowerCase() ?? "";
+    if (lowerProvider === "anthropic" || lowerProvider === "claude") return "claude";
+    if (lowerProvider === "codex" || lowerProvider === "openai") return "codex";
+    return null;
+  }
+
+  /**
+   * Compare Claude and Codex fleets over a rolling time window.
+   *
+   * Tasks are grouped by agent-name prefix, and token usage is grouped by
+   * either agent-name prefix or provider label when agent names are absent.
+   */
+  getFleetComparison(days = 7): FleetComparisonMetrics {
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+    const taskRows = this.db.prepare(`
+      SELECT agent_name, status, quality_score, verification_status
+      FROM tasks
+      WHERE parent_task_id IS NULL
+        AND agent_name IS NOT NULL
+        AND created_at >= ?
+    `).all(since) as Array<{
+      agent_name: string;
+      status: string;
+      quality_score: number | null;
+      verification_status: VerificationStatus;
+    }>;
+
+    const tokenRows = this.db.prepare(`
+      SELECT provider, agent_name, tokens_in, tokens_out
+      FROM token_usage
+      WHERE recorded_at >= ?
+    `).all(since) as Array<{
+      provider: string;
+      agent_name: string | null;
+      tokens_in: number;
+      tokens_out: number;
+    }>;
+
+    const tokenSourceRows: Array<{
+      agent_name: string | null;
+      provider?: string | null;
+      tokens_in: number;
+      tokens_out: number;
+    }> =
+      tokenRows.length > 0
+        ? tokenRows.map((row) => ({
+            agent_name: row.agent_name,
+            provider: row.provider,
+            tokens_in: row.tokens_in,
+            tokens_out: row.tokens_out,
+          }))
+        : this.db.prepare(`
+            SELECT agent_name, tokens_in, tokens_out
+            FROM task_logs
+            WHERE (tokens_in > 0 OR tokens_out > 0)
+              AND created_at >= ?
+          `).all(since) as Array<{
+            agent_name: string | null;
+            tokens_in: number;
+            tokens_out: number;
+          }>;
+
+    type FleetComparisonAccumulator = FleetComparisonEntry & { quality_samples: number };
+    const baseRow = (provider: FleetComparisonProvider, label: string): FleetComparisonAccumulator => ({
+      provider,
+      label,
+      tasks_completed: 0,
+      tasks_failed: 0,
+      tasks_attempted: 0,
+      success_rate: null,
+      avg_quality_score: null,
+      tokens_in: 0,
+      tokens_out: 0,
+      total_tokens: 0,
+      records: 0,
+      quality_samples: 0,
+    });
+
+    const rowsByProvider = new Map<FleetComparisonProvider, FleetComparisonAccumulator>([
+      ["claude", baseRow("claude", "Claude")],
+      ["codex", baseRow("codex", "Codex")],
+    ]);
+
+    for (const task of taskRows) {
+      const provider = StateStore.inferFleet(task.agent_name, null);
+      if (!provider) continue;
+      const row = rowsByProvider.get(provider)!;
+      if (task.status === "done") row.tasks_completed += 1;
+      if (task.status === "failed") row.tasks_failed += 1;
+      if (task.verification_status !== null && task.quality_score !== null) {
+        row.quality_samples += 1;
+        row.avg_quality_score =
+          row.avg_quality_score === null
+            ? task.quality_score
+            : (row.avg_quality_score * (row.quality_samples - 1) + task.quality_score) / row.quality_samples;
+      }
+    }
+
+    for (const token of tokenSourceRows) {
+      const provider = StateStore.inferFleet(token.agent_name, token.provider ?? null);
+      if (!provider) continue;
+      const row = rowsByProvider.get(provider)!;
+      row.tokens_in += token.tokens_in;
+      row.tokens_out += token.tokens_out;
+      row.total_tokens += token.tokens_in + token.tokens_out;
+      row.records += 1;
+    }
+
+    return {
+      days,
+      rows: (["claude", "codex"] as const).map((provider) => {
+        const row = rowsByProvider.get(provider)!;
+        row.tasks_attempted = row.tasks_completed + row.tasks_failed;
+        row.success_rate = row.tasks_attempted > 0 ? row.tasks_completed / row.tasks_attempted : null;
+        const { quality_samples, ...rest } = row;
+        return rest;
+      }),
+    };
   }
 
   // ── Stuck issues ─────────────────────────────────────────────────────────

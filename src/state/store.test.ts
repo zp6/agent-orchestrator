@@ -138,6 +138,85 @@ describe("StateStore", () => {
       });
     });
 
+    it("builds a Claude vs Codex fleet comparison from token_usage rows", () => {
+      const claudeDone = store.createTask({ title: "Claude task 1", source: "manual", agent_name: "claude-agent-orchestrator" });
+      store.updateTask(claudeDone.id, { status: "done", verification_status: "approved", quality_score: 0.9 });
+
+      const claudeFailed = store.createTask({ title: "Claude task 2", source: "manual", agent_name: "claude-agent-orchestrator" });
+      store.updateTask(claudeFailed.id, { status: "failed", verification_status: "rejected", quality_score: 0.6 });
+
+      const codexDone1 = store.createTask({ title: "Codex task 1", source: "manual", agent_name: "codex-agent-orchestrator" });
+      store.updateTask(codexDone1.id, { status: "done", verification_status: "approved", quality_score: 0.8 });
+
+      const codexDone2 = store.createTask({ title: "Codex task 2", source: "manual", agent_name: "codex-agent-orchestrator" });
+      store.updateTask(codexDone2.id, { status: "done", verification_status: "approved", quality_score: 0.7 });
+
+      store.recordTokenUsage("claude", "claude-agent-orchestrator", 100, 50);
+      store.recordTokenUsage("openai", "codex-agent-orchestrator", 40, 10);
+
+      const comparison = store.getFleetComparison(7);
+      expect(comparison.days).toBe(7);
+      expect(comparison.rows).toHaveLength(2);
+
+      const claude = comparison.rows.find((row) => row.provider === "claude");
+      const codex = comparison.rows.find((row) => row.provider === "codex");
+
+      expect(claude).toMatchObject({
+        label: "Claude",
+        tasks_completed: 1,
+        tasks_failed: 1,
+        tasks_attempted: 2,
+        total_tokens: 150,
+        records: 1,
+      });
+      expect(claude?.success_rate).toBeCloseTo(0.5, 5);
+      expect(claude?.avg_quality_score).toBeCloseTo(0.75, 5);
+
+      expect(codex).toMatchObject({
+        label: "Codex",
+        tasks_completed: 2,
+        tasks_failed: 0,
+        tasks_attempted: 2,
+        total_tokens: 50,
+        records: 1,
+      });
+      expect(codex?.success_rate).toBeCloseTo(1, 5);
+      expect(codex?.avg_quality_score).toBeCloseTo(0.75, 5);
+    });
+
+    it("falls back to task_logs when token_usage is empty", () => {
+      const claudeDone = store.createTask({ title: "Claude task 1", source: "manual", agent_name: "claude-agent-orchestrator" });
+      store.updateTask(claudeDone.id, { status: "done", verification_status: "approved", quality_score: 0.9 });
+      store.addLog({
+        task_id: claudeDone.id,
+        direction: "from_agent",
+        agent_name: "claude-agent-orchestrator",
+        content: "done",
+        tokens_in: 12,
+        tokens_out: 8,
+      });
+
+      const codexDone = store.createTask({ title: "Codex task 1", source: "manual", agent_name: "codex-agent-orchestrator" });
+      store.updateTask(codexDone.id, { status: "done", verification_status: "approved", quality_score: 0.8 });
+      store.addLog({
+        task_id: codexDone.id,
+        direction: "from_agent",
+        agent_name: "codex-agent-orchestrator",
+        content: "done",
+        tokens_in: 5,
+        tokens_out: 5,
+      });
+
+      const comparison = store.getFleetComparison(7);
+      const claude = comparison.rows.find((row) => row.provider === "claude");
+      const codex = comparison.rows.find((row) => row.provider === "codex");
+
+      expect(claude?.total_tokens).toBe(20);
+      expect(claude?.records).toBe(1);
+      expect(codex?.total_tokens).toBe(10);
+      expect(codex?.records).toBe(1);
+    });
+
     it("returns detailed per-agent usage with cache metrics", () => {
       store.recordTokenUsage("claude", "claude-agent-orchestrator", 100, 40, 500, 250);
       store.recordTokenUsage("openai", "codex-agent-orchestrator", 200, 80);
