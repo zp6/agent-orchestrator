@@ -58,6 +58,17 @@ export interface PRReviewResult {
   comment: string;
   reason: string;
   /**
+   * Reviewer confidence in the decision, as a 0.0–1.0 float.
+   *
+   * - 1.0 — very confident (clear approval or obvious blocking bug)
+   * - 0.7 — reasonably confident (normal review)
+   * - 0.5 — borderline (uncertain about impact or risk)
+   * - < 0.7 — low confidence; supervisor should consider second-pass or spot-check
+   *
+   * Null when confidence is not available (e.g. conflict or parse failure paths).
+   */
+  confidence?: number | null;
+  /**
    * Set to true when escalation is due to unresolvable merge conflicts.
    * The orchestrator daemon uses this flag to decide when to auto-close a
    * persistently conflicting PR and re-dispatch the linked issue.
@@ -95,8 +106,15 @@ Respond with ONLY a JSON object (no markdown, no code fences):
 {
   "decision": "approve|request-changes|escalate",
   "comment": "Your review comment to post on the PR",
-  "reason": "Brief internal reason for the decision"
-}`;
+  "reason": "Brief internal reason for the decision",
+  "confidence": 0.0
+}
+
+The confidence field (required) is a 0.0-1.0 float reflecting your certainty:
+- 0.9-1.0: very confident (obvious approval or clear blocking bug)
+- 0.7-0.89: reasonably confident (standard review)
+- 0.5-0.69: borderline (uncertain about scope, impact, or correctness)
+- below 0.5: very uncertain (incomplete information, complex tradeoffs)`;
 
 // ── Issue number helpers ──────────────────────────────────────────────────────
 
@@ -554,6 +572,7 @@ export class PRReviewer {
         repo,
         prNumber,
         decision: result.decision,
+        confidence: result.confidence,
         reason: result.reason,
         branchStalenessHours: result.branchStalenessHours,
         redispatchCategory: result.redispatchCategory,
@@ -631,7 +650,7 @@ export class PRReviewer {
             prNumber,
             position: entry.position,
           });
-          this.store.recordPRReview(repo, prNumber, "approve");
+          this.store.recordPRReview(repo, prNumber, "approve", result.confidence ?? null);
         } catch (err) {
           this.log.error("Failed to approve/enqueue PR", {
             repo,
@@ -649,7 +668,7 @@ export class PRReviewer {
             { encoding: "utf-8", timeout: 30000 },
           );
           this.log.info("PR changes requested", { repo, prNumber });
-          this.store.recordPRReview(repo, prNumber, "request-changes");
+          this.store.recordPRReview(repo, prNumber, "request-changes", result.confidence ?? null);
         } catch (err) {
           this.log.error("Failed to request changes on PR", {
             repo,
@@ -686,7 +705,7 @@ export class PRReviewer {
             prNumber,
             reason: result.reason,
           });
-          this.store.recordPRReview(repo, prNumber, "escalate");
+          this.store.recordPRReview(repo, prNumber, "escalate", result.confidence ?? null);
         } catch (err) {
           this.log.error("Failed to escalate PR", {
             repo,
@@ -810,7 +829,7 @@ export class PRReviewer {
         "Auto-closed persistently conflicting PR and deleted branch",
         { repo, prNumber, branch, conflictCount },
       );
-      this.store.recordPRReview(repo, prNumber, "escalate");
+      this.store.recordPRReview(repo, prNumber, "escalate", null);
 
       // Track for conflict stats
       const repoKey = repo.split("/").pop() ?? repo;
@@ -1481,10 +1500,19 @@ export class PRReviewer {
           ? (parsed.decision as PRReviewResult["decision"])
           : "escalate";
         const comment = String(parsed.comment ?? "");
+        const rawConfidence = parsed.confidence;
+        const confidence =
+          typeof rawConfidence === "number" &&
+          Number.isFinite(rawConfidence) &&
+          rawConfidence >= 0 &&
+          rawConfidence <= 1
+            ? rawConfidence
+            : null;
         return {
           decision,
           comment: decision === "request-changes" ? enforceChecklist(comment) : comment,
           reason: String(parsed.reason ?? ""),
+          confidence,
         };
       } catch {
         continue;
@@ -1495,6 +1523,7 @@ export class PRReviewer {
       decision: "escalate",
       comment: "Could not parse review — escalating to human.",
       reason: "Parse failure",
+      confidence: null,
     };
   }
 }

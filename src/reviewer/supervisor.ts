@@ -15,7 +15,7 @@ import { createLLMClient } from "../client/llm-client.js";
 import { createNotifier } from "../notify.js";
 import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
-import type { IStateStore, Task, AgentHealth, SupervisorDecisionRecord } from "../state/types.js";
+import type { IStateStore, Task, AgentHealth, SupervisorDecisionRecord, PRConfidenceRecord } from "../state/types.js";
 import type { ConflictStats } from "./pr-reviewer.js";
 import {
   buildIssueAgeHeatmap,
@@ -31,6 +31,17 @@ import {
  */
 export interface ConflictStatsProvider {
   getConflictStats(): ConflictStats;
+}
+
+/**
+ * Minimal interface for providing recent PR review confidence scores.
+ * Satisfied by `StateStore.getRecentPRReviewConfidences()` or any stub in tests.
+ *
+ * Injected into the Supervisor so it can surface low-confidence approvals
+ * in its context without requiring new methods on the shared `IStateStore`.
+ */
+export interface PRConfidenceProvider {
+  getRecentPRReviewConfidences(limit: number): PRConfidenceRecord[];
 }
 
 export interface SupervisorDecision {
@@ -90,6 +101,12 @@ You have memory of your recent decisions in "## Recent Supervisor Decisions". Us
 - Avoid repeating actions that have already been taken (especially failed ones)
 - Track whether your dispatches produced results
 - Identify patterns of repeated failures and escalate to issue creation instead
+
+CONFIDENCE-AWARE REVIEW (when "## Recent PR Review Confidence" is present):
+- Each entry shows: PR#N decision(confidence), e.g. "PR#42 approve(0.65) ⚠️ low-conf"
+- Low-confidence approvals (< 0.7) are marked ⚠️ — these borderline PRs should not auto-merge silently
+- When you see ⚠️ low-conf approvals for an agent, consider: (a) dispatch a follow-up verify action for the task, or (b) note the pattern and create an issue if it recurs
+- Do NOT re-open merged PRs — only act on this signal for recently approved PRs that are still in the merge queue
 
 CONFLICT-AWARE DISPATCH (when "## Merge Conflict Stats" is present):
 - Repos with high stale-branch-nudge counts are conflict-prone — their agents need to rebase more often
@@ -318,17 +335,72 @@ export function formatConflictStatsSection(stats: ConflictStats): string[] {
   return lines;
 }
 
+/**
+ * Format the last N PR review records into human-readable supervisor context lines,
+ * grouped by agent (derived from the repo name in the agent config).
+ *
+ * Low-confidence approvals (confidence < 0.7) are flagged with ⚠️ so the
+ * supervisor can decide whether to do a second-pass review or flag for
+ * human spot-check rather than auto-merging immediately.
+ *
+ * Exported for unit testing.
+ */
+export function formatPRConfidenceSection(
+  records: PRConfidenceRecord[],
+  config: ReviewerConfig,
+): string[] {
+  if (records.length === 0) return [];
+
+  // Build a repo → agent name lookup from the config
+  const repoToAgent = new Map<string, string>();
+  for (const [name, agent] of Object.entries(config.agents)) {
+    if (agent.github) repoToAgent.set(agent.github, name);
+  }
+
+  // Group records by agent (fall back to the repo string if unmapped)
+  const byAgent = new Map<string, PRConfidenceRecord[]>();
+  for (const r of records) {
+    const agent = repoToAgent.get(r.repo) ?? r.repo;
+    if (!byAgent.has(agent)) byAgent.set(agent, []);
+    byAgent.get(agent)!.push(r);
+  }
+
+  const lines: string[] = [];
+  for (const [agent, agentRecords] of byAgent) {
+    // Show last 5 per agent
+    const last5 = agentRecords.slice(0, 5);
+    const summaryParts = last5.map((r) => {
+      const conf = r.confidence !== null && r.confidence !== undefined
+        ? r.confidence.toFixed(2)
+        : "n/a";
+      const lowConfFlag =
+        r.decision === "approve" &&
+        r.confidence !== null &&
+        r.confidence !== undefined &&
+        r.confidence < 0.7
+          ? " ⚠️ low-conf"
+          : "";
+      return `PR#${r.pr_number} ${r.decision}(${conf})${lowConfFlag}`;
+    });
+    lines.push(`- ${agent}: ${summaryParts.join(", ")}`);
+  }
+
+  return lines;
+}
+
 export class Supervisor {
   private log = createLogger("supervisor");
   private conflictStatsProvider?: ConflictStatsProvider;
+  private prConfidenceProvider?: PRConfidenceProvider;
   private notifier = createNotifier();
 
   constructor(
     private config: ReviewerConfig,
     private store: IStateStore,
-    opts: { conflictStatsProvider?: ConflictStatsProvider } = {},
+    opts: { conflictStatsProvider?: ConflictStatsProvider; prConfidenceProvider?: PRConfidenceProvider } = {},
   ) {
     this.conflictStatsProvider = opts.conflictStatsProvider;
+    this.prConfidenceProvider = opts.prConfidenceProvider;
   }
 
   async review(): Promise<SupervisorDecision[]> {
@@ -656,6 +728,17 @@ export class Supervisor {
       const conflictLines = formatConflictStatsSection(conflictStats);
       if (conflictLines.length > 0) {
         sections.push(`## Merge Conflict Stats\n${conflictLines.join("\n")}`);
+      }
+    }
+
+    // Recent PR review confidence scores (from PRConfidenceProvider)
+    if (this.prConfidenceProvider) {
+      const confidenceLines = formatPRConfidenceSection(
+        this.prConfidenceProvider.getRecentPRReviewConfidences(10),
+        this.config,
+      );
+      if (confidenceLines.length > 0) {
+        sections.push(`## Recent PR Review Confidence\n${confidenceLines.join("\n")}`);
       }
     }
 

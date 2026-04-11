@@ -20,6 +20,7 @@ import type {
   SupervisorDecisionRecord,
   SupervisorDecisionQuery,
   DispatchRequest,
+  PRConfidenceRecord,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -56,6 +57,7 @@ export class StateStore implements ITelegramStateStore {
         repo TEXT NOT NULL,
         pr_number INTEGER NOT NULL,
         decision TEXT NOT NULL,
+        confidence REAL,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
 
@@ -151,6 +153,13 @@ export class StateStore implements ITelegramStateStore {
     // Add rationale column to routing_decisions (idempotent).
     try {
       this.db.exec("ALTER TABLE routing_decisions ADD COLUMN rationale TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+
+    // Add confidence column to pr_reviews (idempotent — for existing databases)
+    try {
+      this.db.exec("ALTER TABLE pr_reviews ADD COLUMN confidence REAL");
     } catch {
       // Column already exists — ignore
     }
@@ -559,10 +568,27 @@ export class StateStore implements ITelegramStateStore {
 
   // ── PR review history ─────────────────────────────────────────────────────
 
-  recordPRReview(repo: string, prNumber: number, decision: string): void {
+  recordPRReview(repo: string, prNumber: number, decision: string, confidence?: number | null): void {
     this.db
-      .prepare("INSERT INTO pr_reviews (id, repo, pr_number, decision) VALUES (?, ?, ?, ?)")
-      .run(ulid(), repo, prNumber, decision);
+      .prepare(
+        "INSERT INTO pr_reviews (id, repo, pr_number, decision, confidence) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(ulid(), repo, prNumber, decision, confidence ?? null);
+  }
+
+  /**
+   * Return the most recent PR review records, ordered newest first.
+   * Used by the supervisor to surface recent confidence scores in its context.
+   */
+  getRecentPRReviewConfidences(limit: number = 10): PRConfidenceRecord[] {
+    return this.db
+      .prepare(
+        `SELECT repo, pr_number, decision, confidence, created_at
+           FROM pr_reviews
+          ORDER BY created_at DESC
+          LIMIT ?`,
+      )
+      .all(limit) as PRConfidenceRecord[];
   }
 
   // ── System flags (pause / resume / operator overrides) ───────────────────

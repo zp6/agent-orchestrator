@@ -17,6 +17,7 @@
 import { PRReviewer } from "../reviewer/pr-reviewer.js";
 import { Verifier } from "../reviewer/verifier.js";
 import { Supervisor } from "../reviewer/supervisor.js";
+import type { PRConfidenceProvider } from "../reviewer/supervisor.js";
 import { ImprovementDetector } from "../reviewer/improvement-detector.js";
 import { IssueCreator } from "../reviewer/issue-creator.js";
 import type { ReviewerConfig } from "../config.js";
@@ -60,10 +61,17 @@ export function createReviewerInstances(
   // for the supervisor (issue #44).
   const reviewer = new PRReviewer(config, store, { onAgentRestart: opts.onAgentRestart });
 
+  // Wire the store as a PRConfidenceProvider if it implements the method
+  // (the reviewer's own StateStore does; the orchestrator's StateStore may not).
+  const prConfidenceProvider: PRConfidenceProvider | undefined =
+    typeof (store as unknown as PRConfidenceProvider).getRecentPRReviewConfidences === "function"
+      ? (store as unknown as PRConfidenceProvider)
+      : undefined;
+
   return {
     reviewer,
     verifier: new Verifier(store),
-    supervisor: new Supervisor(config, store, { conflictStatsProvider: reviewer }),
+    supervisor: new Supervisor(config, store, { conflictStatsProvider: reviewer, prConfidenceProvider }),
     detector: new ImprovementDetector(config),
     issueCreator: new IssueCreator(config),
   };

@@ -177,6 +177,19 @@ export interface SystemFlag {
   updated_at: string;
 }
 
+/**
+ * A recent PR review record with its confidence score.
+ * Returned by `getRecentPRReviewConfidences()` for the supervisor context.
+ */
+export interface PRConfidenceRecord {
+  repo: string;
+  pr_number: number;
+  decision: string;
+  /** Reviewer confidence in the decision (0.0–1.0), or null if not recorded. */
+  confidence: number | null;
+  created_at: string;
+}
+
 /** A dispatch request inserted by the Telegram /dispatch command. */
 export interface DispatchRequest {
   id: string;
@@ -250,7 +263,7 @@ export interface IStateStore {
   removeFromMergeQueue(repo: string, prNumber: number): void;
 
   // PR review history
-  recordPRReview(repo: string, prNumber: number, decision: string): void;
+  recordPRReview(repo: string, prNumber: number, decision: string, confidence?: number | null): void;
 }
 
 /**

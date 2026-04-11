@@ -22,8 +22,8 @@ export type { PRInfo, PRReviewResult, RedispatchCategory, ConflictStats, CrossRe
 export { Verifier } from "./reviewer/verifier.js";
 export type { VerificationResult } from "./reviewer/verifier.js";
 
-export { Supervisor, extractIssueRefs, isDecisionAlreadyResolved, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo, formatConflictStatsSection } from "./reviewer/supervisor.js";
-export type { SupervisorDecision, ConflictStatsProvider } from "./reviewer/supervisor.js";
+export { Supervisor, extractIssueRefs, isDecisionAlreadyResolved, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo, formatConflictStatsSection, formatPRConfidenceSection } from "./reviewer/supervisor.js";
+export type { SupervisorDecision, ConflictStatsProvider, PRConfidenceProvider } from "./reviewer/supervisor.js";
 
 export {
   classifyIssueAge,
@@ -78,6 +78,7 @@ export type {
   SystemFlag,
   DispatchRequest,
   DispatchRationale,
+  PRConfidenceRecord,
 } from "./state/types.js";
 
 // Supervisor decision log — queryable log for orch CLI and dashboard consumers
