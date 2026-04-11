@@ -12,10 +12,18 @@
 
 import { execSync } from "node:child_process";
 import { createLLMClient } from "../client/llm-client.js";
+import { createNotifier } from "../notify.js";
 import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
 import type { IStateStore, Task, AgentHealth, SupervisorDecisionRecord } from "../state/types.js";
 import type { ConflictStats } from "./pr-reviewer.js";
+import {
+  buildIssueAgeHeatmap,
+  collectIssueAgeEscalations,
+  formatIssueAgeHeatmap,
+  hasRecentAgeDispatchDecision,
+  hasRecentAgeNudge,
+} from "./issue-age.js";
 
 /**
  * Minimal interface for providing conflict stats to the supervisor.
@@ -313,6 +321,7 @@ export function formatConflictStatsSection(stats: ConflictStats): string[] {
 export class Supervisor {
   private log = createLogger("supervisor");
   private conflictStatsProvider?: ConflictStatsProvider;
+  private notifier = createNotifier();
 
   constructor(
     private config: ReviewerConfig,
@@ -323,6 +332,7 @@ export class Supervisor {
   }
 
   async review(): Promise<SupervisorDecision[]> {
+    const ageEscalations = await this.applyAgeEscalations();
     const context = this.buildContext();
     const client = createLLMClient();
 
@@ -352,6 +362,8 @@ export class Supervisor {
 
       const decisions = this.parseDecisions(text);
       const validated = this.filterVagueDispatches(decisions);
+      const merged = this.mergeDecisions(ageEscalations, validated);
+      this.persistDecisions(merged);
 
       const dropped = decisions.length - validated.length;
       if (dropped > 0) {
@@ -359,16 +371,132 @@ export class Supervisor {
       }
 
       this.log.info("Supervisor review complete", {
-        decisions: validated.length,
-        actions: validated.map((d) => d.action),
+        decisions: merged.length,
+        actions: merged.map((d) => d.action),
       });
-      return validated;
+      return merged;
     } catch (err) {
       this.log.error("Supervisor review failed", {
         error: err instanceof Error ? err.message : String(err),
       });
-      return [];
+      this.persistDecisions(ageEscalations);
+      return ageEscalations;
     }
+  }
+
+  private mergeDecisions(base: SupervisorDecision[], extra: SupervisorDecision[]): SupervisorDecision[] {
+    const seen = new Set<string>();
+    const merged: SupervisorDecision[] = [];
+
+    for (const decision of [...base, ...extra]) {
+      const key = [
+        decision.action,
+        decision.agentName ?? "",
+        decision.taskId ?? "",
+        decision.message ?? "",
+        decision.reason,
+      ].join("|");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(decision);
+    }
+
+    return merged;
+  }
+
+  private persistDecisions(decisions: SupervisorDecision[]): void {
+    for (const decision of decisions) {
+      const reasoning = [decision.reason, decision.message ?? ""].join(" ").trim();
+      const issueRef = extractIssueRefs(reasoning).at(0);
+      const outcome =
+        decision.action === "none"
+          ? "none"
+          : decision.action === "age-nudge"
+            ? "notified"
+            : decision.action === "dispatch" || decision.action === "follow-up"
+              ? "dispatched"
+              : decision.action === "verify"
+                ? "queued"
+                : decision.action === "redeploy"
+                  ? "queued"
+                  : decision.action === "create-issue"
+                    ? "queued"
+                    : "pending";
+
+      this.store.recordSupervisorDecision(decision.action, decision.reason, {
+        agentName: decision.agentName,
+        taskId: decision.taskId,
+        outcome,
+        message: decision.message,
+        issueRef: issueRef ? `#${issueRef}` : undefined,
+      });
+    }
+  }
+
+  private async applyAgeEscalations(): Promise<SupervisorDecision[]> {
+    const nowMs = Date.now();
+    const tasks = this.store.listTasks({ limit: 500 });
+    const recentDecisions = this.store.querySupervisorDecisions({ limit: 100 });
+    const candidates = collectIssueAgeEscalations(tasks, recentDecisions, nowMs);
+    const decisions: SupervisorDecision[] = [];
+
+    for (const candidate of candidates) {
+      const task = tasks.find((entry) => entry.id === candidate.taskId);
+      if (!task) continue;
+
+      if (candidate.shouldNudge && !hasRecentAgeNudge(task, recentDecisions, nowMs)) {
+        const issueLabel = candidate.issueRef ?? task.id.slice(0, 8);
+        const subject = `Issue age escalation: ${issueLabel}`;
+        const body = [
+          `Task \`${task.id.slice(0, 8)}\` has been open for ${candidate.ageDays}d without a dispatch attempt.`,
+          ``,
+          `*Task:* ${task.title}`,
+          `*Agent:* ${task.agent_name ?? "unassigned"}`,
+          `*Bucket:* ${candidate.bucket}`,
+          `*Age:* ${candidate.ageDays}d`,
+          `*Dispatch attempts:* ${candidate.dispatchAttempts}`,
+        ].join("\n");
+
+        if (this.notifier.isConfigured()) {
+          await this.notifier.notifyOperator(subject, body, "medium");
+          this.store.recordSupervisorDecision(
+            "age-nudge",
+            `Telegram nudge sent for ${issueLabel} after ${candidate.ageDays}d without dispatch attempt`,
+            {
+              taskId: task.id,
+              issueRef: candidate.issueRef ?? undefined,
+              outcome: "notified",
+              message: candidate.title,
+            },
+          );
+        } else {
+          this.log.warn("Age escalation nudge skipped: Telegram not configured", {
+            taskId: task.id,
+            issueRef: candidate.issueRef,
+          });
+        }
+      }
+
+      if (candidate.shouldForceDispatch && !hasRecentAgeDispatchDecision(task, recentDecisions, nowMs)) {
+        if (!task.agent_name) {
+          this.log.warn("Age escalation dispatch skipped: task has no agent target", {
+            taskId: task.id,
+            issueRef: candidate.issueRef,
+          });
+          continue;
+        }
+
+        decisions.push({
+          action: "dispatch",
+          agentName: task.agent_name,
+          taskId: task.id,
+          message: `Implement issue ${candidate.issueRef ?? task.id.slice(0, 8)}: ${task.title}`,
+          reason: "dispatched due to age escalation",
+        });
+      }
+    }
+
+    return decisions;
   }
 
   /**
@@ -456,6 +584,14 @@ export class Supervisor {
     const openIssues = this.fetchOpenIssues();
     if (openIssues.length > 0) {
       sections.push(`## Open Issues\n${openIssues.join("\n")}`);
+    }
+
+    const heatmap = buildIssueAgeHeatmap(
+      this.store.listTasks({ limit: 500 }),
+      this.store.querySupervisorDecisions({ limit: 100 }),
+    );
+    if (heatmap.total > 0) {
+      sections.push(`## Issue Age Heatmap\n${formatIssueAgeHeatmap(heatmap).join("\n")}`);
     }
 
     // Recent completed tasks

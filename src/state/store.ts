@@ -80,6 +80,16 @@ export class StateStore implements ITelegramStateStore {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
 
+      CREATE TABLE IF NOT EXISTS routing_decisions (
+        id TEXT PRIMARY KEY,
+        action TEXT NOT NULL,
+        agent_name TEXT,
+        task_id TEXT,
+        reason TEXT NOT NULL,
+        outcome TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
       CREATE TABLE IF NOT EXISTS system_flags (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
@@ -124,11 +134,50 @@ export class StateStore implements ITelegramStateStore {
       // Column already exists — ignore
     }
 
+    // Add message column to routing_decisions (idempotent).
+    try {
+      this.db.exec("ALTER TABLE routing_decisions ADD COLUMN message TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+
+    // Add issue_ref column to routing_decisions (idempotent).
+    try {
+      this.db.exec("ALTER TABLE routing_decisions ADD COLUMN issue_ref TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+
+    // Add rationale column to routing_decisions (idempotent).
+    try {
+      this.db.exec("ALTER TABLE routing_decisions ADD COLUMN rationale TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+
     // Create index for efficient time-ordered lookups (idempotent)
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_supervisor_decisions_created_at
         ON supervisor_decisions (created_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_routing_decisions_created_at
+        ON routing_decisions (created_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_routing_decisions_agent_outcome_created_at
+        ON routing_decisions (agent_name, outcome, created_at DESC);
     `);
+
+    // Backfill existing supervisor decision rows into the routing audit table.
+    try {
+      this.db.exec(`
+        INSERT OR IGNORE INTO routing_decisions
+          (id, action, agent_name, task_id, reason, outcome, created_at, message, issue_ref, rationale)
+        SELECT id, action, agent_name, task_id, reason, outcome, created_at, message, issue_ref, rationale
+        FROM supervisor_decisions;
+      `);
+    } catch {
+      // Older databases may not have all columns yet; leave them untouched.
+    }
   }
 
   // ── Task operations ──────────────────────────────────────────────────────
@@ -340,12 +389,17 @@ export class StateStore implements ITelegramStateStore {
   // ── Supervisor memory ─────────────────────────────────────────────────────
 
   getRecentSupervisorDecisions(limit: number): SupervisorDecisionRecord[] {
-    return this.db
-      .prepare("SELECT * FROM supervisor_decisions ORDER BY created_at DESC LIMIT ?")
-      .all(limit) as SupervisorDecisionRecord[];
+    return this.queryDecisions("routing_decisions", { limit });
   }
 
   querySupervisorDecisions(opts: SupervisorDecisionQuery): SupervisorDecisionRecord[] {
+    return this.queryDecisions("routing_decisions", opts);
+  }
+
+  private queryDecisions(
+    tableName: "routing_decisions" | "supervisor_decisions",
+    opts: SupervisorDecisionQuery,
+  ): SupervisorDecisionRecord[] {
     const conditions: string[] = [];
     const params: Record<string, unknown> = {};
 
@@ -357,6 +411,10 @@ export class StateStore implements ITelegramStateStore {
       conditions.push("agent_name = @agentName");
       params.agentName = opts.agentName;
     }
+    if (opts.outcome) {
+      conditions.push("outcome = @outcome");
+      params.outcome = opts.outcome;
+    }
     if (opts.since) {
       conditions.push("created_at > @since");
       params.since = opts.since;
@@ -365,16 +423,34 @@ export class StateStore implements ITelegramStateStore {
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     const limit = Math.min(opts.limit ?? 20, 100);
 
-    return this.db
-      .prepare(`SELECT * FROM supervisor_decisions ${where} ORDER BY created_at DESC LIMIT ${limit}`)
-      .all(params) as SupervisorDecisionRecord[];
+    try {
+      return this.db
+        .prepare(`SELECT * FROM ${tableName} ${where} ORDER BY created_at DESC LIMIT ${limit}`)
+        .all(params) as SupervisorDecisionRecord[];
+    } catch {
+      if (tableName === "supervisor_decisions") {
+        return [];
+      }
+      return this.queryDecisions("supervisor_decisions", opts);
+    }
   }
 
   pruneOldSupervisorDecisions(daysOld: number = 7): number {
-    const result = this.db
-      .prepare("DELETE FROM supervisor_decisions WHERE created_at < datetime('now', ?)")
-      .run(`-${daysOld} days`);
-    return result.changes;
+    const statements = [
+      "DELETE FROM routing_decisions WHERE created_at < datetime('now', ?)",
+      "DELETE FROM supervisor_decisions WHERE created_at < datetime('now', ?)",
+    ];
+
+    let total = 0;
+    for (const statement of statements) {
+      try {
+        const result = this.db.prepare(statement).run(`-${daysOld} days`);
+        total += result.changes;
+      } catch {
+        // Ignore missing legacy tables on older databases.
+      }
+    }
+    return total;
   }
 
   recordSupervisorDecision(
@@ -390,23 +466,40 @@ export class StateStore implements ITelegramStateStore {
       rationale?: string;
     } = {},
   ): void {
-    this.db
-      .prepare(
-        `INSERT INTO supervisor_decisions
-           (id, action, agent_name, task_id, reason, outcome, message, issue_ref, rationale)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        ulid(),
-        action,
-        opts.agentName ?? null,
-        opts.taskId ?? null,
-        reason,
-        opts.outcome ?? "pending",
-        opts.message ?? null,
-        opts.issueRef ?? null,
-        opts.rationale ?? null,
-      );
+    const params = [
+      ulid(),
+      action,
+      opts.agentName ?? null,
+      opts.taskId ?? null,
+      reason,
+      opts.outcome ?? "pending",
+      opts.message ?? null,
+      opts.issueRef ?? null,
+      opts.rationale ?? null,
+    ] as const;
+
+    const insert = this.db.prepare(
+      `INSERT INTO supervisor_decisions
+         (id, action, agent_name, task_id, reason, outcome, message, issue_ref, rationale)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const routingInsert = this.db.prepare(
+      `INSERT INTO routing_decisions
+         (id, action, agent_name, task_id, reason, outcome, message, issue_ref, rationale)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+
+    const tx = this.db.transaction(() => {
+      insert.run(...params);
+      routingInsert.run(...params);
+    });
+
+    try {
+      tx();
+    } catch {
+      // Fall back to the legacy table if the routing table is unavailable.
+      insert.run(...params);
+    }
   }
 
   // ── PR merge queue ────────────────────────────────────────────────────────

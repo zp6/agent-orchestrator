@@ -90,6 +90,8 @@ export interface SupervisorDecisionQuery {
   action?: string;
   /** Filter to decisions for a specific agent. */
   agentName?: string;
+  /** Filter to decisions with a specific outcome (e.g. "dispatched", "escalated"). */
+  outcome?: string;
   /** Return only decisions created after this ISO-8601 timestamp. */
   since?: string;
 }

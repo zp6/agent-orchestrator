@@ -72,6 +72,25 @@ describe("querySupervisorLog", () => {
     const result = querySupervisorLog(store);
     expect(result).toHaveLength(0);
   });
+
+  it("forwards outcome filters to the store", () => {
+    let capturedOpts: SupervisorDecisionQuery | undefined;
+    const store = {
+      ...makeStore(SAMPLE_DECISIONS),
+      querySupervisorDecisions: (opts: SupervisorDecisionQuery) => {
+        capturedOpts = opts;
+        return SAMPLE_DECISIONS;
+      },
+    } as IStateStore;
+
+    querySupervisorLog(store, { limit: 5, agentName: "claude-proxy", outcome: "dispatched" });
+
+    expect(capturedOpts).toMatchObject({
+      limit: 5,
+      agentName: "claude-proxy",
+      outcome: "dispatched",
+    });
+  });
 });
 
 describe("formatSupervisorLogForCLI", () => {

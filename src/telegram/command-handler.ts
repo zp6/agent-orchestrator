@@ -8,6 +8,8 @@
  *   /resume      → writes paused=false flag to system_flags
  *   /dispatch <agent> <instruction...>  → inserts dispatch_request row for orchestrator
  *   /prioritize <item>     → bumps priority on matching task row
+ *   /ack|/dismiss|/resolve [target] → clears escalated task(s) back to pending
+ *   /deescalate [target]   → alias for /resolve
  *   /queue [repo]          → shows PR merge queue entries, optionally filtered by repo
  *   /logs [n]    → last N supervisor decisions (default 10), newest first
  *   /supervisor [n]  → last N supervisor decisions with full detail (default 10)
@@ -21,8 +23,9 @@
  */
 
 import { createLogger } from "../service/logger.js";
-import type { ITelegramStateStore } from "../state/types.js";
+import type { ITelegramStateStore, Task } from "../state/types.js";
 import type { ConflictStatsProvider } from "../reviewer/supervisor.js";
+import { buildIssueAgeHeatmap, formatIssueAgeHeatmap } from "../reviewer/issue-age.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
 const log = createLogger("telegram-commands");
@@ -45,7 +48,23 @@ interface TelegramGetUpdatesResponse {
 
 // ── Supported commands ────────────────────────────────────────────────────
 
-type CommandName = "status" | "health" | "pause" | "resume" | "dispatch" | "prioritize" | "queue" | "logs" | "supervisor" | "agents" | "s";
+type CommandName =
+  | "status"
+  | "health"
+  | "pause"
+  | "resume"
+  | "dispatch"
+  | "prioritize"
+  | "ack"
+  | "dismiss"
+  | "resolve"
+  | "deescalate"
+  | "de-escalate"
+  | "queue"
+  | "logs"
+  | "supervisor"
+  | "agents"
+  | "s";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -54,6 +73,11 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "resume",
   "dispatch",
   "prioritize",
+  "ack",
+  "dismiss",
+  "resolve",
+  "deescalate",
+  "de-escalate",
   "queue",
   "logs",
   "supervisor",
@@ -205,6 +229,13 @@ async function executeCommand(
       return `❌ No task found matching \`${item}\`. Use an ID prefix or a word from the title.`;
     }
 
+    case "ack":
+    case "dismiss":
+    case "resolve":
+    case "deescalate":
+    case "de-escalate":
+      return handleDeescalation(store, cmd.command, cmd.args.join(" ").trim());
+
     case "queue": {
       const repo = cmd.args[0]?.trim() || undefined;
       return handleQueue(store, repo);
@@ -233,11 +264,13 @@ async function executeCommand(
 async function handleStatus(store: ITelegramStateStore): Promise<string> {
   const active = store.listTasks({ status: "in_progress" });
   const dispatched = store.listTasks({ status: "dispatched" });
+  const escalated = store.listTasks({ status: "escalated", limit: 100 });
   const pendingVerification = store.getUnverified(5);
   const recentDone = store.getRecentCompleted(3);
   const recentFailed = store.listTasks({ status: "failed", limit: 3 });
   const isPaused = store.getSystemFlag("paused") === "true";
   const pendingDispatch = store.getPendingDispatchRequests();
+  const heatmap = buildIssueAgeHeatmap(store.listTasks({ limit: 500 }));
 
   const lines: string[] = [
     `📊 *System Status*`,
@@ -248,6 +281,25 @@ async function handleStatus(store: ITelegramStateStore): Promise<string> {
   if (active.length > 0 || dispatched.length > 0) {
     for (const t of [...active, ...dispatched].slice(0, 5)) {
       lines.push(`  • \`${t.id.slice(0, 8)}\` ${t.title.slice(0, 40)} _(${t.agent_name ?? "unassigned"})_`);
+    }
+  }
+
+  lines.push(``, `🚨 Escalated tasks: ${escalated.length}`);
+  if (escalated.length > 0) {
+    for (const t of escalated.slice(0, 5)) {
+      lines.push(`  • \`${t.id.slice(0, 8)}\` ${t.title.slice(0, 40)} _(${t.agent_name ?? "unassigned"})_`);
+    }
+  }
+
+  if (heatmap.total > 0) {
+    lines.push(``, ...formatIssueAgeHeatmap(heatmap));
+    const stale = heatmap.buckets.find((bucket) => bucket.bucket === "30d+");
+    if (stale && stale.tasks.length > 0) {
+      lines.push(`  *Oldest:*`);
+      for (const task of stale.tasks.slice(0, 5)) {
+        const issueRef = task.issueRef ? ` · ${task.issueRef}` : "";
+        lines.push(`    • \`${task.taskId.slice(0, 8)}\` ${task.title.slice(0, 36)}${issueRef}`);
+      }
     }
   }
 
@@ -275,6 +327,84 @@ async function handleStatus(store: ITelegramStateStore): Promise<string> {
   lines.push(``, isPaused ? `⏸ Poll loop: *PAUSED*` : `▶️ Poll loop: *running*`);
 
   return lines.join("\n");
+}
+
+function getEscalatedTasks(store: ITelegramStateStore): Task[] {
+  return store.listTasks({ status: "escalated", limit: 100 });
+}
+
+function matchesTaskTarget(task: Task, rawTarget: string): boolean {
+  const target = rawTarget.trim().toLowerCase();
+  if (!target || target === "all") return true;
+
+  const taskId = task.id.toLowerCase();
+  if (taskId.startsWith(target)) return true;
+
+  const title = task.title.toLowerCase();
+  if (title.includes(target)) return true;
+
+  const sourceRef = task.source_ref?.toLowerCase();
+  if (sourceRef) {
+    if (sourceRef === target || sourceRef.includes(target)) return true;
+  }
+
+  const source = task.source?.toLowerCase();
+  if (source && source.includes(target)) return true;
+
+  const needle = target.startsWith("#") ? target : `#${target}`;
+  const haystacks = [task.description, task.result].filter((value): value is string => typeof value === "string");
+  if (haystacks.some((value) => value.toLowerCase().includes(target))) return true;
+
+  if (task.source_ref?.toLowerCase().includes(needle)) return true;
+  return task.title.toLowerCase().includes(needle);
+}
+
+function summarizeTask(task: Task): string {
+  const sourceRef = task.source_ref ? ` · ${task.source_ref}` : "";
+  const agent = task.agent_name ? ` (${task.agent_name})` : "";
+  return `\`${task.id.slice(0, 8)}\`${agent} ${task.title.slice(0, 48)}${sourceRef}`;
+}
+
+function handleDeescalation(
+  store: ITelegramStateStore,
+  command: "ack" | "dismiss" | "resolve" | "deescalate" | "de-escalate",
+  targetRaw: string,
+): string {
+  const target = targetRaw.trim() || "all";
+  const escalated = getEscalatedTasks(store);
+  const matched =
+    target.toLowerCase() === "all"
+      ? escalated
+      : escalated.filter((task) => matchesTaskTarget(task, target));
+
+  if (matched.length === 0) {
+    return target.toLowerCase() === "all"
+      ? "ℹ️ No escalated tasks are currently active."
+      : `ℹ️ No escalated tasks matched \`${target}\`.`;
+  }
+
+  for (const task of matched) {
+    store.updateTask(task.id, { status: "pending" });
+  }
+
+  const reason = `Telegram /${command} de-escalated ${matched.length} task(s)${target.toLowerCase() === "all" ? "" : ` for ${target}`}`;
+  store.recordSupervisorDecision(command, reason, {
+    taskId: matched.length === 1 ? matched[0].id : undefined,
+    outcome: "de-escalated",
+    message: target.toLowerCase() === "all" ? "all escalated tasks" : target,
+  });
+
+  const preview = matched.slice(0, 5).map((task) => `  • ${summarizeTask(task)}`).join("\n");
+  const more = matched.length > 5 ? `\n  • ...and ${matched.length - 5} more` : "";
+
+  return [
+    `✅ *De-escalated* ${matched.length} task${matched.length === 1 ? "" : "s"}`,
+    ``,
+    `Returned to *pending* queue.`,
+    `Target: \`${target}\``,
+    ``,
+    preview + more,
+  ].join("\n");
 }
 
 async function handleHealth(

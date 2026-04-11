@@ -25,6 +25,24 @@ export type { VerificationResult } from "./reviewer/verifier.js";
 export { Supervisor, extractIssueRefs, isDecisionAlreadyResolved, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo, formatConflictStatsSection } from "./reviewer/supervisor.js";
 export type { SupervisorDecision, ConflictStatsProvider } from "./reviewer/supervisor.js";
 
+export {
+  classifyIssueAge,
+  buildIssueAgeEntry,
+  buildIssueAgeHeatmap,
+  collectIssueAgeEscalations,
+  formatIssueAgeHeatmap,
+  hasRecentAgeNudge,
+  hasRecentAgeDispatchDecision,
+} from "./reviewer/issue-age.js";
+export type {
+  IssueAgeBucket,
+  IssueAgeSeverity,
+  IssueAgeEntry,
+  IssueAgeBucketSummary,
+  IssueAgeHeatmap,
+  IssueAgeEscalationCandidate,
+} from "./reviewer/issue-age.js";
+
 export { ImprovementDetector } from "./reviewer/improvement-detector.js";
 export type { DetectedImprovement } from "./reviewer/improvement-detector.js";
 
