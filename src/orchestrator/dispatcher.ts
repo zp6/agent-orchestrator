@@ -12,6 +12,7 @@ import { cachedValidateForDispatch } from "../triggers/issue-state-bridge.js";
 import { checkDuplicate } from "../triggers/duplicate-guard.js";
 import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
 import { buildRejectionHistoryBlock } from "./rejection-history.js";
+import { getAndApplyRules } from "./learned-rules.js";
 import { notifyOperator } from "../service/notify.js";
 import { resolveAgentBudget } from "../cli/commands/budget.js";
 import {
@@ -776,6 +777,30 @@ export class Dispatcher {
           priorAttemptCount: priorAttempts.length,
         });
         messageToSend = messageToSend + rejectionBlock;
+      }
+    }
+
+    // Inject per-repo learned rules (conventions from prior PR reviews)
+    const sourceRepo = options?.sourceRef
+      ? extractRepoFromSourceRef(options.sourceRef)
+      : this.config.agents[agentName]?.github;
+    if (sourceRepo) {
+      const { block: rulesBlock, ruleIds } = getAndApplyRules(this.store, sourceRepo);
+      if (rulesBlock) {
+        this.log.info("Injecting learned rules into dispatch", {
+          taskId: task.id,
+          agentName,
+          repo: sourceRepo,
+          ruleCount: ruleIds.length,
+        });
+        messageToSend = messageToSend + rulesBlock;
+        // Log the applied rule IDs for later confidence tracking
+        this.store.addLog({
+          task_id: task.id,
+          direction: "system",
+          agent_name: agentName,
+          content: `[learned-rules] Applied rule IDs: ${ruleIds.join(",")}`,
+        });
       }
     }
 

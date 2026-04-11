@@ -12,6 +12,8 @@ import { createLogger } from "./logger.js";
 import { notifyOperator } from "./notify.js";
 import { cachedGetIssueState, liveValidateForDispatch } from "../triggers/issue-state-bridge.js";
 import { loadGoals, measureGoalProgress, buildGoalsContext } from "../orchestrator/goals.js";
+import { extractAndStoreRules } from "../orchestrator/learned-rules.js";
+import { extractRepoFromSourceRef } from "../orchestrator/dispatcher.js";
 
 const verifierLog = createLogger("verifier");
 const supervisorLog = createLogger("supervisor");
@@ -71,6 +73,35 @@ export async function verifyTask(
       quality_score: result.score,
       verification_notes: result.notes,
     });
+
+    // Cross-task learning: extract rules from reviewer feedback
+    const feedbackText = result.revision || result.notes;
+    if (feedbackText && !result.approved) {
+      const repo = extractRepoFromSourceRef(task.source_ref);
+      if (repo) {
+        const extractedRules = extractAndStoreRules(
+          store,
+          repo,
+          feedbackText,
+          `Task ${taskId} verification feedback`,
+          taskId,
+        );
+        if (extractedRules.length > 0) {
+          verifierLog.info("Extracted learned rules from verification feedback", {
+            taskId,
+            repo,
+            ruleCount: extractedRules.length,
+          });
+        }
+      }
+    }
+
+    // Cross-task learning: boost confidence of rules that were applied to successful tasks
+    if (result.approved) {
+      boostAppliedRules(store, taskId);
+    } else {
+      decayAppliedRules(store, taskId);
+    }
 
     return result;
   } catch (err) {
@@ -606,4 +637,54 @@ export async function detectImprovements(
   recentTasks: Task[],
 ): Promise<DetectedImprovement[]> {
   return reviewerClient.analyzeImprovements(recentTasks);
+}
+
+// ── Cross-task learning: rule confidence tracking ──────────────────────────
+
+/**
+ * Parse applied rule IDs from task logs and boost their confidence
+ * (called when a task passes verification).
+ */
+function boostAppliedRules(store: StateStore, taskId: string): void {
+  const ruleIds = getAppliedRuleIds(store, taskId);
+  for (const id of ruleIds) {
+    store.boostRuleConfidence(id);
+  }
+  if (ruleIds.length > 0) {
+    verifierLog.info("Boosted confidence for rules on successful task", {
+      taskId,
+      ruleIds,
+    });
+  }
+}
+
+/**
+ * Parse applied rule IDs from task logs and decay their confidence
+ * (called when a task fails verification).
+ */
+function decayAppliedRules(store: StateStore, taskId: string): void {
+  const ruleIds = getAppliedRuleIds(store, taskId);
+  for (const id of ruleIds) {
+    store.decayRuleConfidence(id);
+  }
+  if (ruleIds.length > 0) {
+    verifierLog.info("Decayed confidence for rules on failed task", {
+      taskId,
+      ruleIds,
+    });
+  }
+}
+
+/**
+ * Extract applied rule IDs from task logs (written by dispatcher).
+ */
+function getAppliedRuleIds(store: StateStore, taskId: string): number[] {
+  const logs = store.getLogs(taskId);
+  for (const log of logs) {
+    const match = log.content.match(/\[learned-rules\] Applied rule IDs: ([\d,]+)/);
+    if (match) {
+      return match[1].split(",").map(Number).filter((n) => !isNaN(n) && n > 0);
+    }
+  }
+  return [];
 }

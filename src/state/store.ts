@@ -536,6 +536,36 @@ export interface Directive {
   created_at: string;
 }
 
+/** Classification of a learned rule's domain. */
+export type LearnedRuleCategory = "style" | "architecture" | "testing" | "security" | "convention" | "workflow";
+
+/** A per-repo convention learned from PR review feedback. */
+export interface LearnedRule {
+  id: number;
+  /** GitHub repo slug, e.g. "rapartlu/agent-orchestrator" */
+  repo: string;
+  /** The rule text injected into prompts */
+  rule: string;
+  /** Category for filtering/display */
+  category: LearnedRuleCategory;
+  /** Where this rule was learned from, e.g. "PR #489 review comment" */
+  source: string;
+  /** Task ID that triggered the rule extraction */
+  source_task_id: string | null;
+  /** Confidence score 0–1, decays over time */
+  confidence: number;
+  /** How many times this rule has been injected into dispatches */
+  applied_count: number;
+  /** How many times a dispatch with this rule succeeded verification */
+  success_count: number;
+  /** How many times a dispatch with this rule failed verification */
+  failure_count: number;
+  /** ISO timestamp of last injection */
+  last_applied: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 /**
  * Aggregated PR review metrics — cycle time and rejection rate.
  */
@@ -764,6 +794,7 @@ export class StateStore {
     this.runIssueClaimsMigration();
     this.runConfigReloadsMigration();
     this.runIssueCacheMigration();
+    this.runLearnedRulesMigration();
   }
 
   private runPhase2Migration(): void {
@@ -4150,6 +4181,159 @@ export class StateStore {
       avg_duration_ms: r.avg_duration_ms,
       total_tokens: tokenByProvider.get(r.provider) ?? 0,
     }));
+  }
+
+  // ── Learned Rules (cross-task learning from PR feedback) ─────────────────
+
+  private runLearnedRulesMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS learned_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        rule TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'convention',
+        source TEXT NOT NULL,
+        source_task_id TEXT,
+        confidence REAL NOT NULL DEFAULT 0.8,
+        applied_count INTEGER NOT NULL DEFAULT 0,
+        success_count INTEGER NOT NULL DEFAULT 0,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        last_applied TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_learned_rules_repo ON learned_rules(repo);
+      CREATE INDEX IF NOT EXISTS idx_learned_rules_confidence ON learned_rules(confidence DESC);
+    `);
+  }
+
+  /**
+   * Add a new learned rule. Deduplicates by checking for similar rule text
+   * in the same repo (exact match). Returns the stored record.
+   */
+  addLearnedRule(params: {
+    repo: string;
+    rule: string;
+    category?: LearnedRuleCategory;
+    source: string;
+    source_task_id?: string;
+    confidence?: number;
+  }): LearnedRule {
+    const now = new Date().toISOString();
+
+    // Check for exact duplicate
+    const existing = this.db
+      .prepare("SELECT id FROM learned_rules WHERE repo = ? AND rule = ?")
+      .get(params.repo, params.rule.trim()) as { id: number } | undefined;
+    if (existing) {
+      // Boost confidence of existing rule instead of duplicating
+      this.db
+        .prepare(
+          "UPDATE learned_rules SET confidence = MIN(0.95, confidence + 0.05), updated_at = ? WHERE id = ?",
+        )
+        .run(now, existing.id);
+      return this.db
+        .prepare("SELECT * FROM learned_rules WHERE id = ?")
+        .get(existing.id) as LearnedRule;
+    }
+
+    const stmt = this.db.prepare(`
+      INSERT INTO learned_rules (repo, rule, category, source, source_task_id, confidence, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const result = stmt.run(
+      params.repo,
+      params.rule.trim(),
+      params.category ?? "convention",
+      params.source,
+      params.source_task_id ?? null,
+      params.confidence ?? 0.8,
+      now,
+      now,
+    );
+    return this.db
+      .prepare("SELECT * FROM learned_rules WHERE id = ?")
+      .get(result.lastInsertRowid) as LearnedRule;
+  }
+
+  /**
+   * Get the top N learned rules for a given repo, ordered by confidence.
+   */
+  getLearnedRulesForRepo(repo: string, limit = 10): LearnedRule[] {
+    return this.db
+      .prepare(
+        "SELECT * FROM learned_rules WHERE repo = ? AND confidence > 0.3 ORDER BY confidence DESC LIMIT ?",
+      )
+      .all(repo, limit) as LearnedRule[];
+  }
+
+  /**
+   * Get all learned rules across all repos, ordered by confidence.
+   */
+  listLearnedRules(limit = 50): LearnedRule[] {
+    return this.db
+      .prepare("SELECT * FROM learned_rules ORDER BY confidence DESC LIMIT ?")
+      .all(limit) as LearnedRule[];
+  }
+
+  /**
+   * Record that a rule was applied (injected into a dispatch).
+   */
+  markRuleApplied(ruleId: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "UPDATE learned_rules SET applied_count = applied_count + 1, last_applied = ?, updated_at = ? WHERE id = ?",
+      )
+      .run(now, now, ruleId);
+  }
+
+  /**
+   * Boost confidence when the task that used a rule passes verification.
+   */
+  boostRuleConfidence(ruleId: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "UPDATE learned_rules SET confidence = MIN(0.95, confidence * 1.05), success_count = success_count + 1, updated_at = ? WHERE id = ?",
+      )
+      .run(now, ruleId);
+  }
+
+  /**
+   * Decay confidence when the task that used a rule fails verification.
+   */
+  decayRuleConfidence(ruleId: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "UPDATE learned_rules SET confidence = MAX(0.1, confidence * 0.85), failure_count = failure_count + 1, updated_at = ? WHERE id = ?",
+      )
+      .run(now, ruleId);
+  }
+
+  /**
+   * Decay rules that haven't been applied in the given number of days.
+   * Called periodically (e.g. daily) to let stale rules fade.
+   */
+  decayStaleRules(staleDays = 30): number {
+    const cutoff = new Date(Date.now() - staleDays * 86400000).toISOString();
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE learned_rules
+         SET confidence = MAX(0.1, confidence * 0.9), updated_at = ?
+         WHERE (last_applied IS NULL OR last_applied < ?) AND confidence > 0.3`,
+      )
+      .run(now, cutoff);
+    return result.changes;
+  }
+
+  /**
+   * Remove a learned rule by ID.
+   */
+  removeLearnedRule(id: number): void {
+    this.db.prepare("DELETE FROM learned_rules WHERE id = ?").run(id);
   }
 
   close(): void {

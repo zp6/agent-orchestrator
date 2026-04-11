@@ -31,10 +31,19 @@ vi.mock("../orchestrator/dispatcher.js", () => ({
   Dispatcher: function MockDispatcher(this: { dispatch: typeof mockDispatch }) {
     this.dispatch = mockDispatch;
   },
+  extractRepoFromSourceRef: (ref: string | null | undefined) => {
+    if (!ref) return undefined;
+    const m = ref.match(/^([^/]+\/[^/#]+)/);
+    return m ? m[1] : undefined;
+  },
 }));
 
 vi.mock("./notify.js", () => ({
   notifyOperator: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../orchestrator/learned-rules.js", () => ({
+  extractAndStoreRules: vi.fn().mockReturnValue([]),
 }));
 
 vi.mock("node:child_process", () => ({

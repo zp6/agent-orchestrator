@@ -28,6 +28,7 @@ import { registerSupervisorLogCommand } from "./commands/supervisor-log.js";
 import { registerConfigCommand } from "./commands/config.js";
 import { registerBorrowCommand } from "./commands/borrow.js";
 import { registerFleetCommand } from "./commands/fleet.js";
+import { registerLearnedRulesCommand } from "./commands/learned-rules.js";
 
 const program = new Command();
 
@@ -65,5 +66,6 @@ registerSupervisorLogCommand(program);
 registerConfigCommand(program);
 registerBorrowCommand(program);
 registerFleetCommand(program);
+registerLearnedRulesCommand(program);
 
 program.parse();
