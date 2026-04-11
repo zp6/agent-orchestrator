@@ -345,6 +345,17 @@ export class PRReviewer {
           this.log.error("Failed to escalate PR", { repo, prNumber, error: String(err) });
         }
         break;
+
+      case "error":
+        // Review LLM call failed (timeout, parse failure, rate limit).
+        // Don't escalate to human — just skip. The PR will be re-reviewed
+        // on the next cycle when the reviewer may have recovered.
+        this.log.warn("PR review skipped due to LLM error — will retry next cycle", {
+          repo,
+          prNumber,
+          reason: result.reason,
+        });
+        break;
     }
   }
 

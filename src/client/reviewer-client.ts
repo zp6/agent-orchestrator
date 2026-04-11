@@ -26,7 +26,7 @@ export interface VerificationResult {
 }
 
 export interface PRReviewResult {
-  decision: "approve" | "request-changes" | "escalate";
+  decision: "approve" | "request-changes" | "escalate" | "error";
   comment: string;
   reason: string;
   conflictEscalation?: boolean;
@@ -332,10 +332,9 @@ export class ReviewerClient {
 
       return this.parsePRReviewResponse(text);
     } catch (err) {
-      this.log.error("PR review LLM call failed", {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      this.log.error("PR review LLM call failed — returning error decision", { error: msg });
+      return { decision: "error", comment: `Review LLM call failed: ${msg}`, reason: msg };
     }
   }
 
@@ -511,7 +510,8 @@ export class ReviewerClient {
       }
     }
 
-    return { decision: "escalate", comment: "Could not parse review — escalating to human.", reason: "Parse failure" };
+    this.log.warn("All PR review parse strategies failed — will retry next cycle", { textLength: text.length, preview: text.slice(0, 200) });
+    return { decision: "error", comment: "Could not parse review response — will retry next cycle.", reason: "Parse failure" };
   }
 
   private parseSupervisorResponse(text: string): SupervisorDecision[] {

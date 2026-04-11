@@ -146,7 +146,7 @@ describe("PRReviewer", () => {
     expect(result.decision).toBe("escalate");
   });
 
-  it("escalates on malformed LLM response", async () => {
+  it("returns error (not escalate) on malformed LLM response", async () => {
     mockCreate.mockResolvedValueOnce({
       content: [{ type: "text", text: "I think this looks fine" }],
     });
@@ -154,7 +154,7 @@ describe("PRReviewer", () => {
     const reviewer = new PRReviewer(config);
     const result = await reviewer.reviewPR("owner/repo", 9);
 
-    expect(result.decision).toBe("escalate");
+    expect(result.decision).toBe("error");
     expect(result.reason).toContain("Parse failure");
   });
 
@@ -215,7 +215,7 @@ describe("PRReviewer", () => {
       expect(result.comment).toBe("All good.");
     });
 
-    it("defaults to escalate when no strategy can extract valid JSON", async () => {
+    it("returns error (not escalate) when no strategy can extract valid JSON", async () => {
       mockCreate.mockResolvedValueOnce({
         content: [{ type: "text", text: "This PR looks fine to me, I approve it." }],
       });
@@ -223,7 +223,7 @@ describe("PRReviewer", () => {
       const reviewer = new PRReviewer(config);
       const result = await reviewer.reviewPR("owner/repo", 9);
 
-      expect(result.decision).toBe("escalate");
+      expect(result.decision).toBe("error");
       expect(result.reason).toBe("Parse failure");
     });
 
