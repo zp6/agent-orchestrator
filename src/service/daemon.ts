@@ -64,6 +64,13 @@ const BLUESKY_MEETING_EVERY_N_CYCLES = 2016; // ~7 days at 5min interval
 const ROADMAP_PROPOSAL_EVERY_N_CYCLES = 288; // ~24h at 5min interval
 
 /**
+ * Maximum time a single poll cycle is allowed to run before the watchdog
+ * kills it and moves on to the next cycle. Prevents a hung LLM call or
+ * Docker operation from deadlocking the entire daemon for hours.
+ */
+const CYCLE_WATCHDOG_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
  * Default quality-score floor for reviewer-pool approvals.  Any completed
  * task from a reviewer-pool agent that is approved but scores below this
  * value triggers a Telegram alert and a supervisor follow-up dispatch.
@@ -330,7 +337,30 @@ export class Daemon {
     startTelegramPolling({ config: this.config, store: this.store, dispatcher: this.dispatcher });
 
     while (this.running) {
-      await this.pollCycle();
+      // Watchdog: kill the cycle if it runs longer than CYCLE_WATCHDOG_TIMEOUT_MS.
+      // A hung LLM call or Docker operation should not deadlock the entire daemon.
+      const cyclePromise = this.pollCycle();
+      const watchdog = new Promise<"timeout">((resolve) =>
+        setTimeout(() => resolve("timeout"), CYCLE_WATCHDOG_TIMEOUT_MS),
+      );
+
+      const result = await Promise.race([cyclePromise.then(() => "done" as const), watchdog]);
+      if (result === "timeout") {
+        this.log.error("WATCHDOG: Cycle exceeded timeout — aborting and starting next cycle", {
+          timeoutMs: CYCLE_WATCHDOG_TIMEOUT_MS,
+          cycle: this.cycleCount,
+        });
+        console.error(`[WATCHDOG] Cycle #${this.cycleCount} exceeded ${CYCLE_WATCHDOG_TIMEOUT_MS / 1000}s — moving on`);
+        notifyOperator(
+          "Cycle watchdog triggered",
+          `Cycle #${this.cycleCount} exceeded the ${CYCLE_WATCHDOG_TIMEOUT_MS / 1000}s watchdog timeout and was aborted. A step (likely LLM call or Docker operation) is hanging.`,
+          "critical",
+          `watchdog:${this.cycleCount}`,
+        ).catch(() => {});
+        // The hung cycle continues in the background but we don't await it.
+        // The next cycle will start fresh.
+      }
+
       if (!this.running) break;
       await this.sleep(this.pollInterval);
     }
