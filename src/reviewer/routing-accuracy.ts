@@ -24,7 +24,7 @@ export type { RoutingAccuracyStats, AgentQualityByTaskType };
 
 export interface RoutingAccuracyProvider {
   getAccuracyStats(days?: number): RoutingAccuracyStats[];
-  getQualityByTaskType(): AgentQualityByTaskType[];
+  getQualityByTaskType(days?: number): AgentQualityByTaskType[];
 }
 
 export class RoutingAccuracyTracker implements RoutingAccuracyProvider {
@@ -44,10 +44,10 @@ export class RoutingAccuracyTracker implements RoutingAccuracyProvider {
 
   /**
    * Return per-agent quality scores broken down by task type (implementation /
-   * research) over the last 30 days.
+   * research) for the given look-back window (default: 30 days).
    */
-  getQualityByTaskType(): AgentQualityByTaskType[] {
-    return this.store.getAgentQualityByTaskType();
+  getQualityByTaskType(days = 30): AgentQualityByTaskType[] {
+    return this.store.getAgentQualityByTaskType(days);
   }
 
   /**
@@ -81,8 +81,8 @@ export class RoutingAccuracyTracker implements RoutingAccuracyProvider {
    *   - claude-agent-dashboard: implementation(0.85×18), research(0.79×4)
    *   - claude-agent-orchestrator: implementation(0.70×9), research(0.75×2)
    */
-  formatQualityByTypeSection(): string[] {
-    const byAgent = this.getQualityByTaskType();
+  formatQualityByTypeSection(days = 30): string[] {
+    const byAgent = this.getQualityByTaskType(days);
     if (byAgent.length === 0) return [];
 
     return byAgent.map((agent) => {

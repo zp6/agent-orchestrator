@@ -329,7 +329,7 @@ export interface IStateStore {
 
   // Routing accuracy feedback
   getRoutingAccuracyStats(days?: number): RoutingAccuracyStats[];
-  getAgentQualityByTaskType(): AgentQualityByTaskType[];
+  getAgentQualityByTaskType(days?: number): AgentQualityByTaskType[];
 
   // Calibration drift monitoring
   getScoreDistributions(days?: number): AgentScoreDistribution[];

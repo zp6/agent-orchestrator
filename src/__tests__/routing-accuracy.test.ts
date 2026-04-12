@@ -178,6 +178,28 @@ describe("StateStore routing accuracy queries", () => {
     expect(research.avg_quality_score).toBeCloseTo(0.75, 2);
   });
 
+  it("getAgentQualityByTaskType respects a custom look-back window", () => {
+    // Add a task updated 40 days ago — should be excluded when days=30 but included when days=60
+    const insertOld = (store as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } } }).db.prepare(`
+      INSERT INTO tasks (id, title, status, agent_name, task_type, quality_score, verification_status, created_at, updated_at)
+      VALUES (?, ?, 'done', ?, ?, ?, ?, datetime('now', '-40 days'), datetime('now', '-40 days'))
+    `);
+    insertOld.run("T88", "old impl task", "agent-c", "implementation", 0.95, "approved");
+
+    // With default 30-day window, agent-c should not appear
+    const result30 = store.getAgentQualityByTaskType(30);
+    expect(result30.find((r) => r.agent_name === "agent-c")).toBeUndefined();
+
+    // With 60-day window, agent-c should appear with the correct data
+    const result60 = store.getAgentQualityByTaskType(60);
+    const agentC = result60.find((r) => r.agent_name === "agent-c");
+    expect(agentC).toBeDefined();
+    expect(agentC!.by_task_type).toHaveLength(1);
+    expect(agentC!.by_task_type[0].task_type).toBe("implementation");
+    expect(agentC!.by_task_type[0].task_count).toBe(1);
+    expect(agentC!.by_task_type[0].avg_quality_score).toBeCloseTo(0.95, 2);
+  });
+
   it("excludes tasks outside the look-back window", () => {
     // Add an old task (40 days ago)
     const insert = (store as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } } }).db.prepare(`

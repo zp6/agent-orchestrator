@@ -293,12 +293,14 @@ export class StateStore implements ITelegramStateStore {
   }
 
   /**
-   * Return per-agent quality breakdown grouped by task type over the last 30 days.
+   * Return per-agent quality breakdown grouped by task type for the given
+   * look-back window (default: 30 days).
    *
    * Enables the supervisor to answer "which agent scores highest on
    * implementation tasks vs. research tasks?" and route accordingly.
    */
-  getAgentQualityByTaskType(): AgentQualityByTaskType[] {
+  getAgentQualityByTaskType(days: number = 30): AgentQualityByTaskType[] {
+    const lookback = Number.isFinite(days) && days >= 1 ? Math.floor(days) : 30;
     const rows = this.db
       .prepare(
         `SELECT
@@ -311,11 +313,11 @@ export class StateStore implements ITelegramStateStore {
                     ELSE NULL END) AS approval_rate
          FROM tasks
          WHERE agent_name IS NOT NULL
-           AND updated_at >= datetime('now', '-30 days')
+           AND updated_at >= datetime('now', ?)
          GROUP BY agent_name, task_type
          ORDER BY agent_name, task_type`,
       )
-      .all() as Array<{
+      .all(`-${lookback} days`) as Array<{
         agent_name: string;
         task_type: string;
         task_count: number;
