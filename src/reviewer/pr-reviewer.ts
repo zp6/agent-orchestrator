@@ -26,6 +26,12 @@ import {
   extractChangedFilesFromDiff,
   buildSchemaImpactNotice,
 } from "./schema-impact.js";
+import {
+  isStandupIssue,
+  extractActionItemCount,
+  handleZeroActionStandup,
+  type GitHubIssue,
+} from "./standup-handler.js";
 
 export interface PRInfo {
   number: number;
@@ -662,6 +668,64 @@ export class PRReviewer {
       }
     }
     return results;
+  }
+
+  /**
+   * Processes a GitHub issue for standup handling.
+   *
+   * If the issue is a standup with 0 action items, posts an acknowledgment
+   * comment and optionally closes the issue if all referenced PRs are merged.
+   *
+   * Returns true if the issue was handled as a zero-action standup (preventing
+   * normal PR review flow), false otherwise.
+   */
+  async handleStandupIssueIfNeeded(repo: string, issueNumber: number): Promise<boolean> {
+    try {
+      // Fetch issue details
+      const jsonOutput = execSync(
+        `gh issue view ${issueNumber} --repo ${shellEscape(repo)} --json number,title,body,labels,state --jq '.'`,
+        { encoding: "utf-8", timeout: 30000 },
+      );
+
+      const issueData = JSON.parse(jsonOutput);
+      const issue: GitHubIssue = {
+        number: issueData.number,
+        title: issueData.title,
+        body: issueData.body || "",
+        labels: issueData.labels?.map((l: Record<string, string>) => l.name) || [],
+        state: issueData.state,
+      };
+
+      // Check if this is a standup issue
+      if (!isStandupIssue(issue)) {
+        return false;
+      }
+
+      // Check if it has zero action items
+      const actionItemCount = extractActionItemCount(issue);
+      if (actionItemCount !== 0) {
+        // Has action items, proceed with normal flow
+        return false;
+      }
+
+      // Handle zero-action standup
+      this.log.info("Processing zero-action standup issue", {
+        repo,
+        issueNumber,
+        title: issue.title,
+      });
+
+      await handleZeroActionStandup(repo, issueNumber, issue, true);
+      return true;
+    } catch (err) {
+      // If we can't process as standup, let normal flow handle it
+      this.log.debug("Failed to check standup status, continuing with normal review", {
+        repo,
+        issueNumber,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
   }
 
   private async executeDecision(
