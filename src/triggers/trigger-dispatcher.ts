@@ -4,6 +4,7 @@ import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { createLogger } from "../service/logger.js";
+import { scoreIssuePriority } from "../orchestrator/priority-scorer.js";
 
 /**
  * Default TTL for issue claims: 2 hours (matches agents.yaml stale_timeout_ms conventions).
@@ -21,13 +22,22 @@ const log = createLogger("trigger-dispatcher");
 const inFlightDispatches = new Map<string, AbortController>();
 
 function sortIssuesForDispatch(store: StateStore, issues: GitHubIssue[]): GitHubIssue[] {
+  // Priority scoring: rank by labels, age, stuck status, keywords
+  // Manual boosts (from deescalation) still get highest priority
   return [...issues].sort((a, b) => {
     const aBoosted = store.isSourceRefPriorityBoosted("github", `${a.repo}#${a.number}`);
     const bBoosted = store.isSourceRefPriorityBoosted("github", `${b.repo}#${b.number}`);
-    if (aBoosted !== bBoosted) {
-      return aBoosted ? -1 : 1;
-    }
-    return a.number - b.number;
+    if (aBoosted !== bBoosted) return aBoosted ? -1 : 1;
+
+    const aScore = scoreIssuePriority(
+      { number: a.number, title: a.title, labels: a.labels ?? [], createdAt: a.created_at, repo: a.repo },
+      store,
+    ).score;
+    const bScore = scoreIssuePriority(
+      { number: b.number, title: b.title, labels: b.labels ?? [], createdAt: b.created_at, repo: b.repo },
+      store,
+    ).score;
+    return bScore - aScore; // highest priority first
   });
 }
 

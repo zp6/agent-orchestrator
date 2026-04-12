@@ -180,6 +180,7 @@ async function fetchIssueDetails(repo: string, issueNumber: number): Promise<(Gi
       url: issue.url,
       state: issue.state,
       labels: (issue.labels ?? []).map((label) => label.name).filter((name): name is string => !!name),
+      created_at: new Date().toISOString(),
     };
   } catch {
     return null;

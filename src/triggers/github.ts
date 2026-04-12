@@ -7,6 +7,7 @@ export interface GitHubIssue {
   body: string;
   url: string;
   labels: string[];
+  created_at?: string;
 }
 
 export interface GhAuthStatus {
@@ -301,7 +302,7 @@ export function findApprovedPRForIssue(
 export function fetchOpenIssues(repo: string): GitHubIssue[] {
   try {
     const output = execSync(
-      `gh api "repos/${repo}/issues?state=open&per_page=50" --jq '[.[] | select(.pull_request == null) | {number, title, body, url: .html_url, labels: [.labels[].name]}]'`,
+      `gh api "repos/${repo}/issues?state=open&per_page=50" --jq '[.[] | select(.pull_request == null) | {number, title, body, url: .html_url, labels: [.labels[].name], created_at}]'`,
       { encoding: "utf-8", timeout: 30000 },
     );
 
@@ -311,6 +312,7 @@ export function fetchOpenIssues(repo: string): GitHubIssue[] {
       body: string | null;
       url: string;
       labels: string[];
+      created_at: string;
     }>;
 
     return parsed.map((issue) => ({
@@ -319,6 +321,7 @@ export function fetchOpenIssues(repo: string): GitHubIssue[] {
       title: issue.title,
       body: issue.body ?? "",
       url: issue.url,
+      created_at: issue.created_at ?? new Date().toISOString(),
       labels: issue.labels,
     }));
   } catch (err) {
