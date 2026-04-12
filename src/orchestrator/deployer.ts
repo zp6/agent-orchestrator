@@ -17,12 +17,18 @@ export interface DeployResult {
 
 /**
  * Default delays (ms) between health-check attempts.
- * Extended from [1s, 3s, 10s] to [2s, 5s, 15s, 30s] to accommodate
- * slow-starting containers (e.g. Codex/OpenAI providers that need time for
- * git pull + OpenAI WebSocket warmup before the HTTP port is ready).
- * Total window: ~52s, which covers typical Codex startup (10-30s).
+ * Extended from [2s, 5s, 15s, 30s] (52s) to [3s, 10s, 20s, 30s, 45s, 60s]
+ * to accommodate the Claude Code CLI's startup sequence, which uses an
+ * exponential-backoff readiness probe on first start / after a restart that
+ * can take up to ~120s. The previous 52s window expired before the container
+ * was ready (codex-proxy incident 2026-04-12, issue #728).
+ *
+ * Total window: 3 + 10 + 20 + 30 + 45 + 60 = 168s (covers ~120s CLI init).
+ *
+ * Override per-agent in agents.yaml via `docker.health_check_delays_ms`, or
+ * globally via `deploy.health_check_delays_ms`.
  */
-const HEALTH_CHECK_DELAYS_MS = [2_000, 5_000, 15_000, 30_000];
+const HEALTH_CHECK_DELAYS_MS = [3_000, 10_000, 20_000, 30_000, 45_000, 60_000];
 
 /**
  * Default post-restart warmup delay (ms). After a container passes the health
@@ -50,7 +56,7 @@ export class Deployer {
    *   1. `options.delaysMs` (explicit override, used in tests)
    *   2. `agent.docker.health_check_delays_ms` (per-agent in agents.yaml)
    *   3. `config.deploy.health_check_delays_ms` (global in agents.yaml)
-   *   4. `HEALTH_CHECK_DELAYS_MS` (built-in default: [2s, 5s, 15s, 30s])
+   *   4. `HEALTH_CHECK_DELAYS_MS` (built-in default: [3s, 10s, 20s, 30s, 45s, 60s] = 168s)
    *
    * Returns true if the agent responds within the retry window, false otherwise.
    */
