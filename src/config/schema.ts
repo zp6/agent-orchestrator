@@ -196,6 +196,30 @@ export interface VerificationConfig {
    * Defaults to 0.80 when omitted.
    */
   reviewer_low_score_threshold?: number;
+
+  /**
+   * Per-agent rolling-average SLA thresholds.  When an agent's rolling
+   * quality score (calculated over `quality_sla_window_tasks` recent tasks)
+   * drops below its threshold, the daemon fires a Telegram alert and logs a
+   * structured warning — prompting the supervisor to consider routing changes.
+   *
+   * Falls back to `min_score` (default 0.70) when an agent has no entry here.
+   * Set an agent's value to 0 to silence alerts for that agent entirely.
+   *
+   * Example:
+   *   per_agent_quality_thresholds:
+   *     claude-orchestrator-reviewer: 0.75
+   *     claude-research-agent: 0.72
+   */
+  per_agent_quality_thresholds?: Record<string, number>;
+
+  /**
+   * Number of most-recent scored tasks used to compute each agent's rolling
+   * average for SLA threshold checks.  Larger windows smooth out noise;
+   * smaller windows react faster to degradation.
+   * Defaults to 5 when omitted.
+   */
+  quality_sla_window_tasks?: number;
 }
 
 export interface ProxyConfig {
