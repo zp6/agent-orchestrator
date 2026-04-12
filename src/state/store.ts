@@ -21,6 +21,8 @@ import type {
   SupervisorDecisionQuery,
   DispatchRequest,
   PRConfidenceRecord,
+  RoutingAccuracyStats,
+  AgentQualityByTaskType,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -253,6 +255,85 @@ export class StateStore implements ITelegramStateStore {
         GROUP BY agent_name
       `)
       .all() as AgentStats[];
+  }
+
+  /**
+   * Return per-agent routing accuracy stats for the given look-back window.
+   *
+   * Accuracy is derived from the `tasks` table: for each agent we report
+   * - total_routed:   tasks dispatched to that agent in the window
+   * - verified_count: tasks that completed LLM verification (approved or rejected)
+   * - avg_quality_score: mean quality_score across verified tasks
+   * - approval_rate:  fraction of verified tasks that were approved
+   *
+   * Only agents with at least one task in the window are included.
+   */
+  getRoutingAccuracyStats(days: number = 30): RoutingAccuracyStats[] {
+    const lookback = Number.isFinite(days) && days >= 1 ? Math.floor(days) : 30;
+    return this.db
+      .prepare(
+        `SELECT
+           agent_name,
+           COUNT(*) AS total_routed,
+           SUM(CASE WHEN verification_status IN ('approved', 'rejected') THEN 1 ELSE 0 END) AS verified_count,
+           AVG(CASE WHEN quality_score IS NOT NULL THEN quality_score END) AS avg_quality_score,
+           AVG(CASE WHEN verification_status = 'approved' THEN 1.0
+                    WHEN verification_status = 'rejected' THEN 0.0
+                    ELSE NULL END) AS approval_rate
+         FROM tasks
+         WHERE agent_name IS NOT NULL
+           AND updated_at >= datetime('now', ?)
+         GROUP BY agent_name
+         ORDER BY avg_quality_score DESC`,
+      )
+      .all(`-${lookback} days`) as RoutingAccuracyStats[];
+  }
+
+  /**
+   * Return per-agent quality breakdown grouped by task type over the last 30 days.
+   *
+   * Enables the supervisor to answer "which agent scores highest on
+   * implementation tasks vs. research tasks?" and route accordingly.
+   */
+  getAgentQualityByTaskType(): AgentQualityByTaskType[] {
+    const rows = this.db
+      .prepare(
+        `SELECT
+           agent_name,
+           task_type,
+           COUNT(*) AS task_count,
+           AVG(CASE WHEN quality_score IS NOT NULL THEN quality_score END) AS avg_quality_score,
+           AVG(CASE WHEN verification_status = 'approved' THEN 1.0
+                    WHEN verification_status = 'rejected' THEN 0.0
+                    ELSE NULL END) AS approval_rate
+         FROM tasks
+         WHERE agent_name IS NOT NULL
+           AND updated_at >= datetime('now', '-30 days')
+         GROUP BY agent_name, task_type
+         ORDER BY agent_name, task_type`,
+      )
+      .all() as Array<{
+        agent_name: string;
+        task_type: string;
+        task_count: number;
+        avg_quality_score: number | null;
+        approval_rate: number | null;
+      }>;
+
+    // Group by agent_name
+    const byAgent = new Map<string, AgentQualityByTaskType>();
+    for (const row of rows) {
+      if (!byAgent.has(row.agent_name)) {
+        byAgent.set(row.agent_name, { agent_name: row.agent_name, by_task_type: [] });
+      }
+      byAgent.get(row.agent_name)!.by_task_type.push({
+        task_type: row.task_type,
+        task_count: row.task_count,
+        avg_quality_score: row.avg_quality_score,
+        approval_rate: row.approval_rate,
+      });
+    }
+    return [...byAgent.values()];
   }
 
   /**

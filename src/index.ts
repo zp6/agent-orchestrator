@@ -22,8 +22,10 @@ export type { PRInfo, PRReviewResult, RedispatchCategory, ConflictStats, CrossRe
 export { Verifier } from "./reviewer/verifier.js";
 export type { VerificationResult } from "./reviewer/verifier.js";
 
-export { Supervisor, extractIssueRefs, isDecisionAlreadyResolved, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo, formatConflictStatsSection, formatPRConfidenceSection } from "./reviewer/supervisor.js";
-export type { SupervisorDecision, ConflictStatsProvider, PRConfidenceProvider } from "./reviewer/supervisor.js";
+export { Supervisor, extractIssueRefs, isDecisionAlreadyResolved, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo, formatConflictStatsSection, formatPRConfidenceSection, formatRoutingAccuracySection, formatQualityByTaskTypeSection } from "./reviewer/supervisor.js";
+export type { SupervisorDecision, ConflictStatsProvider, PRConfidenceProvider, RoutingAccuracyProvider } from "./reviewer/supervisor.js";
+
+export { RoutingAccuracyTracker } from "./reviewer/routing-accuracy.js";
 
 export {
   classifyIssueAge,
@@ -79,6 +81,9 @@ export type {
   DispatchRequest,
   DispatchRationale,
   PRConfidenceRecord,
+  RoutingAccuracyStats,
+  AgentQualityByTaskType,
+  AgentTaskTypeQuality,
 } from "./state/types.js";
 
 // Supervisor decision log — queryable log for orch CLI and dashboard consumers

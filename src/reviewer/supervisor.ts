@@ -15,7 +15,7 @@ import { createLLMClient } from "../client/llm-client.js";
 import { createNotifier } from "../notify.js";
 import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
-import type { IStateStore, Task, AgentHealth, SupervisorDecisionRecord, PRConfidenceRecord } from "../state/types.js";
+import type { IStateStore, Task, AgentHealth, SupervisorDecisionRecord, PRConfidenceRecord, RoutingAccuracyStats, AgentQualityByTaskType } from "../state/types.js";
 import type { ConflictStats } from "./pr-reviewer.js";
 import {
   buildIssueAgeHeatmap,
@@ -24,6 +24,7 @@ import {
   hasRecentAgeDispatchDecision,
   hasRecentAgeNudge,
 } from "./issue-age.js";
+import type { RoutingAccuracyProvider } from "./routing-accuracy.js";
 
 /**
  * Minimal interface for providing conflict stats to the supervisor.
@@ -43,6 +44,8 @@ export interface ConflictStatsProvider {
 export interface PRConfidenceProvider {
   getRecentPRReviewConfidences(limit: number): PRConfidenceRecord[];
 }
+
+export type { RoutingAccuracyProvider };
 
 export interface SupervisorDecision {
   action: "dispatch" | "verify" | "redeploy" | "create-issue" | "follow-up" | "none";
@@ -113,6 +116,13 @@ CONFLICT-AWARE DISPATCH (when "## Merge Conflict Stats" is present):
 - When dispatching to an agent whose repo has stale-nudge or escalation counts > 0, include a reminder: "Before opening a PR, run: git fetch origin && git rebase origin/main"
 - If conflict escalations are high for a repo (≥2 this period), consider creating an issue to investigate the root cause rather than continuing to dispatch direct work
 - Cycles lost to conflicts are wasted — use the stats to prioritise rebasing and conflict prevention over new feature work
+
+ROUTING ACCURACY (when "## Routing Accuracy" or "## Quality by Task Type" is present):
+- "## Routing Accuracy" shows per-agent avg quality score and approval rate over the last 30 days
+- "## Quality by Task Type" shows per-agent breakdown by task type (implementation / research)
+- When multiple agents can handle a task, PREFER the agent with the higher avg quality score for that task type
+- If an agent's avg quality score is below 0.6 for a task type, consider creating an issue to investigate root cause rather than dispatching more of that task type to them
+- Use this data to make routing decisions more precise — not as a reason to punish agents, but to match work to strengths
 
 Be specific and actionable. Only suggest actions that address real gaps. Return [] if everything is on track.`;
 
@@ -388,19 +398,75 @@ export function formatPRConfidenceSection(
   return lines;
 }
 
+/**
+ * Format per-agent routing accuracy stats as human-readable supervisor context lines.
+ *
+ * Example:
+ *   - claude-agent-dashboard: avg score 0.84, approval rate 91% (22/24 verified, last 30d)
+ *
+ * Exported for unit testing.
+ */
+export function formatRoutingAccuracySection(
+  stats: RoutingAccuracyStats[],
+  days = 30,
+): string[] {
+  if (stats.length === 0) return [];
+  return stats.map((s) => {
+    const score =
+      s.avg_quality_score !== null && s.avg_quality_score !== undefined
+        ? s.avg_quality_score.toFixed(2)
+        : "n/a";
+    const rate =
+      s.approval_rate !== null && s.approval_rate !== undefined
+        ? `${(s.approval_rate * 100).toFixed(0)}%`
+        : "n/a";
+    return `- ${s.agent_name}: avg score ${score}, approval rate ${rate} (${s.verified_count}/${s.total_routed} verified, last ${days}d)`;
+  });
+}
+
+/**
+ * Format per-agent quality breakdown by task type as supervisor context lines.
+ *
+ * Example:
+ *   - claude-agent-dashboard: implementation(0.85×18), research(0.79×4)
+ *
+ * Exported for unit testing.
+ */
+export function formatQualityByTaskTypeSection(
+  byAgent: AgentQualityByTaskType[],
+): string[] {
+  if (byAgent.length === 0) return [];
+  return byAgent.map((agent) => {
+    const parts = agent.by_task_type.map((t) => {
+      const score =
+        t.avg_quality_score !== null && t.avg_quality_score !== undefined
+          ? t.avg_quality_score.toFixed(2)
+          : "n/a";
+      return `${t.task_type}(${score}×${t.task_count})`;
+    });
+    return `- ${agent.agent_name}: ${parts.join(", ")}`;
+  });
+}
+
 export class Supervisor {
   private log = createLogger("supervisor");
   private conflictStatsProvider?: ConflictStatsProvider;
   private prConfidenceProvider?: PRConfidenceProvider;
+  private routingAccuracyProvider?: RoutingAccuracyProvider;
   private notifier = createNotifier();
 
   constructor(
     private config: ReviewerConfig,
     private store: IStateStore,
-    opts: { conflictStatsProvider?: ConflictStatsProvider; prConfidenceProvider?: PRConfidenceProvider } = {},
+    opts: {
+      conflictStatsProvider?: ConflictStatsProvider;
+      prConfidenceProvider?: PRConfidenceProvider;
+      routingAccuracyProvider?: RoutingAccuracyProvider;
+    } = {},
   ) {
     this.conflictStatsProvider = opts.conflictStatsProvider;
     this.prConfidenceProvider = opts.prConfidenceProvider;
+    this.routingAccuracyProvider = opts.routingAccuracyProvider;
   }
 
   async review(): Promise<SupervisorDecision[]> {
@@ -739,6 +805,22 @@ export class Supervisor {
       );
       if (confidenceLines.length > 0) {
         sections.push(`## Recent PR Review Confidence\n${confidenceLines.join("\n")}`);
+      }
+    }
+
+    // Routing accuracy feedback (from RoutingAccuracyProvider)
+    if (this.routingAccuracyProvider) {
+      const accuracyLines = formatRoutingAccuracySection(
+        this.routingAccuracyProvider.getAccuracyStats(30),
+      );
+      if (accuracyLines.length > 0) {
+        sections.push(`## Routing Accuracy (last 30d)\n${accuracyLines.join("\n")}`);
+      }
+      const byTypeLines = formatQualityByTaskTypeSection(
+        this.routingAccuracyProvider.getQualityByTaskType(),
+      );
+      if (byTypeLines.length > 0) {
+        sections.push(`## Quality by Task Type (last 30d)\n${byTypeLines.join("\n")}`);
       }
     }
 

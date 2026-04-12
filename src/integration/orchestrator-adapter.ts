@@ -20,6 +20,7 @@ import { Supervisor } from "../reviewer/supervisor.js";
 import type { PRConfidenceProvider } from "../reviewer/supervisor.js";
 import { ImprovementDetector } from "../reviewer/improvement-detector.js";
 import { IssueCreator } from "../reviewer/issue-creator.js";
+import { RoutingAccuracyTracker } from "../reviewer/routing-accuracy.js";
 import type { ReviewerConfig } from "../config.js";
 import type { IStateStore } from "../state/types.js";
 
@@ -68,10 +69,21 @@ export function createReviewerInstances(
       ? (store as unknown as PRConfidenceProvider)
       : undefined;
 
+  // Wire the store as a RoutingAccuracyProvider if it implements the required methods.
+  const routingAccuracyProvider =
+    typeof (store as unknown as IStateStore).getRoutingAccuracyStats === "function" &&
+    typeof (store as unknown as IStateStore).getAgentQualityByTaskType === "function"
+      ? new RoutingAccuracyTracker(store)
+      : undefined;
+
   return {
     reviewer,
     verifier: new Verifier(store),
-    supervisor: new Supervisor(config, store, { conflictStatsProvider: reviewer, prConfidenceProvider }),
+    supervisor: new Supervisor(config, store, {
+      conflictStatsProvider: reviewer,
+      prConfidenceProvider,
+      routingAccuracyProvider,
+    }),
     detector: new ImprovementDetector(config),
     issueCreator: new IssueCreator(config),
   };

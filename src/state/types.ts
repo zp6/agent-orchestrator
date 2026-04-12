@@ -200,6 +200,42 @@ export interface DispatchRequest {
 }
 
 /**
+ * Per-agent routing accuracy statistics computed from verified tasks.
+ * Surfaces avg quality scores and approval rates to drive smarter routing.
+ */
+export interface RoutingAccuracyStats {
+  agent_name: string;
+  /** Total tasks routed to this agent in the window. */
+  total_routed: number;
+  /** Tasks that completed verification (approved or rejected). */
+  verified_count: number;
+  /** Average quality_score across verified tasks (0-1), or null if none. */
+  avg_quality_score: number | null;
+  /**
+   * Fraction of verified tasks that were approved (0-1), or null if none
+   * have completed verification.
+   */
+  approval_rate: number | null;
+}
+
+/** Quality breakdown for one task type within an agent's history. */
+export interface AgentTaskTypeQuality {
+  task_type: string;
+  task_count: number;
+  avg_quality_score: number | null;
+  approval_rate: number | null;
+}
+
+/**
+ * Per-agent quality breakdown grouped by task type.
+ * Lets the supervisor answer "which agent is best at implementation vs. research?"
+ */
+export interface AgentQualityByTaskType {
+  agent_name: string;
+  by_task_type: AgentTaskTypeQuality[];
+}
+
+/**
  * Core StateStore interface consumed by reviewer modules.
  *
  * This is intentionally scoped to the methods the orchestrator's StateStore
@@ -226,6 +262,10 @@ export interface IStateStore {
     warningThreshold?: number,
     criticalThreshold?: number,
   ): EfficiencyTrend;
+
+  // Routing accuracy feedback
+  getRoutingAccuracyStats(days?: number): RoutingAccuracyStats[];
+  getAgentQualityByTaskType(): AgentQualityByTaskType[];
 
   // Agent health (reads from orchestrator's agent_health table)
   getAgentHealthBatch(agentNames: string[]): AgentHealth[];
