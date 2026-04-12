@@ -56,6 +56,7 @@ const RESEARCH_LINK_EVERY_N_CYCLES = 6; // ~30min — same cadence as improvemen
 const BACKLOG_TRIAGE_EVERY_N_CYCLES = 60; // ~5h at default interval
 const CONTAINER_RESTART_EVERY_N_CYCLES = 100; // ~50min at 30s interval — prevents Docker stalls
 const AGENT_SYNC_EVERY_N_CYCLES = 10; // ~5min at default interval — recover from proxy restarts
+const SELF_UPDATE_EVERY_N_CYCLES = 10; // ~5min — pull + rebuild if behind origin/main, then re-exec
 const CLOSED_ISSUE_CHECK_EVERY_N_CYCLES = 3; // ~15min at default — cancel in-flight tasks for closed issues
 const STALE_ISSUE_AGE_DAYS = 7;
 const STANDUP_MEETING_EVERY_N_CYCLES = 288;  // ~24h at 5min interval
@@ -353,7 +354,14 @@ export class Daemon {
       // Fetch which agents are actually deployed on the proxy
       registeredAgents = await this.deployer.getRegisteredAgents();
 
-      // 0a. Sync agents every 10 cycles (~5 min) to recover from proxy restarts.
+      // 0a. Self-update: pull + rebuild if behind origin/main, then re-exec.
+      //     Runs on the same cadence as agent sync (~5 min) so merged PRs are
+      //     picked up quickly without operator intervention.
+      if (this.cycleCount % SELF_UPDATE_EVERY_N_CYCLES === 0) {
+        await this.selfUpdate();
+      }
+
+      // 0c. Sync agents every 10 cycles (~5 min) to recover from proxy restarts.
       //     The management API loses agent state when the proxy restarts, so periodic
       //     sync ensures agents are re-registered without requiring a daemon restart.
       //     Also check for auth recovery on quarantined agents (issue #418).
@@ -369,7 +377,7 @@ export class Daemon {
         await this.checkAuthRecovery();
       }
 
-      // 0b. Poll Telegram for operator commands (lightweight — single HTTP call)
+      // 0d. Poll Telegram for operator commands (lightweight — single HTTP call)
       await pollTelegram({ config: this.config, store: this.store, dispatcher: this.dispatcher });
 
       // 0c. Confirm recovery for agents that were previously failing health checks.
@@ -536,6 +544,55 @@ export class Daemon {
       console.log(`[${time}] Cycle #${this.cycleCount} complete (${durationMs}ms)`);
     }
 
+  }
+
+  /**
+   * Checks if the local repo is behind origin/main. If so, pulls the latest
+   * changes, rebuilds the TypeScript, and re-execs the daemon process so the
+   * new code takes effect without operator intervention.
+   */
+  private async selfUpdate(): Promise<void> {
+    const repoDir = resolve(new URL("../../..", import.meta.url).pathname);
+    try {
+      execSync("git fetch origin main --quiet", { cwd: repoDir, stdio: "pipe" });
+      const behind = execSync("git rev-list HEAD..origin/main --count", { cwd: repoDir, stdio: "pipe" })
+        .toString()
+        .trim();
+      if (behind === "0") return;
+
+      const commits = execSync("git log HEAD..origin/main --oneline", { cwd: repoDir, stdio: "pipe" })
+        .toString()
+        .trim();
+      this.log.info("Self-update: new commits detected, pulling and rebuilding", {
+        behindBy: Number(behind),
+        commits,
+      });
+
+      execSync("git pull --ff-only origin main", { cwd: repoDir, stdio: "pipe" });
+      execSync("npm run build", { cwd: repoDir, stdio: "pipe" });
+
+      this.log.info("Self-update: rebuild complete, re-execing daemon");
+      await notifyOperator(
+        `Daemon self-updated (${behind} commit${Number(behind) === 1 ? "" : "s"})`,
+        commits,
+        "info",
+      );
+
+      // Flush PID file, spawn fresh daemon with new build, then exit.
+      // process.argv = ["node", "dist/service/daemon-entry.js", ...flags]
+      removePid();
+      const { spawn } = await import("node:child_process");
+      const nodeArgs = process.argv.slice(1); // everything after "node"
+      spawn(process.execPath, nodeArgs, {
+        detached: true,
+        stdio: "ignore",
+        env: process.env,
+        cwd: repoDir,
+      }).unref();
+      process.exit(0);
+    } catch (err) {
+      this.log.warn("Self-update failed", { error: err instanceof Error ? err.message : String(err) });
+    }
   }
 
   private async syncAgents(options?: { forceTokenRefresh?: boolean }): Promise<void> {
