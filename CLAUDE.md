@@ -175,6 +175,27 @@ agents:
 - **Build:** tsc (test files excluded via tsconfig)
 - **GitHub API:** `gh` CLI
 
+## Monitoring Session — Proactive Recovery
+
+This session runs the health monitoring loop and **owns the daemon lifecycle**. When something is broken and a fix is available, execute it immediately — do not report the same issue across multiple checks.
+
+### Automated recovery actions (no confirmation needed)
+
+| Condition | Action |
+|-----------|--------|
+| Daemon PID missing or process dead | Start: `cd /Users/paultarr/Local/Git/claude-agent-orchestrator && nohup node dist/service/daemon-entry.js --poll-interval 300000 > /dev/null 2>&1 &` |
+| Stale PID file (file exists, process dead) | `rm ~/.claude-orchestrator/daemon.pid` then start daemon |
+| Daemon running but no new log lines for >15 min | Kill PID and restart |
+| Same agents failing deployer health checks 2+ consecutive cycles | `curl -X POST http://localhost:3400/v1/rebuild` |
+
+### After any recovery action
+- Verify it worked: check PID alive, agents healthy, new log activity
+- Report what was done and the result
+- If the issue recurs after recovery, file a GitHub issue in `rapartlu/agent-orchestrator`
+
+### Health check cadence
+Each check must verify all 6 points: daemon PID, latest cycle timestamp, ERROR lines in last 2 min, task status counts (done/failed/in_progress/escalated), agent health via `curl http://localhost:3400/v1/agents`, and report issues or confirm healthy.
+
 ## PR Discipline
 
 - One issue, one branch, one PR
