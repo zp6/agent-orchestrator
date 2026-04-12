@@ -306,7 +306,7 @@ export class Daemon {
 
     // Seed learned rules from CLAUDE.md files (idempotent — skips existing rules)
     try {
-      const { seeded, repos } = seedFromClaudeMd(this.config, this.store);
+      const { seeded, repos } = await seedFromClaudeMd(this.config, this.store);
       if (seeded > 0) console.log(`Seeded ${seeded} learned rules from ${repos.length} repo(s)`);
     } catch (err) {
       this.log.warn("Failed to seed learned rules from CLAUDE.md", { error: err instanceof Error ? err.message : String(err) });

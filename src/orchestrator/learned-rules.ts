@@ -3,10 +3,13 @@
  * and inject per-repo conventions into future dispatches.
  */
 
-import { execSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { LearnedRule, LearnedRuleCategory, StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { createLogger } from "../service/logger.js";
+
+const execFileAsync = promisify(execFile);
 
 const log = createLogger("learned-rules");
 
@@ -146,14 +149,25 @@ export function getAndApplyRules(
 /**
  * Fetch CLAUDE.md from a GitHub repo and return its content.
  * Returns null if the file doesn't exist or can't be fetched.
+ *
+ * Uses execFileAsync (no shell) to prevent shell injection — `repo` is passed
+ * as a discrete argument, never interpolated into a shell string.
  */
-function fetchClaudeMd(repo: string): string | null {
+async function fetchClaudeMd(repo: string): Promise<string | null> {
   try {
-    const content = execSync(
-      `gh api repos/${repo}/contents/CLAUDE.md --jq .content 2>/dev/null | base64 -d`,
+    // Fetch the base64-encoded content via gh API (no shell — safe against injection).
+    // `repo` is passed as a discrete argument, never interpolated into a shell string.
+    const { stdout: b64 } = await execFileAsync(
+      "gh",
+      ["api", `repos/${repo}/contents/CLAUDE.md`, "--jq", ".content"],
       { encoding: "utf-8", timeout: 15000 },
-    ).trim();
-    return content || null;
+    );
+    const trimmed = b64.trim();
+    if (!trimmed) return null;
+
+    // Decode base64 in-process — no additional subprocess or shell involvement.
+    const decoded = Buffer.from(trimmed, "base64").toString("utf-8");
+    return decoded.trim() || null;
   } catch {
     return null;
   }
@@ -166,10 +180,10 @@ function fetchClaudeMd(repo: string): string | null {
  * Only adds rules that don't already exist (deduplicates by rule text + repo).
  * Safe to call multiple times — idempotent.
  */
-export function seedFromClaudeMd(
+export async function seedFromClaudeMd(
   config: OrchestratorConfig,
   store: StateStore,
-): { seeded: number; repos: string[] } {
+): Promise<{ seeded: number; repos: string[] }> {
   const repos = new Set<string>();
   for (const agent of Object.values(config.agents)) {
     if (agent.github) repos.add(agent.github);
@@ -179,7 +193,7 @@ export function seedFromClaudeMd(
   const seededRepos: string[] = [];
 
   for (const repo of repos) {
-    const content = fetchClaudeMd(repo);
+    const content = await fetchClaudeMd(repo);
     if (!content) {
       log.info("No CLAUDE.md found", { repo });
       continue;

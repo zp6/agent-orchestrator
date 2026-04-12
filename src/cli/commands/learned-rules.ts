@@ -206,11 +206,11 @@ export function registerLearnedRulesCommand(program: Command): void {
   rules
     .command("seed")
     .description("Seed learned rules from CLAUDE.md files across all repos")
-    .action(() => {
+    .action(async () => {
       const config = loadConfig();
       const store = new StateStore();
       try {
-        const result = seedFromClaudeMd(config, store);
+        const result = await seedFromClaudeMd(config, store);
         if (result.seeded === 0) {
           console.log(chalk.yellow("No new rules seeded (all repos already up to date)."));
         } else {
