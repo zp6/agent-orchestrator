@@ -1,0 +1,291 @@
+import { describe, it, expect } from "vitest";
+import {
+  detectSchemaChanges,
+  extractChangedFilesFromDiff,
+  buildSchemaImpactNotice,
+  SCHEMA_CONSUMER_MAP,
+} from "../reviewer/schema-impact.js";
+import type { SchemaImpactHit } from "../reviewer/schema-impact.js";
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/** Builds a minimal git diff for a file with the given content snippet added. */
+function makeDiff(filePath: string, addedLines: string): string {
+  return [
+    `diff --git a/${filePath} b/${filePath}`,
+    `--- a/${filePath}`,
+    `+++ b/${filePath}`,
+    `@@ -1,1 +1,5 @@`,
+    ...addedLines.split("\n").map((l) => `+${l}`),
+  ].join("\n");
+}
+
+// ── extractChangedFilesFromDiff ───────────────────────────────────────────────
+
+describe("extractChangedFilesFromDiff", () => {
+  it("extracts file paths from git diff headers", () => {
+    const diff = makeDiff("src/state/store.ts", "CREATE TABLE tasks (id TEXT);");
+    const files = extractChangedFilesFromDiff(diff);
+    expect(files).toContain("src/state/store.ts");
+  });
+
+  it("extracts multiple files from a multi-file diff", () => {
+    const diff = [
+      makeDiff("src/state/store.ts", "ALTER TABLE tasks ADD COLUMN foo TEXT;"),
+      makeDiff("src/state/types.ts", "export interface Task { foo: string; }"),
+    ].join("\n");
+    const files = extractChangedFilesFromDiff(diff);
+    expect(files).toContain("src/state/store.ts");
+    expect(files).toContain("src/state/types.ts");
+  });
+
+  it("falls back to +++ b/ lines when git headers are absent", () => {
+    const diff = [
+      "--- a/src/verifier.ts",
+      "+++ b/src/verifier.ts",
+      "@@ -1,1 +1,2 @@",
+      "+// change",
+    ].join("\n");
+    const files = extractChangedFilesFromDiff(diff);
+    expect(files).toContain("src/verifier.ts");
+  });
+
+  it("returns empty array for an empty diff", () => {
+    expect(extractChangedFilesFromDiff("")).toEqual([]);
+  });
+
+  it("deduplicates repeated file paths", () => {
+    const diff = [
+      makeDiff("src/state/store.ts", "line 1"),
+      makeDiff("src/state/store.ts", "line 2"),
+    ].join("\n");
+    const files = extractChangedFilesFromDiff(diff);
+    expect(files.filter((f) => f === "src/state/store.ts")).toHaveLength(1);
+  });
+});
+
+// ── detectSchemaChanges ───────────────────────────────────────────────────────
+
+describe("detectSchemaChanges", () => {
+  it("detects a state.db schema change (CREATE TABLE)", () => {
+    const diff = makeDiff("src/state/store.ts", "CREATE TABLE new_table (id TEXT PRIMARY KEY);");
+    const files = ["src/state/store.ts"];
+    const hits = detectSchemaChanges(diff, files);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].schemaLabel).toMatch(/state\.db/i);
+    expect(hits[0].consumers).toContain("rapartlu/agent-dashboard");
+    expect(hits[0].matchedFiles).toContain("src/state/store.ts");
+  });
+
+  it("detects an ALTER TABLE as a schema change", () => {
+    const diff = makeDiff(
+      "src/state/store.ts",
+      "ALTER TABLE tasks ADD COLUMN dispatched_at TEXT;",
+    );
+    const files = ["src/state/store.ts"];
+    const hits = detectSchemaChanges(diff, files);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].consumers).toContain("rapartlu/agent-orchestrator");
+  });
+
+  it("does NOT detect a non-schema change in store.ts (no SQL indicators)", () => {
+    const diff = makeDiff("src/state/store.ts", "// refactored helper function");
+    const files = ["src/state/store.ts"];
+    const hits = detectSchemaChanges(diff, files);
+    // store.ts has indicators defined — no SQL indicator means no hit
+    expect(hits).toHaveLength(0);
+  });
+
+  it("detects a state types change (no indicators required)", () => {
+    const diff = makeDiff(
+      "src/state/types.ts",
+      "export interface Task { newField: string; }",
+    );
+    const files = ["src/state/types.ts"];
+    const hits = detectSchemaChanges(diff, files);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].schemaLabel).toMatch(/TypeScript types/i);
+  });
+
+  it("detects openapi.yaml change", () => {
+    const diff = makeDiff("openapi.yaml", "  /v1/new-endpoint:\n    get:");
+    const files = ["openapi.yaml"];
+    const hits = detectSchemaChanges(diff, files);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].schemaLabel).toMatch(/OpenAPI/i);
+    expect(hits[0].consumers).toContain("rapartlu/agent-dashboard");
+  });
+
+  it("detects agents.yaml change", () => {
+    const diff = makeDiff("agents.yaml", "  new-agent:\n    port: 3480");
+    const files = ["agents.yaml"];
+    const hits = detectSchemaChanges(diff, files);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].consumers).toContain("rapartlu/agent-proxy");
+  });
+
+  it("detects index.ts public API export change", () => {
+    const diff = makeDiff("src/index.ts", "export { newHelper } from './reviewer/helpers.js';");
+    const files = ["src/index.ts"];
+    const hits = detectSchemaChanges(diff, files);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].schemaLabel).toMatch(/public API/i);
+    expect(hits[0].consumers).toContain("rapartlu/agent-orchestrator");
+  });
+
+  it("returns no hits for a file with no schema pattern match", () => {
+    const diff = makeDiff("src/util/logger.ts", "console.log('debug');");
+    const files = ["src/util/logger.ts"];
+    const hits = detectSchemaChanges(diff, files);
+    expect(hits).toHaveLength(0);
+  });
+
+  it("returns no hits for an empty diff", () => {
+    const hits = detectSchemaChanges("", []);
+    expect(hits).toHaveLength(0);
+  });
+
+  it("can return multiple hits when multiple schemas are touched", () => {
+    const diff = [
+      makeDiff("src/state/store.ts", "CREATE TABLE new_table (id TEXT);"),
+      makeDiff("src/state/types.ts", "export interface Task { newField: string; }"),
+    ].join("\n");
+    const files = ["src/state/store.ts", "src/state/types.ts"];
+    const hits = detectSchemaChanges(diff, files);
+    expect(hits.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("is case-insensitive for SQL indicators", () => {
+    const diff = makeDiff("src/state/store.ts", "create table foo (id text);");
+    const files = ["src/state/store.ts"];
+    const hits = detectSchemaChanges(diff, files);
+    expect(hits).toHaveLength(1);
+  });
+
+  it("populates matchedFiles correctly", () => {
+    const diff = makeDiff("src/state/store.ts", "ALTER TABLE tasks ADD done INTEGER;");
+    const files = ["src/state/store.ts", "README.md"];
+    const hits = detectSchemaChanges(diff, files);
+    expect(hits[0].matchedFiles).toEqual(["src/state/store.ts"]);
+    expect(hits[0].matchedFiles).not.toContain("README.md");
+  });
+});
+
+// ── buildSchemaImpactNotice ───────────────────────────────────────────────────
+
+describe("buildSchemaImpactNotice", () => {
+  it("returns empty string when there are no hits", () => {
+    expect(buildSchemaImpactNotice([])).toBe("");
+  });
+
+  it("includes the schema label in the output", () => {
+    const hits: SchemaImpactHit[] = [
+      {
+        schemaLabel: "state.db schema (SQLite tables / columns)",
+        consumers: ["rapartlu/agent-dashboard"],
+        matchedFiles: ["src/state/store.ts"],
+      },
+    ];
+    const notice = buildSchemaImpactNotice(hits);
+    expect(notice).toContain("state.db schema");
+  });
+
+  it("includes all consumer repos", () => {
+    const hits: SchemaImpactHit[] = [
+      {
+        schemaLabel: "state.db schema",
+        consumers: ["rapartlu/agent-orchestrator", "rapartlu/agent-dashboard"],
+        matchedFiles: ["src/state/store.ts"],
+      },
+    ];
+    const notice = buildSchemaImpactNotice(hits);
+    expect(notice).toContain("rapartlu/agent-orchestrator");
+    expect(notice).toContain("rapartlu/agent-dashboard");
+  });
+
+  it("includes the matched file path", () => {
+    const hits: SchemaImpactHit[] = [
+      {
+        schemaLabel: "state.db schema",
+        consumers: ["rapartlu/agent-dashboard"],
+        matchedFiles: ["src/state/store.ts"],
+      },
+    ];
+    const notice = buildSchemaImpactNotice(hits);
+    expect(notice).toContain("src/state/store.ts");
+  });
+
+  it("contains the flagged-risk callout (not a block)", () => {
+    const hits: SchemaImpactHit[] = [
+      {
+        schemaLabel: "state.db schema",
+        consumers: ["rapartlu/agent-dashboard"],
+        matchedFiles: ["src/state/store.ts"],
+      },
+    ];
+    const notice = buildSchemaImpactNotice(hits);
+    expect(notice).toContain("flagged risk");
+    expect(notice).toContain("approve");
+  });
+
+  it("renders multiple hits", () => {
+    const hits: SchemaImpactHit[] = [
+      {
+        schemaLabel: "state.db schema",
+        consumers: ["rapartlu/agent-dashboard"],
+        matchedFiles: ["src/state/store.ts"],
+      },
+      {
+        schemaLabel: "proxy OpenAPI spec",
+        consumers: ["rapartlu/agent-orchestrator"],
+        matchedFiles: ["openapi.yaml"],
+      },
+    ];
+    const notice = buildSchemaImpactNotice(hits);
+    expect(notice).toContain("state.db schema");
+    expect(notice).toContain("proxy OpenAPI spec");
+    expect(notice).toContain("openapi.yaml");
+  });
+
+  it("starts with a newline so it appends cleanly to the prompt header", () => {
+    const hits: SchemaImpactHit[] = [
+      {
+        schemaLabel: "state.db schema",
+        consumers: ["rapartlu/agent-dashboard"],
+        matchedFiles: ["src/state/store.ts"],
+      },
+    ];
+    const notice = buildSchemaImpactNotice(hits);
+    expect(notice.startsWith("\n")).toBe(true);
+  });
+});
+
+// ── SCHEMA_CONSUMER_MAP sanity checks ─────────────────────────────────────────
+
+describe("SCHEMA_CONSUMER_MAP", () => {
+  it("has at least one entry for state.db", () => {
+    const entry = SCHEMA_CONSUMER_MAP.find((e) => e.filePattern.includes("state/store"));
+    expect(entry).toBeDefined();
+    expect(entry!.consumers.length).toBeGreaterThan(0);
+  });
+
+  it("every entry has a non-empty schemaLabel", () => {
+    for (const entry of SCHEMA_CONSUMER_MAP) {
+      expect(entry.schemaLabel.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("every entry has at least one consumer", () => {
+    for (const entry of SCHEMA_CONSUMER_MAP) {
+      expect(entry.consumers.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("every consumer follows owner/repo format", () => {
+    for (const entry of SCHEMA_CONSUMER_MAP) {
+      for (const consumer of entry.consumers) {
+        expect(consumer).toMatch(/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+$/);
+      }
+    }
+  });
+});

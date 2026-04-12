@@ -21,6 +21,11 @@ import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
 import type { IStateStore, MergeQueueEntry } from "../state/types.js";
+import {
+  detectSchemaChanges,
+  extractChangedFilesFromDiff,
+  buildSchemaImpactNotice,
+} from "./schema-impact.js";
 
 export interface PRInfo {
   number: number;
@@ -526,7 +531,21 @@ export class PRReviewer {
 
     // ── LLM review ────────────────────────────────────────────────────────
     const client = createLLMClient();
-    const prompt = `## PR #${pr.number}: ${pr.title}\n**Repo:** ${pr.repo}\n**Author:** ${pr.author}\n**Branch:** ${pr.branch}\n**Files changed:** ${pr.files_changed}${diffWarning}\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${truncatedDiff}\n\`\`\``;
+
+    // Detect schema-consumer impact and inject a notice when schema files changed
+    const changedFiles = extractChangedFilesFromDiff(truncatedDiff);
+    const schemaHits = detectSchemaChanges(truncatedDiff, changedFiles);
+    const schemaNotice = buildSchemaImpactNotice(schemaHits);
+    if (schemaHits.length > 0) {
+      this.log.info("Schema-consumer impact detected", {
+        repo,
+        prNumber,
+        schemas: schemaHits.map((h) => h.schemaLabel),
+        consumers: [...new Set(schemaHits.flatMap((h) => h.consumers))],
+      });
+    }
+
+    const prompt = `## PR #${pr.number}: ${pr.title}\n**Repo:** ${pr.repo}\n**Author:** ${pr.author}\n**Branch:** ${pr.branch}\n**Files changed:** ${pr.files_changed}${diffWarning}${schemaNotice}\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${truncatedDiff}\n\`\`\``;
 
     const LLM_TIMEOUT_MS = 5 * 60 * 1000;
     const abortController = new AbortController();

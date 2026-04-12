@@ -19,6 +19,15 @@
 export { PRReviewer, enforceChecklist, validateClosesReferences } from "./reviewer/pr-reviewer.js";
 export type { PRInfo, PRReviewResult, RedispatchCategory, ConflictStats, CrossRepoCloseIssue } from "./reviewer/pr-reviewer.js";
 
+// Schema-consumer impact detection
+export {
+  detectSchemaChanges,
+  extractChangedFilesFromDiff,
+  buildSchemaImpactNotice,
+  SCHEMA_CONSUMER_MAP,
+} from "./reviewer/schema-impact.js";
+export type { SchemaConsumerEntry, SchemaImpactHit } from "./reviewer/schema-impact.js";
+
 export { Verifier } from "./reviewer/verifier.js";
 export type { VerificationResult } from "./reviewer/verifier.js";
 
