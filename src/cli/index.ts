@@ -33,6 +33,7 @@ import { registerLearnedRulesCommand } from "./commands/learned-rules.js";
 import { registerAuditInfraCommand } from "./commands/audit-infra.js";
 import { registerRoutingAccuracyCommand } from "./commands/routing-accuracy.js";
 import { registerSignalsCommand } from "./commands/signals.js";
+import { registerLearnedPatternsCommand } from "./commands/learned-patterns.js";
 
 const program = new Command();
 
@@ -75,5 +76,6 @@ registerLearnedRulesCommand(program);
 registerAuditInfraCommand(program);
 registerRoutingAccuracyCommand(program);
 registerSignalsCommand(program);
+registerLearnedPatternsCommand(program);
 
 program.parse();

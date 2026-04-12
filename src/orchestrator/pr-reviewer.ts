@@ -9,6 +9,12 @@ import { Deployer } from "./deployer.js";
 import { extractIssueNumberFromBranch, findMatchingIssueNumber } from "./pr-creator.js";
 import { notifyOperator } from "../service/notify.js";
 import { extractCrossRepoIssueRefs } from "../service/daemon.js";
+import {
+  getAndRecordPatterns,
+  buildPatternsBlock,
+  recordFirstPassSaves,
+  seedDefaultPatterns,
+} from "./learned-patterns.js";
 
 export interface PRInfo {
   number: number;
@@ -217,11 +223,36 @@ export class PRReviewer {
       ? `\n\n> ⚠️ **TRUNCATED DIFF WARNING**: The full diff is ${Math.round(diffSize / 1024)} KB but only the first ~${Math.round(truncatedDiff.length / 1024)} KB is shown here. Your review is INCOMPLETE — you have not seen all the changes. Factor this into your decision: note in your comment which files/areas you could not review, and consider escalating if the unseen portion looks significant based on file names or context.`
       : "";
 
-    const prompt = `## PR #${pr.number}: ${pr.title}\n**Repo:** ${pr.repo}\n**Author:** ${pr.author}\n**Branch:** ${pr.branch}\n**Files changed:** ${pr.files_changed}${diffWarning}\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${truncatedDiff}\n\`\`\``;
+    // ── Immune system: inject known anti-patterns into the review prompt ──────
+    // Seed defaults on first run (idempotent), then fetch active patterns.
+    seedDefaultPatterns(this.store);
+    const patterns = getAndRecordPatterns(this.store, repo);
+    const patternsBlock = buildPatternsBlock(patterns);
+    const patternIds = patterns.map((p) => p.id);
+
+    const prompt =
+      `## PR #${pr.number}: ${pr.title}\n` +
+      `**Repo:** ${pr.repo}\n` +
+      `**Author:** ${pr.author}\n` +
+      `**Branch:** ${pr.branch}\n` +
+      `**Files changed:** ${pr.files_changed}` +
+      diffWarning +
+      patternsBlock +
+      `\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${truncatedDiff}\n\`\`\``;
+
+    if (patterns.length > 0) {
+      this.log.debug("Injected learned patterns into review prompt", { repo, prNumber, patternCount: patterns.length });
+    }
 
     try {
       const result = await this.reviewerClient.reviewPRDiff(prompt);
       this.log.info("PR review complete", { repo, prNumber, decision: result.decision, reason: result.reason });
+
+      // Record first-pass save when PR is approved with no prior review rounds.
+      // This measures how often the immune-system injection prevents a rejection.
+      if (result.decision === "approve" && priorReviews === 0 && patternIds.length > 0) {
+        recordFirstPassSaves(this.store, patternIds);
+      }
 
       // Execute the decision — pass branch so approve can enqueue without an extra API call
       await this.executeDecision(repo, prNumber, result, pr.branch);

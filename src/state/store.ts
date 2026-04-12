@@ -847,6 +847,54 @@ export interface WriteSignalParams {
   ttl_hours?: number;
 }
 
+// ── Learned Patterns (immune system / anti-pattern registry) ─────────────────
+
+/**
+ * A persistent anti-pattern record extracted from verification failures, PR
+ * rejections, and manual seeds.  Unlike `learned_rules` (per-repo conventions
+ * from PR feedback) and `signals` (ephemeral pheromones), `learned_patterns`
+ * are long-lived, fleet-wide immune memories injected into LLM review prompts
+ * to prevent known failures from recurring.
+ */
+export interface LearnedPattern {
+  id: number;
+  /** Semantic category. */
+  pattern_type: "anti_pattern" | "bug" | "security" | "architecture" | "workflow";
+  /** Short human-readable title. */
+  title: string;
+  /** Full description of the pattern and why it's harmful. */
+  description: string;
+  /** How this pattern was discovered. */
+  source: "verification_failure" | "pr_rejection" | "manual" | "blue_sky_seed";
+  /** Source task/issue/PR reference (optional). */
+  source_ref: string | null;
+  /** Agent that first encountered this pattern. */
+  agent: string | null;
+  /** JSON-encoded string array of repos this applies to, or null = all repos. */
+  repos: string | null;
+  /** Confidence 0–1; increases each time the pattern prevents a failure. */
+  confidence: number;
+  /** Number of times this pattern was injected into a review prompt. */
+  hit_count: number;
+  /** Times the review passed on the first try after this pattern was injected. */
+  first_pass_saves: number;
+  /** Whether this pattern is active (1) or retired (0). */
+  active: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WriteLearnedPatternParams {
+  pattern_type: LearnedPattern["pattern_type"];
+  title: string;
+  description: string;
+  source: LearnedPattern["source"];
+  source_ref?: string;
+  agent?: string;
+  repos?: string[];
+  confidence?: number;
+}
+
 export interface ReadSignalsFilter {
   signal_type?: string;
   repo?: string;
@@ -991,6 +1039,7 @@ export class StateStore {
     this.runConflictHeatMapMigration();
     this.runRoutingOutcomesMigration();
     this.runStigmergySignalsMigration();
+    this.runLearnedPatternsMigration();
   }
 
   private runPhase2Migration(): void {
@@ -5189,5 +5238,162 @@ export class StateStore {
       .prepare(`DELETE FROM signals WHERE expires_at <= ?`)
       .run(now);
     return result.changes;
+  }
+
+  // ── Learned Patterns (immune system / anti-pattern registry) ─────────────
+
+  private runLearnedPatternsMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS learned_patterns (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        pattern_type     TEXT    NOT NULL DEFAULT 'anti_pattern',
+        title            TEXT    NOT NULL,
+        description      TEXT    NOT NULL,
+        source           TEXT    NOT NULL DEFAULT 'manual',
+        source_ref       TEXT,
+        agent            TEXT,
+        repos            TEXT,
+        confidence       REAL    NOT NULL DEFAULT 0.8,
+        hit_count        INTEGER NOT NULL DEFAULT 0,
+        first_pass_saves INTEGER NOT NULL DEFAULT 0,
+        active           INTEGER NOT NULL DEFAULT 1,
+        created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+        updated_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_learned_patterns_type   ON learned_patterns(pattern_type);
+      CREATE INDEX IF NOT EXISTS idx_learned_patterns_active ON learned_patterns(active);
+      CREATE INDEX IF NOT EXISTS idx_learned_patterns_conf   ON learned_patterns(confidence DESC);
+    `);
+  }
+
+  /**
+   * Add a new learned pattern.  Deduplicates by title (case-insensitive).
+   * Returns the stored record.
+   */
+  addLearnedPattern(params: WriteLearnedPatternParams): LearnedPattern {
+    const now = new Date().toISOString();
+
+    // Deduplicate by title
+    const existing = this.db
+      .prepare("SELECT id FROM learned_patterns WHERE lower(title) = lower(?)")
+      .get(params.title.trim()) as { id: number } | undefined;
+
+    if (existing) {
+      this.db
+        .prepare(
+          "UPDATE learned_patterns SET confidence = MIN(0.99, confidence + 0.02), updated_at = ? WHERE id = ?",
+        )
+        .run(now, existing.id);
+      return this.db
+        .prepare("SELECT * FROM learned_patterns WHERE id = ?")
+        .get(existing.id) as LearnedPattern;
+    }
+
+    const reposJson = params.repos ? JSON.stringify(params.repos) : null;
+    const result = this.db
+      .prepare(
+        `INSERT INTO learned_patterns
+          (pattern_type, title, description, source, source_ref, agent, repos, confidence, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        params.pattern_type,
+        params.title.trim(),
+        params.description.trim(),
+        params.source,
+        params.source_ref ?? null,
+        params.agent ?? null,
+        reposJson,
+        params.confidence ?? 0.8,
+        now,
+        now,
+      );
+
+    return this.db
+      .prepare("SELECT * FROM learned_patterns WHERE id = ?")
+      .get(result.lastInsertRowid) as LearnedPattern;
+  }
+
+  /**
+   * List active learned patterns, optionally filtered by repo.
+   * Patterns with `repos = null` apply to all repos.
+   *
+   * @param repo - If provided, return patterns that apply to this repo (or all-repo patterns).
+   * @param limit - Max rows to return (default 20).
+   */
+  getLearnedPatterns(repo?: string, limit = 20): LearnedPattern[] {
+    if (repo) {
+      // Return patterns that apply to all repos (repos IS NULL) or contain this repo
+      return this.db
+        .prepare(
+          `SELECT * FROM learned_patterns
+           WHERE active = 1
+             AND (repos IS NULL OR repos LIKE ?)
+           ORDER BY confidence DESC, hit_count DESC
+           LIMIT ?`,
+        )
+        .all(`%${repo}%`, limit) as LearnedPattern[];
+    }
+    return this.db
+      .prepare(
+        `SELECT * FROM learned_patterns
+         WHERE active = 1
+         ORDER BY confidence DESC, hit_count DESC
+         LIMIT ?`,
+      )
+      .all(limit) as LearnedPattern[];
+  }
+
+  /** List ALL patterns (active and inactive) for CLI/admin use. */
+  listAllLearnedPatterns(limit = 100): LearnedPattern[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM learned_patterns ORDER BY active DESC, confidence DESC LIMIT ?`,
+      )
+      .all(limit) as LearnedPattern[];
+  }
+
+  /**
+   * Increment `hit_count` each time a pattern is injected into a review prompt.
+   */
+  recordPatternHit(id: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "UPDATE learned_patterns SET hit_count = hit_count + 1, updated_at = ? WHERE id = ?",
+      )
+      .run(now, id);
+  }
+
+  /**
+   * Increment `first_pass_saves` when a PR passes review after pattern injection.
+   * Also boosts confidence slightly.
+   */
+  recordPatternSave(id: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE learned_patterns
+         SET first_pass_saves = first_pass_saves + 1,
+             confidence = MIN(0.99, confidence + 0.01),
+             updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(now, id);
+  }
+
+  /** Retire a pattern (soft-delete). */
+  retireLearnedPattern(id: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare("UPDATE learned_patterns SET active = 0, updated_at = ? WHERE id = ?")
+      .run(now, id);
+  }
+
+  /** Get a single pattern by ID. */
+  getLearnedPattern(id: number): LearnedPattern | undefined {
+    return this.db
+      .prepare("SELECT * FROM learned_patterns WHERE id = ?")
+      .get(id) as LearnedPattern | undefined;
   }
 }
