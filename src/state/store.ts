@@ -2111,35 +2111,63 @@ export class StateStore {
     actionItems: Array<{ description: string; owner: string; priority: string }>;
     goalAdjustments: string[];
   }): number {
-    const result = this.db.prepare(`
-      INSERT INTO meetings (type, date, rounds, participant_count, synthesis, action_items_json, goal_adjustments_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      meeting.type,
-      meeting.date,
-      meeting.rounds.length,
-      meeting.rounds[0]?.entries.filter((e) => e.response).length ?? 0,
-      meeting.synthesis,
-      JSON.stringify(meeting.actionItems),
-      JSON.stringify(meeting.goalAdjustments),
-      new Date().toISOString(),
-    );
+    // Ensure tables exist with correct schema (guards against dashboard creating
+    // them first with different column types — seen in production).
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS meetings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL, date TEXT NOT NULL,
+        rounds INTEGER NOT NULL DEFAULT 1,
+        participant_count INTEGER NOT NULL DEFAULT 0,
+        synthesis TEXT, action_items_json TEXT,
+        goal_adjustments_json TEXT, created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS meeting_rounds (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        meeting_id INTEGER NOT NULL, round_number INTEGER NOT NULL, prompt TEXT
+      );
+      CREATE TABLE IF NOT EXISTS meeting_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        meeting_id INTEGER NOT NULL, round_number INTEGER NOT NULL,
+        agent_name TEXT NOT NULL, provider TEXT, pool TEXT,
+        response TEXT, error TEXT
+      );
+    `);
 
-    const meetingId = result.lastInsertRowid as number;
+    // Use a transaction so partial writes don't leave orphan rows
+    const insert = this.db.transaction(() => {
+      const result = this.db.prepare(`
+        INSERT INTO meetings (type, date, rounds, participant_count, synthesis, action_items_json, goal_adjustments_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        meeting.type,
+        meeting.date,
+        meeting.rounds.length,
+        meeting.rounds[0]?.entries.filter((e) => e.response).length ?? 0,
+        meeting.synthesis,
+        JSON.stringify(meeting.actionItems),
+        JSON.stringify(meeting.goalAdjustments),
+        new Date().toISOString(),
+      );
 
-    for (const round of meeting.rounds) {
-      this.db.prepare(
-        "INSERT INTO meeting_rounds (meeting_id, round_number, prompt) VALUES (?, ?, ?)",
-      ).run(meetingId, round.roundNumber, round.prompt);
+      const meetingId = result.lastInsertRowid as number;
 
-      for (const entry of round.entries) {
+      for (const round of meeting.rounds) {
         this.db.prepare(
-          "INSERT INTO meeting_entries (meeting_id, round_number, agent_name, provider, pool, response, error) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ).run(meetingId, round.roundNumber, entry.agentName, entry.provider, entry.pool ?? null, entry.response, entry.error);
-      }
-    }
+          "INSERT INTO meeting_rounds (meeting_id, round_number, prompt) VALUES (?, ?, ?)",
+        ).run(meetingId, round.roundNumber, round.prompt);
 
-    return meetingId;
+        for (const entry of round.entries) {
+          this.db.prepare(
+            "INSERT INTO meeting_entries (meeting_id, round_number, agent_name, provider, pool, response, error) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          ).run(meetingId, round.roundNumber, entry.agentName, entry.provider, entry.pool ?? null, entry.response, entry.error);
+        }
+      }
+
+      return meetingId;
+    });
+
+    return insert();
   }
 
   getMeetings(limit = 20): Array<{
