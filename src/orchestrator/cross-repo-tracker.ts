@@ -355,6 +355,23 @@ export function detectAndCreateFollowUps(
   // in passing and should not trigger issue creation.
   if (task.task_type === "research") return [];
 
+  // Chain depth limiter: prevent infinite follow-up cascades.
+  // Count how many times "follow-up" or "follows from" appears in the title —
+  // each level adds one. Cap at depth 2 (original → follow-up → follow-up of follow-up).
+  const MAX_FOLLOWUP_DEPTH = 2;
+  const titleLower = (task.title ?? "").toLowerCase();
+  const followUpCount = (titleLower.match(/follow[- ]?up/g) ?? []).length;
+  if (followUpCount >= MAX_FOLLOWUP_DEPTH) {
+    log.info("Skipping cross-repo follow-ups: chain depth limit reached", {
+      taskId: task.id,
+      agentName,
+      depth: followUpCount,
+      maxDepth: MAX_FOLLOWUP_DEPTH,
+      title: task.title,
+    });
+    return [];
+  }
+
   // Before creating any follow-ups, ensure the parent issue is still a live
   // GitHub target. If the issue is already closed or linked in a PR, creating
   // a fresh cross-repo issue would be stale and redundant.
