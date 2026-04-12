@@ -320,6 +320,45 @@ export interface AgentSLAThreshold {
  * DO NOT add methods here unless the orchestrator's StateStore implements them.
  * Telegram-specific helpers live in ITelegramStateStore below.
  */
+/**
+ * Discriminates which reviewer subsystem made an LLM call.
+ */
+export type LlmCallType = "pr_review" | "task_verify" | "supervisor" | "improvement" | "pr_review_issue_match";
+
+/**
+ * One record per Anthropic SDK call emitted by the reviewer.
+ * Written to `llm_call_events` in state.db after each call completes.
+ */
+export interface LlmCallEvent {
+  call_type: LlmCallType;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  /** Tokens served from the prompt cache (cache_read_input_tokens). */
+  cache_read_tokens?: number;
+  /** Tokens written into the prompt cache (cache_creation_input_tokens). */
+  cache_write_tokens?: number;
+  /** Wall-clock duration in ms from call start to response. */
+  duration_ms?: number;
+  /** Links to the tasks table when the call is for a specific task. */
+  task_id?: string;
+  /** Links to the PR being reviewed (pr_reviews table). */
+  pr_number?: number;
+}
+
+/**
+ * Per-call-type token usage summary returned by `getTokenStats()`.
+ */
+export interface LlmTokenStats {
+  call_type: LlmCallType;
+  call_count: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cache_read_tokens: number;
+  total_cache_write_tokens: number;
+  avg_duration_ms: number | null;
+}
+
 export interface IStateStore {
   // Task operations
   getTask(id: string): Task | null | undefined;
@@ -382,6 +421,19 @@ export interface IStateStore {
 
   // PR review history
   recordPRReview(repo: string, prNumber: number, decision: string, confidence?: number | null): void;
+
+  // LLM token instrumentation
+  /**
+   * Persist a per-call token usage record after every Anthropic SDK call completes.
+   * Fire-and-forget — callers should not await errors from this method.
+   */
+  recordLlmCallEvent(event: LlmCallEvent): void;
+  /**
+   * Return aggregate token usage grouped by call_type.
+   *
+   * @param sinceHours - Look-back window in hours (default: 720 = 30 days).
+   */
+  getTokenStats(sinceHours?: number): LlmTokenStats[];
 }
 
 /**

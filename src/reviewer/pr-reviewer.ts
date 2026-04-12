@@ -531,6 +531,7 @@ export class PRReviewer {
     const LLM_TIMEOUT_MS = 5 * 60 * 1000;
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
+    const callStart = Date.now();
     try {
       let response;
       try {
@@ -545,6 +546,19 @@ export class PRReviewer {
         );
       } finally {
         clearTimeout(timer);
+      }
+
+      if (response.usage) {
+        this.store.recordLlmCallEvent({
+          call_type: "pr_review",
+          model: response.model,
+          input_tokens: response.usage.input_tokens,
+          output_tokens: response.usage.output_tokens,
+          cache_read_tokens: response.usage.cache_read_input_tokens ?? 0,
+          cache_write_tokens: response.usage.cache_creation_input_tokens ?? 0,
+          duration_ms: Date.now() - callStart,
+          pr_number: prNumber,
+        });
       }
 
       const text = response.content

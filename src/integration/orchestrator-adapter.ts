@@ -91,7 +91,7 @@ export function createReviewerInstances(
       routingAccuracyProvider,
       calibrationDriftProvider: calibrationDriftMonitor,
     }),
-    detector: new ImprovementDetector(config),
+    detector: new ImprovementDetector(config, store),
     issueCreator: new IssueCreator(config),
     calibrationDriftMonitor,
   };

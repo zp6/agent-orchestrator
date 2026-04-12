@@ -27,6 +27,8 @@ import type {
   ScoreDistributionBucket,
   CalibrationDriftAlert,
   AgentSLAThreshold,
+  LlmCallEvent,
+  LlmTokenStats,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -111,6 +113,26 @@ export class StateStore implements ITelegramStateStore {
         status TEXT NOT NULL DEFAULT 'pending',
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
+
+      CREATE TABLE IF NOT EXISTS llm_call_events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        call_type   TEXT NOT NULL,
+        model       TEXT NOT NULL,
+        input_tokens  INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+        duration_ms   INTEGER,
+        task_id     TEXT,
+        pr_number   INTEGER
+      );
+    `);
+
+    // Index on call_type + created_at for efficient per-type aggregation
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_llm_call_events_call_type_created_at
+        ON llm_call_events (call_type, created_at DESC);
     `);
 
     // Add priority column to tasks if it doesn't exist yet (idempotent)
@@ -831,6 +853,65 @@ export class StateStore implements ITelegramStateStore {
           LIMIT ?`,
       )
       .all(limit) as PRConfidenceRecord[];
+  }
+
+  // ── LLM token instrumentation ─────────────────────────────────────────────
+
+  /**
+   * Persist one per-call token usage record to `llm_call_events`.
+   *
+   * Called by every reviewer subsystem (pr-reviewer, verifier, supervisor,
+   * improvement-detector) immediately after a successful Anthropic SDK call.
+   * Errors are swallowed — instrumentation must never interrupt the main flow.
+   */
+  recordLlmCallEvent(event: LlmCallEvent): void {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO llm_call_events
+             (call_type, model, input_tokens, output_tokens, cache_read_tokens,
+              cache_write_tokens, duration_ms, task_id, pr_number)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          event.call_type,
+          event.model,
+          event.input_tokens,
+          event.output_tokens,
+          event.cache_read_tokens ?? 0,
+          event.cache_write_tokens ?? 0,
+          event.duration_ms ?? null,
+          event.task_id ?? null,
+          event.pr_number ?? null,
+        );
+    } catch {
+      // Instrumentation failures must never surface to callers.
+    }
+  }
+
+  /**
+   * Return aggregate per-call-type token usage over the given look-back window.
+   *
+   * @param sinceHours - Look-back window in hours (default: 720 = 30 days).
+   */
+  getTokenStats(sinceHours = 720): LlmTokenStats[] {
+    const lookback = Number.isFinite(sinceHours) && sinceHours >= 1 ? Math.round(sinceHours) : 720;
+    return this.db
+      .prepare(
+        `SELECT
+           call_type,
+           COUNT(*)                        AS call_count,
+           SUM(input_tokens)               AS total_input_tokens,
+           SUM(output_tokens)              AS total_output_tokens,
+           SUM(cache_read_tokens)          AS total_cache_read_tokens,
+           SUM(cache_write_tokens)         AS total_cache_write_tokens,
+           AVG(duration_ms)               AS avg_duration_ms
+         FROM llm_call_events
+         WHERE created_at >= datetime('now', ?)
+         GROUP BY call_type
+         ORDER BY total_input_tokens DESC`,
+      )
+      .all(`-${lookback} hours`) as LlmTokenStats[];
   }
 
   // ── System flags (pause / resume / operator overrides) ───────────────────

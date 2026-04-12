@@ -17,6 +17,7 @@
  *   /sla [status|set|clear] → configure and monitor quality SLA thresholds
  *   /verification-calibration [days] → score histograms, low-conf approvals, and drift alerts
  *   /calibration [days]  → alias for /verification-calibration
+ *   /token-stats [hours] → per-call-type LLM token usage (default: 720h = 30 days)
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -26,7 +27,7 @@
  */
 
 import { createLogger } from "../service/logger.js";
-import type { ITelegramStateStore, Task } from "../state/types.js";
+import type { ITelegramStateStore, Task, LlmTokenStats } from "../state/types.js";
 import type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 import { buildIssueAgeHeatmap, formatIssueAgeHeatmap } from "../reviewer/issue-age.js";
 import type { CalibrationDriftProvider } from "../reviewer/calibration-drift.js";
@@ -72,7 +73,8 @@ type CommandName =
   | "s"
   | "sla"
   | "verification-calibration"
-  | "calibration";
+  | "calibration"
+  | "token-stats";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -94,6 +96,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "sla",
   "verification-calibration",
   "calibration",
+  "token-stats",
 ]);
 
 interface ParsedCommand {
@@ -282,6 +285,12 @@ async function executeCommand(
 
     case "sla":
       return handleSLA(store, cmd.args);
+
+    case "token-stats": {
+      const hours = parseInt(cmd.args[0] ?? "720", 10);
+      const windowHours = Number.isNaN(hours) || hours < 1 ? 720 : Math.min(hours, 8760);
+      return handleTokenStats(store, windowHours);
+    }
   }
 }
 
@@ -834,6 +843,52 @@ function handleSLA(store: ITelegramStateStore, args: string[]): string {
   }
 
   return `❌ Unknown SLA subcommand. Use \`/sla\`, \`/sla set <agent> <score> <window>\`, or \`/sla clear <agent>\`.`;
+}
+
+// ── /token-stats handler ──────────────────────────────────────────────────
+
+function handleTokenStats(store: ITelegramStateStore, sinceHours: number): string {
+  const rows: LlmTokenStats[] = store.getTokenStats(sinceHours);
+
+  const windowDesc =
+    sinceHours >= 720
+      ? `${Math.round(sinceHours / 720)} month(s)`
+      : sinceHours >= 24
+        ? `${Math.round(sinceHours / 24)} day(s)`
+        : `${sinceHours}h`;
+
+  if (rows.length === 0) {
+    return `📊 *Token Stats* (last ${windowDesc})\n\nNo LLM call events recorded yet.`;
+  }
+
+  const totalInput = rows.reduce((s, r) => s + r.total_input_tokens, 0);
+  const totalOutput = rows.reduce((s, r) => s + r.total_output_tokens, 0);
+  const totalCacheRead = rows.reduce((s, r) => s + r.total_cache_read_tokens, 0);
+  const totalCalls = rows.reduce((s, r) => s + r.call_count, 0);
+  const cacheHitRate = totalInput > 0 ? ((totalCacheRead / totalInput) * 100).toFixed(1) : "0.0";
+
+  const header = [
+    `📊 *Token Stats* (last ${windowDesc})`,
+    ``,
+    `*Fleet totals* — ${totalCalls} calls`,
+    `  Input:       ${totalInput.toLocaleString()} tokens`,
+    `  Output:      ${totalOutput.toLocaleString()} tokens`,
+    `  Cache reads: ${totalCacheRead.toLocaleString()} tokens (${cacheHitRate}% of input)`,
+    ``,
+    `*By call type:*`,
+  ];
+
+  const lines: string[] = [];
+  for (const r of rows) {
+    const avgMs = r.avg_duration_ms !== null ? `${Math.round(r.avg_duration_ms)}ms` : "n/a";
+    const cacheRead = r.total_cache_read_tokens > 0 ? ` cache: ${r.total_cache_read_tokens.toLocaleString()}` : "";
+    lines.push(
+      `\`${r.call_type}\` — ${r.call_count} calls`,
+      `  in: ${r.total_input_tokens.toLocaleString()}  out: ${r.total_output_tokens.toLocaleString()}${cacheRead}  avg: ${avgMs}`,
+    );
+  }
+
+  return [...header, ...lines].join("\n");
 }
 
 // ── TelegramCommandHandler class ──────────────────────────────────────────
