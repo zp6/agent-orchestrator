@@ -361,6 +361,24 @@ export async function runTeamMeeting(
     goalAdjustments,
   };
 
+  // Persist to SQLite for dashboard access
+  try {
+    store.saveMeeting({
+      type: meetingType,
+      date: summary.date,
+      rounds: summary.rounds.map((r) => ({
+        roundNumber: r.roundNumber,
+        prompt: r.prompt,
+        entries: r.entries,
+      })),
+      synthesis,
+      actionItems,
+      goalAdjustments,
+    });
+  } catch (err) {
+    log.warn("Failed to save meeting to store", { error: err instanceof Error ? err.message : String(err) });
+  }
+
   // File as GitHub issue
   fileMeetingIssue(config, summary);
 
