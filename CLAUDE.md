@@ -199,6 +199,65 @@ This session runs the health monitoring loop and **owns the daemon lifecycle**. 
 ### Health check cadence
 Each check must verify all 6 points: daemon PID, latest cycle timestamp, ERROR lines in last 2 min, task status counts (done/failed/in_progress/escalated), agent health via `curl http://localhost:3400/v1/agents`, and Docker socket responsive (`curl --unix-socket /var/run/docker.sock --max-time 8 http://localhost/ping`). Report issues or confirm healthy.
 
+## Token Rotation (Claude OAuth token)
+
+When a new `CLAUDE_CODE_OAUTH_TOKEN` is provided, deploy it as follows.
+
+### How token auth works
+- Token lives in `/Users/paultarr/Documents/Git/claude-proxy/.env` as `CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...`
+- `generate.sh` reads it and writes to `.secrets/<agent>/oauth_token` (one file per agent)
+- `docker-compose.generated.yml` mounts each file as a Docker secret at `/run/secrets/<agent>_oauth_token`
+- `entrypoint.sh` exports it as `CLAUDE_CODE_OAUTH_TOKEN` env var before starting the Claude CLI
+
+**Important:** `generate.sh` (full mode) is triggered by the proxy management API (port 3400, `src/manager.ts`) on every agent create/update. It wipes and recreates `.secrets/` each time. Do NOT write `.secrets/` files manually between bash calls — they will be overwritten.
+
+### Rotation procedure
+
+1. **Update `.env`:**
+   ```bash
+   # Edit /Users/paultarr/Documents/Git/claude-proxy/.env
+   # Replace CLAUDE_CODE_OAUTH_TOKEN=<old> with the new token
+   ```
+
+2. **Run agents sync** — this registers all agents with the management API, which triggers `generate.sh` for each, writing the new token to all `.secrets/<agent>/oauth_token` files and restarting containers:
+   ```bash
+   GH_TOKEN="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" \
+     node dist/cli/index.js agents sync
+   ```
+
+3. **Fix any containers that failed to start** (race condition: secrets wiped mid-rotation):
+   ```bash
+   # Write secrets and start in one atomic command
+   OAUTH="<new-token>"
+   GH="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"
+   BASE="/Users/paultarr/Documents/Git/claude-proxy/.secrets"
+   for agent in claude-orchestrator-telegram claude-agent-orchestrator codex-agent-orchestrator \
+     claude-orchestrator-reviewer codex-orchestrator-reviewer claude-orchestrator-dashboard \
+     codex-orchestrator-dashboard claude-research-agent codex-research-agent claude-proxy codex-proxy; do
+     mkdir -p "$BASE/$agent"
+     printf '%s' "$OAUTH" > "$BASE/$agent/oauth_token"
+     printf '%s' "$GH" > "$BASE/$agent/gh_token"
+     printf '' > "$BASE/$agent/openai_api_key"
+     printf '' > "$BASE/$agent/gemini_api_key"
+   done
+   docker start $(docker ps -a --format "{{.Names}}" | grep "^claude-proxy-" | grep -v "child\|repo") 2>&1
+   ```
+
+4. **Verify** all 11 containers are running: `curl -s http://localhost:3400/v1/agents | python3 -c "import json,sys; a=json.load(sys.stdin); print(len(a), [(x['name'],x.get('status')) for x in a])"`
+
+### If agents still show "Not logged in · Please run /login" after rotation
+
+The `.env` path covers the `CLAUDE_CODE_OAUTH_TOKEN` env var injected at container startup. If the Claude CLI inside a container has cached a different (stale) token internally, the env var alone won't fix it. This requires **human interaction**:
+
+```bash
+# On the host machine, run:
+claude setup-token
+# Then restart the affected container so entrypoint.sh re-reads the new secrets
+docker restart claude-proxy-<agent-name>-1
+```
+
+The `setup-token` command cannot be automated — it opens an OAuth flow or prompts for a token interactively.
+
 ## PR Discipline
 
 - One issue, one branch, one PR
