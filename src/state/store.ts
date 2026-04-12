@@ -900,6 +900,52 @@ export interface ReadSignalsFilter {
   repo?: string;
   file_glob?: string;
   limit?: number;
+  /**
+   * When set, each signal returned is recorded as a consumption event in
+   * `signal_reads`, enabling the activity feed to show cross-agent influence.
+   */
+  reader_agent?: string;
+  /** Optional context string to attach to the read event (e.g. task ID). */
+  reader_context?: string;
+}
+
+/**
+ * A record of an agent consuming (reading) a stigmergy signal.
+ * Stored in `signal_reads` to power the activity feed timeline.
+ */
+export interface SignalRead {
+  id: number;
+  /** FK → signals.id */
+  signal_id: number;
+  /** Which agent read the signal. */
+  reader: string;
+  /** Optional context (e.g. task ID, issue ref). */
+  context: string | null;
+  /** ISO timestamp when the signal was read. */
+  read_at: string;
+}
+
+/**
+ * A unified event in the stigmergy activity feed, covering both writes and reads.
+ * Used by `getSignalActivityFeed()` to produce a chronological timeline.
+ */
+export interface SignalActivityEvent {
+  /** 'write' = signal was emitted; 'read' = signal was consumed. */
+  event_type: "write" | "read";
+  /** ISO timestamp of the event. */
+  at: string;
+  /** Agent that emitted or consumed the signal. */
+  agent: string;
+  /** FK to the signals table. */
+  signal_id: number;
+  signal_type: string;
+  key: string;
+  repo: string | null;
+  confidence: number;
+  /** Raw JSON value payload (if any). */
+  value: string | null;
+  /** Only present for read events: optional context string. */
+  context: string | null;
 }
 
 const MIGRATIONS = `
@@ -1039,6 +1085,7 @@ export class StateStore {
     this.runConflictHeatMapMigration();
     this.runRoutingOutcomesMigration();
     this.runStigmergySignalsMigration();
+    this.runSignalReadsMigration();
     this.runLearnedPatternsMigration();
   }
 
@@ -5216,7 +5263,7 @@ export class StateStore {
     const limit = filter.limit ?? 500;
     bindings.push(limit);
 
-    return this.db
+    const signals = this.db
       .prepare(
         `SELECT * FROM signals
          WHERE ${where}
@@ -5224,6 +5271,16 @@ export class StateStore {
          LIMIT ?`,
       )
       .all(...bindings) as Signal[];
+
+    // Record consumption events when a reader_agent is provided so the
+    // activity feed can show cross-agent influence.
+    if (filter.reader_agent && signals.length > 0) {
+      for (const sig of signals) {
+        this.recordSignalRead(sig.id, filter.reader_agent, filter.reader_context);
+      }
+    }
+
+    return signals;
   }
 
   /**
@@ -5238,6 +5295,96 @@ export class StateStore {
       .prepare(`DELETE FROM signals WHERE expires_at <= ?`)
       .run(now);
     return result.changes;
+  }
+
+  // ── Signal reads (consumption tracking) ──────────────────────────────────────
+
+  private runSignalReadsMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS signal_reads (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        signal_id INTEGER NOT NULL,
+        reader    TEXT    NOT NULL,
+        context   TEXT,
+        read_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_signal_reads_signal ON signal_reads(signal_id);
+      CREATE INDEX IF NOT EXISTS idx_signal_reads_reader ON signal_reads(reader);
+      CREATE INDEX IF NOT EXISTS idx_signal_reads_time   ON signal_reads(read_at);
+    `);
+  }
+
+  /**
+   * Record that an agent consumed (read) a specific signal.
+   * Called by `readSignals()` when `reader_agent` is set in the filter,
+   * and can also be called explicitly for targeted reads.
+   */
+  recordSignalRead(signalId: number, reader: string, context?: string): SignalRead {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `INSERT INTO signal_reads (signal_id, reader, context, read_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(signalId, reader, context ?? null, now);
+    return this.db
+      .prepare(`SELECT * FROM signal_reads WHERE id = ?`)
+      .get(result.lastInsertRowid) as SignalRead;
+  }
+
+  /**
+   * Return a chronological activity feed of stigmergy signal events — both
+   * writes (emitted by agents) and reads (consumed by agents).
+   *
+   * The feed merges the `signals` and `signal_reads` tables using a UNION
+   * ordered by timestamp DESC, so operators see the most recent coordination
+   * activity first.  Only signals still present in the signals table are
+   * included (expired/pruned signals are excluded from the read side too).
+   *
+   * @param limit  Max total events to return (default 100).
+   * @param since  Optional ISO timestamp: only events at or after this time.
+   */
+  getSignalActivityFeed(limit = 100, since?: string): SignalActivityEvent[] {
+    const sinceClause = since ? `AND s.created_at >= '${since.replace(/'/g, "''")}'` : "";
+    const sinceReadClause = since ? `AND sr.read_at >= '${since.replace(/'/g, "''")}'` : "";
+
+    const sql = `
+      SELECT
+        'write'         AS event_type,
+        s.created_at    AS at,
+        s.agent         AS agent,
+        s.id            AS signal_id,
+        s.signal_type   AS signal_type,
+        s.key           AS key,
+        s.repo          AS repo,
+        s.confidence    AS confidence,
+        s.value         AS value,
+        NULL            AS context
+      FROM signals s
+      WHERE 1=1 ${sinceClause}
+
+      UNION ALL
+
+      SELECT
+        'read'          AS event_type,
+        sr.read_at      AS at,
+        sr.reader       AS agent,
+        sr.signal_id    AS signal_id,
+        s.signal_type   AS signal_type,
+        s.key           AS key,
+        s.repo          AS repo,
+        s.confidence    AS confidence,
+        s.value         AS value,
+        sr.context      AS context
+      FROM signal_reads sr
+      JOIN signals s ON s.id = sr.signal_id
+      WHERE 1=1 ${sinceReadClause}
+
+      ORDER BY at DESC
+      LIMIT ?
+    `;
+
+    return this.db.prepare(sql).all(limit) as SignalActivityEvent[];
   }
 
   // ── Learned Patterns (immune system / anti-pattern registry) ─────────────

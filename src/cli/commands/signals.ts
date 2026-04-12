@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { StateStore, type Signal } from "../../state/store.js";
+import { StateStore, type Signal, type SignalActivityEvent } from "../../state/store.js";
 
 export function registerSignalsCommand(program: Command): void {
   const signals = program
@@ -189,6 +189,103 @@ export function registerSignalsCommand(program: Command): void {
       },
     );
 
+  // ── feed ──────────────────────────────────────────────────────────────────
+  signals
+    .command("feed")
+    .description("Show a real-time activity feed of stigmergy signal writes and reads")
+    .option("--limit <n>", "Maximum number of events to show", "50")
+    .option(
+      "--since <iso>",
+      "Only show events at or after this ISO timestamp (e.g. 2026-04-12T00:00:00Z)",
+    )
+    .option(
+      "--watch",
+      "Auto-refresh the feed every --interval seconds",
+    )
+    .option(
+      "--interval <s>",
+      "Refresh interval in seconds (requires --watch)",
+      "10",
+    )
+    .option("--json", "Output raw JSON")
+    .action(
+      (opts: {
+        limit?: string;
+        since?: string;
+        watch?: boolean;
+        interval?: string;
+        json?: boolean;
+      }) => {
+        const limit = parseInt(opts.limit ?? "50", 10);
+        const intervalMs = parseInt(opts.interval ?? "10", 10) * 1000;
+
+        const renderFeed = (): void => {
+          let store: StateStore;
+          try {
+            store = new StateStore();
+          } catch (err) {
+            console.error(
+              chalk.red("Could not open state database:"),
+              err instanceof Error ? err.message : String(err),
+            );
+            process.exit(1);
+          }
+
+          let events: SignalActivityEvent[];
+          try {
+            events = store.getSignalActivityFeed(limit, opts.since);
+          } finally {
+            store.close();
+          }
+
+          if (opts.json) {
+            console.log(JSON.stringify(events, null, 2));
+            return;
+          }
+
+          if (opts.watch) {
+            // Clear terminal on refresh
+            process.stdout.write("\x1Bc");
+          }
+
+          console.log(
+            chalk.bold("\n● Stigmergy Signal Activity Feed") +
+            chalk.dim(`  (${events.length} event${events.length === 1 ? "" : "s"})\n`),
+          );
+
+          if (events.length === 0) {
+            console.log(
+              chalk.dim(
+                "  No signal activity yet. Signals are written during verification failures and read by agents\n  before dispatching tasks to inform routing decisions.\n",
+              ),
+            );
+            return;
+          }
+
+          for (const ev of events) {
+            renderEvent(ev);
+          }
+
+          if (opts.watch) {
+            console.log(
+              chalk.dim(`\n  Auto-refreshing every ${opts.interval ?? 10}s — Ctrl+C to stop`),
+            );
+          }
+        };
+
+        renderFeed();
+
+        if (opts.watch) {
+          const timer = setInterval(renderFeed, intervalMs);
+          // Keep the process alive; clean up on SIGINT
+          process.on("SIGINT", () => {
+            clearInterval(timer);
+            process.exit(0);
+          });
+        }
+      },
+    );
+
   // ── prune ─────────────────────────────────────────────────────────────────
   signals
     .command("prune")
@@ -228,4 +325,72 @@ function formatExpiresIn(expiresAt: string): string {
   if (hours < 24) return chalk.yellow(`${hours}h`);
   const days = Math.floor(hours / 24);
   return chalk.dim(`${days}d`);
+}
+
+// ── Activity feed helpers ────────────────────────────────────────────────────
+
+/** Format an ISO timestamp as HH:MM:SS in local time. */
+function formatWallClock(isoString: string): string {
+  const d = new Date(isoString);
+  if (isNaN(d.getTime())) return "??:??:??";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/** Return a coloured, fixed-width event-type badge. */
+function formatEventBadge(eventType: "write" | "read"): string {
+  if (eventType === "write") return chalk.green("WRITE".padEnd(5));
+  return chalk.cyan("READ ".padEnd(5));
+}
+
+/** Format a confidence score as a coloured percentage string. */
+function formatConfidence(confidence: number): string {
+  const pct = Math.round(confidence * 100);
+  const label = `${pct}%`.padStart(4);
+  if (pct >= 70) return chalk.red(label);
+  if (pct >= 40) return chalk.yellow(label);
+  return chalk.green(label);
+}
+
+/**
+ * Render a single SignalActivityEvent to the terminal.
+ *
+ * Format (two lines):
+ *   HH:MM:SS  WRITE  <agent>  [signal_type] <key>  [repo]  conf:XX%
+ *             hint: <revision_hint (truncated)>    ← only for write events with hints
+ *
+ * Read events additionally show the context if present:
+ *   HH:MM:SS  READ   <reader>  ← signal_type <key>  [context]
+ */
+function renderEvent(ev: SignalActivityEvent): void {
+  const time = chalk.dim(formatWallClock(ev.at));
+  const badge = formatEventBadge(ev.event_type);
+  const agent = chalk.bold(ev.agent);
+  const sigType = chalk.cyan(ev.signal_type);
+  const key = ev.key.length > 60 ? ev.key.slice(0, 57) + "…" : ev.key;
+  const repo = ev.repo ? chalk.dim(` [${ev.repo}]`) : "";
+  const conf = formatConfidence(ev.confidence);
+  const arrow = ev.event_type === "read" ? chalk.dim("←") : chalk.dim("→");
+
+  console.log(
+    `  ${time}  ${badge}  ${agent}  ${arrow}  ${sigType} ${chalk.white(key)}${repo}  ${chalk.dim("conf:")}${conf}`,
+  );
+
+  // For write events, show a value hint if present
+  if (ev.event_type === "write" && ev.value) {
+    try {
+      const parsed = JSON.parse(ev.value) as Record<string, unknown>;
+      if (parsed.revision_hint) {
+        const hint = String(parsed.revision_hint).slice(0, 120);
+        console.log(`           ${chalk.dim("hint:")} ${chalk.yellow(hint)}`);
+      }
+    } catch {
+      // value is not JSON — skip
+    }
+  }
+
+  // For read events, show the context if available
+  if (ev.event_type === "read" && ev.context) {
+    console.log(`           ${chalk.dim("ctx:")} ${chalk.dim(ev.context)}`);
+  }
 }
