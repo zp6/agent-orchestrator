@@ -12,6 +12,7 @@ import { createLogger } from "./logger.js";
 import { notifyOperator } from "./notify.js";
 import { cachedGetIssueState, liveValidateForDispatch } from "../triggers/issue-state-bridge.js";
 import { loadGoals, measureGoalProgress, buildGoalsContext } from "../orchestrator/goals.js";
+import { scoreIssuePriority } from "../orchestrator/priority-scorer.js";
 import { extractAndStoreRules } from "../orchestrator/learned-rules.js";
 import { extractRepoFromSourceRef } from "../orchestrator/dispatcher.js";
 
@@ -352,7 +353,7 @@ export function buildSupervisorContext(config: OrchestratorConfig, store: StateS
     .join("\n");
   sections.push(`## Agents\n${agents}`);
 
-  const openIssues = fetchOpenIssues(config);
+  const openIssues = fetchOpenIssues(config, store);
   if (openIssues.length > 0) {
     sections.push(`## Open Issues\n${openIssues.join("\n")}`);
   }
@@ -542,24 +543,40 @@ function filterVagueDispatches(store: StateStore, decisions: SupervisorDecision[
   });
 }
 
-function fetchOpenIssues(config: OrchestratorConfig): string[] {
-  const lines: string[] = [];
+function fetchOpenIssues(config: OrchestratorConfig, store?: StateStore): string[] {
+  const items: Array<{ line: string; score: number }> = [];
   for (const [name, agent] of Object.entries(config.agents)) {
     if (!agent.github) continue;
     try {
       const raw = execSync(
-        `gh issue list --repo ${agent.github} --state open --json number,title -L 10`,
+        `gh issue list --repo ${agent.github} --state open --json number,title,labels,createdAt -L 10`,
         { encoding: "utf-8", timeout: 10000 },
       ).trim();
       if (!raw) continue;
-      const issues = JSON.parse(raw) as Array<{ number: number; title: string }>;
+      const issues = JSON.parse(raw) as Array<{ number: number; title: string; labels?: Array<{ name: string }>; createdAt?: string }>;
       for (const issue of issues) {
-        lines.push(`- ${name} (${agent.github}): #${issue.number} ${issue.title}`);
+        const labels = (issue.labels ?? []).map((l) => l.name);
+        let priorityStr = "";
+        let score = 0.4;
+        if (store) {
+          const priority = scoreIssuePriority(
+            { number: issue.number, title: issue.title, labels, createdAt: issue.createdAt, repo: agent.github },
+            store,
+          );
+          score = priority.score;
+          priorityStr = ` [priority: ${priority.score.toFixed(2)}]`;
+        }
+        items.push({
+          line: `- ${name} (${agent.github}): #${issue.number} ${issue.title}${priorityStr}`,
+          score,
+        });
       }
     } catch {
     }
   }
-  return lines;
+  // Sort by priority (highest first) so supervisor sees most important issues at top
+  items.sort((a, b) => b.score - a.score);
+  return items.map((i) => i.line);
 }
 
 function formatTask(t: Task): string {
