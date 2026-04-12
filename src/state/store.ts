@@ -921,6 +921,39 @@ CREATE INDEX IF NOT EXISTS idx_task_logs_task ON task_logs(task_id);
 CREATE INDEX IF NOT EXISTS idx_daemon_cycles_started ON daemon_cycles(started_at);
 CREATE INDEX IF NOT EXISTS idx_token_usage_recorded_at ON token_usage(recorded_at);
 CREATE INDEX IF NOT EXISTS idx_token_usage_agent_name ON token_usage(agent_name);
+
+CREATE TABLE IF NOT EXISTS meetings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,
+  date TEXT NOT NULL,
+  rounds INTEGER NOT NULL DEFAULT 1,
+  participant_count INTEGER NOT NULL DEFAULT 0,
+  synthesis TEXT,
+  action_items_json TEXT,
+  goal_adjustments_json TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS meeting_rounds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  meeting_id INTEGER NOT NULL REFERENCES meetings(id),
+  round_number INTEGER NOT NULL,
+  prompt TEXT
+);
+
+CREATE TABLE IF NOT EXISTS meeting_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  meeting_id INTEGER NOT NULL REFERENCES meetings(id),
+  round_number INTEGER NOT NULL,
+  agent_name TEXT NOT NULL,
+  provider TEXT,
+  pool TEXT,
+  response TEXT,
+  error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_meetings_date ON meetings(date DESC);
+CREATE INDEX IF NOT EXISTS idx_meeting_entries_meeting ON meeting_entries(meeting_id);
 `;
 
 export class StateStore {
@@ -1960,6 +1993,94 @@ export class StateStore {
   getTotalCycleCount(): number {
     const row = this.db.prepare("SELECT COUNT(*) as count FROM daemon_cycles").get() as { count: number };
     return row?.count ?? 0;
+  }
+
+  // ── Meetings ──────────────────────────────────────────────────────────────
+
+  saveMeeting(meeting: {
+    type: string;
+    date: string;
+    rounds: Array<{
+      roundNumber: number;
+      prompt: string;
+      entries: Array<{
+        agentName: string;
+        provider: string;
+        pool: string | undefined;
+        response: string | null;
+        error: string | null;
+      }>;
+    }>;
+    synthesis: string;
+    actionItems: Array<{ description: string; owner: string; priority: string }>;
+    goalAdjustments: string[];
+  }): number {
+    const result = this.db.prepare(`
+      INSERT INTO meetings (type, date, rounds, participant_count, synthesis, action_items_json, goal_adjustments_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      meeting.type,
+      meeting.date,
+      meeting.rounds.length,
+      meeting.rounds[0]?.entries.filter((e) => e.response).length ?? 0,
+      meeting.synthesis,
+      JSON.stringify(meeting.actionItems),
+      JSON.stringify(meeting.goalAdjustments),
+      new Date().toISOString(),
+    );
+
+    const meetingId = result.lastInsertRowid as number;
+
+    for (const round of meeting.rounds) {
+      this.db.prepare(
+        "INSERT INTO meeting_rounds (meeting_id, round_number, prompt) VALUES (?, ?, ?)",
+      ).run(meetingId, round.roundNumber, round.prompt);
+
+      for (const entry of round.entries) {
+        this.db.prepare(
+          "INSERT INTO meeting_entries (meeting_id, round_number, agent_name, provider, pool, response, error) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ).run(meetingId, round.roundNumber, entry.agentName, entry.provider, entry.pool ?? null, entry.response, entry.error);
+      }
+    }
+
+    return meetingId;
+  }
+
+  getMeetings(limit = 20): Array<{
+    id: number;
+    type: string;
+    date: string;
+    rounds: number;
+    participant_count: number;
+    synthesis: string | null;
+    action_items_json: string | null;
+    goal_adjustments_json: string | null;
+    created_at: string;
+  }> {
+    return this.db.prepare(
+      "SELECT * FROM meetings ORDER BY created_at DESC LIMIT ?",
+    ).all(limit) as Array<{
+      id: number; type: string; date: string; rounds: number;
+      participant_count: number; synthesis: string | null;
+      action_items_json: string | null; goal_adjustments_json: string | null;
+      created_at: string;
+    }>;
+  }
+
+  getMeetingEntries(meetingId: number): Array<{
+    round_number: number;
+    agent_name: string;
+    provider: string | null;
+    pool: string | null;
+    response: string | null;
+    error: string | null;
+  }> {
+    return this.db.prepare(
+      "SELECT round_number, agent_name, provider, pool, response, error FROM meeting_entries WHERE meeting_id = ? ORDER BY round_number, agent_name",
+    ).all(meetingId) as Array<{
+      round_number: number; agent_name: string; provider: string | null;
+      pool: string | null; response: string | null; error: string | null;
+    }>;
   }
 
   /**
