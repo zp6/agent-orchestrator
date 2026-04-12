@@ -4,9 +4,9 @@ import { homedir } from "node:os";
 
 const PID_PATH = join(homedir(), ".claude-orchestrator", "daemon.pid");
 
-export function writePid(): void {
+export function writePid(pid: number = process.pid): void {
   mkdirSync(dirname(PID_PATH), { recursive: true });
-  writeFileSync(PID_PATH, String(process.pid));
+  writeFileSync(PID_PATH, String(pid));
 }
 
 export function readPid(): number | null {

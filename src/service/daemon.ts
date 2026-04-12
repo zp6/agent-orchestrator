@@ -20,7 +20,7 @@ import {
   dispatchSlackChecks,
   type TriggerResult,
 } from "../triggers/trigger-dispatcher.js";
-import { writePid, removePid } from "./pid.js";
+import { writePid, readPid, removePid } from "./pid.js";
 import { createLogger } from "./logger.js";
 import { execSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
@@ -627,17 +627,35 @@ export class Daemon {
         "info",
       );
 
-      // Flush PID file, spawn fresh daemon with new build, then exit.
+      // Guard: only the canonical daemon (the one whose PID is in daemon.pid)
+      // should spawn a replacement. If another instance already owns the PID
+      // file, just exit — don't pile on another child.
+      const currentPid = readPid();
+      if (currentPid !== null && currentPid !== process.pid) {
+        this.log.warn("Self-update: another daemon owns the PID file, exiting without spawning", {
+          ownerPid: currentPid,
+          myPid: process.pid,
+        });
+        process.exit(0);
+      }
+
+      // Spawn fresh daemon with new build, hand off PID ownership, then exit.
+      // Spawn BEFORE removing the old PID so there is no window where
+      // daemon.pid is missing — we immediately overwrite it with the child PID.
       // process.argv = ["node", "dist/service/daemon-entry.js", ...flags]
-      removePid();
       const { spawn } = await import("node:child_process");
       const nodeArgs = process.argv.slice(1); // everything after "node"
-      spawn(process.execPath, nodeArgs, {
+      const child = spawn(process.execPath, nodeArgs, {
         detached: true,
         stdio: "ignore",
         env: process.env,
         cwd: repoDir,
-      }).unref();
+      });
+      child.unref();
+
+      // Transfer PID ownership to the child before we exit so monitoring
+      // sessions never see a missing daemon.pid.
+      writePid(child.pid!);
       process.exit(0);
     } catch (err) {
       this.log.warn("Self-update failed", { error: err instanceof Error ? err.message : String(err) });
