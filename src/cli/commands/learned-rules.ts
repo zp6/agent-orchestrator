@@ -1,6 +1,8 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { StateStore } from "../../state/store.js";
+import { loadConfig } from "../../config/schema.js";
+import { seedFromClaudeMd } from "../../orchestrator/learned-rules.js";
 
 export function registerLearnedRulesCommand(program: Command): void {
   const rules = program
@@ -198,5 +200,27 @@ export function registerLearnedRulesCommand(program: Command): void {
       console.log(
         chalk.green(`✓ Decayed ${decayed} stale rule${decayed === 1 ? "" : "s"}.`),
       );
+    });
+
+  // ── seed ───────────────────────────────────────────────────────────────────
+  rules
+    .command("seed")
+    .description("Seed learned rules from CLAUDE.md files across all repos")
+    .action(() => {
+      const config = loadConfig();
+      const store = new StateStore();
+      try {
+        const result = seedFromClaudeMd(config, store);
+        if (result.seeded === 0) {
+          console.log(chalk.yellow("No new rules seeded (all repos already up to date)."));
+        } else {
+          console.log(chalk.green(`✓ Seeded ${result.seeded} rule(s) from ${result.repos.length} repo(s):`));
+          for (const repo of result.repos) {
+            console.log(chalk.dim(`  ${repo}`));
+          }
+        }
+      } finally {
+        store.close();
+      }
     });
 }

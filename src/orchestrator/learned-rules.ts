@@ -3,7 +3,12 @@
  * and inject per-repo conventions into future dispatches.
  */
 
+import { execSync } from "node:child_process";
 import type { LearnedRule, LearnedRuleCategory, StateStore } from "../state/store.js";
+import type { OrchestratorConfig } from "../config/schema.js";
+import { createLogger } from "../service/logger.js";
+
+const log = createLogger("learned-rules");
 
 /** Categories and their keyword signals for classification. */
 const CATEGORY_SIGNALS: Record<LearnedRuleCategory, RegExp[]> = {
@@ -136,4 +141,77 @@ export function getAndApplyRules(
   }
 
   return { block: buildLearnedRulesBlock(rules), ruleIds };
+}
+
+/**
+ * Fetch CLAUDE.md from a GitHub repo and return its content.
+ * Returns null if the file doesn't exist or can't be fetched.
+ */
+function fetchClaudeMd(repo: string): string | null {
+  try {
+    const content = execSync(
+      `gh api repos/${repo}/contents/CLAUDE.md --jq .content 2>/dev/null | base64 -d`,
+      { encoding: "utf-8", timeout: 15000 },
+    ).trim();
+    return content || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Seed the learned rules database from CLAUDE.md files across all repos.
+ * Parses convention-like statements and stores them as high-confidence rules.
+ *
+ * Only adds rules that don't already exist (deduplicates by rule text + repo).
+ * Safe to call multiple times — idempotent.
+ */
+export function seedFromClaudeMd(
+  config: OrchestratorConfig,
+  store: StateStore,
+): { seeded: number; repos: string[] } {
+  const repos = new Set<string>();
+  for (const agent of Object.values(config.agents)) {
+    if (agent.github) repos.add(agent.github);
+  }
+
+  let totalSeeded = 0;
+  const seededRepos: string[] = [];
+
+  for (const repo of repos) {
+    const content = fetchClaudeMd(repo);
+    if (!content) {
+      log.info("No CLAUDE.md found", { repo });
+      continue;
+    }
+
+    const existingRules = store.getLearnedRulesForRepo(repo, 100);
+    const existingTexts = new Set(existingRules.map((r) => r.rule.toLowerCase()));
+
+    const ruleTexts = extractRulesFromFeedback(content);
+    let repoSeeded = 0;
+
+    for (const ruleText of ruleTexts) {
+      // Skip if already exists
+      if (existingTexts.has(ruleText.toLowerCase())) continue;
+
+      const category = classifyRule(ruleText);
+      store.addLearnedRule({
+        repo,
+        rule: ruleText,
+        category,
+        source: "CLAUDE.md",
+        confidence: 0.95, // high confidence — operator-authored
+      });
+      repoSeeded++;
+    }
+
+    if (repoSeeded > 0) {
+      totalSeeded += repoSeeded;
+      seededRepos.push(repo);
+      log.info("Seeded rules from CLAUDE.md", { repo, count: repoSeeded });
+    }
+  }
+
+  return { seeded: totalSeeded, repos: seededRepos };
 }
