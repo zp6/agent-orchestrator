@@ -289,6 +289,33 @@ export class PRReviewer {
   async reviewPR(repo: string, prNumber: number): Promise<PRReviewResult> {
     const pr = this.fetchPRInfo(repo, prNumber);
 
+    // ── Zero-action standup check ─────────────────────────────────────────
+    // If this PR is for a zero-action standup issue, handle it specially
+    // (no PR review, just an acknowledgment comment on the associated issue).
+    // Try branch name first, then fall back to PR body/title to handle
+    // non-standard branch naming conventions (e.g. "standup-721-response").
+    const standupIssueNumber = this.resolveIssueNumberForStandupCheck(pr);
+    if (standupIssueNumber !== null) {
+      const wasHandledAsStandup = await this.handleStandupIssueIfNeeded(repo, standupIssueNumber);
+      if (wasHandledAsStandup) {
+        // Zero-action standup was handled — no PR review needed, auto-approve
+        this.log.info("PR skipped (zero-action standup handled separately)", {
+          repo,
+          prNumber,
+          issueNumber: standupIssueNumber,
+          branch: pr.branch,
+        });
+        return {
+          decision: "approve",
+          comment:
+            "**[orchestrator] PR auto-approved** ✅\n\n" +
+            "This PR is associated with a zero-action standup issue, which was acknowledged in the corresponding issue. " +
+            "No further PR review is needed.",
+          reason: "Zero-action standup — handled via issue acknowledgment",
+        };
+      }
+    }
+
     // ── Merge conflict check ──────────────────────────────────────────────
     if (pr.mergeable === "CONFLICTING") {
       const localPath = this.findLocalRepoPath(repo);
@@ -721,13 +748,56 @@ export class PRReviewer {
       return true;
     } catch (err) {
       // If we can't process as standup, let normal flow handle it
-      this.log.debug("Failed to check standup status, continuing with normal review", {
+      this.log.info("Failed to check standup status, continuing with normal review", {
         repo,
         issueNumber,
         error: err instanceof Error ? err.message : String(err),
       });
       return false;
     }
+  }
+
+  /**
+   * Resolve an issue number for the zero-action standup check.
+   *
+   * Tries multiple sources to find the linked issue number:
+   * 1. Branch name: `issue-N-*` pattern (most common)
+   * 2. PR body: `Closes #N` / `Fixes #N` / `Resolves #N` keywords
+   * 3. PR body: fully qualified `Closes owner/repo#N` references
+   *
+   * This ensures standup PRs with non-standard branch names (e.g.
+   * "standup-721-response") are still caught by the zero-action guard.
+   */
+  resolveIssueNumberForStandupCheck(pr: PRInfo): number | null {
+    // Tier 1: branch name (fast, no regex ambiguity)
+    const branchIssue = extractIssueNumberFromBranch(pr.branch);
+    if (branchIssue) {
+      return parseInt(branchIssue, 10);
+    }
+
+    // Tier 2: PR body — bare "Closes #N" / "Fixes #N" / "Resolves #N"
+    const bodyMatch = pr.body.match(
+      /(?:closes|fixes|resolves)\s+#(\d+)/i,
+    );
+    if (bodyMatch) {
+      return parseInt(bodyMatch[1], 10);
+    }
+
+    // Tier 3: PR body — fully qualified "Closes owner/repo#N"
+    const qualifiedMatch = pr.body.match(
+      /(?:closes|fixes|resolves)\s+\S+#(\d+)/i,
+    );
+    if (qualifiedMatch) {
+      return parseInt(qualifiedMatch[1], 10);
+    }
+
+    // Tier 4: PR title — standup-related issue reference
+    const titleMatch = pr.title.match(/#(\d+)/);
+    if (titleMatch) {
+      return parseInt(titleMatch[1], 10);
+    }
+
+    return null;
   }
 
   private async executeDecision(
