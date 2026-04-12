@@ -13,7 +13,7 @@
 
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
-import type { IStateStore } from "../state/types.js";
+import type { IStateStore, SubtaskRollupPolicy, SubtaskRollupResult, SubtaskChildSummary } from "../state/types.js";
 import type { Notifier } from "../notify.js";
 
 export interface VerificationResult {
@@ -277,6 +277,168 @@ export class Verifier {
     });
 
     return { ...firstPassResult, revision: enrichedRevision };
+  }
+
+  /**
+   * Compute a parent task's rolled-up quality score from its children.
+   *
+   * Does NOT call the LLM — this is a pure aggregation over already-verified
+   * child scores. Call this after children have been individually verified via
+   * `verify()`. The orchestrator daemon should call `verify()` on each child
+   * first, then call `rollupChildScores()` on the parent.
+   *
+   * Three rollup policies are supported (set via `task.rollup_policy`):
+   *
+   * - **`strict`**   — parent score = min(child scores). One failing child
+   *                    fails the parent. `failingChildIds` contains only the
+   *                    failing subtasks so the daemon can re-dispatch them
+   *                    individually rather than re-running the whole parent.
+   *
+   * - **`majority`** — parent score = mean(child scores). Passes when ≥50%
+   *                    of children have score ≥ 0.80.
+   *
+   * - **`weighted`** — parent score = weighted mean by `subtask_complexity_hint`
+   *                    (0–1). Falls back to equal weights when hints are absent.
+   *
+   * Children with status `failed` or `escalated` that have no quality_score
+   * are treated as score 0.0 and flagged as failing. Children still in-flight
+   * (pending / dispatched / in_progress) contribute a score of 0.0 and set
+   * `partialCompletion = true` in the result — the orchestrator should wait
+   * for all children before acting on the rollup.
+   *
+   * The parent task record is updated in state.db with the rolled-up score
+   * and verification_status.
+   *
+   * @throws {Error} if the parent task does not exist.
+   */
+  rollupChildScores(parentTaskId: string): SubtaskRollupResult {
+    const parent = this.store.getTask(parentTaskId);
+    if (!parent) {
+      throw new Error(`Parent task not found: ${parentTaskId}`);
+    }
+
+    const APPROVAL_THRESHOLD = 0.80;
+
+    const children = this.store.getChildTasks(parentTaskId);
+
+    const terminalStatuses = new Set(["done", "failed", "escalated"]);
+    const inFlightStatuses = new Set(["pending", "planning", "dispatched", "in_progress"]);
+
+    let completedCount = 0;
+    let pendingCount = 0;
+
+    const childSummaries: SubtaskChildSummary[] = children.map((child) => {
+      const isTerminal = terminalStatuses.has(child.status);
+      const isInFlight = inFlightStatuses.has(child.status);
+
+      if (isTerminal) completedCount++;
+      else if (isInFlight) pendingCount++;
+
+      // failed/escalated children always contribute 0.0 to the rollup score,
+      // even if they have a stored quality_score (that score may pre-date the failure).
+      // In-flight children with no score also get 0.0 (conservative).
+      const isFailedTerminal = child.status === "failed" || child.status === "escalated";
+      const effectiveScore = isFailedTerminal ? 0.0 : (child.quality_score ?? 0.0);
+      const weight = child.subtask_complexity_hint ?? 1.0;
+      const failing =
+        effectiveScore < APPROVAL_THRESHOLD ||
+        child.status === "failed" ||
+        child.status === "escalated";
+
+      return {
+        id: child.id,
+        agent_name: child.agent_name ?? null,
+        status: child.status,
+        quality_score: child.quality_score ?? null,
+        verification_status: child.verification_status ?? null,
+        weight,
+        failing,
+      };
+    });
+
+    const partialCompletion = pendingCount > 0;
+
+    // Determine policy — default to majority if not set
+    const policy: SubtaskRollupPolicy = parent.rollup_policy ?? "majority";
+
+    let parentScore: number;
+    const scores = childSummaries.map((c) => c.quality_score ?? 0.0);
+    const weights = childSummaries.map((c) => c.weight);
+
+    if (childSummaries.length === 0) {
+      // No children: treat parent as unscored
+      parentScore = 0.0;
+    } else if (policy === "strict") {
+      parentScore = Math.min(...scores);
+    } else if (policy === "majority") {
+      const sum = scores.reduce((a, b) => a + b, 0);
+      parentScore = sum / scores.length;
+    } else {
+      // weighted
+      const totalWeight = weights.reduce((a, b) => a + b, 0);
+      if (totalWeight === 0) {
+        // All weights are zero — fall back to simple mean
+        const sum = scores.reduce((a, b) => a + b, 0);
+        parentScore = scores.length > 0 ? sum / scores.length : 0.0;
+      } else {
+        const weightedSum = scores.reduce((acc, score, i) => acc + score * weights[i], 0);
+        parentScore = weightedSum / totalWeight;
+      }
+    }
+
+    const failingChildIds = childSummaries.filter((c) => c.failing).map((c) => c.id);
+
+    // Majority policy: pass when ≥50% of children individually pass
+    let approved: boolean;
+    if (policy === "majority") {
+      const passingCount = childSummaries.filter(
+        (c) => (c.quality_score ?? 0) >= APPROVAL_THRESHOLD,
+      ).length;
+      approved = childSummaries.length > 0 && passingCount / childSummaries.length >= 0.5;
+    } else {
+      approved = parentScore >= APPROVAL_THRESHOLD;
+    }
+
+    // When partial: conservatively mark as not approved until all children finish
+    if (partialCompletion) {
+      approved = false;
+    }
+
+    const rollupNotes = [
+      `[Subtask rollup — policy: ${policy}]`,
+      `Children: ${children.length} total, ${completedCount} completed, ${pendingCount} pending`,
+      `Parent score: ${(parentScore * 100).toFixed(0)}% (${approved ? "approved" : "rejected"})`,
+      failingChildIds.length > 0
+        ? `Failing children (${failingChildIds.length}): ${failingChildIds.map((id) => id.slice(0, 12)).join(", ")}`
+        : "All children passing",
+    ].join("\n");
+
+    this.log.info("Subtask rollup complete", {
+      parentTaskId,
+      policy,
+      parentScore,
+      approved,
+      completedCount,
+      pendingCount,
+      failingChildIds,
+    });
+
+    this.store.updateTask(parentTaskId, {
+      quality_score: parentScore,
+      verification_status: partialCompletion ? "pending" : approved ? "approved" : "rejected",
+      verification_notes: rollupNotes,
+    });
+
+    return {
+      parentScore,
+      approved,
+      policy,
+      children: childSummaries,
+      failingChildIds,
+      completedCount,
+      pendingCount,
+      partialCompletion,
+    };
   }
 
   /**

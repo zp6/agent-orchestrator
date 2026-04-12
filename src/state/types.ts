@@ -15,6 +15,57 @@ export type TaskStatus =
 export type VerificationStatus = "pending" | "approved" | "rejected" | null;
 export type TaskType = "implementation" | "research";
 
+/**
+ * Determines how a parent task's quality score is derived from its children's
+ * individual verification scores.
+ *
+ * Set by the orchestrator dispatcher on the parent task record at dispatch time.
+ * Read by the Verifier when scoring a parent task via `rollupChildScores()`.
+ *
+ * - `strict`:   parent score = min(child scores); any child below the approval
+ *               threshold (0.80) fails the whole parent. Re-dispatch targets
+ *               only the failing child.
+ * - `majority`: parent score = mean(child scores); passes if ≥50% of children
+ *               individually pass (score ≥ 0.80).
+ * - `weighted`: parent score = weighted mean, where each child's weight comes
+ *               from its `subtask_complexity_hint` (0–1). Falls back to
+ *               `majority` (equal weights) when hints are absent.
+ */
+export type SubtaskRollupPolicy = "strict" | "majority" | "weighted";
+
+/**
+ * The outcome of rolling up child verification scores to a parent task score.
+ * Returned by `Verifier.rollupChildScores()`.
+ */
+export interface SubtaskRollupResult {
+  /** Rolled-up parent score (0–1), computed per the policy. */
+  parentScore: number;
+  /** True when the parent passes the 0.80 approval threshold. */
+  approved: boolean;
+  /** Policy that was applied. */
+  policy: SubtaskRollupPolicy;
+  /** Per-child summary — useful for targeted re-dispatch. */
+  children: SubtaskChildSummary[];
+  /**
+   * IDs of children that failed (score < 0.80 or status = 'failed'/'escalated').
+   * The orchestrator uses this list to re-dispatch only the failing subtasks
+   * when policy = 'strict'.
+   */
+  failingChildIds: string[];
+  /**
+   * How many children had a terminal status (done | failed | escalated) vs.
+   * still in-flight (pending | planning | dispatched | in_progress).
+   */
+  completedCount: number;
+  pendingCount: number;
+  /**
+   * Present when some children have not yet completed. The parent cannot be
+   * fully scored until all children finish. The orchestrator should wait or
+   * apply a partial-score policy (see `approved`).
+   */
+  partialCompletion: boolean;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -33,8 +84,42 @@ export interface Task {
    * Populated only for sub-0.80 results; null otherwise.
    */
   quality_explanation?: string | null;
+  /**
+   * ID of the parent task when this task is a subtask in a parallel tree.
+   * Null for top-level tasks. Set by the dispatcher at creation time.
+   */
+  parent_task_id?: string | null;
+  /**
+   * Rollup policy for scoring this task's children.
+   * Only meaningful on parent tasks (those that have children via parent_task_id).
+   * Null on leaf tasks and on parents that have not been given an explicit policy
+   * (the verifier defaults to 'majority' in that case).
+   */
+  rollup_policy?: SubtaskRollupPolicy | null;
+  /**
+   * Relative complexity hint for this subtask (0.0–1.0).
+   * Used as the weight in `weighted` rollup policy. Higher = more complex.
+   * Null when not provided; treated as equal weight (1.0) during rollup.
+   */
+  subtask_complexity_hint?: number | null;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * Per-child summary included in SubtaskRollupResult.
+ */
+export interface SubtaskChildSummary {
+  id: string;
+  agent_name: string | null;
+  status: TaskStatus;
+  /** null when the child has not yet been verified or is still in-flight. */
+  quality_score: number | null;
+  verification_status: VerificationStatus;
+  /** Weight applied during rollup (from subtask_complexity_hint or 1.0 default). */
+  weight: number;
+  /** True when this child is considered failing for rollup purposes. */
+  failing: boolean;
 }
 
 /**
@@ -370,6 +455,12 @@ export interface IStateStore {
   updateTask(id: string, updates: Partial<Task>): void;
   hasActiveTask(agentName: string): boolean;
   listTasks(opts: { status?: TaskStatus; agent_name?: string; limit?: number }): Task[];
+  /**
+   * Return all direct children of a parent task, ordered by created_at ASC.
+   * Returns an empty array when the parent has no children or does not exist.
+   * Required for SubtaskRollupPolicy scoring in the Verifier.
+   */
+  getChildTasks(parentTaskId: string): Task[];
 
   // Query helpers
   getRecentCompleted(limit: number): Task[];

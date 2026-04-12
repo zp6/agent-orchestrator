@@ -225,6 +225,30 @@ export class StateStore implements ITelegramStateStore {
       // Column already exists — ignore
     }
 
+    // Add subtask tree columns (idempotent — issue #95).
+    try {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN parent_task_id TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+    try {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN rollup_policy TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+    try {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN subtask_complexity_hint REAL");
+    } catch {
+      // Column already exists — ignore
+    }
+
+    // Index for parent → children lookups (idempotent)
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_tasks_parent_task_id
+        ON tasks (parent_task_id)
+        WHERE parent_task_id IS NOT NULL;
+    `);
+
     // Create index for efficient time-ordered lookups (idempotent)
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_supervisor_decisions_created_at
@@ -285,6 +309,12 @@ export class StateStore implements ITelegramStateStore {
     return this.db
       .prepare(`SELECT * FROM tasks ${where} ORDER BY created_at DESC LIMIT ${limit}`)
       .all(params) as Task[];
+  }
+
+  getChildTasks(parentTaskId: string): Task[] {
+    return this.db
+      .prepare("SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY created_at ASC")
+      .all(parentTaskId) as Task[];
   }
 
   getRecentCompleted(limit: number): Task[] {

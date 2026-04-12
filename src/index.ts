@@ -30,6 +30,7 @@ export type { SchemaConsumerEntry, SchemaImpactHit } from "./reviewer/schema-imp
 
 export { Verifier } from "./reviewer/verifier.js";
 export type { VerificationResult } from "./reviewer/verifier.js";
+export type { SubtaskRollupPolicy, SubtaskRollupResult, SubtaskChildSummary } from "./state/types.js";
 
 export { Supervisor, extractIssueRefs, isDecisionAlreadyResolved, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo, formatConflictStatsSection, formatPRConfidenceSection, formatRoutingAccuracySection, formatQualityByTaskTypeSection } from "./reviewer/supervisor.js";
 export type { SupervisorDecision, ConflictStatsProvider, PRConfidenceProvider, RoutingAccuracyProvider } from "./reviewer/supervisor.js";
