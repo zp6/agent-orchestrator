@@ -902,6 +902,63 @@ export interface WriteLearnedPatternParams {
   confidence?: number;
 }
 
+// ── Antibody Log ─────────────────────────────────────────────────────────────
+
+/**
+ * A structured summary of a PR diff's shape — file count, size, languages, and
+ * which areas of the codebase were touched.  Stored as JSON in antibody_log so
+ * that pattern-matching queries can group entries by similarity.
+ */
+export interface DiffShape {
+  /** Total number of files changed. */
+  files_changed: number;
+  /** Raw diff size in bytes. */
+  diff_size_bytes: number;
+  /** File extensions present in the diff (e.g. [".ts", ".json"]). */
+  extensions: string[];
+  /** Top-level source directories touched (e.g. ["src/state", "src/orchestrator"]). */
+  directories: string[];
+  /** Whether the diff touches schema/migration files. */
+  touches_schema: boolean;
+  /** Whether the diff touches test files. */
+  touches_tests: boolean;
+}
+
+/**
+ * A single antibody log entry — one record per reviewer decision, capturing
+ * the diff shape, the decision, and (later) the outcome after merge.
+ */
+export interface AntibodyLogEntry {
+  id: number;
+  /** GitHub repo slug, e.g. "rapartlu/agent-orchestrator". */
+  repo: string;
+  pr_number: number;
+  /** JSON-serialised DiffShape. */
+  diff_shape: string;
+  /** Reviewer decision at time of review. */
+  decision: "approve" | "request-changes" | "escalate";
+  /**
+   * Post-merge outcome filled in later.  null = pending.
+   * "clean" = no regressions; "regression" = downstream failure detected.
+   */
+  outcome: "clean" | "regression" | null;
+  /** Optional LLM reason / rationale for the decision. */
+  reason: string | null;
+  /** Agent that authored the PR (if known). */
+  agent: string | null;
+  /** ISO timestamp of the review decision. */
+  timestamp: string;
+}
+
+export interface WriteAntibodyLogParams {
+  repo: string;
+  pr_number: number;
+  diff_shape: DiffShape;
+  decision: AntibodyLogEntry["decision"];
+  reason?: string;
+  agent?: string;
+}
+
 export interface ReadSignalsFilter {
   signal_type?: string;
   repo?: string;
@@ -1095,6 +1152,7 @@ export class StateStore {
     this.runSignalReadsMigration();
     this.runLearnedPatternsMigration();
     this.runLineageMigration();
+    this.runAntibodyLogMigration();
   }
 
   private runPhase2Migration(): void {
@@ -5704,5 +5762,109 @@ export class StateStore {
       latest: string;
       root_title: string;
     }>;
+  }
+
+  // ── Antibody Log ─────────────────────────────────────────────────────────────
+
+  private runAntibodyLogMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS antibody_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo        TEXT    NOT NULL,
+        pr_number   INTEGER NOT NULL,
+        diff_shape  TEXT    NOT NULL,
+        decision    TEXT    NOT NULL,
+        outcome     TEXT,
+        reason      TEXT,
+        agent       TEXT,
+        timestamp   TEXT    NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_antibody_log_repo_pr  ON antibody_log(repo, pr_number);
+      CREATE INDEX IF NOT EXISTS idx_antibody_log_decision ON antibody_log(decision);
+      CREATE INDEX IF NOT EXISTS idx_antibody_log_ts       ON antibody_log(timestamp);
+    `);
+  }
+
+  /**
+   * Record one antibody log entry — called once per PR review decision so that
+   * every decision (approve / request-changes / escalate) contributes a
+   * structured data point to the shared failure genome.
+   */
+  recordAntibodyEntry(params: WriteAntibodyLogParams): AntibodyLogEntry {
+    const now = new Date().toISOString();
+    const result = this.db.prepare(`
+      INSERT INTO antibody_log (repo, pr_number, diff_shape, decision, outcome, reason, agent, timestamp)
+      VALUES (?, ?, ?, ?, NULL, ?, ?, ?)
+    `).run(
+      params.repo,
+      params.pr_number,
+      JSON.stringify(params.diff_shape),
+      params.decision,
+      params.reason ?? null,
+      params.agent ?? null,
+      now,
+    );
+    return this.db
+      .prepare("SELECT * FROM antibody_log WHERE id = ?")
+      .get(result.lastInsertRowid) as AntibodyLogEntry;
+  }
+
+  /**
+   * Update the outcome for a previously logged entry once post-merge signals
+   * are available.  Outcome is "clean" (no issues) or "regression" (downstream
+   * failure detected).
+   */
+  updateAntibodyOutcome(id: number, outcome: "clean" | "regression"): void {
+    this.db.prepare("UPDATE antibody_log SET outcome = ? WHERE id = ?").run(outcome, id);
+  }
+
+  /**
+   * Retrieve recent antibody log entries, optionally filtered by repo and/or
+   * decision.  Returns entries newest-first.
+   *
+   * @param opts.repo     - Restrict to a single repo slug.
+   * @param opts.decision - Restrict to a specific decision type.
+   * @param opts.limit    - Max rows to return (default 50).
+   */
+  getAntibodyEntries(opts: {
+    repo?: string;
+    decision?: AntibodyLogEntry["decision"];
+    limit?: number;
+  } = {}): AntibodyLogEntry[] {
+    const { repo, decision, limit = 50 } = opts;
+    const conditions: string[] = [];
+    const args: unknown[] = [];
+
+    if (repo) {
+      conditions.push("repo = ?");
+      args.push(repo);
+    }
+    if (decision) {
+      conditions.push("decision = ?");
+      args.push(decision);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    args.push(limit);
+
+    return this.db
+      .prepare(`SELECT * FROM antibody_log ${where} ORDER BY timestamp DESC LIMIT ?`)
+      .all(...args) as AntibodyLogEntry[];
+  }
+
+  /**
+   * Count entries in the antibody log grouped by decision type.
+   * Useful for dashboard metrics and pattern synthesis.
+   */
+  getAntibodyStats(): Array<{ decision: string; count: number; with_outcome: number }> {
+    return this.db.prepare(`
+      SELECT
+        decision,
+        COUNT(*)                              AS count,
+        COUNT(CASE WHEN outcome IS NOT NULL THEN 1 END) AS with_outcome
+      FROM antibody_log
+      GROUP BY decision
+      ORDER BY count DESC
+    `).all() as Array<{ decision: string; count: number; with_outcome: number }>;
   }
 }

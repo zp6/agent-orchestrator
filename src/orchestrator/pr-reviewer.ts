@@ -4,7 +4,7 @@ import { unlinkSync } from "node:fs";
 import { ReviewerClient } from "../client/reviewer-client.js";
 import { createLogger } from "../service/logger.js";
 import type { OrchestratorConfig } from "../config/schema.js";
-import { StateStore, type MergeQueueEntry } from "../state/store.js";
+import { StateStore, type MergeQueueEntry, type DiffShape, type WriteAntibodyLogParams } from "../state/store.js";
 import { Deployer } from "./deployer.js";
 import { extractIssueNumberFromBranch, findMatchingIssueNumber } from "./pr-creator.js";
 import { notifyOperator } from "../service/notify.js";
@@ -160,7 +160,7 @@ export class PRReviewer {
             reason: "PR body missing issue reference (Closes #N) — auto-patch failed",
           };
           this.log.info("PR body linter: auto-patch failed, requesting changes", { repo, prNumber, inferredIssue });
-          await this.executeDecision(repo, prNumber, result);
+          await this.executeDecision(repo, prNumber, result, undefined, pr);
           return result;
         }
       } else {
@@ -176,7 +176,7 @@ export class PRReviewer {
           branch: pr.branch,
           title: pr.title,
         });
-        await this.executeDecision(repo, prNumber, result);
+        await this.executeDecision(repo, prNumber, result, undefined, pr);
         return result;
       }
     }
@@ -192,7 +192,7 @@ export class PRReviewer {
         reason: `${priorReviews} revision rounds without merging — escalating to break the loop`,
       };
       this.log.info("PR review cycle cap reached, escalating", { repo, prNumber, priorReviews, reviewCeiling });
-      await this.executeDecision(repo, prNumber, result);
+      await this.executeDecision(repo, prNumber, result, undefined, pr);
       return result;
     }
 
@@ -211,7 +211,7 @@ export class PRReviewer {
           reason: `Diff too large for automated review (${Math.round(diffSize / 1024)} KB > 200 KB threshold)`,
         };
         this.log.warn("PR diff too large — auto-escalating", { repo, prNumber, diffSize });
-        await this.executeDecision(repo, prNumber, result);
+        await this.executeDecision(repo, prNumber, result, undefined, pr);
         return result;
       }
       this.log.info("Large diff allowed — bootstrap PR on new repo", { repo, prNumber, diffSize });
@@ -254,8 +254,9 @@ export class PRReviewer {
         recordFirstPassSaves(this.store, patternIds);
       }
 
-      // Execute the decision — pass branch so approve can enqueue without an extra API call
-      await this.executeDecision(repo, prNumber, result, pr.branch);
+      // Execute the decision — pass branch so approve can enqueue without an extra API call.
+      // Pass the full PRInfo so executeDecision can log a rich diff shape to the antibody log.
+      await this.executeDecision(repo, prNumber, result, pr.branch, pr);
 
       return result;
     } catch (err) {
@@ -294,7 +295,55 @@ export class PRReviewer {
     return results;
   }
 
-  private async executeDecision(repo: string, prNumber: number, result: PRReviewResult, prBranch?: string): Promise<void> {
+  /**
+   * Compute a lightweight DiffShape summary from a PRInfo for antibody log storage.
+   * Extensions and directories are derived from the diff hunks' file headers.
+   */
+  private buildDiffShape(pr: PRInfo): DiffShape {
+    const extensions = new Set<string>();
+    const directories = new Set<string>();
+
+    // Parse file paths from unified diff headers: lines starting with "+++ b/…"
+    for (const line of pr.diff.split("\n")) {
+      const m = line.match(/^\+{3} b\/(.+)$/);
+      if (m) {
+        const filePath = m[1];
+        const dotIdx = filePath.lastIndexOf(".");
+        if (dotIdx !== -1) extensions.add(filePath.slice(dotIdx));
+        const slashIdx = filePath.lastIndexOf("/");
+        if (slashIdx !== -1) {
+          // Keep only the top two path segments for grouping
+          const parts = filePath.split("/");
+          directories.add(parts.slice(0, Math.min(2, parts.length - 1)).join("/"));
+        }
+      }
+    }
+
+    const extArr = Array.from(extensions);
+    const dirArr = Array.from(directories);
+    const schemaKeywords = ["migration", "schema", "state.db", "store.ts"];
+    const testKeywords = [".test.", ".spec.", "__tests__"];
+
+    return {
+      files_changed: pr.files_changed,
+      diff_size_bytes: pr.diff.length,
+      extensions: extArr,
+      directories: dirArr,
+      touches_schema: extArr.some((e) => schemaKeywords.some((k) => e.includes(k))) ||
+        dirArr.some((d) => schemaKeywords.some((k) => d.includes(k))) ||
+        pr.diff.includes("CREATE TABLE") || pr.diff.includes("ALTER TABLE"),
+      touches_tests: extArr.some((e) => testKeywords.some((k) => e.includes(k))) ||
+        dirArr.some((d) => testKeywords.some((k) => d.includes(k))),
+    };
+  }
+
+  private async executeDecision(
+    repo: string,
+    prNumber: number,
+    result: PRReviewResult,
+    prBranch?: string,
+    pr?: PRInfo,
+  ): Promise<void> {
     switch (result.decision) {
       case "approve":
         try {
@@ -387,6 +436,35 @@ export class PRReviewer {
           reason: result.reason,
         });
         break;
+    }
+
+    // ── Antibody log: record every non-error decision as a structured entry ────
+    // Errors are skipped — they represent LLM failures, not reviewer judgements.
+    if (result.decision !== "error") {
+      try {
+        const diffShape: DiffShape = pr
+          ? this.buildDiffShape(pr)
+          : {
+              files_changed: 0,
+              diff_size_bytes: 0,
+              extensions: [],
+              directories: [],
+              touches_schema: false,
+              touches_tests: false,
+            };
+
+        this.store.recordAntibodyEntry({
+          repo,
+          pr_number: prNumber,
+          diff_shape: diffShape,
+          decision: result.decision as WriteAntibodyLogParams["decision"],
+          reason: result.reason ?? undefined,
+          agent: pr?.author ?? undefined,
+        });
+      } catch (err) {
+        // Non-fatal — antibody logging must never block review operations
+        this.log.warn("Failed to record antibody log entry", { repo, prNumber, error: String(err) });
+      }
     }
   }
 
