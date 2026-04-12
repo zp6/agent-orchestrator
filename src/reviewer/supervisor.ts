@@ -25,6 +25,8 @@ import {
   hasRecentAgeNudge,
 } from "./issue-age.js";
 import type { RoutingAccuracyProvider } from "./routing-accuracy.js";
+import type { CalibrationDriftProvider } from "./calibration-drift.js";
+import { formatDriftAlertLine } from "./calibration-drift.js";
 
 /**
  * Minimal interface for providing conflict stats to the supervisor.
@@ -46,6 +48,7 @@ export interface PRConfidenceProvider {
 }
 
 export type { RoutingAccuracyProvider };
+export type { CalibrationDriftProvider };
 
 export interface SupervisorDecision {
   action: "dispatch" | "verify" | "redeploy" | "create-issue" | "follow-up" | "none";
@@ -123,6 +126,13 @@ ROUTING ACCURACY (when "## Routing Accuracy" or "## Quality by Task Type" is pre
 - When multiple agents can handle a task, PREFER the agent with the higher avg quality score for that task type
 - If an agent's avg quality score is below 0.6 for a task type, consider creating an issue to investigate root cause rather than dispatching more of that task type to them
 - Use this data to make routing decisions more precise — not as a reason to punish agents, but to match work to strengths
+
+CALIBRATION DRIFT (when "## Calibration Drift Alerts" is present):
+- Each entry shows an agent whose mean verification score has shifted >0.1 from its historical baseline
+- Upward drift (▲) may indicate score inflation — the verifier is approving work it previously would have rejected
+- Downward drift (▼) may indicate score deflation or genuinely degraded agent quality
+- For drifting agents: consider creating an issue to investigate the root cause before dispatching more high-stakes tasks to them
+- Do NOT dispatch new work to an agent with active drift alerts until the cause is understood
 
 Be specific and actionable. Only suggest actions that address real gaps. Return [] if everything is on track.`;
 
@@ -453,6 +463,7 @@ export class Supervisor {
   private conflictStatsProvider?: ConflictStatsProvider;
   private prConfidenceProvider?: PRConfidenceProvider;
   private routingAccuracyProvider?: RoutingAccuracyProvider;
+  private calibrationDriftProvider?: CalibrationDriftProvider;
   private notifier = createNotifier();
 
   constructor(
@@ -462,11 +473,13 @@ export class Supervisor {
       conflictStatsProvider?: ConflictStatsProvider;
       prConfidenceProvider?: PRConfidenceProvider;
       routingAccuracyProvider?: RoutingAccuracyProvider;
+      calibrationDriftProvider?: CalibrationDriftProvider;
     } = {},
   ) {
     this.conflictStatsProvider = opts.conflictStatsProvider;
     this.prConfidenceProvider = opts.prConfidenceProvider;
     this.routingAccuracyProvider = opts.routingAccuracyProvider;
+    this.calibrationDriftProvider = opts.calibrationDriftProvider;
   }
 
   async review(): Promise<SupervisorDecision[]> {
@@ -821,6 +834,16 @@ export class Supervisor {
       );
       if (byTypeLines.length > 0) {
         sections.push(`## Quality by Task Type (last 30d)\n${byTypeLines.join("\n")}`);
+      }
+    }
+
+    // Calibration drift alerts (from CalibrationDriftProvider)
+    if (this.calibrationDriftProvider) {
+      const report = this.calibrationDriftProvider.buildReport();
+      const activeAlerts = report.drift_alerts.filter((a) => a.alerted);
+      if (activeAlerts.length > 0) {
+        const alertLines = activeAlerts.flatMap((a) => formatDriftAlertLine(a));
+        sections.push(`## Calibration Drift Alerts\n${alertLines.join("\n")}`);
       }
     }
 

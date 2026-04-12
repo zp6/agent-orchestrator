@@ -21,6 +21,7 @@ import type { PRConfidenceProvider } from "../reviewer/supervisor.js";
 import { ImprovementDetector } from "../reviewer/improvement-detector.js";
 import { IssueCreator } from "../reviewer/issue-creator.js";
 import { RoutingAccuracyTracker } from "../reviewer/routing-accuracy.js";
+import { CalibrationDriftMonitor } from "../reviewer/calibration-drift.js";
 import type { ReviewerConfig } from "../config.js";
 import type { IStateStore } from "../state/types.js";
 
@@ -35,6 +36,8 @@ export interface ReviewerInstances {
   detector: ImprovementDetector;
   /** Creates GitHub issues on agent repos. */
   issueCreator: IssueCreator;
+  /** Detects calibration drift and surfaces score distribution histograms. */
+  calibrationDriftMonitor: CalibrationDriftMonitor;
 }
 
 export interface CreateReviewerOptions {
@@ -76,6 +79,9 @@ export function createReviewerInstances(
       ? new RoutingAccuracyTracker(store)
       : undefined;
 
+  // Always constructed — getScoreDistributions / getCalibrationDriftAlerts are on IStateStore.
+  const calibrationDriftMonitor = new CalibrationDriftMonitor(store);
+
   return {
     reviewer,
     verifier: new Verifier(store),
@@ -83,8 +89,10 @@ export function createReviewerInstances(
       conflictStatsProvider: reviewer,
       prConfidenceProvider,
       routingAccuracyProvider,
+      calibrationDriftProvider: calibrationDriftMonitor,
     }),
     detector: new ImprovementDetector(config),
     issueCreator: new IssueCreator(config),
+    calibrationDriftMonitor,
   };
 }

@@ -23,6 +23,9 @@ import type {
   PRConfidenceRecord,
   RoutingAccuracyStats,
   AgentQualityByTaskType,
+  AgentScoreDistribution,
+  ScoreDistributionBucket,
+  CalibrationDriftAlert,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -334,6 +337,161 @@ export class StateStore implements ITelegramStateStore {
       });
     }
     return [...byAgent.values()];
+  }
+
+  /**
+   * Return per-agent score distribution histograms for the given look-back window.
+   *
+   * Each agent gets:
+   * - mean_score: average quality_score across scored tasks
+   * - low_confidence_approval_rate: fraction of approved tasks with score < 0.8
+   *   (a proxy for false-positive risk)
+   * - buckets: count of tasks per 0.1-wide score bucket (0.0–0.1, 0.1–0.2, …, 0.9–1.0)
+   */
+  getScoreDistributions(days: number = 30): AgentScoreDistribution[] {
+    const lookback = Number.isFinite(days) && days >= 1 ? Math.floor(days) : 30;
+
+    // One row per (agent_name, bucket) for tasks in the window
+    const bucketRows = this.db
+      .prepare(
+        `SELECT
+           agent_name,
+           CASE
+             WHEN quality_score < 0.1 THEN 0.0
+             WHEN quality_score < 0.2 THEN 0.1
+             WHEN quality_score < 0.3 THEN 0.2
+             WHEN quality_score < 0.4 THEN 0.3
+             WHEN quality_score < 0.5 THEN 0.4
+             WHEN quality_score < 0.6 THEN 0.5
+             WHEN quality_score < 0.7 THEN 0.6
+             WHEN quality_score < 0.8 THEN 0.7
+             WHEN quality_score < 0.9 THEN 0.8
+             ELSE 0.9
+           END AS bucket_min,
+           COUNT(*) AS count
+         FROM tasks
+         WHERE quality_score IS NOT NULL
+           AND updated_at >= datetime('now', ?)
+         GROUP BY agent_name, bucket_min
+         ORDER BY agent_name, bucket_min`,
+      )
+      .all(`-${lookback} days`) as Array<{
+        agent_name: string;
+        bucket_min: number;
+        count: number;
+      }>;
+
+    // Per-agent summary stats
+    const summaryRows = this.db
+      .prepare(
+        `SELECT
+           agent_name,
+           COUNT(*) AS task_count,
+           AVG(quality_score) AS mean_score,
+           SUM(CASE WHEN verification_status = 'approved' THEN 1 ELSE 0 END) AS approved_count,
+           SUM(CASE WHEN verification_status = 'approved' AND quality_score < 0.8 THEN 1 ELSE 0 END) AS low_conf_approved_count
+         FROM tasks
+         WHERE quality_score IS NOT NULL
+           AND updated_at >= datetime('now', ?)
+         GROUP BY agent_name`,
+      )
+      .all(`-${lookback} days`) as Array<{
+        agent_name: string;
+        task_count: number;
+        mean_score: number | null;
+        approved_count: number;
+        low_conf_approved_count: number;
+      }>;
+
+    // Index buckets by agent
+    const bucketsByAgent = new Map<string, ScoreDistributionBucket[]>();
+    for (const row of bucketRows) {
+      const list = bucketsByAgent.get(row.agent_name) ?? [];
+      list.push({ bucket_min: row.bucket_min, count: row.count });
+      bucketsByAgent.set(row.agent_name, list);
+    }
+
+    return summaryRows.map((s) => ({
+      agent_name: s.agent_name,
+      task_count: s.task_count,
+      mean_score: s.mean_score,
+      low_confidence_approval_rate:
+        s.approved_count > 0
+          ? s.low_conf_approved_count / s.approved_count
+          : null,
+      buckets: bucketsByAgent.get(s.agent_name) ?? [],
+    }));
+  }
+
+  /**
+   * Compute calibration drift alerts by comparing per-agent mean quality scores
+   * between a recent window and a baseline window.
+   *
+   * @param recentDays   - Size of the recent window (default: 30 days).
+   * @param baselineDays - Size of the baseline window immediately before the
+   *                       recent window (default: 60 days, i.e. 31–90 days ago).
+   *
+   * Only agents with data in BOTH windows are returned.
+   * `alerted` is true when |drift| > 0.1.
+   */
+  getCalibrationDriftAlerts(
+    recentDays: number = 30,
+    baselineDays: number = 60,
+  ): CalibrationDriftAlert[] {
+    const recent = Number.isFinite(recentDays) && recentDays >= 1 ? Math.floor(recentDays) : 30;
+    const baseline =
+      Number.isFinite(baselineDays) && baselineDays >= 1 ? Math.floor(baselineDays) : 60;
+
+    const recentRows = this.db
+      .prepare(
+        `SELECT agent_name, AVG(quality_score) AS mean, COUNT(*) AS task_count
+         FROM tasks
+         WHERE quality_score IS NOT NULL
+           AND updated_at >= datetime('now', ?)
+         GROUP BY agent_name`,
+      )
+      .all(`-${recent} days`) as Array<{
+        agent_name: string;
+        mean: number;
+        task_count: number;
+      }>;
+
+    const baselineRows = this.db
+      .prepare(
+        `SELECT agent_name, AVG(quality_score) AS mean, COUNT(*) AS task_count
+         FROM tasks
+         WHERE quality_score IS NOT NULL
+           AND updated_at >= datetime('now', ?)
+           AND updated_at < datetime('now', ?)
+         GROUP BY agent_name`,
+      )
+      .all(`-${recent + baseline} days`, `-${recent} days`) as Array<{
+        agent_name: string;
+        mean: number;
+        task_count: number;
+      }>;
+
+    const baselineMap = new Map(baselineRows.map((r) => [r.agent_name, r]));
+
+    const alerts: CalibrationDriftAlert[] = [];
+    for (const r of recentRows) {
+      const b = baselineMap.get(r.agent_name);
+      if (!b) continue; // no baseline data — skip
+
+      const drift = r.mean - b.mean;
+      alerts.push({
+        agent_name: r.agent_name,
+        baseline_mean: b.mean,
+        baseline_task_count: b.task_count,
+        recent_mean: r.mean,
+        recent_task_count: r.task_count,
+        drift,
+        alerted: Math.abs(drift) > 0.1,
+      });
+    }
+
+    // Sort by |drift| descending so the most significant appear first
+    return alerts.sort((a, b) => Math.abs(b.drift) - Math.abs(a.drift));
   }
 
   /**

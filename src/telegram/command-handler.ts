@@ -14,6 +14,8 @@
  *   /logs [n]    → last N supervisor decisions (default 10), newest first
  *   /supervisor [n]  → last N supervisor decisions with full detail (default 10)
  *   /agents      → per-agent stats: total/done/failed/avg quality score
+ *   /verification-calibration [days] → score histograms, low-conf approvals, and drift alerts
+ *   /calibration [days]  → alias for /verification-calibration
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -26,6 +28,8 @@ import { createLogger } from "../service/logger.js";
 import type { ITelegramStateStore, Task } from "../state/types.js";
 import type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 import { buildIssueAgeHeatmap, formatIssueAgeHeatmap } from "../reviewer/issue-age.js";
+import type { CalibrationDriftProvider } from "../reviewer/calibration-drift.js";
+import { CalibrationDriftMonitor } from "../reviewer/calibration-drift.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
 const log = createLogger("telegram-commands");
@@ -64,7 +68,9 @@ type CommandName =
   | "logs"
   | "supervisor"
   | "agents"
-  | "s";
+  | "s"
+  | "verification-calibration"
+  | "calibration";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -83,6 +89,8 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "supervisor",
   "agents",
   "s",
+  "verification-calibration",
+  "calibration",
 ]);
 
 interface ParsedCommand {
@@ -177,6 +185,7 @@ async function executeCommand(
   store: ITelegramStateStore,
   botToken: string,
   conflictStatsProvider?: ConflictStatsProvider,
+  calibrationDriftProvider?: CalibrationDriftProvider,
 ): Promise<string> {
   switch (cmd.command) {
     case "status":
@@ -258,6 +267,15 @@ async function executeCommand(
 
     case "s":
       return handleWeeklySummary(store, conflictStatsProvider);
+
+    case "verification-calibration":
+    case "calibration": {
+      const days = parseInt(cmd.args[0] ?? "30", 10);
+      const windowDays = Number.isNaN(days) || days < 1 ? 30 : Math.min(days, 90);
+      const provider: CalibrationDriftProvider = calibrationDriftProvider ?? new CalibrationDriftMonitor(store);
+      const report = provider.buildReport({ windowDays });
+      return provider.formatDistributionPage(report);
+    }
   }
 }
 
@@ -728,14 +746,20 @@ export class TelegramCommandHandler {
   private store: ITelegramStateStore;
   private pollIntervalMs: number;
   private conflictStatsProvider?: ConflictStatsProvider;
+  private calibrationDriftProvider?: CalibrationDriftProvider;
 
   constructor(
     store: ITelegramStateStore,
-    opts: { pollIntervalMs?: number; conflictStatsProvider?: ConflictStatsProvider } = {},
+    opts: {
+      pollIntervalMs?: number;
+      conflictStatsProvider?: ConflictStatsProvider;
+      calibrationDriftProvider?: CalibrationDriftProvider;
+    } = {},
   ) {
     this.store = store;
     this.pollIntervalMs = opts.pollIntervalMs ?? 1_000;
     this.conflictStatsProvider = opts.conflictStatsProvider;
+    this.calibrationDriftProvider = opts.calibrationDriftProvider;
   }
 
   /**
@@ -769,7 +793,7 @@ export class TelegramCommandHandler {
             log.info("Received Telegram command", { command: cmd.command, args: cmd.args });
 
             try {
-              const reply = await executeCommand(cmd, this.store, config.botToken, this.conflictStatsProvider);
+              const reply = await executeCommand(cmd, this.store, config.botToken, this.conflictStatsProvider, this.calibrationDriftProvider);
               await sendMessage(config.botToken, cmd.chatId, reply);
             } catch (err) {
               log.error("Error executing command", {

@@ -199,6 +199,70 @@ export interface DispatchRequest {
   created_at: string;
 }
 
+// ── Calibration drift types ───────────────────────────────────────────────
+
+/**
+ * A single bucket of the score histogram for one agent.
+ * bucket_min is 0.0, 0.1, 0.2, ..., 0.9 (lower inclusive bound of a 0.1-wide range).
+ */
+export interface ScoreDistributionBucket {
+  bucket_min: number;
+  count: number;
+}
+
+/**
+ * Score distribution for a single agent over a time window.
+ * Used for the /verification-calibration dashboard page.
+ */
+export interface AgentScoreDistribution {
+  agent_name: string;
+  /** Total tasks with a quality_score in the window. */
+  task_count: number;
+  /** Mean quality score across all scored tasks (null if none). */
+  mean_score: number | null;
+  /**
+   * Low-confidence approval rate: fraction of approved tasks whose
+   * quality_score was below 0.8 (a proxy for false-positive risk).
+   * Null when no approvals exist in the window.
+   */
+  low_confidence_approval_rate: number | null;
+  /** Score histogram, one entry per 0.1-wide bucket that has at least one task. */
+  buckets: ScoreDistributionBucket[];
+}
+
+/**
+ * Drift alert for a single agent.
+ * Compares the recent window mean score to a baseline window mean.
+ */
+export interface CalibrationDriftAlert {
+  agent_name: string;
+  /** Mean quality score in the baseline window (31-90 days ago by default). */
+  baseline_mean: number;
+  /** Number of tasks in the baseline window. */
+  baseline_task_count: number;
+  /** Mean quality score in the recent window (last 30 days by default). */
+  recent_mean: number;
+  /** Number of tasks in the recent window. */
+  recent_task_count: number;
+  /** Signed drift: recent_mean − baseline_mean. */
+  drift: number;
+  /** True when |drift| > 0.1 (alert threshold). */
+  alerted: boolean;
+}
+
+/**
+ * Full calibration drift report, returned by CalibrationDriftMonitor.buildReport().
+ */
+export interface CalibrationDriftReport {
+  generated_at: string;
+  /** Look-back window for score distributions (days). */
+  window_days: number;
+  /** Per-agent score distributions for the window. */
+  distributions: AgentScoreDistribution[];
+  /** Drift alerts — one per agent that has data in both windows. */
+  drift_alerts: CalibrationDriftAlert[];
+}
+
 /**
  * Per-agent routing accuracy statistics computed from verified tasks.
  * Surfaces avg quality scores and approval rates to drive smarter routing.
@@ -266,6 +330,10 @@ export interface IStateStore {
   // Routing accuracy feedback
   getRoutingAccuracyStats(days?: number): RoutingAccuracyStats[];
   getAgentQualityByTaskType(): AgentQualityByTaskType[];
+
+  // Calibration drift monitoring
+  getScoreDistributions(days?: number): AgentScoreDistribution[];
+  getCalibrationDriftAlerts(recentDays?: number, baselineDays?: number): CalibrationDriftAlert[];
 
   // Agent health (reads from orchestrator's agent_health table)
   getAgentHealthBatch(agentNames: string[]): AgentHealth[];
