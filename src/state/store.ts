@@ -696,6 +696,35 @@ export interface IssueClaim {
 }
 
 /**
+ * A single routing decision record.
+ * Written at dispatch time; quality_score is filled when the task is verified.
+ */
+export interface RoutingOutcome {
+  id: number;
+  task_id: string;
+  agent_chosen: string;
+  task_type: string;
+  route_method: "deterministic" | "llm" | "explicit";
+  route_confidence: number | null;
+  source_ref: string | null;
+  routed_at: string;
+  quality_score: number | null;
+  outcome_updated_at: string | null;
+}
+
+/**
+ * Per-agent routing accuracy aggregate for a rolling time window.
+ * Used to surface 'which agent performs best on infrastructure tasks vs. dashboard tasks'.
+ */
+export interface RoutingAccuracyStat {
+  agent_name: string;
+  task_type: string;
+  total_routed: number;
+  scored: number;
+  avg_quality_score: number | null;
+}
+
+/**
  * Per-agent health record for pool failover routing.
  * Tracks consecutive dispatch failures so the dispatcher can route around
  * unhealthy pool instances without waiting for the supervisor to intervene.
@@ -817,6 +846,7 @@ export class StateStore {
     this.runIssueCacheMigration();
     this.runLearnedRulesMigration();
     this.runConflictHeatMapMigration();
+    this.runRoutingOutcomesMigration();
   }
 
   private runPhase2Migration(): void {
@@ -4594,5 +4624,109 @@ export class StateStore {
       prNumbers: JSON.parse(r.pr_numbers_json) as number[],
       assessedAt: r.assessed_at,
     }));
+  }
+
+  // ── Routing outcomes ──────────────────────────────────────────────────────
+
+  private runRoutingOutcomesMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS routing_outcomes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL,
+        agent_chosen TEXT NOT NULL,
+        task_type TEXT NOT NULL DEFAULT 'implementation',
+        route_method TEXT NOT NULL DEFAULT 'deterministic',
+        route_confidence REAL,
+        source_ref TEXT,
+        routed_at TEXT NOT NULL,
+        quality_score REAL,
+        outcome_updated_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_routing_outcomes_task ON routing_outcomes(task_id);
+      CREATE INDEX IF NOT EXISTS idx_routing_outcomes_agent ON routing_outcomes(agent_chosen);
+      CREATE INDEX IF NOT EXISTS idx_routing_outcomes_routed ON routing_outcomes(routed_at);
+    `);
+  }
+
+  /**
+   * Record a routing decision at dispatch time.
+   * quality_score is null until the task is verified.
+   */
+  recordRoutingDecision(params: {
+    taskId: string;
+    agentChosen: string;
+    taskType: string;
+    routeMethod: "deterministic" | "llm" | "explicit";
+    routeConfidence: number | null;
+    sourceRef?: string;
+  }): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO routing_outcomes
+           (task_id, agent_chosen, task_type, route_method, route_confidence, source_ref, routed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        params.taskId,
+        params.agentChosen,
+        params.taskType,
+        params.routeMethod,
+        params.routeConfidence ?? null,
+        params.sourceRef ?? null,
+        now,
+      );
+  }
+
+  /**
+   * Fill in the quality_score for a routing outcome when a task is verified.
+   * Updates all routing_outcome rows for the given task_id (there should be one).
+   */
+  updateRoutingOutcomeScore(taskId: string, qualityScore: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE routing_outcomes
+         SET quality_score = ?, outcome_updated_at = ?
+         WHERE task_id = ? AND quality_score IS NULL`,
+      )
+      .run(qualityScore, now, taskId);
+  }
+
+  /**
+   * Return per-agent routing accuracy stats for the last `days` days, grouped by task type.
+   * Only routing decisions that have a resolved quality_score are included in the average.
+   */
+  getRoutingAccuracyStats(days = 30): RoutingAccuracyStat[] {
+    const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+    return this.db
+      .prepare(
+        `SELECT
+           agent_chosen AS agent_name,
+           task_type,
+           COUNT(*) AS total_routed,
+           COUNT(quality_score) AS scored,
+           AVG(quality_score) AS avg_quality_score
+         FROM routing_outcomes
+         WHERE routed_at >= ?
+         GROUP BY agent_chosen, task_type
+         ORDER BY agent_chosen, task_type`,
+      )
+      .all(cutoff) as RoutingAccuracyStat[];
+  }
+
+  /**
+   * Return recent routing outcome rows for a given agent (for the dashboard /
+   * routing-decisions page), most recent first.
+   */
+  getAgentRoutingOutcomes(agentName: string, limit = 50): RoutingOutcome[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM routing_outcomes
+         WHERE agent_chosen = ?
+         ORDER BY routed_at DESC
+         LIMIT ?`,
+      )
+      .all(agentName, limit) as RoutingOutcome[];
   }
 }

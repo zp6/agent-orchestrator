@@ -74,6 +74,11 @@ export async function verifyTask(
       verification_notes: result.notes,
     });
 
+    // Update routing outcome with quality score (issue #656).
+    if (result.score != null) {
+      store.updateRoutingOutcomeScore(taskId, result.score);
+    }
+
     // Cross-task learning: extract rules from reviewer feedback
     const feedbackText = result.revision || result.notes;
     if (feedbackText && !result.approved) {
@@ -412,6 +417,37 @@ export function buildSupervisorContext(config: OrchestratorConfig, store: StateS
       `## Orchestrator Efficiency\n` +
       `- follow_ups_avoided: ${followUpsAvoided} cross-repo follow-up issue(s) skipped because an open PR already closes the parent issue`,
     );
+  }
+
+  // Routing accuracy feedback: per-agent quality breakdown by task type (issue #656).
+  // Used to prefer higher-accuracy agents for similar task types.
+  const routingStats = store.getRoutingAccuracyStats(30);
+  if (routingStats.length > 0) {
+    // Group by agent for readable display
+    const byAgent = new Map<string, typeof routingStats>();
+    for (const row of routingStats) {
+      if (!byAgent.has(row.agent_name)) byAgent.set(row.agent_name, []);
+      byAgent.get(row.agent_name)!.push(row);
+    }
+    const lines: string[] = [];
+    for (const [agentName, rows] of byAgent) {
+      const parts = rows
+        .filter((r) => r.scored > 0)
+        .map((r) => {
+          const score = r.avg_quality_score != null ? r.avg_quality_score.toFixed(2) : "n/a";
+          return `${r.task_type}: ${score} (n=${r.scored})`;
+        });
+      if (parts.length > 0) {
+        lines.push(`- ${agentName}: ${parts.join(", ")}`);
+      }
+    }
+    if (lines.length > 0) {
+      sections.push(
+        `## Routing Accuracy (last 30 days)\n` +
+        `Avg quality score by agent × task type. Prefer agents with higher scores for similar tasks.\n` +
+        lines.join("\n"),
+      );
+    }
   }
 
   return sections.join("\n\n");
