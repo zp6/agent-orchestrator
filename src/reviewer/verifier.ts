@@ -8,18 +8,38 @@
  *   - Removed Dispatcher dependency — revision re-dispatch is handled by the
  *     orchestrator daemon, not the reviewer itself
  *   - Config is ReviewerConfig (simpler shape, no proxy/docker fields)
+ *   - Accepts optional Notifier for second-pass escalation alerts
  */
 
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { IStateStore } from "../state/types.js";
+import type { Notifier } from "../notify.js";
 
 export interface VerificationResult {
   approved: boolean;
   score: number;
   notes: string;
   revision?: string;
+  /**
+   * Present when a borderline score (0.70–0.79) triggered an automatic
+   * second-pass review. The orchestrator can use this to detect disagreements.
+   */
+  secondPass?: {
+    score: number;
+    notes: string;
+    /** True when both passes agreed on the approval decision. */
+    agreed: boolean;
+  };
 }
+
+/**
+ * Score range that triggers automatic second-pass review.
+ * Tasks with a first-pass score in [BORDERLINE_LOW, BORDERLINE_HIGH] are
+ * independently evaluated a second time before approval is finalised.
+ */
+const BORDERLINE_LOW = 0.70;
+const BORDERLINE_HIGH = 0.79;
 
 const SYSTEM_PROMPT = `You are a quality reviewer for an AI agent orchestrator. Given a task description and the agent's response, assess the quality of the work.
 
@@ -61,10 +81,39 @@ Scoring guide:
 - 0.5-0.69: Acceptable — addresses the question but lacks depth or alternatives
 - Below 0.5: Needs revision — superficial, missing key considerations, or not actionable`;
 
+/**
+ * System prompt for the second-pass reviewer.
+ * Deliberately more sceptical — it knows a first reviewer already approved
+ * with a borderline score and is asked to independently validate.
+ */
+const SECOND_PASS_SYSTEM_PROMPT = `You are a senior quality auditor performing an independent second-pass review.
+A first reviewer already assessed this task and gave a borderline approval score (0.70–0.79).
+Your job is to independently evaluate the work WITHOUT being anchored to that score.
+
+Be thorough and critical. A borderline score means the work probably has real gaps.
+Ask yourself: "Would I be comfortable merging/shipping this as-is?"
+
+Respond with ONLY a JSON object (no markdown, no code fences):
+{
+  "approved": true/false,
+  "score": 0.0-1.0,
+  "notes": "Independent assessment — be specific about what is missing or wrong",
+  "revision": "If not approved, concrete guidance for what needs to change (omit if approved)"
+}
+
+Scoring guide:
+- 0.9-1.0: Excellent — thorough, correct, well-structured
+- 0.7-0.89: Good — meets requirements with minor gaps
+- 0.5-0.69: Acceptable — partially addresses the task
+- Below 0.5: Needs revision — incomplete or incorrect`;
+
 export class Verifier {
   private log = createLogger("verifier");
 
-  constructor(private store: IStateStore) {}
+  constructor(
+    private store: IStateStore,
+    private notifier?: Notifier,
+  ) {}
 
   async verify(taskId: string): Promise<VerificationResult> {
     const task = this.store.getTask(taskId);
@@ -85,53 +134,113 @@ export class Verifier {
       : `## Task\n${task.description ?? task.title}\n\n## Agent Response (${task.agent_name})\n${task.result ?? "(no result)"}`;
 
     const LLM_TIMEOUT_MS = 5 * 60 * 1000;
-    const abortController = new AbortController();
-    const timer = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
-    try {
-      let response;
-      try {
-        response = await client.messages.create(
-          {
-            model: "claude-sonnet-4-6",
-            max_tokens: 1024,
-            system: isResearch ? RESEARCH_SYSTEM_PROMPT : SYSTEM_PROMPT,
-            messages: [{ role: "user", content: prompt }],
-          },
-          { signal: abortController.signal },
+
+    // ── First pass ──────────────────────────────────────────────────────────
+    const firstPassResult = await this.runLLMPass(
+      client,
+      isResearch ? RESEARCH_SYSTEM_PROMPT : SYSTEM_PROMPT,
+      prompt,
+      LLM_TIMEOUT_MS,
+      taskId,
+      "first-pass",
+    );
+
+    // ── Borderline second-pass guard ────────────────────────────────────────
+    const isBorderline =
+      firstPassResult.score >= BORDERLINE_LOW && firstPassResult.score <= BORDERLINE_HIGH;
+
+    if (isBorderline) {
+      this.log.info("Borderline score — triggering second-pass review", {
+        taskId,
+        firstPassScore: firstPassResult.score,
+        agent: task.agent_name,
+      });
+
+      const secondPassResult = await this.runLLMPass(
+        client,
+        SECOND_PASS_SYSTEM_PROMPT,
+        prompt,
+        LLM_TIMEOUT_MS,
+        taskId,
+        "second-pass",
+      );
+
+      const agreed = firstPassResult.approved === secondPassResult.approved;
+
+      // Conservative final decision: if either pass rejects, reject overall.
+      const finalApproved = firstPassResult.approved && secondPassResult.approved;
+
+      const combinedNotes = [
+        `[First pass — score ${(firstPassResult.score * 100).toFixed(0)}%] ${firstPassResult.notes}`,
+        `[Second pass — score ${(secondPassResult.score * 100).toFixed(0)}%] ${secondPassResult.notes}`,
+        agreed
+          ? `[Agreement: both passes ${finalApproved ? "approved" : "rejected"}]`
+          : `[Disagreement: passes diverged — conservative decision: ${finalApproved ? "approved" : "rejected"}]`,
+      ].join("\n");
+
+      // Escalate to Telegram when passes disagree.
+      if (!agreed && this.notifier) {
+        const body = [
+          `Task \`${taskId.slice(0, 12)}\` scored *${(firstPassResult.score * 100).toFixed(0)}%* on first pass — borderline range triggered second review.`,
+          ``,
+          `*First pass:* ${firstPassResult.approved ? "✅ approved" : "❌ rejected"} (${(firstPassResult.score * 100).toFixed(0)}%)`,
+          `*Second pass:* ${secondPassResult.approved ? "✅ approved" : "❌ rejected"} (${(secondPassResult.score * 100).toFixed(0)}%)`,
+          `*Agent:* \`${task.agent_name ?? "unknown"}\``,
+          `*Conservative outcome:* ${finalApproved ? "approved" : "rejected"}`,
+        ].join("\n");
+
+        await this.notifier.notifyOperator(
+          "Borderline review disagreement",
+          body,
+          "medium",
         );
-      } finally {
-        clearTimeout(timer);
       }
 
-      const text = response.content
-        .filter((b) => b.type === "text")
-        .map((b) => ("text" in b ? b.text : ""))
-        .join("");
+      const finalResult: VerificationResult = {
+        approved: finalApproved,
+        score: firstPassResult.score,
+        notes: combinedNotes,
+        revision: finalApproved ? undefined : (secondPassResult.revision ?? firstPassResult.revision),
+        secondPass: {
+          score: secondPassResult.score,
+          notes: secondPassResult.notes,
+          agreed,
+        },
+      };
 
-      const result = this.parseResponse(text);
-
-      this.log.info("Verification complete", {
+      this.log.info("Second-pass review complete", {
         taskId,
-        approved: result.approved,
-        score: result.score,
+        firstPassApproved: firstPassResult.approved,
+        secondPassApproved: secondPassResult.approved,
+        agreed,
+        finalApproved,
         agent: task.agent_name,
       });
 
       this.store.updateTask(taskId, {
-        verification_status: result.approved ? "approved" : "rejected",
-        quality_score: result.score,
-        verification_notes: result.notes,
+        verification_status: finalApproved ? "approved" : "rejected",
+        quality_score: firstPassResult.score,
+        verification_notes: combinedNotes,
       });
 
-      return result;
-    } catch (err) {
-      this.log.error("Verification failed", {
-        taskId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      this.store.updateTask(taskId, { verification_status: null });
-      throw new Error(`Verification failed: ${err instanceof Error ? err.message : String(err)}`);
+      return finalResult;
     }
+
+    // ── Standard (non-borderline) result ────────────────────────────────────
+    this.log.info("Verification complete", {
+      taskId,
+      approved: firstPassResult.approved,
+      score: firstPassResult.score,
+      agent: task.agent_name,
+    });
+
+    this.store.updateTask(taskId, {
+      verification_status: firstPassResult.approved ? "approved" : "rejected",
+      quality_score: firstPassResult.score,
+      verification_notes: firstPassResult.notes,
+    });
+
+    return firstPassResult;
   }
 
   /**
@@ -164,6 +273,54 @@ export class Verifier {
     }
 
     return result;
+  }
+
+  /**
+   * Run a single LLM verification pass.
+   * Extracted to avoid duplicating timeout/parse logic between first and second passes.
+   */
+  private async runLLMPass(
+    client: ReturnType<typeof createLLMClient>,
+    systemPrompt: string,
+    userPrompt: string,
+    timeoutMs: number,
+    taskId: string,
+    passLabel: string,
+  ): Promise<VerificationResult> {
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), timeoutMs);
+    try {
+      let response;
+      try {
+        response = await client.messages.create(
+          {
+            model: "claude-sonnet-4-6",
+            max_tokens: 1024,
+            system: systemPrompt,
+            messages: [{ role: "user", content: userPrompt }],
+          },
+          { signal: abortController.signal },
+        );
+      } finally {
+        clearTimeout(timer);
+      }
+
+      const text = response.content
+        .filter((b) => b.type === "text")
+        .map((b) => ("text" in b ? b.text : ""))
+        .join("");
+
+      return this.parseResponse(text);
+    } catch (err) {
+      this.log.error("LLM pass failed", {
+        taskId,
+        pass: passLabel,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw new Error(
+        `Verification ${passLabel} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private parseResponse(text: string): VerificationResult {
