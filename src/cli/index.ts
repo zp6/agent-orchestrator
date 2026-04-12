@@ -30,6 +30,7 @@ import { registerConfigCommand } from "./commands/config.js";
 import { registerBorrowCommand } from "./commands/borrow.js";
 import { registerFleetCommand } from "./commands/fleet.js";
 import { registerLearnedRulesCommand } from "./commands/learned-rules.js";
+import { registerAuditInfraCommand } from "./commands/audit-infra.js";
 
 const program = new Command();
 
@@ -69,5 +70,6 @@ registerConfigCommand(program);
 registerBorrowCommand(program);
 registerFleetCommand(program);
 registerLearnedRulesCommand(program);
+registerAuditInfraCommand(program);
 
 program.parse();
