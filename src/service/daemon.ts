@@ -37,6 +37,7 @@ import { seedFromClaudeMd } from "../orchestrator/learned-rules.js";
 import { checkAgedIssues } from "../orchestrator/issue-age-monitor.js";
 import { runProactiveScan } from "../orchestrator/proactive-scanner.js";
 import { validateMergedPR } from "../orchestrator/staging-validator.js";
+import { proposeAndFileRoadmapItems } from "../orchestrator/roadmap-proposer.js";
 import {
   type GateResult,
   detectImprovements,
@@ -59,6 +60,7 @@ const CLOSED_ISSUE_CHECK_EVERY_N_CYCLES = 3; // ~15min at default — cancel in-
 const STALE_ISSUE_AGE_DAYS = 7;
 const STANDUP_MEETING_EVERY_N_CYCLES = 288;  // ~24h at 5min interval
 const BLUESKY_MEETING_EVERY_N_CYCLES = 2016; // ~7 days at 5min interval
+const ROADMAP_PROPOSAL_EVERY_N_CYCLES = 288; // ~24h at 5min interval
 
 /**
  * Default quality-score floor for reviewer-pool approvals.  Any completed
@@ -440,7 +442,17 @@ export class Daemon {
         await this.runMeeting(time, "bluesky");
       }
 
-      // 3d. Link approved research findings to implementation issues
+      // 3f. Daily roadmap proposals — strategic blue-sky ideas filed as issues
+      if (this.cycleCount % ROADMAP_PROPOSAL_EVERY_N_CYCLES === 0) {
+        try {
+          const filed = await proposeAndFileRoadmapItems(this.config, this.store);
+          if (filed > 0) console.log(`[${time}] Roadmap proposer: filed ${filed} proposal(s)`);
+        } catch (err) {
+          this.log.warn("Roadmap proposal failed", { error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
+      // 3g. Link approved research findings to implementation issues
       if (this.cycleCount % RESEARCH_LINK_EVERY_N_CYCLES === 0) {
         await this.linkResearchToImplementation(time);
       }
