@@ -250,3 +250,55 @@ export function buildSchemaImpactNotice(hits: SchemaImpactHit[]): string {
 
   return lines.join("\n");
 }
+
+/**
+ * Builds a collapsible "Downstream Impact" section for posting in PR review comments.
+ * Returns an empty string if there are no hits.
+ *
+ * The section lists affected consumer repos and the schema changes that touch them,
+ * formatted as a GitHub details/summary collapsible element with links to each consumer.
+ */
+export function buildDownstreamImpactSection(hits: SchemaImpactHit[]): string {
+  if (hits.length === 0) return "";
+
+  const lines: string[] = [
+    "",
+    "<details>",
+    "<summary><b>📦 Downstream Impact</b></summary>",
+    "",
+    "This PR modifies shared schema(s) with known downstream consumers:",
+    "",
+  ];
+
+  // Build a map of consumer to affected schemas for a cleaner display
+  const consumerSchemaMap = new Map<string, { schemaLabel: string; files: string[] }[]>();
+
+  for (const hit of hits) {
+    for (const consumer of hit.consumers) {
+      if (!consumerSchemaMap.has(consumer)) {
+        consumerSchemaMap.set(consumer, []);
+      }
+      consumerSchemaMap.get(consumer)!.push({
+        schemaLabel: hit.schemaLabel,
+        files: hit.matchedFiles,
+      });
+    }
+  }
+
+  // Format each consumer with its affected schemas
+  for (const [consumer, schemas] of consumerSchemaMap) {
+    const [owner, repo] = consumer.split("/");
+    const repoLink = `https://github.com/${consumer}`;
+    lines.push(`- **[${consumer}](${repoLink})**`);
+
+    for (const schema of schemas) {
+      lines.push(`  - ${schema.schemaLabel}`);
+      lines.push(`    - Changed files: \`${schema.files.join("`, `")}\``);
+    }
+    lines.push("");
+  }
+
+  lines.push("</details>");
+
+  return lines.join("\n");
+}

@@ -3,6 +3,7 @@ import {
   detectSchemaChanges,
   extractChangedFilesFromDiff,
   buildSchemaImpactNotice,
+  buildDownstreamImpactSection,
   SCHEMA_CONSUMER_MAP,
 } from "../reviewer/schema-impact.js";
 import type { SchemaImpactHit } from "../reviewer/schema-impact.js";
@@ -257,6 +258,99 @@ describe("buildSchemaImpactNotice", () => {
     ];
     const notice = buildSchemaImpactNotice(hits);
     expect(notice.startsWith("\n")).toBe(true);
+  });
+});
+
+// ── buildDownstreamImpactSection ──────────────────────────────────────────────
+
+describe("buildDownstreamImpactSection", () => {
+  it("returns empty string for no hits", () => {
+    const section = buildDownstreamImpactSection([]);
+    expect(section).toBe("");
+  });
+
+  it("formats a single hit as a collapsible details element", () => {
+    const hits: SchemaImpactHit[] = [
+      {
+        schemaLabel: "state.db schema (SQLite tables / columns)",
+        consumers: ["rapartlu/agent-orchestrator", "rapartlu/agent-dashboard"],
+        matchedFiles: ["src/state/store.ts"],
+      },
+    ];
+    const section = buildDownstreamImpactSection(hits);
+    expect(section).toContain("<details>");
+    expect(section).toContain("</details>");
+    expect(section).toContain("<summary><b>📦 Downstream Impact</b></summary>");
+    expect(section).toContain("rapartlu/agent-orchestrator");
+    expect(section).toContain("rapartlu/agent-dashboard");
+  });
+
+  it("includes links to consumer repos", () => {
+    const hits: SchemaImpactHit[] = [
+      {
+        schemaLabel: "test schema",
+        consumers: ["rapartlu/test-repo"],
+        matchedFiles: ["src/test.ts"],
+      },
+    ];
+    const section = buildDownstreamImpactSection(hits);
+    expect(section).toContain("https://github.com/rapartlu/test-repo");
+  });
+
+  it("lists affected files for each schema", () => {
+    const hits: SchemaImpactHit[] = [
+      {
+        schemaLabel: "test schema",
+        consumers: ["rapartlu/test-repo"],
+        matchedFiles: ["src/file1.ts", "src/file2.ts"],
+      },
+    ];
+    const section = buildDownstreamImpactSection(hits);
+    expect(section).toContain("src/file1.ts");
+    expect(section).toContain("src/file2.ts");
+  });
+
+  it("groups schemas by consumer", () => {
+    const hits: SchemaImpactHit[] = [
+      {
+        schemaLabel: "schema A",
+        consumers: ["rapartlu/shared-repo"],
+        matchedFiles: ["src/a.ts"],
+      },
+      {
+        schemaLabel: "schema B",
+        consumers: ["rapartlu/shared-repo"],
+        matchedFiles: ["src/b.ts"],
+      },
+      {
+        schemaLabel: "schema C",
+        consumers: ["rapartlu/other-repo"],
+        matchedFiles: ["src/c.ts"],
+      },
+    ];
+    const section = buildDownstreamImpactSection(hits);
+    // rapartlu/shared-repo should appear as a link (once in markdown link text, once in URL)
+    const sharedRepoMatches = (section.match(/rapartlu\/shared-repo/g) || []).length;
+    expect(sharedRepoMatches).toBeGreaterThan(0);
+    // but both schemas should be listed
+    expect(section).toContain("schema A");
+    expect(section).toContain("schema B");
+    expect(section).toContain("schema C");
+    // and both should be under shared-repo, not duplicated
+    const sharedRepoLines = section.split('\n').filter(line => line.includes('shared-repo'));
+    expect(sharedRepoLines.length).toBe(1);
+  });
+
+  it("starts with a newline so it appends cleanly to comments", () => {
+    const hits: SchemaImpactHit[] = [
+      {
+        schemaLabel: "test",
+        consumers: ["rapartlu/test"],
+        matchedFiles: ["test.ts"],
+      },
+    ];
+    const section = buildDownstreamImpactSection(hits);
+    expect(section.startsWith("\n")).toBe(true);
   });
 });
 

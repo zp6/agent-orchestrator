@@ -25,6 +25,8 @@ import {
   detectSchemaChanges,
   extractChangedFilesFromDiff,
   buildSchemaImpactNotice,
+  buildDownstreamImpactSection,
+  type SchemaImpactHit,
 } from "./schema-impact.js";
 import {
   isStandupIssue,
@@ -630,7 +632,7 @@ export class PRReviewer {
         redispatchCategory: result.redispatchCategory,
       });
 
-      await this.executeDecision(repo, prNumber, result, pr.branch);
+      await this.executeDecision(repo, prNumber, result, pr.branch, schemaHits);
       return result;
     } catch (err) {
       this.log.error("PR review failed", {
@@ -733,7 +735,11 @@ export class PRReviewer {
     prNumber: number,
     result: PRReviewResult,
     prBranch?: string,
+    schemaHits: SchemaImpactHit[] = [],
   ): Promise<void> {
+    // Build downstream impact section if schema changes were detected
+    const downstreamImpact = buildDownstreamImpactSection(schemaHits);
+
     switch (result.decision) {
       case "approve": {
         try {
@@ -752,7 +758,7 @@ export class PRReviewer {
               ? "next in queue"
               : `position ${entry.position + 1} of ${queueSize} in queue`;
           execSync(
-            `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**[orchestrator] PR Review — Approved** ✅\n\n${result.comment}\n\n---\n🔀 Added to merge queue (${positionMsg}). PRs merge sequentially to avoid branch conflicts.`)}`,
+            `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**[orchestrator] PR Review — Approved** ✅\n\n${result.comment}${downstreamImpact}\n\n---\n🔀 Added to merge queue (${positionMsg}). PRs merge sequentially to avoid branch conflicts.`)}`,
             { encoding: "utf-8", timeout: 30000 },
           );
           this.log.info("PR approved and added to merge queue", {
@@ -774,7 +780,7 @@ export class PRReviewer {
       case "request-changes": {
         try {
           execSync(
-            `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**[orchestrator] PR Review — Changes Requested**\n\n${result.comment}`)}`,
+            `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**[orchestrator] PR Review — Changes Requested**\n\n${result.comment}${downstreamImpact}`)}`,
             { encoding: "utf-8", timeout: 30000 },
           );
           this.log.info("PR changes requested", { repo, prNumber });
@@ -807,7 +813,7 @@ export class PRReviewer {
             }
           }
           execSync(
-            `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**Orchestrator escalation:** ${result.comment}`)}`,
+            `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**Orchestrator escalation:** ${result.comment}${downstreamImpact}`)}`,
             { encoding: "utf-8", timeout: 30000 },
           );
           this.log.info("PR escalated to human", {
