@@ -5,6 +5,7 @@ import { getAgentDir, getAgentBaseUrl, getPoolMembers } from "../config/schema.j
 import { createLogger } from "../service/logger.js";
 import {
   isRateLimitError,
+  isProviderAvailable,
   markProviderExhausted,
   markProviderAvailable,
   parseResetTime,
@@ -205,7 +206,10 @@ export function createLLMClient(config: OrchestratorConfig, taskKind?: LLMTaskKi
     const candidates = getPoolMembers(config, agentName)
       .filter((name) => {
         const agent = config.agents[name];
-        return agent?.docker?.port && agent?.docker?.api_key;
+        if (!agent?.docker?.port || !agent?.docker?.api_key) return false;
+        // Skip agents whose provider is exhausted (rate limited)
+        const prov = agent.provider ?? "claude";
+        return isProviderAvailable(prov);
       });
 
     if (candidates.length > 0) {
