@@ -187,6 +187,9 @@ This session runs the health monitoring loop and **owns the daemon lifecycle**. 
 | Stale PID file (file exists, process dead) | `rm ~/.claude-orchestrator/daemon.pid` then start daemon |
 | Daemon running but no new log lines for >15 min | Kill PID and restart |
 | Same agents failing deployer health checks 2+ consecutive cycles | `curl -X POST http://localhost:3400/v1/rebuild` |
+| Proxy registry empty (0 agents) | `node dist/cli/index.js agents sync` immediately |
+| After any daemon start/restart | Always run `node dist/cli/index.js agents sync` — deployer only re-registers stale agents, not all missing ones |
+| Docker socket unresponsive (`curl --unix-socket /var/run/docker.sock --max-time 8 http://localhost/ping` times out or EOF) | Detect runtime: `docker context show` returns `orbstack` → `killall OrbStack 2>/dev/null; sleep 5 && open -a OrbStack`; returns `desktop-linux` → `killall Docker 2>/dev/null; sleep 5 && open -a Docker`. Wait ~60s, verify socket ping, then `node dist/cli/index.js agents sync` |
 
 ### After any recovery action
 - Verify it worked: check PID alive, agents healthy, new log activity
@@ -194,7 +197,7 @@ This session runs the health monitoring loop and **owns the daemon lifecycle**. 
 - If the issue recurs after recovery, file a GitHub issue in `rapartlu/agent-orchestrator`
 
 ### Health check cadence
-Each check must verify all 6 points: daemon PID, latest cycle timestamp, ERROR lines in last 2 min, task status counts (done/failed/in_progress/escalated), agent health via `curl http://localhost:3400/v1/agents`, and report issues or confirm healthy.
+Each check must verify all 6 points: daemon PID, latest cycle timestamp, ERROR lines in last 2 min, task status counts (done/failed/in_progress/escalated), agent health via `curl http://localhost:3400/v1/agents`, and Docker socket responsive (`curl --unix-socket /var/run/docker.sock --max-time 8 http://localhost/ping`). Report issues or confirm healthy.
 
 ## PR Discipline
 
