@@ -520,8 +520,30 @@ export class Dispatcher {
       const provider = this.config.agents[name]?.provider ?? "claude";
       return isProviderAvailable(provider);
     });
-    // If ALL providers are exhausted, fall back to full list (let it fail naturally)
-    const effectiveMembers = poolMembers.length > 0 ? poolMembers : allPoolMembers;
+
+    // Hard block: if ALL providers in this pool are exhausted, don't dispatch.
+    // The task stays in the queue and will be picked up when a provider recovers.
+    if (poolMembers.length === 0) {
+      const providers = [...new Set(allPoolMembers.map((n) => this.config.agents[n]?.provider ?? "claude"))];
+      this.log.warn("Dispatch blocked: all providers exhausted for this pool", {
+        agentName,
+        pool: this.config.agents[agentName]?.pool,
+        providers,
+        sourceRef: options?.sourceRef,
+      });
+      return {
+        taskId: "",
+        agentName,
+        response: {
+          content: `All providers exhausted (${providers.join(", ")}). Task will retry when limits reset.`,
+          model: "",
+          usage: { input_tokens: 0, output_tokens: 0 },
+          stop_reason: "provider-exhausted",
+        },
+      };
+    }
+
+    const effectiveMembers = poolMembers;
 
     if (effectiveMembers.length > 1) {
       const healthRecords = this.store.getAgentHealthBatch(effectiveMembers);
