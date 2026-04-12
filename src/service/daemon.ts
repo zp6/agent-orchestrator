@@ -34,6 +34,7 @@ import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.
 import { maybeRunDailySecurityScan, type SecurityScanState } from "../orchestrator/security-scanner.js";
 import { runTeamMeeting } from "../orchestrator/team-meeting.js";
 import { seedFromClaudeMd } from "../orchestrator/learned-rules.js";
+import { checkAgedIssues } from "../orchestrator/issue-age-monitor.js";
 import {
   type GateResult,
   detectImprovements,
@@ -412,7 +413,19 @@ export class Daemon {
         await this.runMeeting(time, "standup");
       }
 
-      // 3d. Weekly blue sky — creative ideation, bold proposals
+      // 3d. Daily aged issue check — nudge at 14d, force-boost at 30d
+      if (this.cycleCount % STANDUP_MEETING_EVERY_N_CYCLES === 0) {
+        try {
+          const { nudged, boosted } = checkAgedIssues(this.config, this.store);
+          if (nudged.length + boosted.length > 0) {
+            console.log(`[${time}] Aged issues: ${nudged.length} nudged, ${boosted.length} boosted`);
+          }
+        } catch (err) {
+          this.log.warn("Aged issue check failed", { error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
+      // 3e. Weekly blue sky — creative ideation, bold proposals
       if (this.cycleCount % BLUESKY_MEETING_EVERY_N_CYCLES === 0) {
         await this.runMeeting(time, "bluesky");
       }
