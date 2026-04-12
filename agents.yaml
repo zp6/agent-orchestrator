@@ -65,6 +65,10 @@ agents:
       api_key: "cheese"
       permissions: "bypassPermissions"
       session: "fresh"
+      # Codex containers take longer to start (git pull + OpenAI WebSocket warmup).
+      # Extended window: 4 attempts over ~60s vs the default 4 attempts over ~52s.
+      # Addresses recurring "health check failed after restart" failures.
+      health_check_delays_ms: [5000, 10000, 20000, 30000]
 
   # ── Reviewer pool (Claude + Codex) ──────────────────────────────
   claude-orchestrator-reviewer:
@@ -97,6 +101,7 @@ agents:
       api_key: "cheese"
       permissions: "bypassPermissions"
       session: "fresh"
+      health_check_delays_ms: [5000, 10000, 20000, 30000]
 
   # ── Dashboard pool (Claude + Codex) ─────────────────────────────
   claude-orchestrator-dashboard:
@@ -129,6 +134,7 @@ agents:
       api_key: "cheese"
       permissions: "bypassPermissions"
       session: "fresh"
+      health_check_delays_ms: [5000, 10000, 20000, 30000]
 
   # ── Telegram ────────────────────────────────────────────────────
   claude-orchestrator-telegram:
@@ -175,6 +181,7 @@ agents:
       api_key: "cheese"
       permissions: "bypassPermissions"
       session: "fresh"
+      health_check_delays_ms: [5000, 10000, 20000, 30000]
 
   # ── Proxy pool (Claude + Codex) ────────────────────────────────
   claude-proxy:
@@ -207,3 +214,4 @@ agents:
       api_key: "cheese"
       permissions: "bypassPermissions"
       session: "fresh"
+      health_check_delays_ms: [5000, 10000, 20000, 30000]

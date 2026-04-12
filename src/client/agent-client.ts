@@ -184,6 +184,37 @@ export class AgentClient {
   }
 
   /**
+   * Like `ping`, but also returns the error type when the check fails.
+   * - `errorType: "connection_refused"` — port not yet bound (container still starting)
+   * - `errorType: "timeout"` — port bound but not responding within timeoutMs
+   * - `errorType: "no_port"` — agent has no docker.port configured
+   * - `errorType: "other"` — unexpected error
+   * Returns `{ alive: true, errorType: undefined }` on success.
+   */
+  async pingWithDetail(agentName: string, timeoutMs = 10_000): Promise<{ alive: boolean; errorType?: string }> {
+    const baseUrl = getAgentBaseUrl(this.config, agentName);
+    if (!baseUrl) return { alive: false, errorType: "no_port" };
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      await fetch(`${baseUrl}/`, { signal: controller.signal });
+      return { alive: true };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      let errorType = "other";
+      if (err instanceof Error && err.name === "AbortError") {
+        errorType = "timeout";
+      } else if (msg.includes("ECONNREFUSED") || msg.includes("connection refused")) {
+        errorType = "connection_refused";
+      }
+      return { alive: false, errorType };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * Like `ping`, but also measures and returns response latency in milliseconds.
    * Returns `{ alive: true, latencyMs: N }` on success,
    * or `{ alive: false, latencyMs: null }` if unreachable or no port configured.

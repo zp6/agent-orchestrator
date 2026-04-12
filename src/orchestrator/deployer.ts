@@ -15,8 +15,14 @@ export interface DeployResult {
   detail?: string;
 }
 
-// Default delays (ms) between health-check attempts: 1s, 3s, 10s
-const HEALTH_CHECK_DELAYS_MS = [1_000, 3_000, 10_000];
+/**
+ * Default delays (ms) between health-check attempts.
+ * Extended from [1s, 3s, 10s] to [2s, 5s, 15s, 30s] to accommodate
+ * slow-starting containers (e.g. Codex/OpenAI providers that need time for
+ * git pull + OpenAI WebSocket warmup before the HTTP port is ready).
+ * Total window: ~52s, which covers typical Codex startup (10-30s).
+ */
+const HEALTH_CHECK_DELAYS_MS = [2_000, 5_000, 15_000, 30_000];
 
 /**
  * Default post-restart warmup delay (ms). After a container passes the health
@@ -38,27 +44,41 @@ export class Deployer {
 
   /**
    * Verify an agent is responding after a deploy/restart.
-   * Retries with exponential backoff: waits `delays[i]` ms before each attempt.
+   * Retries with configurable backoff: waits `delays[i]` ms before each attempt.
+   *
+   * Delay schedule resolution order (first wins):
+   *   1. `options.delaysMs` (explicit override, used in tests)
+   *   2. `agent.docker.health_check_delays_ms` (per-agent in agents.yaml)
+   *   3. `config.deploy.health_check_delays_ms` (global in agents.yaml)
+   *   4. `HEALTH_CHECK_DELAYS_MS` (built-in default: [2s, 5s, 15s, 30s])
+   *
    * Returns true if the agent responds within the retry window, false otherwise.
    */
   async healthCheck(
     agentName: string,
     options?: { maxRetries?: number; delaysMs?: number[] },
   ): Promise<boolean> {
-    const maxRetries = options?.maxRetries ?? HEALTH_CHECK_DELAYS_MS.length;
-    const delays = options?.delaysMs ?? HEALTH_CHECK_DELAYS_MS;
+    const agentCfg = this.config.agents[agentName];
+    const delays =
+      options?.delaysMs ??
+      agentCfg?.docker?.health_check_delays_ms ??
+      this.config.deploy?.health_check_delays_ms ??
+      HEALTH_CHECK_DELAYS_MS;
+    const maxRetries = options?.maxRetries ?? delays.length;
+
+    this.log.info("Starting health check", { agentName, maxRetries, totalWindowMs: delays.reduce((a, b) => a + b, 0) });
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       // Wait before each attempt (gives container time to initialise on attempt 0)
       const waitMs = delays[Math.min(attempt, delays.length - 1)];
       await new Promise((res) => setTimeout(res, waitMs));
 
-      const alive = await this.agentClient.ping(agentName);
+      const { alive, errorType } = await this.agentClient.pingWithDetail(agentName);
       if (alive) {
         this.log.info("Health check passed", { agentName, attempt: attempt + 1 });
         return true;
       }
-      this.log.warn("Health check attempt failed", { agentName, attempt: attempt + 1, maxRetries });
+      this.log.warn("Health check attempt failed", { agentName, attempt: attempt + 1, maxRetries, errorType });
     }
 
     return false;

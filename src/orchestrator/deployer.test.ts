@@ -17,10 +17,13 @@ vi.mock("../client/management-client.js", () => ({
 
 // Default: ping succeeds (agent is healthy after deploy)
 const mockPing = vi.fn().mockResolvedValue(true);
+// Default: pingWithDetail succeeds (used by healthCheck in deployer)
+const mockPingWithDetail = vi.fn().mockResolvedValue({ alive: true });
 
 vi.mock("../client/agent-client.js", () => ({
   AgentClient: class {
     ping = mockPing;
+    pingWithDetail = mockPingWithDetail;
   },
 }));
 
@@ -75,8 +78,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   // Default: execSync returns a git SHA for local agents and a remote SHA for repo agents
   mockExecSync.mockReturnValue("abc123\n");
-  // Default: ping succeeds
+  // Default: ping succeeds (used by external callers)
   mockPing.mockResolvedValue(true);
+  // Default: pingWithDetail succeeds (used by healthCheck in deployer)
+  mockPingWithDetail.mockResolvedValue({ alive: true });
 });
 
 describe("Deployer", () => {
@@ -95,11 +100,11 @@ describe("Deployer", () => {
   });
 
   it("returns health-check-failed when agent does not respond after redeploy", async () => {
-    mockPing.mockResolvedValue(false);
+    mockPingWithDetail.mockResolvedValue({ alive: false, errorType: "connection_refused" });
     vi.useFakeTimers();
     const deployer = new Deployer(config);
     const resultPromise = deployer.redeploy("agent-a");
-    // Advance through all health-check delays (1s + 3s + 10s = 14s)
+    // Advance through all health-check delays (2s + 5s + 15s + 30s = 52s)
     await vi.runAllTimersAsync();
     const result = await resultPromise;
     vi.useRealTimers();
@@ -108,7 +113,7 @@ describe("Deployer", () => {
   });
 
   it("returns health-check-failed when agent does not respond after restart", async () => {
-    mockPing.mockResolvedValue(false);
+    mockPingWithDetail.mockResolvedValue({ alive: false, errorType: "connection_refused" });
     vi.useFakeTimers();
     const deployer = new Deployer(config);
     const resultPromise = deployer.restartAgent("agent-a");
@@ -119,31 +124,31 @@ describe("Deployer", () => {
     expect(result.detail).toMatch(/health check/i);
   });
 
-  it("healthCheck returns true when ping succeeds on first attempt", async () => {
-    mockPing.mockResolvedValue(true);
+  it("healthCheck returns true when pingWithDetail succeeds on first attempt", async () => {
+    mockPingWithDetail.mockResolvedValue({ alive: true });
     const deployer = new Deployer(config);
     const ok = await deployer.healthCheck("agent-a", { maxRetries: 1, delaysMs: [0] });
     expect(ok).toBe(true);
-    expect(mockPing).toHaveBeenCalledTimes(1);
+    expect(mockPingWithDetail).toHaveBeenCalledTimes(1);
   });
 
   it("healthCheck retries and returns true when a later attempt succeeds", async () => {
-    mockPing
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(true);
+    mockPingWithDetail
+      .mockResolvedValueOnce({ alive: false, errorType: "connection_refused" })
+      .mockResolvedValueOnce({ alive: false, errorType: "connection_refused" })
+      .mockResolvedValueOnce({ alive: true });
     const deployer = new Deployer(config);
     const ok = await deployer.healthCheck("agent-a", { maxRetries: 3, delaysMs: [0, 0, 0] });
     expect(ok).toBe(true);
-    expect(mockPing).toHaveBeenCalledTimes(3);
+    expect(mockPingWithDetail).toHaveBeenCalledTimes(3);
   });
 
   it("healthCheck returns false when all attempts fail", async () => {
-    mockPing.mockResolvedValue(false);
+    mockPingWithDetail.mockResolvedValue({ alive: false, errorType: "timeout" });
     const deployer = new Deployer(config);
     const ok = await deployer.healthCheck("agent-a", { maxRetries: 2, delaysMs: [0, 0] });
     expect(ok).toBe(false);
-    expect(mockPing).toHaveBeenCalledTimes(2);
+    expect(mockPingWithDetail).toHaveBeenCalledTimes(2);
   });
 
   it("detects stale agents without deploy marker", () => {

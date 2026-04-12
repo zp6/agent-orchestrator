@@ -25,6 +25,14 @@ export interface AgentDockerConfig {
   packages?: string[];
   allowed_tools?: string;
   api_key?: string;
+  /**
+   * Per-agent override for health check retry delays (ms).
+   * Each entry is the wait time before that attempt (attempt 0, 1, 2, ...).
+   * Useful for slow-starting containers (e.g. Codex/OpenAI providers that
+   * need extra time for git pull + CLI WebSocket warmup).
+   * Overrides deploy.health_check_delays_ms when set.
+   */
+  health_check_delays_ms?: number[];
 }
 
 export interface AgentLinearConfig {
@@ -469,6 +477,14 @@ export interface DeployConfig {
    * Defaults to 5000 (5 seconds) when omitted.
    */
   post_restart_warmup_ms?: number;
+  /**
+   * Health check retry delay schedule (ms).
+   * Each entry is the wait time before that attempt (attempt 0, 1, 2, ...).
+   * The number of entries also determines the max retry count.
+   * Defaults to [2000, 5000, 15000, 30000] (4 attempts, ~52s total window).
+   * Can be overridden per-agent via docker.health_check_delays_ms.
+   */
+  health_check_delays_ms?: number[];
 }
 
 export interface DispatchConfig {
