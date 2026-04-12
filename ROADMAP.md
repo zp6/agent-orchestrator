@@ -8,6 +8,7 @@
 
 ## Planned
 
+- **#87 — Prompt caching for review rubric prefix**: Cache the system prompt rubric block using `cache_control: { type: "ephemeral", ttl: "1h" }` on all reviewer LLM calls. Research findings available at [rapartlu/research-agent — findings/reviewer-prompt-caching.md](https://github.com/rapartlu/research-agent/blob/main/findings/reviewer-prompt-caching.md). Estimated 71% savings on rubric tokens at 20 reviews/day (Sonnet 4.6).
 - **#2 — Telegram two-way communication**: Operator commands via bot — approve/reject tasks, trigger reruns, escalate to human — all wired to live state.
 - ~~**#9 — Publish package to npm registry**~~ ✅ Done — workflow added in PR for issue #9.
 - **Improvement detector scheduling**: Run `ImprovementDetector.analyze()` on a cron cadence (e.g. every 6 hours) and auto-file GitHub issues for patterns found.
