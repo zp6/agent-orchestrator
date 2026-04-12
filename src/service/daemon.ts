@@ -1500,6 +1500,7 @@ export class Daemon {
     const duration = formatHealthDuration(durationMs);
 
     this.healthFailingAgents.delete(agentName);
+    this.healthFailureCycles.delete(agentName);
     this.healthFailureStartTimes.delete(agentName);
     this.healthRecoveryConfirmCycles.delete(agentName);
     // Clear rate-limit so the recovery notification fires immediately even if a
@@ -1537,19 +1538,51 @@ export class Daemon {
    * playbook so the dispatched agent runs concrete diagnostics rather than
    * returning a canned "recovered" string.
    */
+  /** Number of consecutive health-check-failing cycles before escalating.
+   *  Most post-deploy failures resolve within 1-2 cycles (~5-10 min).
+   *  Escalating on first failure creates false-positive storms during merge waves. */
+  private static readonly HEALTH_ESCALATION_THRESHOLD = 3;
+
+  /** Track consecutive failure cycles per agent. */
+  private healthFailureCycles = new Map<string, number>();
+
   private onHealthCheckFailed(agentName: string, detail: string): void {
     this.healthRecoveryConfirmCycles.set(agentName, 0);
     clearNotifyRateLimit(`health-recovery:${agentName}`);
 
+    // Increment consecutive failure count
+    const failCount = (this.healthFailureCycles.get(agentName) ?? 0) + 1;
+    this.healthFailureCycles.set(agentName, failCount);
+
     if (this.healthFailingAgents.has(agentName)) {
-      // Already tracking this failure — don't re-alert.
+      // Already tracking this failure — check if we should escalate now
+      if (failCount === Daemon.HEALTH_ESCALATION_THRESHOLD) {
+        this.log.warn("Health check failure persisted — escalating now", {
+          agentName,
+          consecutiveFailures: failCount,
+        });
+        // Fall through to create the escalation task below
+      } else {
+        return; // Not yet at threshold — wait another cycle
+      }
+    } else if (failCount < Daemon.HEALTH_ESCALATION_THRESHOLD) {
+      // First failure or below threshold — track but don't escalate yet
+      this.healthFailingAgents.add(agentName);
+      this.healthFailureStartTimes.set(agentName, Date.now());
+      this.log.info("Health check failed — tracking, will escalate after consecutive failures", {
+        agentName,
+        failCount,
+        threshold: Daemon.HEALTH_ESCALATION_THRESHOLD,
+      });
       return;
+    } else {
+      this.healthFailingAgents.add(agentName);
+      this.healthFailureStartTimes.set(agentName, Date.now());
     }
-    this.healthFailingAgents.add(agentName);
-    this.healthFailureStartTimes.set(agentName, Date.now());
+
     notifyOperator(
       `Health check failed: ${agentName}`,
-      `Agent ${agentName} failed health check. May be broken. Detail: ${detail}`,
+      `Agent ${agentName} failed health check for ${failCount} consecutive cycle(s). Detail: ${detail}`,
       "critical",
       `health-fail:${agentName}`,
     ).catch(() => {});
