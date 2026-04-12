@@ -3000,4 +3000,84 @@ describe("StateStore", () => {
       expect(store.getLastSuccessfulConfigReload()).toBeNull();
     });
   });
+
+  describe("routing outcomes", () => {
+    it("records a routing decision with null quality_score", () => {
+      const task = store.createTask({ title: "Route test", source: "github", source_ref: "owner/repo#1" });
+      store.recordRoutingDecision({
+        taskId: task.id,
+        agentChosen: "claude-agent-foo",
+        taskType: "implementation",
+        routeMethod: "deterministic",
+        routeConfidence: 0.9,
+        sourceRef: "owner/repo#1",
+      });
+      const outcomes = store.getAgentRoutingOutcomes("claude-agent-foo");
+      expect(outcomes).toHaveLength(1);
+      expect(outcomes[0].task_id).toBe(task.id);
+      expect(outcomes[0].agent_chosen).toBe("claude-agent-foo");
+      expect(outcomes[0].route_method).toBe("deterministic");
+      expect(outcomes[0].route_confidence).toBeCloseTo(0.9);
+      expect(outcomes[0].quality_score).toBeNull();
+      expect(outcomes[0].outcome_updated_at).toBeNull();
+    });
+
+    it("updates quality_score after verification", () => {
+      const task = store.createTask({ title: "Verified task", source: "github", source_ref: "owner/repo#2" });
+      store.recordRoutingDecision({
+        taskId: task.id,
+        agentChosen: "claude-agent-bar",
+        taskType: "implementation",
+        routeMethod: "llm",
+        routeConfidence: 0.75,
+        sourceRef: "owner/repo#2",
+      });
+      store.updateRoutingOutcomeScore(task.id, 0.85);
+      const outcomes = store.getAgentRoutingOutcomes("claude-agent-bar");
+      expect(outcomes[0].quality_score).toBeCloseTo(0.85);
+      expect(outcomes[0].outcome_updated_at).not.toBeNull();
+    });
+
+    it("getRoutingAccuracyStats aggregates per-agent per-task-type", () => {
+      const taskA = store.createTask({ title: "Task A", source: "github" });
+      const taskB = store.createTask({ title: "Task B", source: "github" });
+      const taskC = store.createTask({ title: "Task C", source: "github" });
+
+      store.recordRoutingDecision({ taskId: taskA.id, agentChosen: "agent-x", taskType: "implementation", routeMethod: "deterministic", routeConfidence: 1.0 });
+      store.recordRoutingDecision({ taskId: taskB.id, agentChosen: "agent-x", taskType: "implementation", routeMethod: "deterministic", routeConfidence: 0.8 });
+      store.recordRoutingDecision({ taskId: taskC.id, agentChosen: "agent-x", taskType: "research", routeMethod: "explicit", routeConfidence: null });
+
+      store.updateRoutingOutcomeScore(taskA.id, 0.9);
+      store.updateRoutingOutcomeScore(taskB.id, 0.7);
+      // taskC intentionally left unscored
+
+      const stats = store.getRoutingAccuracyStats(30);
+      const implRow = stats.find((r) => r.agent_name === "agent-x" && r.task_type === "implementation");
+      expect(implRow).toBeDefined();
+      expect(implRow!.total_routed).toBe(2);
+      expect(implRow!.scored).toBe(2);
+      expect(implRow!.avg_quality_score).toBeCloseTo(0.8);
+
+      const researchRow = stats.find((r) => r.agent_name === "agent-x" && r.task_type === "research");
+      expect(researchRow).toBeDefined();
+      expect(researchRow!.total_routed).toBe(1);
+      expect(researchRow!.scored).toBe(0);
+      expect(researchRow!.avg_quality_score).toBeNull();
+    });
+
+    it("getRoutingAccuracyStats excludes entries older than window", () => {
+      const task = store.createTask({ title: "Old task", source: "github" });
+      store.recordRoutingDecision({ taskId: task.id, agentChosen: "old-agent", taskType: "implementation", routeMethod: "deterministic", routeConfidence: 0.5 });
+      store.updateRoutingOutcomeScore(task.id, 0.6);
+
+      // Force the routed_at to be 60 days ago
+      const store_db = (store as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } }).db;
+      const oldDate = new Date(Date.now() - 60 * 86400000).toISOString();
+      store_db.prepare("UPDATE routing_outcomes SET routed_at = ? WHERE agent_chosen = 'old-agent'").run(oldDate);
+
+      // Query for last 30 days — should not include this entry
+      const stats = store.getRoutingAccuracyStats(30);
+      expect(stats.find((r) => r.agent_name === "old-agent")).toBeUndefined();
+    });
+  });
 });

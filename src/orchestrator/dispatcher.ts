@@ -1,5 +1,5 @@
 import { AgentClient, type AgentResponse } from "../client/agent-client.js";
-import { Router } from "./router.js";
+import { Router, LLM_FALLBACK_THRESHOLD } from "./router.js";
 import { LLMRouter } from "./llm-router.js";
 import { Planner, type Plan } from "./planner.js";
 import { PlanExecutor, type ExecutionResult } from "./executor.js";
@@ -488,8 +488,16 @@ export class Dispatcher {
     // Resolve agent
     let agentName = options?.agentName;
     let routeReason = "Explicitly specified";
+    let routeMethod: "deterministic" | "llm" | "explicit" = "explicit";
+    let routeConfidence: number | null = null;
 
     if (!agentName) {
+      // Run deterministic routing first to detect if LLM fallback was used
+      const deterministicMatches = this.router.route(message, options?.sourceRepo);
+      const usedLLM =
+        deterministicMatches.length === 0 ||
+        deterministicMatches[0].confidence < LLM_FALLBACK_THRESHOLD;
+
       const matches = await this.router.routeWithFallback(message, options?.sourceRepo);
       if (matches.length === 0) {
         throw new Error(
@@ -497,6 +505,8 @@ export class Dispatcher {
         );
       }
       agentName = matches[0].agentName;
+      routeMethod = usedLLM ? "llm" : "deterministic";
+      routeConfidence = matches[0].confidence;
       routeReason = `Auto-routed (${matches[0].reason}, confidence: ${matches[0].confidence.toFixed(2)})`;
       this.log.info("Routed task", { agentName, reason: routeReason, confidence: matches[0].confidence });
     }
@@ -804,6 +814,17 @@ export class Dispatcher {
     this.store.updateTask(task.id, {
       status: "dispatched",
       conversation_id: conversationId,
+    });
+
+    // Record routing decision for accuracy feedback loop (issue #656).
+    // quality_score is null at dispatch time; filled when the task is verified.
+    this.store.recordRoutingDecision({
+      taskId: task.id,
+      agentChosen: agentName,
+      taskType,
+      routeMethod,
+      routeConfidence,
+      sourceRef: options?.sourceRef,
     });
 
     // Prepend the target-repo header so the agent always knows which repo to
