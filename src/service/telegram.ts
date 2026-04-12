@@ -518,6 +518,18 @@ Steps:
     return "🚀 Starting blue sky session — 3 rounds of creative thinking...";
   }
 
+  // Reset PR escalation
+  if (cmd.startsWith("reset-pr ") || cmd.startsWith("/reset-pr ")) {
+    const ref = text.trim().split(/\s+/)[1];
+    if (!ref) return "Usage: reset-pr owner/repo#123";
+    const match = ref.match(/^(.+?)#(\d+)$/);
+    if (!match) return "Usage: reset-pr owner/repo#123";
+    const count = ctx.store.clearPRReviewEscalation(match[1], parseInt(match[2], 10));
+    return count > 0
+      ? `✅ Cleared escalation for ${ref} — reviewer will re-review next cycle`
+      : `⚠️ No escalated review found for ${ref}`;
+  }
+
   if (cmd.startsWith("dispatch ") || cmd.startsWith("/dispatch ")) {
     const parts = text.trim().split(/\s+/);
     const agentName = parts[1];

@@ -2552,6 +2552,26 @@ export class StateStore {
       .run(repo, prNumber, decision, new Date().toISOString());
   }
 
+  clearPRReviewEscalation(repo: string, prNumber: number): number {
+    const result = this.db
+      .prepare("DELETE FROM pr_reviews WHERE repo = ? AND pr_number = ? AND decision = 'escalate'")
+      .run(repo, prNumber);
+    return result.changes;
+  }
+
+  clearAllEscalatedPRReviews(): number {
+    const result = this.db
+      .prepare("DELETE FROM pr_reviews WHERE decision = 'escalate'")
+      .run();
+    return result.changes;
+  }
+
+  getPRReviews(repo: string, prNumber: number): Array<{ decision: string; created_at: string }> {
+    return this.db
+      .prepare("SELECT decision, created_at FROM pr_reviews WHERE repo = ? AND pr_number = ? ORDER BY created_at DESC")
+      .all(repo, prNumber) as Array<{ decision: string; created_at: string }>;
+  }
+
   /**
    * Compute aggregated PR metrics: cycle time and rejection rate.
    *
