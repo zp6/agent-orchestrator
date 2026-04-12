@@ -43,6 +43,7 @@ import {
 } from "./reviewer-ops.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
+const QUALITY_SLA_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
 const AUTO_MERGE_SWEEP_EVERY_N_CYCLES = 3;  // ~15min — same cadence as PR review
 const SUPERVISOR_CHECK_EVERY_N_CYCLES = 3; // ~15min at default interval
@@ -62,6 +63,13 @@ const BLUESKY_MEETING_EVERY_N_CYCLES = 2016; // ~7 days at 5min interval
  * Configurable via `verification.reviewer_low_score_threshold` in agents.yaml.
  */
 const DEFAULT_REVIEWER_LOW_SCORE_THRESHOLD = 0.80;
+
+/**
+ * Default number of recent scored tasks used to compute an agent's rolling
+ * average for quality SLA checks.  Configurable via
+ * `verification.quality_sla_window_tasks` in agents.yaml.
+ */
+const DEFAULT_QUALITY_SLA_WINDOW_TASKS = 5;
 
 /**
  * Tasks in 'done' state with no recorded result older than this threshold are
@@ -457,6 +465,12 @@ export class Daemon {
 
       // 10. Daily security scan — checks agent repos for plaintext secrets (issue #544)
       await maybeRunDailySecurityScan(this.securityScanState, this.config);
+
+      // 11. Quality SLA breach detection — alert when an agent's rolling avg
+      //     drops below its configured threshold (issue #669).
+      if (this.cycleCount % QUALITY_SLA_CHECK_EVERY_N_CYCLES === 0) {
+        await this.checkQualitySlaBreaches(time);
+      }
     } finally {
       this.store.recordCycleEnd(cycleId, cycleStartedAt);
       const durationMs = Date.now() - cycleStartedAt.getTime();
@@ -1157,6 +1171,84 @@ export class Daemon {
         error: err instanceof Error ? err.message : String(err),
       });
     });
+  }
+
+  /**
+   * Scan every agent's rolling quality average and fire a Telegram alert when
+   * it drops below its configured SLA threshold (issue #669).
+   *
+   * Algorithm:
+   *   1. Collect all agent names that appear in the task table with at least
+   *      one scored task.
+   *   2. For each agent compute the rolling average of their most recent
+   *      `quality_sla_window_tasks` scored tasks (default 5) using the
+   *      existing `getAgentScoreTrend` helper.
+   *   3. Compare the rolling average against the per-agent threshold
+   *      (`per_agent_quality_thresholds[agentName]`) or the global `min_score`
+   *      fallback (default 0.70).
+   *   4. When a breach is detected, call `notifyOperator` with a rate-limit
+   *      key scoped to `quality-sla:{agentName}:{windowDate}` so at most one
+   *      alert fires per agent per 15-minute window even if the daemon check
+   *      runs frequently.
+   */
+  private async checkQualitySlaBreaches(time: string): Promise<void> {
+    const verification = this.config.verification;
+    if (!verification?.enabled) return;
+
+    const globalThreshold  = verification.min_score ?? 0.70;
+    const perAgentThresholds = verification.per_agent_quality_thresholds ?? {};
+    const windowTasks = verification.quality_sla_window_tasks ?? DEFAULT_QUALITY_SLA_WINDOW_TASKS;
+
+    // Gather agent names that have at least one scored task.
+    const agentNames: string[] = this.store
+      .getAgentStats()
+      .filter((a) => a.avg_score !== null)
+      .map((a) => a.agent_name);
+
+    if (agentNames.length === 0) return;
+
+    const windowDate = new Date().toISOString().slice(0, 10);
+
+    for (const agentName of agentNames) {
+      const threshold =
+        agentName in perAgentThresholds
+          ? perAgentThresholds[agentName]
+          : globalThreshold;
+
+      // A threshold of 0 means the operator explicitly silenced alerts.
+      if (threshold <= 0) continue;
+
+      const trend = this.store.getAgentScoreTrend(agentName, windowTasks);
+
+      // Skip if insufficient data (fewer than windowTasks scored tasks).
+      if (trend.direction === "insufficient_data" || trend.recent_avg === null) continue;
+
+      const rollingAvg = trend.recent_avg;
+      if (rollingAvg >= threshold) continue;
+
+      // Breach detected — log and notify.
+      const avgPct = (rollingAvg * 100).toFixed(0);
+      const thrPct = (threshold * 100).toFixed(0);
+      console.warn(
+        `[${time}] Quality SLA breach: ${agentName} rolling avg ${avgPct}% ` +
+        `(last ${windowTasks} tasks) is below threshold ${thrPct}%.`,
+      );
+      this.log.warn("Quality SLA breach detected", {
+        agentName,
+        rollingAvg,
+        threshold,
+        windowTasks,
+        direction: trend.direction,
+      });
+
+      await notifyOperator(
+        `Quality SLA breach — ${agentName}`,
+        `Agent \`${agentName}\` rolling quality average is *${avgPct}%* over the last ${windowTasks} scored tasks — below the SLA threshold of *${thrPct}%*.\n\n` +
+        `Trend direction: ${trend.direction}. Operator review and possible routing adjustment recommended.`,
+        "warning",
+        `quality-sla:${agentName}:${windowDate}`,
+      );
+    }
   }
 
   private async detectImprovements(time: string): Promise<void> {
