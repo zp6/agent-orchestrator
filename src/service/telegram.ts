@@ -12,6 +12,7 @@ import { findBranchForIssue, findExistingPRsForIssue, type GitHubIssue } from ".
 import { getProviderStates } from "../service/provider-state.js";
 import { loadGoals, measureGoalProgress, formatGoalsForTelegram } from "../orchestrator/goals.js";
 import { runTeamMeeting } from "../orchestrator/team-meeting.js";
+import { buildCalibrationReport, formatCalibrationForTelegram } from "../orchestrator/verification-calibrator.js";
 import { deescalateAllEscalatedTasks, deescalateEscalatedTask, normaliseSourceRef } from "../cli/commands/deescalate.js";
 
 const log = createLogger("telegram");
@@ -517,6 +518,12 @@ Steps:
       })
       .catch((e) => sendReply(`❌ Blue sky failed: ${e instanceof Error ? e.message : String(e)}`));
     return "🚀 Starting blue sky session — 3 rounds of creative thinking...";
+  }
+
+  // Verification calibration report
+  if (cmd === "calibrate" || cmd === "/calibrate") {
+    const report = buildCalibrationReport(ctx.store);
+    return formatCalibrationForTelegram(report) || "No calibration data yet.";
   }
 
   // Reset PR escalation
