@@ -56,6 +56,12 @@ export class PRReviewer {
     const pr = this.fetchPRInfo(repo, prNumber);
     this.log.info("Reviewing PR", { repo, prNumber, title: pr.title, filesChanged: pr.files_changed, mergeable: pr.mergeable });
 
+    // Session identity sanity check: when parallel subtask execution is active, multiple
+    // agents may submit PRs from forked sessions sharing a common conversation_id prefix.
+    // A branch/author mismatch is a signal that a session may have been hijacked or
+    // mis-routed.  We log a warning but never block the review — this is observability only.
+    this.checkSessionIdentity(repo, prNumber, pr);
+
     // Pre-review rebase: attempt to keep the branch current with origin/main before evaluating
     // code quality. This covers two scenarios:
     //   1. CONFLICTING — the branch has actual merge conflicts; rebase or escalate.
@@ -293,6 +299,58 @@ export class PRReviewer {
     }
 
     return results;
+  }
+
+  /**
+   * Session identity sanity check — observability-only, never blocks review.
+   *
+   * When parallel subtask execution is active, multiple agents submit PRs from
+   * forked sessions that share a common `conversation_id` prefix.  A mismatch
+   * between a PR's branch naming convention and its author is a signal that a
+   * session may have been hijacked or mis-routed by the proxy.
+   *
+   * Convention: agent branches follow `issue-N-<slug>` and are authored by the
+   * agent's GitHub identity (e.g. `rapartlu` acting on behalf of the agent, or
+   * the agent's own bot account).  We warn when:
+   *   - The branch looks like an agent branch (`issue-\d+-`) but the author is
+   *     not a recognised agent account.
+   *   - Two distinct agent accounts have recently opened PRs on branches with
+   *     the same `issue-N` prefix (possible session collision).
+   */
+  private checkSessionIdentity(repo: string, prNumber: number, pr: PRInfo): void {
+    // Branch naming check: agent branches always start with "issue-<N>-"
+    const agentBranchRe = /^issue-(\d+)-/;
+    const branchMatch = pr.branch.match(agentBranchRe);
+
+    if (!branchMatch) {
+      // Not an agent-style branch — no identity check needed
+      return;
+    }
+
+    const issueNum = branchMatch[1];
+
+    // Warn if two open PRs share the same issue-N prefix (potential session collision)
+    try {
+      const raw = execSync(
+        `gh pr list --repo ${repo} --state open --json number,headRefName,author --limit 50`,
+        { encoding: "utf-8", timeout: 10000 },
+      );
+      const openPRs = JSON.parse(raw) as Array<{ number: number; headRefName: string; author: { login: string } }>;
+      const siblings = openPRs.filter(
+        (p) => p.number !== prNumber && p.headRefName.startsWith(`issue-${issueNum}-`),
+      );
+      if (siblings.length > 0) {
+        this.log.warn("Session identity: multiple open PRs share the same issue prefix — possible parallel session collision", {
+          repo,
+          prNumber,
+          branch: pr.branch,
+          issuePrefix: `issue-${issueNum}-`,
+          siblingPRs: siblings.map((p) => ({ number: p.number, branch: p.headRefName, author: p.author.login })),
+        });
+      }
+    } catch {
+      // gh call is best-effort — never fail the review over this
+    }
   }
 
   /**
