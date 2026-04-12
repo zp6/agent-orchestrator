@@ -1518,11 +1518,12 @@ export class Daemon {
     const sourceRef = `health-check-fail:${agentName}`;
     const escalated = this.store.findEscalatedTask(sourceRef);
     if (escalated) {
+      const port = this.config.agents[agentName]?.docker?.port;
       this.store.updateTask(escalated.id, {
         status: "done",
-        result: `Agent ${agentName} recovered — health check passing again.`,
+        result: `Agent ${agentName} recovered after ${duration}. Health check passing on port ${port ?? "unknown"}. Auto-resolved by daemon.`,
       });
-      this.log.info("Auto-resolved health-check escalation on recovery", { agentName, taskId: escalated.id });
+      this.log.info("Auto-resolved health-check escalation on recovery", { agentName, port, taskId: escalated.id });
     }
   }
 
@@ -1531,6 +1532,10 @@ export class Daemon {
    * one Telegram notification fires per failure streak (not once per daemon
    * cycle).  Also creates an escalated dashboard task on the first failure so
    * the operator can see the issue without waiting for a Telegram message.
+   *
+   * The escalated task description embeds a structured incident response
+   * playbook so the dispatched agent runs concrete diagnostics rather than
+   * returning a canned "recovered" string.
    */
   private onHealthCheckFailed(agentName: string, detail: string): void {
     this.healthRecoveryConfirmCycles.set(agentName, 0);
@@ -1548,24 +1553,80 @@ export class Daemon {
       "critical",
       `health-fail:${agentName}`,
     ).catch(() => {});
+
     // Create an escalated task so the dashboard surfaces the failure.
     // Use a stable source_ref so we can find and resolve it on recovery.
     const sourceRef = `health-check-fail:${agentName}`;
     const existing = this.store.findEscalatedTask(sourceRef);
     if (!existing) {
+      const port = this.config.agents[agentName]?.docker?.port;
+      const portInfo = port ? `port ${port}` : "unknown port";
+      const containerName = agentName; // Docker container names match agent names
+
+      // Build a structured incident response playbook. This replaces the old
+      // one-liner description that caused agents to return canned boilerplate.
+      // Every field must be answered with actual command output, not assumptions.
+      const incidentPlaybook = `## Health Check Incident: ${agentName}
+
+**Trigger:** ${detail}
+**Container:** ${containerName} (${portInfo})
+**Time:** ${new Date().toISOString()}
+
+You are responding to a health check failure. A bare "agent recovered" claim is a
+quality failure. You MUST run every diagnostic step below and include the actual
+command output in your response.
+
+---
+
+### Step 1 — Container state and recent logs
+Run the following and include the full output:
+\`\`\`
+docker logs ${containerName} --tail 50 2>&1
+docker inspect ${containerName} --format '{{.State.Status}} started={{.State.StartedAt}} restarts={{.RestartCount}}' 2>&1
+\`\`\`
+
+### Step 2 — Port binding
+Verify whether the HTTP port is bound:
+\`\`\`
+ss -tlnp | grep ${port ?? "<port>"} || netstat -tlnp 2>/dev/null | grep ${port ?? "<port>"}
+curl -sv --max-time 5 http://localhost:${port ?? "<port>"}/ 2>&1; echo "curl exit: $?"
+\`\`\`
+Include the full curl output with HTTP status code and timestamp.
+
+### Step 3 — Docker healthcheck configuration
+Check whether a \`start_period\` is configured (absent in most containers per prior
+analysis, which means restarts trigger false-positive health failures):
+\`\`\`
+grep -A 10 "healthcheck\\|start_period" docker-compose.generated.yml 2>/dev/null || echo "ABSENT — no healthcheck block found"
+docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
+\`\`\`
+
+### Step 4 — Recovery status
+After running the above:
+- State whether the health check is now passing or still failing (with evidence)
+- State whether self-recovery occurred or manual intervention was required
+- If still failing, identify the root cause from the docker logs output
+
+### Step 5 — Recurrence risk
+If \`start_period\` is absent from \`docker-compose.generated.yml\`, note this as a
+systemic risk: every container restart will produce a false-positive health failure
+until fixed. File a GitHub issue if one doesn't already exist.
+
+**DO NOT** close this task with a one-sentence claim. All five steps are required.`;
+
       const task = this.store.createTask({
-        title: `Health check failed: ${agentName}`,
-        description: `Agent ${agentName} is not responding to health checks. Detail: ${detail}`,
+        title: `Health check incident: ${agentName} (${portInfo})`,
+        description: incidentPlaybook,
         source: "manual",
         source_ref: sourceRef,
         agent_name: agentName,
-        task_type: "implementation",
+        task_type: "research",
       });
       this.store.updateTask(task.id, {
         status: "escalated",
         result: `Health check failed: ${detail}`,
       });
-      this.log.info("Created health-check escalation task", { agentName, taskId: task.id });
+      this.log.info("Created health-check escalation task with diagnostic playbook", { agentName, port, taskId: task.id });
     }
   }
 
