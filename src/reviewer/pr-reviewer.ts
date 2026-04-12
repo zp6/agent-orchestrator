@@ -107,6 +107,19 @@ IMPORTANT:
 - Never block on: code style, naming conventions, missing comments/docs, "could use a helper function", edge cases that are unlikely in practice, or suggestions for follow-up work.
 - If you have minor suggestions, include them in an approval comment — don't block the PR for them.
 
+CREDENTIAL & SECRET DETECTION RULES:
+Example and template files routinely contain intentional placeholder text that looks like a secret but is not. Apply these rules before flagging anything as a credential leak:
+
+1. **Example/template files are never a security violation.** Files whose path contains '.example.', '.template.', '.sample.', 'example.', 'template.', 'sample.' (prefix), or that live under an 'examples/', 'templates/', or 'samples/' directory are documentation artifacts. Placeholder values in these files are expected and must NOT be flagged.
+
+2. **Placeholder values are not real secrets.** The following patterns are definitionally safe — they are instructions to the user, not leaked credentials:
+   - Generic labels: 'your-api-key-here', 'your-token', 'your-secret', 'YOUR_API_KEY', 'INSERT_KEY_HERE'
+   - Common stand-ins: 'changeme', 'CHANGEME', 'REPLACE_ME', 'replace-me', 'xxx', 'XXX', 'todo', 'TODO'
+   - Angle-bracket templates: '<your-key>', '<API_KEY>', '<token>'
+   - Obvious fakes: '1234567890', 'abcdefghij', 'test-key', 'dummy', 'example-key'
+
+3. **Only flag values that look like real, leaked credentials:** high-entropy random strings (20+ chars of mixed alphanumeric), values matching known API key formats (e.g. 'sk-...', 'ghp_...', 'AKIA...'), or values that appear to be copy-pasted real tokens based on their structure. When in doubt, approve.
+
 Respond with ONLY a JSON object (no markdown, no code fences):
 {
   "decision": "approve|request-changes|escalate",
@@ -1757,4 +1770,86 @@ export function enforceChecklist(comment: string): string {
 
 function shellEscape(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+// ── Example/template file helpers (exported for testing) ─────────────────────
+
+/**
+ * Returns true if the file path is an example, template, or sample file that
+ * is expected to contain placeholder credential values.
+ *
+ * Matches:
+ *   - Files whose basename contains `.example.`, `.template.`, or `.sample.`
+ *     (e.g. `docker-compose.example.yml`, `config.template.json`)
+ *   - Files whose basename starts with `example.`, `template.`, or `sample.`
+ *     (e.g. `example.env`, `template.yaml`)
+ *   - Files under an `examples/`, `templates/`, or `samples/` directory
+ *     anywhere in their path
+ */
+export function isExampleOrTemplateFile(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/");
+  const segments = normalized.split("/");
+  const basename = segments[segments.length - 1] ?? "";
+
+  // Directory check: any path segment is examples/, templates/, or samples/
+  const exampleDirs = new Set(["examples", "templates", "samples"]);
+  for (const seg of segments.slice(0, -1)) {
+    if (exampleDirs.has(seg.toLowerCase())) return true;
+  }
+
+  // Basename check: contains .example. / .template. / .sample. infix
+  const infixPattern = /\.(example|template|sample)\./i;
+  if (infixPattern.test(basename)) return true;
+
+  // Basename check: starts with example. / template. / sample.
+  const prefixPattern = /^(example|template|sample)\./i;
+  if (prefixPattern.test(basename)) return true;
+
+  return false;
+}
+
+/**
+ * Returns true if the value looks like an intentional placeholder rather than
+ * a real leaked credential.
+ *
+ * Placeholders are values that instruct the user to replace them — they carry
+ * no secret entropy and are safe to commit.
+ */
+export function isPlaceholderCredential(value: string): boolean {
+  const v = value.trim();
+
+  // Angle-bracket templates: <your-key>, <API_KEY>, etc.
+  if (/^<[^>]+>$/.test(v)) return true;
+
+  // All-uppercase or mixed-case instruction-style labels
+  const instructionPattern =
+    /\b(your[_-]?(api[_-]?key|token|secret|key|password)|insert[_-]?key|replace[_-]?me|change[_-]?me|put[_-]?your|add[_-]?your)\b/i;
+  if (instructionPattern.test(v)) return true;
+
+  // Common stand-in words
+  const standIns = new Set([
+    "changeme",
+    "replace_me",
+    "replace-me",
+    "todo",
+    "placeholder",
+    "dummy",
+    "example-key",
+    "example_key",
+    "test-key",
+    "test_key",
+    "fake-key",
+    "fake_key",
+    "xxx",
+    "xxxx",
+    "1234567890",
+    "abcdefghij",
+    "abcdefghijklmnopqrstuvwxyz",
+  ]);
+  if (standIns.has(v.toLowerCase())) return true;
+
+  // ALL_CAPS with underscores (environment variable name used as its own value)
+  if (/^[A-Z][A-Z0-9_]{2,}$/.test(v)) return true;
+
+  return false;
 }

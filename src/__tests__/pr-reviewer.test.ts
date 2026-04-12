@@ -4,6 +4,8 @@ import {
   extractChecklistItems,
   buildFeedbackTaskMessage,
   validateClosesReferences,
+  isExampleOrTemplateFile,
+  isPlaceholderCredential,
   PRReviewer,
 } from "../reviewer/pr-reviewer.js";
 import type { ConflictStats, RedispatchCategory, PRReviewResult } from "../reviewer/pr-reviewer.js";
@@ -375,5 +377,157 @@ describe("PRReviewer conflict stats", () => {
     const stats = reviewer.getConflictStats();
     expect(stats.totalAutoClosedConflictPRs).toBe(0);
     expect(stats.totalStaleBranchNudges).toBe(0);
+  });
+});
+
+describe("isExampleOrTemplateFile", () => {
+  // --- positive cases: should be identified as example/template files ---
+
+  it("matches .example. infix in filename", () => {
+    expect(isExampleOrTemplateFile("docker-compose.example.yml")).toBe(true);
+  });
+
+  it("matches .template. infix in filename", () => {
+    expect(isExampleOrTemplateFile("config.template.json")).toBe(true);
+  });
+
+  it("matches .sample. infix in filename", () => {
+    expect(isExampleOrTemplateFile("settings.sample.env")).toBe(true);
+  });
+
+  it("matches example. prefix in filename", () => {
+    expect(isExampleOrTemplateFile("example.env")).toBe(true);
+  });
+
+  it("matches template. prefix in filename", () => {
+    expect(isExampleOrTemplateFile("template.yaml")).toBe(true);
+  });
+
+  it("matches sample. prefix in filename", () => {
+    expect(isExampleOrTemplateFile("sample.config.js")).toBe(true);
+  });
+
+  it("matches file inside examples/ directory", () => {
+    expect(isExampleOrTemplateFile("examples/docker-compose.yml")).toBe(true);
+  });
+
+  it("matches file inside templates/ directory", () => {
+    expect(isExampleOrTemplateFile("src/templates/nginx.conf")).toBe(true);
+  });
+
+  it("matches file inside samples/ directory", () => {
+    expect(isExampleOrTemplateFile("docs/samples/config.yaml")).toBe(true);
+  });
+
+  it("is case-insensitive for directory names", () => {
+    expect(isExampleOrTemplateFile("Examples/foo.yml")).toBe(true);
+    expect(isExampleOrTemplateFile("TEMPLATES/bar.json")).toBe(true);
+  });
+
+  it("is case-insensitive for infix patterns", () => {
+    expect(isExampleOrTemplateFile("docker-compose.EXAMPLE.yml")).toBe(true);
+  });
+
+  it("handles Windows-style backslash paths", () => {
+    expect(isExampleOrTemplateFile("src\\examples\\config.yml")).toBe(true);
+  });
+
+  // --- negative cases: real files that should NOT be exempt ---
+
+  it("does not match a normal config file", () => {
+    expect(isExampleOrTemplateFile("docker-compose.yml")).toBe(false);
+  });
+
+  it("does not match a source file in a regular directory", () => {
+    expect(isExampleOrTemplateFile("src/config/settings.ts")).toBe(false);
+  });
+
+  it("does not match README.md", () => {
+    expect(isExampleOrTemplateFile("README.md")).toBe(false);
+  });
+
+  it("does not match a file that merely contains the word example in its name", () => {
+    // 'example' must be followed by a dot to qualify as a prefix pattern
+    expect(isExampleOrTemplateFile("counterexample.ts")).toBe(false);
+    expect(isExampleOrTemplateFile("example_runner.ts")).toBe(false);
+  });
+});
+
+describe("isPlaceholderCredential", () => {
+  // --- positive cases: should be identified as placeholders ---
+
+  it("matches your-api-key-here", () => {
+    expect(isPlaceholderCredential("your-api-key-here")).toBe(true);
+  });
+
+  it("matches your_api_key", () => {
+    expect(isPlaceholderCredential("your_api_key")).toBe(true);
+  });
+
+  it("matches your-token", () => {
+    expect(isPlaceholderCredential("your-token")).toBe(true);
+  });
+
+  it("matches your-secret", () => {
+    expect(isPlaceholderCredential("your-secret")).toBe(true);
+  });
+
+  it("matches angle-bracket templates", () => {
+    expect(isPlaceholderCredential("<your-key>")).toBe(true);
+    expect(isPlaceholderCredential("<API_KEY>")).toBe(true);
+    expect(isPlaceholderCredential("<token>")).toBe(true);
+  });
+
+  it("matches changeme", () => {
+    expect(isPlaceholderCredential("changeme")).toBe(true);
+    expect(isPlaceholderCredential("CHANGEME")).toBe(true);
+  });
+
+  it("matches replace_me / replace-me", () => {
+    expect(isPlaceholderCredential("replace_me")).toBe(true);
+    expect(isPlaceholderCredential("replace-me")).toBe(true);
+  });
+
+  it("matches dummy", () => {
+    expect(isPlaceholderCredential("dummy")).toBe(true);
+  });
+
+  it("matches test-key and test_key", () => {
+    expect(isPlaceholderCredential("test-key")).toBe(true);
+    expect(isPlaceholderCredential("test_key")).toBe(true);
+  });
+
+  it("matches ALL_CAPS env var names used as their own values", () => {
+    expect(isPlaceholderCredential("MY_API_KEY")).toBe(true);
+    expect(isPlaceholderCredential("ANTHROPIC_API_KEY")).toBe(true);
+    expect(isPlaceholderCredential("GH_TOKEN")).toBe(true);
+  });
+
+  it("matches insert-key-here variants", () => {
+    expect(isPlaceholderCredential("INSERT_KEY_HERE")).toBe(true);
+  });
+
+  it("is case-insensitive for instruction patterns", () => {
+    expect(isPlaceholderCredential("Your-API-Key-Here")).toBe(true);
+    // YOUR-TOKEN matches the 'your[_-]?token' instruction pattern — correctly identified as placeholder
+    expect(isPlaceholderCredential("YOUR-TOKEN")).toBe(true);
+  });
+
+  // --- negative cases: should NOT be treated as placeholders ---
+
+  it("does not match a real-looking API key", () => {
+    expect(isPlaceholderCredential("sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWx")).toBe(false);
+  });
+
+  it("does not match a GitHub token format", () => {
+    expect(isPlaceholderCredential("ghp_ABCDEFGHIJKLMNOPQRSTUVWXyz123456")).toBe(false);
+  });
+
+  it("does not match a high-entropy random string", () => {
+    expect(isPlaceholderCredential("xK9mP2qRvL8nJ4wT6yH1cF3aE5bD7gI0")).toBe(false);
+  });
+
+  it("does not match a short but real-looking value", () => {
+    expect(isPlaceholderCredential("prod-secret-abc123")).toBe(false);
   });
 });

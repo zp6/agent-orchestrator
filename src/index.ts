@@ -16,7 +16,7 @@
  */
 
 // Core reviewer modules
-export { PRReviewer, enforceChecklist, validateClosesReferences } from "./reviewer/pr-reviewer.js";
+export { PRReviewer, enforceChecklist, validateClosesReferences, isExampleOrTemplateFile, isPlaceholderCredential } from "./reviewer/pr-reviewer.js";
 export type { PRInfo, PRReviewResult, RedispatchCategory, ConflictStats, CrossRepoCloseIssue } from "./reviewer/pr-reviewer.js";
 
 // Schema-consumer impact detection
