@@ -802,6 +802,58 @@ export interface AgentHealth {
   auth_degraded_at: string | null;
 }
 
+// ── Stigmergy signals ─────────────────────────────────────────────────────────
+
+/**
+ * A stigmergy signal written by an agent into the shared state store.
+ * Signals enable lightweight, decentralized cross-agent coordination — inspired
+ * by biological stigmergy (ant pheromone trails).
+ *
+ * Any agent can write signals; any agent can read them. The daemon prunes
+ * expired signals each cycle.
+ */
+export interface Signal {
+  id: number;
+  /** Which agent wrote this signal. */
+  agent: string;
+  /** Semantic type, e.g. 'pattern_risk', 'decision_need', 'failure_pattern'. */
+  signal_type: string;
+  /** Discriminator key within the type, e.g. 'auth-schema-change'. */
+  key: string;
+  /** Optional JSON payload with additional details. */
+  value: string | null;
+  /** Which repo this signal applies to, or null for fleet-wide. */
+  repo: string | null;
+  /** Optional file glob this signal applies to, e.g. 'src/auth/**'. */
+  file_glob: string | null;
+  /** Confidence score 0–1. */
+  confidence: number;
+  /** Signals expire after this many hours (default 168 = 7 days). */
+  ttl_hours: number;
+  /** ISO timestamp when the signal was created. */
+  created_at: string;
+  /** ISO timestamp when the signal expires (generated column). */
+  expires_at: string;
+}
+
+export interface WriteSignalParams {
+  agent: string;
+  signal_type: string;
+  key: string;
+  value?: unknown;
+  repo?: string;
+  file_glob?: string;
+  confidence?: number;
+  ttl_hours?: number;
+}
+
+export interface ReadSignalsFilter {
+  signal_type?: string;
+  repo?: string;
+  file_glob?: string;
+  limit?: number;
+}
+
 const MIGRATIONS = `
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
@@ -905,6 +957,7 @@ export class StateStore {
     this.runLearnedRulesMigration();
     this.runConflictHeatMapMigration();
     this.runRoutingOutcomesMigration();
+    this.runStigmergySignalsMigration();
   }
 
   private runPhase2Migration(): void {
@@ -4790,6 +4843,8 @@ export class StateStore {
 
   // ── Routing accuracy drill-down ───────────────────────────────────────────
 
+  // ── Stigmergy signals ─────────────────────────────────────────────────────
+
   /**
    * Minimum quality-score gap between the best and current agent for a task
    * type that counts as a "misrouting" signal.
@@ -4892,5 +4947,126 @@ export class StateStore {
     )];
 
     return { days, rows, misrouted_task_types };
+  }
+
+  // ── Stigmergy signals ─────────────────────────────────────────────────────
+
+  private runStigmergySignalsMigration(): void {
+    // SQLite does not support GENERATED ALWAYS AS with the datetime() expression
+    // in all versions, so we store expires_at as a plain TEXT column and compute
+    // it on insert via a trigger-style default expression.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS signals (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent       TEXT    NOT NULL,
+        signal_type TEXT    NOT NULL,
+        key         TEXT    NOT NULL,
+        value       TEXT,
+        repo        TEXT,
+        file_glob   TEXT,
+        confidence  REAL    NOT NULL DEFAULT 0.5,
+        ttl_hours   INTEGER NOT NULL DEFAULT 168,
+        created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+        expires_at  TEXT    NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_signals_type    ON signals(signal_type);
+      CREATE INDEX IF NOT EXISTS idx_signals_repo    ON signals(repo);
+      CREATE INDEX IF NOT EXISTS idx_signals_expires ON signals(expires_at);
+    `);
+  }
+
+  /**
+   * Write a stigmergy signal into the shared state store.
+   *
+   * Any agent can call this; the signal will be visible to all other agents
+   * via `readSignals()` until it expires.
+   */
+  writeSignal(params: WriteSignalParams): Signal {
+    const ttlHours = params.ttl_hours ?? 168;
+    const confidence = params.confidence ?? 0.5;
+    const now = new Date().toISOString();
+    // Compute expires_at as now + ttl_hours hours.
+    const expiresAt = new Date(Date.now() + ttlHours * 3_600_000).toISOString();
+    const value =
+      params.value !== undefined ? JSON.stringify(params.value) : null;
+
+    const result = this.db
+      .prepare(
+        `INSERT INTO signals
+           (agent, signal_type, key, value, repo, file_glob, confidence, ttl_hours, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        params.agent,
+        params.signal_type,
+        params.key,
+        value,
+        params.repo ?? null,
+        params.file_glob ?? null,
+        confidence,
+        ttlHours,
+        now,
+        expiresAt,
+      );
+
+    return this.db
+      .prepare(`SELECT * FROM signals WHERE id = ?`)
+      .get(result.lastInsertRowid) as Signal;
+  }
+
+  /**
+   * Read active (non-expired) signals, optionally filtered by type, repo, and
+   * file glob.  Expired signals are excluded automatically.
+   *
+   * When `file_glob` is provided the query also returns signals whose
+   * `file_glob` is NULL (fleet-wide signals) so callers always see broad
+   * signals in addition to file-specific ones.
+   */
+  readSignals(filter: ReadSignalsFilter = {}): Signal[] {
+    const now = new Date().toISOString();
+    const conditions: string[] = ["expires_at > ?"];
+    const bindings: unknown[] = [now];
+
+    if (filter.signal_type) {
+      conditions.push("signal_type = ?");
+      bindings.push(filter.signal_type);
+    }
+
+    if (filter.repo) {
+      conditions.push("(repo IS NULL OR repo = ?)");
+      bindings.push(filter.repo);
+    }
+
+    if (filter.file_glob) {
+      conditions.push("(file_glob IS NULL OR file_glob = ?)");
+      bindings.push(filter.file_glob);
+    }
+
+    const where = conditions.join(" AND ");
+    const limit = filter.limit ?? 500;
+    bindings.push(limit);
+
+    return this.db
+      .prepare(
+        `SELECT * FROM signals
+         WHERE ${where}
+         ORDER BY confidence DESC, created_at DESC
+         LIMIT ?`,
+      )
+      .all(...bindings) as Signal[];
+  }
+
+  /**
+   * Delete all signals whose `expires_at` timestamp is in the past.
+   * Called once per daemon poll cycle to keep the table small.
+   *
+   * @returns number of rows deleted.
+   */
+  pruneExpiredSignals(): number {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(`DELETE FROM signals WHERE expires_at <= ?`)
+      .run(now);
+    return result.changes;
   }
 }
