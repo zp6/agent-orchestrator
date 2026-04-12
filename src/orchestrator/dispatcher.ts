@@ -485,6 +485,22 @@ export class Dispatcher {
       stepId?: string;
     },
   ): Promise<DispatchResult> {
+    // Block infrastructure-marker tasks from being dispatched to agents.
+    // These are dashboard escalation markers (e.g. health-check failures),
+    // not coding tasks. They should only be resolved by the system, not agents.
+    if (options?.sourceRef?.startsWith("health-check-fail:")) {
+      return {
+        taskId: "",
+        agentName: options?.agentName ?? "",
+        response: {
+          content: "Health check tasks are infrastructure markers — not dispatchable to agents.",
+          model: "",
+          usage: { input_tokens: 0, output_tokens: 0 },
+          stop_reason: "skipped",
+        },
+      };
+    }
+
     // Resolve agent
     let agentName = options?.agentName;
     let routeReason = "Explicitly specified";
