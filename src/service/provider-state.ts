@@ -98,6 +98,7 @@ export function isRateLimitError(err: unknown): boolean {
     msg.includes("rate limit") ||
     msg.includes("rate_limit") ||
     msg.includes("hit your limit") ||
+    msg.includes("usage limit") ||
     msg.includes("quota") ||
     msg.includes("too many requests") ||
     msg.includes("overloaded")
@@ -115,6 +116,17 @@ export function parseResetTime(err: unknown): Date | null {
   const retryAfterMatch = msg.match(/retry[- ]after:?\s*(\d+)/i);
   if (retryAfterMatch) {
     return new Date(Date.now() + parseInt(retryAfterMatch[1], 10) * 1000);
+  }
+
+  // "try again at Apr 13th, 2026 10:21 PM" (Codex/OpenAI format)
+  const dateMatch = msg.match(/try again at ([A-Z][a-z]+ \d+(?:st|nd|rd|th)?,?\s*\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM))/i);
+  if (dateMatch) {
+    try {
+      // Strip ordinal suffixes (13th → 13) for Date.parse
+      const cleaned = dateMatch[1].replace(/(\d+)(?:st|nd|rd|th)/i, "$1");
+      const parsed = new Date(cleaned);
+      if (!isNaN(parsed.getTime())) return parsed;
+    } catch { /* fall through */ }
   }
 
   // Fallback: assume 5 minute cooldown
