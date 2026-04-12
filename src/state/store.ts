@@ -29,6 +29,9 @@ import type {
   AgentSLAThreshold,
   LlmCallEvent,
   LlmTokenStats,
+  PROutcomeRecord,
+  ScoreCalibrationRow,
+  AdjustedThreshold,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -133,6 +136,28 @@ export class StateStore implements ITelegramStateStore {
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_llm_call_events_call_type_created_at
         ON llm_call_events (call_type, created_at DESC);
+    `);
+
+    // Create PR outcome records table for score calibration (idempotent)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pr_outcome_records (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        task_type TEXT NOT NULL DEFAULT 'implementation',
+        quality_score REAL NOT NULL,
+        score_bucket REAL NOT NULL,
+        repo TEXT NOT NULL,
+        pr_number INTEGER NOT NULL,
+        outcome TEXT NOT NULL,
+        recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pr_outcome_records_agent_type_bucket
+        ON pr_outcome_records (agent_name, task_type, score_bucket);
+
+      CREATE INDEX IF NOT EXISTS idx_pr_outcome_records_recorded_at
+        ON pr_outcome_records (recorded_at DESC);
     `);
 
     // Add priority column to tasks if it doesn't exist yet (idempotent)
@@ -920,6 +945,128 @@ export class StateStore implements ITelegramStateStore {
          ORDER BY total_input_tokens DESC`,
       )
       .all(`-${lookback} hours`) as LlmTokenStats[];
+  }
+
+  // ── Score calibration ─────────────────────────────────────────────────────
+
+  /**
+   * Record the eventual PR outcome for a previously verified task.
+   *
+   * Called by the daemon when a PR is merged, receives change-requests,
+   * is closed without merge, or its task is re-dispatched for revision.
+   * The outcome record links the task's quality_score to the actual PR result
+   * so the calibration model can quantify each verifier's accuracy.
+   */
+  recordPROutcome(record: Omit<PROutcomeRecord, "id" | "recorded_at">): void {
+    // score_bucket = floor(quality_score * 10) / 10, clamped to [0.0, 0.9]
+    const bucket = Math.min(0.9, Math.floor(record.quality_score * 10) / 10);
+    this.db
+      .prepare(
+        `INSERT INTO pr_outcome_records
+           (id, task_id, agent_name, task_type, quality_score, score_bucket, repo, pr_number, outcome)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        ulid(),
+        record.task_id,
+        record.agent_name,
+        record.task_type,
+        record.quality_score,
+        bucket,
+        record.repo,
+        record.pr_number,
+        record.outcome,
+      );
+  }
+
+  /**
+   * Return the full calibration table: per-`(agent, task_type, score_bucket)` cell,
+   * the actual PR merge rate derived from recorded outcome events.
+   *
+   * Only cells with at least 3 outcome records are returned to avoid noise
+   * from very small samples.
+   *
+   * Example row:
+   *   agent_name=claude-reviewer  task_type=implementation  score_bucket=0.7
+   *   total_count=12  merge_count=10  actual_merge_rate=0.833
+   */
+  getCalibrationData(): ScoreCalibrationRow[] {
+    return this.db
+      .prepare(
+        `SELECT
+           agent_name,
+           task_type,
+           score_bucket,
+           COUNT(*) AS total_count,
+           SUM(CASE WHEN outcome = 'merged' THEN 1 ELSE 0 END) AS merge_count,
+           CAST(SUM(CASE WHEN outcome = 'merged' THEN 1 ELSE 0 END) AS REAL) / COUNT(*) AS actual_merge_rate
+         FROM pr_outcome_records
+         GROUP BY agent_name, task_type, score_bucket
+         HAVING COUNT(*) >= 3
+         ORDER BY agent_name, task_type, score_bucket ASC`,
+      )
+      .all() as ScoreCalibrationRow[];
+  }
+
+  /**
+   * Derive per-`(agent, task_type)` recommended minimum verification scores
+   * from the calibration table.
+   *
+   * For each `(agent, task_type)` pair the recommended threshold is the
+   * lowest score_bucket where `actual_merge_rate >= targetMergeRate`.
+   * If no bucket meets the target, `recommended_min_score` is null (insufficient data
+   * or the verifier's scores never correlate well with merge success).
+   *
+   * @param targetMergeRate  - Desired PR merge rate (default: 0.80).
+   * @param currentMinScore  - Baseline min_score to compare against (default: 0.70).
+   */
+  getAdjustedThresholds(targetMergeRate = 0.80, currentMinScore = 0.70): AdjustedThreshold[] {
+    const rows = this.getCalibrationData();
+
+    // Group by (agent, task_type)
+    type Key = string;
+    const cells = new Map<Key, ScoreCalibrationRow[]>();
+    for (const row of rows) {
+      const key: Key = `${row.agent_name}|${row.task_type}`;
+      const list = cells.get(key) ?? [];
+      list.push(row);
+      cells.set(key, list);
+    }
+
+    const thresholds: AdjustedThreshold[] = [];
+    for (const [key, rowGroup] of cells) {
+      const [agentName, taskType] = key.split("|") as [string, string];
+      const totalSamples = rowGroup.reduce((s, r) => s + r.total_count, 0);
+
+      // Find the lowest bucket where actual_merge_rate >= target, scanning ascending
+      const sorted = [...rowGroup].sort((a, b) => a.score_bucket - b.score_bucket);
+      let recommended: number | null = null;
+      for (const row of sorted) {
+        if (row.actual_merge_rate >= targetMergeRate) {
+          recommended = row.score_bucket;
+          break;
+        }
+      }
+
+      const actionRequired =
+        recommended !== null &&
+        totalSamples >= 5 &&
+        Math.abs(recommended - currentMinScore) > 0.05;
+
+      thresholds.push({
+        agent_name: agentName,
+        task_type: taskType as "implementation" | "research",
+        current_min_score: currentMinScore,
+        recommended_min_score: recommended,
+        sample_count: totalSamples,
+        action_required: actionRequired,
+      });
+    }
+
+    return thresholds.sort((a, b) =>
+      a.agent_name.localeCompare(b.agent_name) ||
+      a.task_type.localeCompare(b.task_type),
+    );
   }
 
   // ── System flags (pause / resume / operator overrides) ───────────────────

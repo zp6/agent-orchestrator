@@ -37,6 +37,21 @@ export type { SupervisorDecision, ConflictStatsProvider, PRConfidenceProvider, R
 export { RoutingAccuracyTracker } from "./reviewer/routing-accuracy.js";
 
 export {
+  ScoreCalibrator,
+  detectOverApproval,
+  CALIBRATION_MIN_SAMPLE_SIZE,
+  CALIBRATION_TARGET_MERGE_RATE,
+  CALIBRATION_THRESHOLD_ACTION_DIFF,
+} from "./reviewer/score-calibrator.js";
+export type {
+  PROutcome,
+  ScoreCalibrationRow,
+  AdjustedThreshold,
+  RecordOutcomeOpts,
+  CalibrationReport,
+} from "./reviewer/score-calibrator.js";
+
+export {
   classifyIssueAge,
   buildIssueAgeEntry,
   buildIssueAgeHeatmap,
@@ -76,6 +91,7 @@ export type { ReviewerConfig, AgentConfig } from "./config.js";
 export { StateStore } from "./state/store.js";
 export type {
   IStateStore,
+  IScoreOutcomeStore,
   ITelegramStateStore,
   Task,
   MergeQueueEntry,
@@ -93,6 +109,7 @@ export type {
   RoutingAccuracyStats,
   AgentQualityByTaskType,
   AgentTaskTypeQuality,
+  PROutcomeRecord,
 } from "./state/types.js";
 
 // Supervisor decision log — queryable log for orch CLI and dashboard consumers

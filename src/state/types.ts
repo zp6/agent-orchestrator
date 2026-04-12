@@ -441,6 +441,102 @@ export interface IStateStore {
   getTokenStats(sinceHours?: number): LlmTokenStats[];
 }
 
+// ── Score calibration types ───────────────────────────────────────────────
+
+/**
+ * The eventual outcome of a PR that was submitted after a task was verified.
+ *
+ * - merged:              PR merged without changes — score was accurate or conservative.
+ * - changes_requested:  PR got review feedback   — score was too generous.
+ * - rejected:           PR closed without merge  — score was way off.
+ * - redispatched:       Task re-dispatched after verification — verification missed something.
+ */
+export type PROutcome = "merged" | "changes_requested" | "rejected" | "redispatched";
+
+/**
+ * A recorded PR outcome event, linking a task's verification score to
+ * the actual result of the PR that was submitted for that task.
+ *
+ * Stored in the `pr_outcome_records` table.
+ */
+export interface PROutcomeRecord {
+  id: string;
+  task_id: string;
+  agent_name: string;
+  task_type: TaskType;
+  /** The quality_score assigned by the Verifier (0.0–1.0). */
+  quality_score: number;
+  /**
+   * The lower bound of the 0.1-wide score bucket containing quality_score.
+   * E.g. quality_score=0.82 → score_bucket=0.8.
+   * Pre-computed and stored so calibration queries avoid expensive CASE expressions.
+   */
+  score_bucket: number;
+  repo: string;
+  pr_number: number;
+  outcome: PROutcome;
+  recorded_at: string;
+}
+
+/**
+ * Aggregated calibration data for one `(agent, score_bucket, task_type)` cell.
+ *
+ * The calibration table maps verification scores to actual PR merge rates so
+ * the system can detect when a verifier's scores are miscalibrated.
+ *
+ * Example:
+ *   agent=claude-reviewer  bucket=0.7  type=implementation  → merge_rate=0.85
+ *   agent=codex-reviewer   bucket=0.7  type=implementation  → merge_rate=0.40
+ */
+export interface ScoreCalibrationRow {
+  agent_name: string;
+  task_type: TaskType;
+  score_bucket: number;
+  total_count: number;
+  merge_count: number;
+  /** Fraction of PRs in this cell that were merged (0-1). */
+  actual_merge_rate: number;
+}
+
+/**
+ * A per-agent recommended min_score threshold, derived from calibration data.
+ *
+ * The recommended_min_score is the lowest score bucket where
+ * `actual_merge_rate >= target_merge_rate` (default 0.80).
+ * If no bucket meets the target, `recommended_min_score` is null.
+ */
+export interface AdjustedThreshold {
+  agent_name: string;
+  task_type: TaskType;
+  /** Current min_score used by the verifier for this agent (0-1). */
+  current_min_score: number;
+  /**
+   * Recommended min_score based on calibration data (0-1), or null if
+   * there is insufficient data to make a recommendation.
+   */
+  recommended_min_score: number | null;
+  /** Number of outcome records used to compute this recommendation. */
+  sample_count: number;
+  /**
+   * True when the recommended threshold differs from the current one by
+   * more than 0.05 and there is sufficient data (sample_count ≥ 5).
+   */
+  action_required: boolean;
+}
+
+/**
+ * Store interface for score calibration persistence.
+ *
+ * These methods are implemented by the reviewer's own StateStore.
+ * The orchestrator's StateStore may not implement them — callers should
+ * check at runtime (e.g. via `typeof store.recordPROutcome === 'function'`).
+ */
+export interface IScoreOutcomeStore {
+  recordPROutcome(record: Omit<PROutcomeRecord, "id" | "recorded_at">): void;
+  getCalibrationData(): ScoreCalibrationRow[];
+  getAdjustedThresholds(targetMergeRate?: number, currentMinScore?: number): AdjustedThreshold[];
+}
+
 /**
  * Extended interface for the reviewer's own StateStore, which adds
  * Telegram-specific operations (system flags, dispatch requests,
@@ -451,7 +547,7 @@ export interface IStateStore {
  * this interface; reviewer modules wired into the orchestrator use
  * the narrower IStateStore above.
  */
-export interface ITelegramStateStore extends IStateStore {
+export interface ITelegramStateStore extends IStateStore, IScoreOutcomeStore {
   // System flags (pause/resume, operator overrides)
   getSystemFlag(key: string): string | null;
   setSystemFlag(key: string, value: string): void;

@@ -22,8 +22,9 @@ import { ImprovementDetector } from "../reviewer/improvement-detector.js";
 import { IssueCreator } from "../reviewer/issue-creator.js";
 import { RoutingAccuracyTracker } from "../reviewer/routing-accuracy.js";
 import { CalibrationDriftMonitor } from "../reviewer/calibration-drift.js";
+import { ScoreCalibrator } from "../reviewer/score-calibrator.js";
 import type { ReviewerConfig } from "../config.js";
-import type { IStateStore } from "../state/types.js";
+import type { IStateStore, IScoreOutcomeStore } from "../state/types.js";
 
 export interface ReviewerInstances {
   /** Reviews open PRs, manages the merge queue, and auto-rebases stale branches. */
@@ -38,6 +39,12 @@ export interface ReviewerInstances {
   issueCreator: IssueCreator;
   /** Detects calibration drift and surfaces score distribution histograms. */
   calibrationDriftMonitor: CalibrationDriftMonitor;
+  /**
+   * Records PR outcomes (merged/rejected/changes_requested/redispatched) and
+   * derives per-agent min_score threshold recommendations from the accumulated
+   * outcome history.  Undefined when the store does not implement IScoreOutcomeStore.
+   */
+  scoreCalibrator: ScoreCalibrator | undefined;
 }
 
 export interface CreateReviewerOptions {
@@ -82,6 +89,15 @@ export function createReviewerInstances(
   // Always constructed — getScoreDistributions / getCalibrationDriftAlerts are on IStateStore.
   const calibrationDriftMonitor = new CalibrationDriftMonitor(store);
 
+  // Wire ScoreCalibrator if the store implements IScoreOutcomeStore.
+  // The reviewer's own StateStore does; the orchestrator's StateStore may not (yet).
+  const scoreCalibrator =
+    typeof (store as unknown as IScoreOutcomeStore).recordPROutcome === "function" &&
+    typeof (store as unknown as IScoreOutcomeStore).getCalibrationData === "function" &&
+    typeof (store as unknown as IScoreOutcomeStore).getAdjustedThresholds === "function"
+      ? new ScoreCalibrator(store as unknown as IScoreOutcomeStore)
+      : undefined;
+
   return {
     reviewer,
     verifier: new Verifier(store),
@@ -94,5 +110,6 @@ export function createReviewerInstances(
     detector: new ImprovementDetector(config, store),
     issueCreator: new IssueCreator(config),
     calibrationDriftMonitor,
+    scoreCalibrator,
   };
 }

@@ -595,17 +595,15 @@ export class Supervisor {
       const outcome =
         decision.action === "none"
           ? "none"
-          : decision.action === "age-nudge"
-            ? "notified"
-            : decision.action === "dispatch" || decision.action === "follow-up"
-              ? "dispatched"
-              : decision.action === "verify"
+          : decision.action === "dispatch" || decision.action === "follow-up"
+            ? "dispatched"
+            : decision.action === "verify"
+              ? "queued"
+              : decision.action === "redeploy"
                 ? "queued"
-                : decision.action === "redeploy"
+                : decision.action === "create-issue"
                   ? "queued"
-                  : decision.action === "create-issue"
-                    ? "queued"
-                    : "pending";
+                  : "pending";
 
       this.store.recordSupervisorDecision(decision.action, decision.reason, {
         agentName: decision.agentName,
