@@ -28,6 +28,11 @@ export interface Task {
   verification_status?: VerificationStatus;
   quality_score?: number | null;
   verification_notes?: string | null;
+  /**
+   * Natural-language narrative explaining why the score fell below 0.80.
+   * Populated only for sub-0.80 results; null otherwise.
+   */
+  quality_explanation?: string | null;
   created_at: string;
   updated_at: string;
 }

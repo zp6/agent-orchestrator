@@ -192,6 +192,14 @@ export class StateStore implements ITelegramStateStore {
       // Column already exists — ignore
     }
 
+    // Add quality_explanation column to tasks (idempotent).
+    // Stores the natural-language narrative for sub-0.80 quality scores.
+    try {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN quality_explanation TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+
     // Create index for efficient time-ordered lookups (idempotent)
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_supervisor_decisions_created_at

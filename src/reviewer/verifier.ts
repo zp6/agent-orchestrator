@@ -22,6 +22,13 @@ export interface VerificationResult {
   notes: string;
   revision?: string;
   /**
+   * Natural-language explanation for why the score fell below 0.80.
+   * One to three sentences surfacing which acceptance criteria were missing,
+   * what gaps were found, or what made the work hard to verify.
+   * Populated only when score < 0.80; undefined otherwise.
+   */
+  explanation?: string;
+  /**
    * Present when a borderline score (0.70–0.79) triggered an automatic
    * second-pass review. The orchestrator can use this to detect disagreements.
    */
@@ -48,7 +55,8 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   "approved": true/false,
   "score": 0.0-1.0,
   "notes": "Brief assessment of quality, completeness, correctness",
-  "revision": "If not approved, specific guidance for improvement (omit if approved)"
+  "revision": "If not approved, specific guidance for improvement (omit if approved)",
+  "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — e.g. which acceptance criteria were unmet, what gaps were found, or why the work was hard to verify. Omit entirely when score >= 0.80."
 }
 
 Scoring guide:
@@ -64,7 +72,8 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   "approved": true/false,
   "score": 0.0-1.0,
   "notes": "Brief assessment of research quality",
-  "revision": "If not approved, specific guidance for improvement (omit if approved)"
+  "revision": "If not approved, specific guidance for improvement (omit if approved)",
+  "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — e.g. which research dimensions were thin, what evidence was missing, or why the analysis was hard to act on. Omit entirely when score >= 0.80."
 }
 
 Evaluate research quality on:
@@ -98,7 +107,8 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   "approved": true/false,
   "score": 0.0-1.0,
   "notes": "Independent assessment — be specific about what is missing or wrong",
-  "revision": "If not approved, concrete guidance for what needs to change (omit if approved)"
+  "revision": "If not approved, concrete guidance for what needs to change (omit if approved)",
+  "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — which criteria were unmet, what gaps were found, or what made the work hard to verify. Omit entirely when score >= 0.80."
 }
 
 Scoring guide:
@@ -196,11 +206,25 @@ export class Verifier {
         );
       }
 
+      // Prefer the second-pass explanation when available; fall back to first pass.
+      // Borderline scores (0.70–0.79) are always sub-0.80, so we always expect one.
+      const finalExplanation =
+        secondPassResult.explanation ?? firstPassResult.explanation;
+
+      // When not approved, enrich the revision guidance with the explanation so
+      // agents know what specifically drove the low score.
+      const baseRevision = secondPassResult.revision ?? firstPassResult.revision;
+      const enrichedRevision =
+        !finalApproved && baseRevision && finalExplanation
+          ? `${finalExplanation}\n\n${baseRevision}`
+          : baseRevision;
+
       const finalResult: VerificationResult = {
         approved: finalApproved,
         score: firstPassResult.score,
         notes: combinedNotes,
-        revision: finalApproved ? undefined : (secondPassResult.revision ?? firstPassResult.revision),
+        revision: finalApproved ? undefined : enrichedRevision,
+        explanation: finalExplanation,
         secondPass: {
           score: secondPassResult.score,
           notes: secondPassResult.notes,
@@ -215,12 +239,14 @@ export class Verifier {
         agreed,
         finalApproved,
         agent: task.agent_name,
+        ...(finalExplanation && { explanation: finalExplanation }),
       });
 
       this.store.updateTask(taskId, {
         verification_status: finalApproved ? "approved" : "rejected",
         quality_score: firstPassResult.score,
         verification_notes: combinedNotes,
+        quality_explanation: finalExplanation ?? null,
       });
 
       return finalResult;
@@ -232,15 +258,25 @@ export class Verifier {
       approved: firstPassResult.approved,
       score: firstPassResult.score,
       agent: task.agent_name,
+      ...(firstPassResult.explanation && { explanation: firstPassResult.explanation }),
     });
+
+    // Enrich revision with explanation so agents understand the low score.
+    const enrichedRevision =
+      !firstPassResult.approved &&
+      firstPassResult.revision &&
+      firstPassResult.explanation
+        ? `${firstPassResult.explanation}\n\n${firstPassResult.revision}`
+        : firstPassResult.revision;
 
     this.store.updateTask(taskId, {
       verification_status: firstPassResult.approved ? "approved" : "rejected",
       quality_score: firstPassResult.score,
       verification_notes: firstPassResult.notes,
+      quality_explanation: firstPassResult.explanation ?? null,
     });
 
-    return firstPassResult;
+    return { ...firstPassResult, revision: enrichedRevision };
   }
 
   /**
@@ -344,11 +380,16 @@ export class Verifier {
       .trim();
     try {
       const parsed = JSON.parse(cleaned);
+      const score = Math.min(Math.max(Number(parsed.score) || 0, 0), 1);
+      // Only surface explanation when score is genuinely sub-0.80
+      const explanation =
+        score < 0.80 && parsed.explanation ? String(parsed.explanation) : undefined;
       return {
         approved: Boolean(parsed.approved),
-        score: Math.min(Math.max(Number(parsed.score) || 0, 0), 1),
+        score,
         notes: String(parsed.notes ?? ""),
         revision: parsed.revision ? String(parsed.revision) : undefined,
+        explanation,
       };
     } catch {
       return {

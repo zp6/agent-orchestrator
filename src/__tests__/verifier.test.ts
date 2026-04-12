@@ -28,6 +28,28 @@ describe("Verifier parseResponse (via enforced shape)", () => {
     expect(result.notes).toBeTruthy();
   });
 
+  it("VerificationResult includes optional explanation field for sub-0.80 scores", () => {
+    const result: VerificationResult = {
+      approved: false,
+      score: 0.68,
+      notes: "Incomplete implementation",
+      revision: "Please add the missing test coverage",
+      explanation:
+        "Scored 0.68: acceptance criterion #2 was not verifiable from the diff alone; no test coverage for the dedup path.",
+    };
+    expect(result.explanation).toBeDefined();
+    expect(result.explanation).toContain("0.68");
+  });
+
+  it("explanation is absent for scores >= 0.80", () => {
+    const result: VerificationResult = {
+      approved: true,
+      score: 0.85,
+      notes: "Good work overall",
+    };
+    expect(result.explanation).toBeUndefined();
+  });
+
   it("score is bounded to [0, 1]", () => {
     // Mirror the parseResponse clamping logic
     const clamp = (n: number) => Math.min(Math.max(n, 0), 1);
@@ -166,6 +188,58 @@ describe("Second-pass result merging logic", () => {
     }
 
     expect(notifyOperatorMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("Explanation narrative for sub-0.80 scores", () => {
+  it("explanation is only populated when score < 0.80", () => {
+    // Mirror the parseResponse logic
+    const attachExplanation = (score: number, raw?: string): string | undefined =>
+      score < 0.80 && raw ? raw : undefined;
+
+    expect(attachExplanation(0.79, "Some explanation")).toBeDefined();
+    expect(attachExplanation(0.68, "Low score reason")).toBe("Low score reason");
+    expect(attachExplanation(0.80, "Should be omitted")).toBeUndefined();
+    expect(attachExplanation(0.95, "High score")).toBeUndefined();
+  });
+
+  it("revision is enriched with explanation when both are present", () => {
+    const explanation = "Scored 0.72: criterion #2 unverifiable from diff.";
+    const revision = "Add test coverage for the dedup path.";
+
+    const enrichedRevision = explanation ? `${explanation}\n\n${revision}` : revision;
+
+    expect(enrichedRevision).toContain("Scored 0.72");
+    expect(enrichedRevision).toContain("Add test coverage");
+    // Explanation appears BEFORE the revision guidance
+    expect(enrichedRevision.indexOf(explanation)).toBeLessThan(enrichedRevision.indexOf(revision));
+  });
+
+  it("revision is unchanged when no explanation is present", () => {
+    const explanation: string | undefined = undefined;
+    const revision = "Add test coverage for the dedup path.";
+
+    const enrichedRevision =
+      !explanation ? revision : `${explanation}\n\n${revision}`;
+
+    expect(enrichedRevision).toBe(revision);
+  });
+
+  it("borderline second-pass prefers second-pass explanation over first", () => {
+    const firstExplanation = "First pass: gap in criterion #1.";
+    const secondExplanation = "Second pass: missing test for edge case.";
+
+    // Mirror the logic: secondPassResult.explanation ?? firstPassResult.explanation
+    const finalExplanation = secondExplanation ?? firstExplanation;
+    expect(finalExplanation).toBe(secondExplanation);
+  });
+
+  it("borderline fallback uses first-pass explanation when second pass omits one", () => {
+    const firstExplanation = "First pass: incomplete implementation.";
+    const secondExplanation: string | undefined = undefined;
+
+    const finalExplanation = secondExplanation ?? firstExplanation;
+    expect(finalExplanation).toBe(firstExplanation);
   });
 });
 
