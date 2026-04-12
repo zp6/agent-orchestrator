@@ -1662,6 +1662,22 @@ export class StateStore {
       .get(sourceRef) as Task | undefined;
   }
 
+  /**
+   * Find an active (in-flight) incident task for a given source_ref.
+   * Returns the most recent task that has not been completed or permanently failed.
+   * "Active" means: status is one of pending, planning, dispatched, in_progress, or escalated.
+   */
+  findActiveIncidentTask(sourceRef: string): Task | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE source_ref = ? AND parent_task_id IS NULL
+         AND status IN ('pending', 'planning', 'dispatched', 'in_progress', 'escalated')
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(sourceRef) as Task | undefined;
+  }
+
   /** Return all top-level tasks with a given status. */
   getTasksByStatus(status: string): Task[] {
     return this.db

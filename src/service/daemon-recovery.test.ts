@@ -35,8 +35,15 @@ const {
     recordCycleStart = vi.fn(() => 1);
     recordCycleEnd = vi.fn();
     close = vi.fn();
+    getTotalCycleCount = vi.fn(() => 0);
     findEscalatedTask = vi.fn((sourceRef: string) =>
       [...this.tasks.values()].find((task) => task.source_ref === sourceRef && task.status === "escalated"),
+    );
+    findActiveIncidentTask = vi.fn((sourceRef: string) =>
+      [...this.tasks.values()]
+        .filter((task) => task.source_ref === sourceRef &&
+          ["pending", "planning", "dispatched", "in_progress", "escalated"].includes(task.status))
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0],
     );
     createTask = vi.fn((task: {
       title: string;

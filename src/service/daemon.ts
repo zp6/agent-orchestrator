@@ -1589,8 +1589,9 @@ export class Daemon {
 
     // Create an escalated task so the dashboard surfaces the failure.
     // Use a stable source_ref so we can find and resolve it on recovery.
+    // Check if there's already an active incident task to prevent duplicate dispatches.
     const sourceRef = `health-check-fail:${agentName}`;
-    const existing = this.store.findEscalatedTask(sourceRef);
+    const existing = this.store.findActiveIncidentTask(sourceRef);
     if (!existing) {
       const port = this.config.agents[agentName]?.docker?.port;
       const portInfo = port ? `port ${port}` : "unknown port";
