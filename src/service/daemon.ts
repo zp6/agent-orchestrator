@@ -151,6 +151,18 @@ export const TIMEOUT_RETRY_DELAY_MS = 2 * 60 * 1000; // 2 minutes
 export const HEALTH_RECOVERY_CONFIRM_CYCLES = 3;
 
 /**
+ * Grace period (ms) after the first health check failure during which no
+ * incident task is dispatched.  Agents that self-recover within this window
+ * (e.g. normal container restart + initialisation) produce zero incident
+ * tasks.  Only when the agent remains unhealthy past this threshold is an
+ * escalation task created and a Telegram alert sent.
+ *
+ * Set to 5 minutes — long enough to cover the typical ~111 s Docker
+ * container startup window observed in production incidents.
+ */
+export const HEALTH_GRACE_PERIOD_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
  * Format a health-failure duration for console and Telegram output.
  * Seconds are used below a minute, minutes below an hour, and `h m` beyond.
  */
@@ -202,6 +214,13 @@ export class Daemon {
   private healthFailureStartTimes = new Map<string, number>();
   /** Tracks consecutive passing health checks for recovery debounce. */
   private healthRecoveryConfirmCycles = new Map<string, number>();
+  /**
+   * Tracks agents for which the grace period has expired and an escalation
+   * task + Telegram alert have been created.  Used to distinguish a silent
+   * self-recovery (no task was ever created) from a post-escalation recovery
+   * (task exists and should be auto-resolved).
+   */
+  private healthEscalatedAgents = new Set<string>();
 
   /** Tracks when the daily Slack digest was last sent (re-arms on new calendar day). */
   private digestState: DigestSchedulerState = { lastDigestDate: null };
@@ -1500,9 +1519,9 @@ export class Daemon {
     const duration = formatHealthDuration(durationMs);
 
     this.healthFailingAgents.delete(agentName);
-    this.healthFailureCycles.delete(agentName);
     this.healthFailureStartTimes.delete(agentName);
     this.healthRecoveryConfirmCycles.delete(agentName);
+    this.healthEscalatedAgents.delete(agentName);
     // Clear rate-limit so the recovery notification fires immediately even if a
     // failure alert was sent recently.
     clearNotifyRateLimit(`health-fail:${agentName}`);
@@ -1529,60 +1548,90 @@ export class Daemon {
   }
 
   /**
-   * Called when an agent fails a health check.  Deduplicates alerts so only
-   * one Telegram notification fires per failure streak (not once per daemon
-   * cycle).  Also creates an escalated dashboard task on the first failure so
-   * the operator can see the issue without waiting for a Telegram message.
+   * Called when an agent recovers from a health-check failure that was still
+   * within the grace period — i.e. no escalation task was ever created and no
+   * Telegram alert was sent.  Silently clears all tracking state and logs the
+   * event for observability.  No operator notification is needed because the
+   * operator was never notified of the failure in the first place.
+   */
+  private onHealthCheckSilentRecovery(agentName: string): void {
+    const failureStartedAt = this.healthFailureStartTimes.get(agentName);
+    const durationMs = failureStartedAt !== undefined ? Date.now() - failureStartedAt : 0;
+    const duration = formatHealthDuration(durationMs);
+
+    this.healthFailingAgents.delete(agentName);
+    this.healthFailureStartTimes.delete(agentName);
+    this.healthRecoveryConfirmCycles.delete(agentName);
+    clearNotifyRateLimit(`health-fail:${agentName}`);
+    clearNotifyRateLimit(`health-recovery:${agentName}`);
+    this.log.info(
+      "Agent self-recovered within grace period — no incident task dispatched",
+      { agentName, durationMs, duration },
+    );
+    console.log(
+      `  ${agentName}: ✅ self-recovered in ${duration} (within ${formatHealthDuration(HEALTH_GRACE_PERIOD_MS)} grace period — no incident created)`,
+    );
+  }
+
+  /**
+   * Called when an agent fails a health check.  Starts a grace-period timer on
+   * the first failure; only escalates (Telegram + dashboard task) if the agent
+   * remains unhealthy past HEALTH_GRACE_PERIOD_MS.  Agents that self-recover
+   * within the window produce zero incident tasks.
    *
    * The escalated task description embeds a structured incident response
    * playbook so the dispatched agent runs concrete diagnostics rather than
    * returning a canned "recovered" string.
    */
-  /** Number of consecutive health-check-failing cycles before escalating.
-   *  Most post-deploy failures resolve within 1-2 cycles (~5-10 min).
-   *  Escalating on first failure creates false-positive storms during merge waves. */
-  private static readonly HEALTH_ESCALATION_THRESHOLD = 3;
-
-  /** Track consecutive failure cycles per agent. */
-  private healthFailureCycles = new Map<string, number>();
-
   private onHealthCheckFailed(agentName: string, detail: string): void {
     this.healthRecoveryConfirmCycles.set(agentName, 0);
     clearNotifyRateLimit(`health-recovery:${agentName}`);
 
-    // Increment consecutive failure count
-    const failCount = (this.healthFailureCycles.get(agentName) ?? 0) + 1;
-    this.healthFailureCycles.set(agentName, failCount);
-
-    if (this.healthFailingAgents.has(agentName)) {
-      // Already tracking this failure — check if we should escalate now
-      if (failCount === Daemon.HEALTH_ESCALATION_THRESHOLD) {
-        this.log.warn("Health check failure persisted — escalating now", {
-          agentName,
-          consecutiveFailures: failCount,
-        });
-        // Fall through to create the escalation task below
-      } else {
-        return; // Not yet at threshold — wait another cycle
-      }
-    } else if (failCount < Daemon.HEALTH_ESCALATION_THRESHOLD) {
-      // First failure or below threshold — track but don't escalate yet
+    if (!this.healthFailingAgents.has(agentName)) {
+      // First observed failure — start the grace-period clock but do NOT
+      // escalate yet.  The agent may self-recover within the grace window
+      // (e.g. container restart + normal initialisation).
       this.healthFailingAgents.add(agentName);
       this.healthFailureStartTimes.set(agentName, Date.now());
-      this.log.info("Health check failed — tracking, will escalate after consecutive failures", {
+      this.log.info(
+        "Health check failed — grace period started, escalation suppressed until threshold",
+        {
+          agentName,
+          gracePeriodMs: HEALTH_GRACE_PERIOD_MS,
+        },
+      );
+      return;
+    }
+
+    // Already tracking — check whether we are still inside the grace window.
+    const startedAt = this.healthFailureStartTimes.get(agentName) ?? Date.now();
+    const elapsedMs = Date.now() - startedAt;
+    if (elapsedMs < HEALTH_GRACE_PERIOD_MS) {
+      this.log.info("Health check still failing within grace period — awaiting self-recovery", {
         agentName,
-        failCount,
-        threshold: Daemon.HEALTH_ESCALATION_THRESHOLD,
+        elapsedMs,
+        gracePeriodMs: HEALTH_GRACE_PERIOD_MS,
+        remainingMs: HEALTH_GRACE_PERIOD_MS - elapsedMs,
       });
       return;
-    } else {
-      this.healthFailingAgents.add(agentName);
-      this.healthFailureStartTimes.set(agentName, Date.now());
     }
+
+    // Grace period expired and agent is still unhealthy.
+    // Guard against re-escalating on every subsequent cycle.
+    if (this.healthEscalatedAgents.has(agentName)) {
+      return; // Escalation already created — nothing more to do here.
+    }
+    this.healthEscalatedAgents.add(agentName);
+
+    this.log.warn("Health check failure persisted past grace period — escalating now", {
+      agentName,
+      elapsedMs,
+      gracePeriodMs: HEALTH_GRACE_PERIOD_MS,
+    });
 
     notifyOperator(
       `Health check failed: ${agentName}`,
-      `Agent ${agentName} failed health check for ${failCount} consecutive cycle(s). Detail: ${detail}`,
+      `Agent ${agentName} has been unhealthy for ${formatHealthDuration(elapsedMs)} (grace period expired). Detail: ${detail}`,
       "critical",
       `health-fail:${agentName}`,
     ).catch(() => {});
@@ -1667,8 +1716,14 @@ until fixed. File a GitHub issue if one doesn't already exist.
   /**
    * Confirm recovery for agents currently tracked as failing health checks.
    * Each passing health check increments a debounce counter; any failure resets
-   * the counter. Once the agent passes `HEALTH_RECOVERY_CONFIRM_CYCLES`
-   * consecutive checks, the incident is closed and Telegram is notified.
+   * the counter.  Once the agent passes `HEALTH_RECOVERY_CONFIRM_CYCLES`
+   * consecutive checks the incident is considered closed.
+   *
+   * Two distinct paths:
+   *  - Recovered within grace period (no escalation was fired): call
+   *    `onHealthCheckSilentRecovery` — no operator notification needed.
+   *  - Recovered after escalation: call `onHealthCheckRecovered` — sends
+   *    Telegram recovery alert and auto-resolves the dashboard task.
    */
   private async checkHealthRecoveries(): Promise<void> {
     if (this.healthFailingAgents.size === 0) return;
@@ -1683,7 +1738,13 @@ until fixed. File a GitHub issue if one doesn't already exist.
       const passes = (this.healthRecoveryConfirmCycles.get(agentName) ?? 0) + 1;
       this.healthRecoveryConfirmCycles.set(agentName, passes);
       if (passes >= HEALTH_RECOVERY_CONFIRM_CYCLES) {
-        this.onHealthCheckRecovered(agentName);
+        if (this.healthEscalatedAgents.has(agentName)) {
+          // Escalation was created — send recovery notification and auto-resolve task.
+          this.onHealthCheckRecovered(agentName);
+        } else {
+          // Still within grace period — self-healed with no incident created.
+          this.onHealthCheckSilentRecovery(agentName);
+        }
       }
     }
   }
@@ -1709,9 +1770,14 @@ until fixed. File a GitHub issue if one doesn't already exist.
       for (const r of results) {
         if (r.action === "redeployed") {
           console.log(`  ${r.agentName}: redeployed`);
-          // If this agent was previously failing health checks, fire a recovery notification.
+          // If this agent was previously failing health checks, recover it.
+          // Use silent recovery if the grace period hadn't expired (no escalation created).
           if (this.healthFailingAgents.has(r.agentName)) {
-            this.onHealthCheckRecovered(r.agentName);
+            if (this.healthEscalatedAgents.has(r.agentName)) {
+              this.onHealthCheckRecovered(r.agentName);
+            } else {
+              this.onHealthCheckSilentRecovery(r.agentName);
+            }
           }
         } else if (r.action === "health-check-failed") {
           console.error(`  ${r.agentName}: ⚠ deployed but health check failed — agent may be broken. ${r.detail}`);
@@ -1759,9 +1825,14 @@ until fixed. File a GitHub issue if one doesn't already exist.
             result.detail ?? "Container restarted but agent did not respond to health check",
           );
         } else if (result.action === "redeployed") {
-          // If the agent was previously failing health checks, fire a recovery notification.
+          // If the agent was previously failing health checks, recover it.
+          // Use silent recovery if the grace period hadn't expired (no escalation created).
           if (this.healthFailingAgents.has(name)) {
-            this.onHealthCheckRecovered(name);
+            if (this.healthEscalatedAgents.has(name)) {
+              this.onHealthCheckRecovered(name);
+            } else {
+              this.onHealthCheckSilentRecovery(name);
+            }
           }
         }
       } catch (err) {
