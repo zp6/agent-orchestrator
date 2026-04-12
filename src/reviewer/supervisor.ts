@@ -47,6 +47,17 @@ export interface PRConfidenceProvider {
   getRecentPRReviewConfidences(limit: number): PRConfidenceRecord[];
 }
 
+/**
+ * Minimal interface for providing quality SLA breach information.
+ * Satisfied by `StateStore.getAgentSLABreaches()` or any stub in tests.
+ *
+ * Injected into the Supervisor so it can surface quality regression alerts
+ * in its context without requiring new methods on the shared `IStateStore`.
+ */
+export interface QualitySLAProvider {
+  getAgentSLABreaches(): Array<{ agent_name: string; avg_score: number; threshold_min: number }>;
+}
+
 export type { RoutingAccuracyProvider };
 export type { CalibrationDriftProvider };
 
@@ -133,6 +144,12 @@ CALIBRATION DRIFT (when "## Calibration Drift Alerts" is present):
 - Downward drift (▼) may indicate score deflation or genuinely degraded agent quality
 - For drifting agents: consider creating an issue to investigate the root cause before dispatching more high-stakes tasks to them
 - Do NOT dispatch new work to an agent with active drift alerts until the cause is understood
+
+QUALITY SLA BREACHES (when "## Quality SLA Breaches" is present):
+- This section shows agents whose rolling-average quality score has dropped below their configured SLA threshold
+- Each entry shows: agent name, current average quality score, and the SLA floor
+- Do NOT dispatch new work to a breaching agent without first creating an issue to investigate why their quality regressed
+- The breach indicates real performance degradation, not random variance — prioritize root-cause analysis
 
 Be specific and actionable. Only suggest actions that address real gaps. Return [] if everything is on track.`;
 
@@ -464,6 +481,7 @@ export class Supervisor {
   private prConfidenceProvider?: PRConfidenceProvider;
   private routingAccuracyProvider?: RoutingAccuracyProvider;
   private calibrationDriftProvider?: CalibrationDriftProvider;
+  private qualitySLAProvider?: QualitySLAProvider;
   private notifier = createNotifier();
 
   constructor(
@@ -474,12 +492,14 @@ export class Supervisor {
       prConfidenceProvider?: PRConfidenceProvider;
       routingAccuracyProvider?: RoutingAccuracyProvider;
       calibrationDriftProvider?: CalibrationDriftProvider;
+      qualitySLAProvider?: QualitySLAProvider;
     } = {},
   ) {
     this.conflictStatsProvider = opts.conflictStatsProvider;
     this.prConfidenceProvider = opts.prConfidenceProvider;
     this.routingAccuracyProvider = opts.routingAccuracyProvider;
     this.calibrationDriftProvider = opts.calibrationDriftProvider;
+    this.qualitySLAProvider = opts.qualitySLAProvider;
   }
 
   async review(): Promise<SupervisorDecision[]> {
@@ -844,6 +864,18 @@ export class Supervisor {
       if (activeAlerts.length > 0) {
         const alertLines = activeAlerts.flatMap((a) => formatDriftAlertLine(a));
         sections.push(`## Calibration Drift Alerts\n${alertLines.join("\n")}`);
+      }
+    }
+
+    // Quality SLA breaches (from QualitySLAProvider)
+    if (this.qualitySLAProvider) {
+      const breaches = this.qualitySLAProvider.getAgentSLABreaches();
+      if (breaches.length > 0) {
+        const breachLines = breaches.map(
+          (b) =>
+            `- ${b.agent_name}: avg ${b.avg_score.toFixed(2)} (below threshold ${b.threshold_min.toFixed(2)})`,
+        );
+        sections.push(`## Quality SLA Breaches\n${breachLines.join("\n")}`);
       }
     }
 

@@ -26,6 +26,7 @@ import type {
   AgentScoreDistribution,
   ScoreDistributionBucket,
   CalibrationDriftAlert,
+  AgentSLAThreshold,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -887,5 +888,71 @@ export class StateStore implements ITelegramStateStore {
       .prepare("UPDATE tasks SET priority = 100, updated_at = datetime('now') WHERE title LIKE ?")
       .run(`%${titleOrId}%`);
     return byTitle.changes > 0;
+  }
+
+  // ── Quality SLA Thresholds ────────────────────────────────────────────────
+
+  getSLAThresholds(): AgentSLAThreshold[] {
+    const json = this.getSystemFlag("quality_sla_thresholds");
+    if (!json) return [];
+    try {
+      const parsed = JSON.parse(json);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  setSLAThreshold(agentName: string, minAvgScore: number, windowTasks: number): void {
+    const thresholds = this.getSLAThresholds();
+    // Remove any existing threshold for this agent, then add the new one
+    const filtered = thresholds.filter((t) => t.agent_name !== agentName);
+    const updated = [...filtered, { agent_name: agentName, min_avg_score: minAvgScore, window_tasks: windowTasks }];
+    this.setSystemFlag("quality_sla_thresholds", JSON.stringify(updated));
+  }
+
+  /**
+   * Get recent verified quality scores for an agent (for SLA breach detection).
+   * Internal helper — not exposed on ITelegramStateStore interface.
+   */
+  private getRecentAgentQualityScores(agentName: string, limit: number): number[] {
+    const rows = this.db
+      .prepare(
+        `SELECT quality_score FROM tasks
+         WHERE agent_name = ? AND quality_score IS NOT NULL
+         ORDER BY updated_at DESC
+         LIMIT ?`,
+      )
+      .all(agentName, limit) as { quality_score: number }[];
+    // Return newest-first (from query) but we may want reverse for avg calculation
+    return rows.map((r) => r.quality_score);
+  }
+
+  /**
+   * Check if an agent's rolling average quality score is below its SLA threshold.
+   * Returns true if breached, false if healthy or no threshold configured.
+   * Internal helper — not exposed on interface.
+   */
+  private checkAgentSLABreach(threshold: AgentSLAThreshold): boolean {
+    const scores = this.getRecentAgentQualityScores(threshold.agent_name, threshold.window_tasks);
+    if (scores.length === 0) return false; // No data, no breach
+    const avg = scores.reduce((sum, s) => sum + s, 0) / scores.length;
+    return avg < threshold.min_avg_score;
+  }
+
+  /**
+   * Get all agents currently in SLA breach (below their configured threshold).
+   * Used by supervisor and Telegram commands for alerting/context.
+   * Internal helper — not exposed on interface.
+   */
+  getAgentSLABreaches(): Array<{ agent_name: string; avg_score: number; threshold_min: number }> {
+    const thresholds = this.getSLAThresholds();
+    return thresholds
+      .filter((t) => this.checkAgentSLABreach(t))
+      .map((t) => {
+        const scores = this.getRecentAgentQualityScores(t.agent_name, t.window_tasks);
+        const avg = scores.length > 0 ? scores.reduce((sum, s) => sum + s, 0) / scores.length : 0;
+        return { agent_name: t.agent_name, avg_score: avg, threshold_min: t.min_avg_score };
+      });
   }
 }

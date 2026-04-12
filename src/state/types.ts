@@ -299,6 +299,16 @@ export interface AgentQualityByTaskType {
   by_task_type: AgentTaskTypeQuality[];
 }
 
+/** Operator-configured quality SLA threshold for one agent. */
+export interface AgentSLAThreshold {
+  /** Agent identifier (e.g., "claude-orchestrator-reviewer") */
+  agent_name: string;
+  /** Minimum average quality score (0–1) for rolling window. Breach alert fires when avg drops below this. */
+  min_avg_score: number;
+  /** Number of most-recent verified tasks to include in rolling window. */
+  window_tasks: number;
+}
+
 /**
  * Core StateStore interface consumed by reviewer modules.
  *
@@ -396,4 +406,10 @@ export interface ITelegramStateStore extends IStateStore {
   // Task prioritization from Telegram /prioritize command
   /** Bump priority of the first task whose id starts with or title contains `titleOrId`. Returns true if a row was updated. */
   prioritizeTask(titleOrId: string): boolean;
+
+  // Quality SLA thresholds (operator-configured, for monitoring quality regression)
+  /** Retrieve all configured SLA thresholds for all agents. */
+  getSLAThresholds(): AgentSLAThreshold[];
+  /** Set or update an SLA threshold for one agent. */
+  setSLAThreshold(agentName: string, minAvgScore: number, windowTasks: number): void;
 }

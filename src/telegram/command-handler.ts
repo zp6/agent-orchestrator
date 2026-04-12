@@ -14,6 +14,7 @@
  *   /logs [n]    → last N supervisor decisions (default 10), newest first
  *   /supervisor [n]  → last N supervisor decisions with full detail (default 10)
  *   /agents      → per-agent stats: total/done/failed/avg quality score
+ *   /sla [status|set|clear] → configure and monitor quality SLA thresholds
  *   /verification-calibration [days] → score histograms, low-conf approvals, and drift alerts
  *   /calibration [days]  → alias for /verification-calibration
  *
@@ -69,6 +70,7 @@ type CommandName =
   | "supervisor"
   | "agents"
   | "s"
+  | "sla"
   | "verification-calibration"
   | "calibration";
 
@@ -89,6 +91,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "supervisor",
   "agents",
   "s",
+  "sla",
   "verification-calibration",
   "calibration",
 ]);
@@ -276,6 +279,9 @@ async function executeCommand(
       const report = provider.buildReport({ windowDays });
       return provider.formatDistributionPage(report);
     }
+
+    case "sla":
+      return handleSLA(store, cmd.args);
   }
 }
 
@@ -734,6 +740,100 @@ function handleWeeklySummary(
   }
 
   return lines.join("\n");
+}
+
+function handleSLA(store: ITelegramStateStore, args: string[]): string {
+  const subcommand = args[0]?.toLowerCase().trim() || "status";
+
+  if (subcommand === "status" || subcommand === "") {
+    const thresholds = store.getSLAThresholds();
+    if (thresholds.length === 0) {
+      return [
+        `🎯 *Quality SLA Thresholds*`,
+        ``,
+        `No SLA thresholds configured.`,
+        ``,
+        `Usage:`,
+        `  \`/sla set <agent> <min-score> <window>\` — configure threshold`,
+        `  \`/sla set claude-agent 0.75 5\` — alerts if agent's last 5 tasks avg < 0.75`,
+        `  \`/sla clear <agent>\` — remove threshold`,
+      ].join("\n");
+    }
+
+    // Check for breaches
+    const breaches = (store as any).getAgentSLABreaches?.() ?? [];
+    const lines: string[] = [
+      `🎯 *Quality SLA Thresholds*`,
+      ``,
+      `*Configured:*`,
+    ];
+
+    for (const t of thresholds) {
+      const isBreach = breaches.some((b: any) => b.agent_name === t.agent_name);
+      const icon = isBreach ? `⚠️ ` : `✅ `;
+      lines.push(`${icon}\`${t.agent_name}\`: min avg ${t.min_avg_score.toFixed(2)} over last ${t.window_tasks} tasks`);
+    }
+
+    if (breaches.length > 0) {
+      lines.push(``, `*Current Breaches:*`);
+      for (const b of breaches) {
+        lines.push(`  🚨 \`${b.agent_name}\`: avg ${b.avg_score.toFixed(2)} < ${b.threshold_min.toFixed(2)}`);
+      }
+    } else {
+      lines.push(``, `✨ All agents within SLA.`);
+    }
+
+    return lines.join("\n");
+  }
+
+  if (subcommand === "set") {
+    const agentName = args[1]?.trim();
+    const minScoreStr = args[2]?.trim();
+    const windowStr = args[3]?.trim();
+
+    if (!agentName || !minScoreStr || !windowStr) {
+      return `⚠️ Usage: \`/sla set <agent> <min-score> <window>\`\nExample: \`/sla set my-agent 0.75 5\``;
+    }
+
+    const minScore = parseFloat(minScoreStr);
+    const window = parseInt(windowStr, 10);
+
+    if (Number.isNaN(minScore) || minScore < 0 || minScore > 1) {
+      return `❌ min-score must be 0.0–1.0, got \`${minScoreStr}\``;
+    }
+    if (Number.isNaN(window) || window < 1 || window > 100) {
+      return `❌ window must be 1–100 tasks, got \`${windowStr}\``;
+    }
+
+    store.setSLAThreshold(agentName, minScore, window);
+    return [
+      `✅ *SLA threshold set*`,
+      ``,
+      `Agent: \`${agentName}\``,
+      `Threshold: avg quality ≥ ${minScore.toFixed(2)} over last ${window} tasks`,
+      ``,
+      `Breach alerts will fire in the next supervisor cycle if this threshold is violated.`,
+    ].join("\n");
+  }
+
+  if (subcommand === "clear") {
+    const agentName = args[1]?.trim();
+    if (!agentName) {
+      return `⚠️ Usage: \`/sla clear <agent>\``;
+    }
+
+    const thresholds = store.getSLAThresholds();
+    const filtered = thresholds.filter((t) => t.agent_name !== agentName);
+    if (filtered.length === thresholds.length) {
+      return `❌ No SLA threshold found for \`${agentName}\``;
+    }
+
+    // Re-save without this agent's threshold
+    store.setSystemFlag("quality_sla_thresholds", JSON.stringify(filtered));
+    return `✅ *SLA threshold cleared* for \`${agentName}\`.`;
+  }
+
+  return `❌ Unknown SLA subcommand. Use \`/sla\`, \`/sla set <agent> <score> <window>\`, or \`/sla clear <agent>\`.`;
 }
 
 // ── TelegramCommandHandler class ──────────────────────────────────────────
