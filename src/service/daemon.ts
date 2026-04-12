@@ -35,6 +35,7 @@ import { maybeRunDailySecurityScan, type SecurityScanState } from "../orchestrat
 import { runTeamMeeting } from "../orchestrator/team-meeting.js";
 import { seedFromClaudeMd } from "../orchestrator/learned-rules.js";
 import { checkAgedIssues } from "../orchestrator/issue-age-monitor.js";
+import { runProactiveScan } from "../orchestrator/proactive-scanner.js";
 import {
   type GateResult,
   detectImprovements,
@@ -482,7 +483,17 @@ export class Daemon {
         await this.triageBacklogs(time);
       }
 
-      // 9. Daily Slack digest — posts once per day at the configured wall-clock time
+      // 9. Proactive issue discovery (~every 4h) — scan for CI failures, stale branches
+      if (this.cycleCount % BACKLOG_TRIAGE_EVERY_N_CYCLES === 0) {
+        try {
+          const filed = runProactiveScan(this.config, this.store);
+          if (filed > 0) console.log(`[${time}] Proactive scan: filed ${filed} issue(s)`);
+        } catch (err) {
+          this.log.warn("Proactive scan failed", { error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
+      // 10. Daily Slack digest — posts once per day at the configured wall-clock time
       await maybePostDailyDigest(this.digestState, this.store, this.config);
 
       // 10. Daily security scan — checks agent repos for plaintext secrets (issue #544)
