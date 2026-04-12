@@ -33,6 +33,7 @@ import { startTelegramPolling, stopTelegramPolling, pollTelegram } from "./teleg
 import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.js";
 import { maybeRunDailySecurityScan, type SecurityScanState } from "../orchestrator/security-scanner.js";
 import { runTeamMeeting } from "../orchestrator/team-meeting.js";
+import { seedFromClaudeMd } from "../orchestrator/learned-rules.js";
 import {
   type GateResult,
   detectImprovements,
@@ -310,6 +311,14 @@ export class Daemon {
     // for agents whose tokens have already propagated, instead of waiting 10
     // cycles (~5 min) for the periodic check.
     await this.checkAuthRecovery();
+
+    // Seed learned rules from CLAUDE.md files (idempotent — skips existing rules)
+    try {
+      const { seeded, repos } = await seedFromClaudeMd(this.config, this.store);
+      if (seeded > 0) console.log(`Seeded ${seeded} learned rules from ${repos.length} repo(s)`);
+    } catch (err) {
+      this.log.warn("Failed to seed learned rules from CLAUDE.md", { error: err instanceof Error ? err.message : String(err) });
+    }
 
     // Start independent Telegram polling (3s interval, doesn't block cycles)
     startTelegramPolling({ config: this.config, store: this.store, dispatcher: this.dispatcher });
