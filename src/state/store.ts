@@ -725,6 +725,64 @@ export interface RoutingAccuracyStat {
 }
 
 /**
+ * A single cell in the routing accuracy drill-down matrix.
+ * One row per (task_type × agent_chosen) combination.
+ */
+export interface RoutingDrillDownRow {
+  task_type: string;
+  agent_name: string;
+  total_routed: number;
+  scored: number;
+  avg_quality_score: number | null;
+  /** Mean routing confidence for this cell (null when all were explicit). */
+  avg_confidence: number | null;
+  /** Number of decisions made by the deterministic (rules-based) router. */
+  det_count: number;
+  /** Number of decisions made by the LLM fallback router. */
+  llm_count: number;
+  /** Number of decisions made via explicit (--agent flag) override. */
+  exp_count: number;
+  /**
+   * The agent with the highest avg_quality_score for this task_type
+   * (across the same time window).  Null when there is only one agent.
+   */
+  best_agent_for_type: string | null;
+  /** Average quality score of the best agent for this task_type. */
+  best_agent_avg_score: number | null;
+  /**
+   * best_agent_avg_score − avg_quality_score.
+   * Positive → another agent outperforms this one on this task type.
+   * Null when avg_quality_score or best_agent_avg_score is null.
+   */
+  score_gap: number | null;
+  /**
+   * True when score_gap ≥ MISROUTING_GAP_THRESHOLD (0.10) AND this agent
+   * is NOT the best agent for the type — i.e. the router keeps picking a
+   * sub-optimal agent when a better one is available.
+   */
+  misrouted: boolean;
+}
+
+/**
+ * Full drill-down report returned by getRoutingAccuracyDrillDown().
+ */
+export interface RoutingAccuracyDrillDown {
+  /** Number of calendar days in the look-back window. */
+  days: number;
+  /**
+   * All (task_type × agent) cells with at least one routed task in the
+   * window, sorted by task_type then score ascending (worst first within
+   * each type so the most misrouted rows appear at the top).
+   */
+  rows: RoutingDrillDownRow[];
+  /**
+   * Task types where at least one agent is misrouted.
+   * Pre-computed for quick summary display.
+   */
+  misrouted_task_types: string[];
+}
+
+/**
  * Per-agent health record for pool failover routing.
  * Tracks consecutive dispatch failures so the dispatcher can route around
  * unhealthy pool instances without waiting for the supervisor to intervene.
@@ -4728,5 +4786,111 @@ export class StateStore {
          LIMIT ?`,
       )
       .all(agentName, limit) as RoutingOutcome[];
+  }
+
+  // ── Routing accuracy drill-down ───────────────────────────────────────────
+
+  /**
+   * Minimum quality-score gap between the best and current agent for a task
+   * type that counts as a "misrouting" signal.
+   */
+  static readonly MISROUTING_GAP_THRESHOLD = 0.10;
+
+  /**
+   * Return a per-(task_type × agent) drill-down matrix for the last `days` days.
+   *
+   * For each (task_type, agent_chosen) cell the method computes:
+   *   - aggregate quality score and routing confidence
+   *   - route-method breakdown (deterministic / llm / explicit)
+   *   - the best-performing agent for the same task type in the window
+   *   - the score gap vs that best agent, and a `misrouted` flag
+   *
+   * Only cells with a least one scored task contribute a non-null
+   * avg_quality_score; unscored cells are included so callers can see
+   * recently-dispatched task types even before verification finishes.
+   */
+  getRoutingAccuracyDrillDown(days = 30): RoutingAccuracyDrillDown {
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+
+    // Raw aggregates per (task_type, agent_chosen) cell.
+    interface RawCell {
+      task_type: string;
+      agent_name: string;
+      total_routed: number;
+      scored: number;
+      avg_quality_score: number | null;
+      avg_confidence: number | null;
+      det_count: number;
+      llm_count: number;
+      exp_count: number;
+    }
+
+    const rawRows = this.db
+      .prepare(
+        `SELECT
+           task_type,
+           agent_chosen                                              AS agent_name,
+           COUNT(*)                                                  AS total_routed,
+           COUNT(quality_score)                                      AS scored,
+           AVG(quality_score)                                        AS avg_quality_score,
+           AVG(route_confidence)                                     AS avg_confidence,
+           SUM(CASE WHEN route_method = 'deterministic' THEN 1 ELSE 0 END) AS det_count,
+           SUM(CASE WHEN route_method = 'llm'           THEN 1 ELSE 0 END) AS llm_count,
+           SUM(CASE WHEN route_method = 'explicit'      THEN 1 ELSE 0 END) AS exp_count
+         FROM routing_outcomes
+         WHERE routed_at >= ?
+         GROUP BY task_type, agent_chosen
+         ORDER BY task_type, avg_quality_score DESC`,
+      )
+      .all(cutoff) as RawCell[];
+
+    if (rawRows.length === 0) {
+      return { days, rows: [], misrouted_task_types: [] };
+    }
+
+    // Build a map: task_type → best-scoring agent (name + score).
+    // "Best" = highest avg_quality_score among cells that have scored tasks.
+    const bestByType = new Map<string, { agent: string; score: number }>();
+    for (const row of rawRows) {
+      if (row.avg_quality_score === null) continue;
+      const existing = bestByType.get(row.task_type);
+      if (!existing || row.avg_quality_score > existing.score) {
+        bestByType.set(row.task_type, { agent: row.agent_name, score: row.avg_quality_score });
+      }
+    }
+
+    const threshold = StateStore.MISROUTING_GAP_THRESHOLD;
+
+    const rows: RoutingDrillDownRow[] = rawRows.map((r) => {
+      const best = bestByType.get(r.task_type) ?? null;
+      const isBest = best?.agent === r.agent_name;
+      const scoreGap =
+        best !== null && r.avg_quality_score !== null && !isBest
+          ? best.score - r.avg_quality_score
+          : null;
+      const misrouted = scoreGap !== null && scoreGap >= threshold;
+
+      return {
+        task_type:            r.task_type,
+        agent_name:           r.agent_name,
+        total_routed:         r.total_routed,
+        scored:               r.scored,
+        avg_quality_score:    r.avg_quality_score,
+        avg_confidence:       r.avg_confidence,
+        det_count:            r.det_count,
+        llm_count:            r.llm_count,
+        exp_count:            r.exp_count,
+        best_agent_for_type:  isBest ? null : (best?.agent ?? null),
+        best_agent_avg_score: isBest ? null : (best?.score ?? null),
+        score_gap:            scoreGap,
+        misrouted,
+      };
+    });
+
+    const misrouted_task_types = [...new Set(
+      rows.filter((r) => r.misrouted).map((r) => r.task_type),
+    )];
+
+    return { days, rows, misrouted_task_types };
   }
 }

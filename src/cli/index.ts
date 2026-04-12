@@ -31,6 +31,7 @@ import { registerBorrowCommand } from "./commands/borrow.js";
 import { registerFleetCommand } from "./commands/fleet.js";
 import { registerLearnedRulesCommand } from "./commands/learned-rules.js";
 import { registerAuditInfraCommand } from "./commands/audit-infra.js";
+import { registerRoutingAccuracyCommand } from "./commands/routing-accuracy.js";
 
 const program = new Command();
 
@@ -71,5 +72,6 @@ registerBorrowCommand(program);
 registerFleetCommand(program);
 registerLearnedRulesCommand(program);
 registerAuditInfraCommand(program);
+registerRoutingAccuracyCommand(program);
 
 program.parse();
