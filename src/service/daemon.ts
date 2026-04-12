@@ -36,6 +36,7 @@ import { runTeamMeeting } from "../orchestrator/team-meeting.js";
 import { seedFromClaudeMd } from "../orchestrator/learned-rules.js";
 import { checkAgedIssues } from "../orchestrator/issue-age-monitor.js";
 import { runProactiveScan } from "../orchestrator/proactive-scanner.js";
+import { validateMergedPR } from "../orchestrator/staging-validator.js";
 import {
   type GateResult,
   detectImprovements,
@@ -1831,7 +1832,35 @@ export class Daemon {
       const queue = this.prReviewer.getMergeQueue();
       if (queue.length === 0) return;
       console.log(`[${time}] Merge queue: ${queue.length} PR(s) pending — processing...`);
+
+      // Track what was in queue before processing
+      const prsBefore = queue.map((q) => ({ repo: q.repo, prNumber: q.pr_number }));
+
       await this.prReviewer.processMergeQueue();
+
+      // Post-merge validation: for each PR that was just merged, run tests
+      const queueAfter = this.prReviewer.getMergeQueue();
+      const afterNumbers = new Set(queueAfter.map((q) => `${q.repo}#${q.pr_number}`));
+      const justMerged = prsBefore.filter((p) => !afterNumbers.has(`${p.repo}#${p.prNumber}`));
+
+      for (const pr of justMerged) {
+        try {
+          const sha = execSync(
+            `gh api repos/${pr.repo}/commits/main --jq .sha`,
+            { encoding: "utf-8", timeout: 10000 },
+          ).trim();
+          const result = await validateMergedPR(this.config, this.store, pr.repo, pr.prNumber, sha);
+          if (!result.passed) {
+            console.log(`[${time}] ⚠ Post-merge validation FAILED for ${pr.repo}#${pr.prNumber}`);
+          }
+        } catch (err) {
+          this.log.warn("Post-merge validation skipped", {
+            repo: pr.repo,
+            prNumber: pr.prNumber,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
     } catch (err) {
       console.error(`[${time}] Merge queue processing failed: ${err instanceof Error ? err.message : err}`);
     }
