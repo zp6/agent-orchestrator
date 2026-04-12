@@ -55,6 +55,13 @@ export interface Task {
   next_retry_at: string | null;
   /** Number of revision attempts for this source_ref. Incremented each time a [revision] task is dispatched. */
   revision_count: number;
+  /**
+   * Groups tasks that belong to the same logical unit of work across repos.
+   * Defaults to the task's own ID. Cross-repo follow-up tasks inherit the
+   * originating task's lineage_group_id so operators can trace the full blast
+   * radius of a change.
+   */
+  lineage_group_id: string | null;
   reported: number;
   created_at: string;
   updated_at: string;
@@ -1087,6 +1094,7 @@ export class StateStore {
     this.runStigmergySignalsMigration();
     this.runSignalReadsMigration();
     this.runLearnedPatternsMigration();
+    this.runLineageMigration();
   }
 
   private runPhase2Migration(): void {
@@ -1167,12 +1175,31 @@ export class StateStore {
     task_type?: TaskType;
     parent_task_id?: string | null;
     step_id?: string | null;
+    lineage_group_id?: string | null;
   }): Task {
     const now = new Date().toISOString();
     const id = ulid();
+
+    // Resolve lineage_group_id:
+    // 1. Explicit value from caller (e.g. cross-repo follow-up inheriting lineage)
+    // 2. Inherit from parent task (sub-tasks share parent's lineage)
+    // 3. Check lineage_mappings table for pre-recorded cross-repo follow-up mappings
+    // 4. Default to own id (new top-level task starts its own lineage group)
+    let lineageGroupId = params.lineage_group_id ?? null;
+    if (!lineageGroupId && params.parent_task_id) {
+      const parent = this.getTask(params.parent_task_id);
+      lineageGroupId = parent?.lineage_group_id ?? params.parent_task_id;
+    }
+    if (!lineageGroupId && params.source_ref) {
+      lineageGroupId = this.lookupLineageGroup(params.source_ref) ?? null;
+    }
+    if (!lineageGroupId) {
+      lineageGroupId = id; // self-assign
+    }
+
     const stmt = this.db.prepare(`
-      INSERT INTO tasks (id, title, description, source, source_ref, status, agent_name, parent_task_id, step_id, task_type, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+      INSERT INTO tasks (id, title, description, source, source_ref, status, agent_name, parent_task_id, step_id, task_type, lineage_group_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       id,
@@ -1184,6 +1211,7 @@ export class StateStore {
       params.parent_task_id ?? null,
       params.step_id ?? null,
       params.task_type ?? "implementation",
+      lineageGroupId,
       now,
       now,
     );
@@ -5570,5 +5598,111 @@ export class StateStore {
     return this.db
       .prepare("SELECT * FROM learned_patterns WHERE id = ?")
       .get(id) as LearnedPattern | undefined;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cross-repo task lineage
+  // ---------------------------------------------------------------------------
+
+  private runLineageMigration(): void {
+    // 1. Add lineage_group_id column to tasks
+    const columns = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+    const colNames = new Set(columns.map((c) => c.name));
+    if (!colNames.has("lineage_group_id")) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN lineage_group_id TEXT");
+      // Back-fill: set lineage_group_id = id for all existing tasks that have
+      // no parent (top-level tasks get their own lineage group)
+      this.db.exec("UPDATE tasks SET lineage_group_id = id WHERE parent_task_id IS NULL AND lineage_group_id IS NULL");
+      // Sub-tasks inherit from parent
+      this.db.exec(`
+        UPDATE tasks SET lineage_group_id = (
+          SELECT COALESCE(p.lineage_group_id, p.id)
+          FROM tasks p WHERE p.id = tasks.parent_task_id
+        ) WHERE parent_task_id IS NOT NULL AND lineage_group_id IS NULL
+      `);
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_lineage_group ON tasks(lineage_group_id)");
+
+    // 2. Create lineage_mappings table: maps future source_refs to a lineage
+    //    group so that when trigger polling picks up a cross-repo follow-up
+    //    issue, the new task inherits the correct lineage_group_id.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS lineage_mappings (
+        source_ref        TEXT PRIMARY KEY,
+        lineage_group_id  TEXT NOT NULL,
+        parent_source_ref TEXT,
+        created_at        TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_lineage_mappings_group ON lineage_mappings(lineage_group_id);
+    `);
+  }
+
+  /**
+   * Record a lineage mapping so that when a cross-repo follow-up issue is
+   * later picked up by trigger polling, the resulting task inherits the
+   * originating task's lineage group.
+   */
+  recordLineageMapping(sourceRef: string, lineageGroupId: string, parentSourceRef?: string): void {
+    this.db.prepare(`
+      INSERT OR REPLACE INTO lineage_mappings (source_ref, lineage_group_id, parent_source_ref, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(sourceRef, lineageGroupId, parentSourceRef ?? null, new Date().toISOString());
+  }
+
+  /**
+   * Look up a pre-recorded lineage group for a source_ref.
+   * Returns the lineage_group_id if found, otherwise undefined.
+   */
+  lookupLineageGroup(sourceRef: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT lineage_group_id FROM lineage_mappings WHERE source_ref = ?")
+      .get(sourceRef) as { lineage_group_id: string } | undefined;
+    return row?.lineage_group_id;
+  }
+
+  /**
+   * Get all tasks belonging to the same lineage group, ordered by creation time.
+   */
+  getLineageGroup(lineageGroupId: string): Task[] {
+    return this.db
+      .prepare("SELECT * FROM tasks WHERE lineage_group_id = ? ORDER BY created_at ASC")
+      .all(lineageGroupId) as Task[];
+  }
+
+  /**
+   * Get distinct lineage groups that contain more than one task (i.e. actual
+   * cross-repo coordination). Returns summary info for each group.
+   */
+  getMultiTaskLineageGroups(limit = 50): Array<{
+    lineage_group_id: string;
+    task_count: number;
+    repos: string;
+    earliest: string;
+    latest: string;
+    root_title: string;
+  }> {
+    return this.db.prepare(`
+      SELECT
+        t.lineage_group_id,
+        COUNT(*)                                        AS task_count,
+        GROUP_CONCAT(DISTINCT SUBSTR(t.source_ref, 1, INSTR(t.source_ref || '#', '#') - 1)) AS repos,
+        MIN(t.created_at)                               AS earliest,
+        MAX(t.created_at)                               AS latest,
+        (SELECT t2.title FROM tasks t2 WHERE t2.id = t.lineage_group_id) AS root_title
+      FROM tasks t
+      WHERE t.lineage_group_id IS NOT NULL
+        AND t.parent_task_id IS NULL
+      GROUP BY t.lineage_group_id
+      HAVING COUNT(*) > 1
+      ORDER BY MAX(t.created_at) DESC
+      LIMIT ?
+    `).all(limit) as Array<{
+      lineage_group_id: string;
+      task_count: number;
+      repos: string;
+      earliest: string;
+      latest: string;
+      root_title: string;
+    }>;
   }
 }

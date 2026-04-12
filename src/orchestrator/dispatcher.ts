@@ -957,9 +957,21 @@ export class Dispatcher {
         );
         if (followUps.length > 0) {
           finalResult += formatFollowUpNote(followUps);
-          this.log.info("Cross-repo follow-ups created", {
+          // Record lineage mappings so that when trigger polling picks up the
+          // follow-up issues, the resulting tasks inherit this task's lineage group.
+          const lineageGroupId = completedTask.lineage_group_id ?? completedTask.id;
+          for (const followUp of followUps) {
+            const followUpSourceRef = `${followUp.repo}#${followUp.issueNumber}`;
+            this.store.recordLineageMapping(
+              followUpSourceRef,
+              lineageGroupId,
+              completedTask.source_ref ?? undefined,
+            );
+          }
+          this.log.info("Cross-repo follow-ups created with lineage tracking", {
             taskId: task.id,
             agentName,
+            lineageGroupId,
             followUps: followUps.map((f) => `${f.repo}#${f.issueNumber}`),
           });
         }
