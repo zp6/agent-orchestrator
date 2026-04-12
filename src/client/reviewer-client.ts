@@ -15,6 +15,7 @@ import { createLLMClient, getLLMModel } from "./llm-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { Task } from "../state/store.js";
 import { createLogger } from "../service/logger.js";
+import { extractJSON } from "../utils/json-extract.js";
 
 // ─── Shared types (re-exported so consumers don't need to reach into modules) ───
 
@@ -426,98 +427,52 @@ export class ReviewerClient {
   // ─── Response parsers ──────────────────────────────────────────────────────
 
   private parseVerificationResponse(text: string): VerificationResult {
-    // Try multiple extraction strategies — Codex and Claude format JSON differently.
-    const strategies = [
-      // 1. Strip code fences and parse directly
-      () => JSON.parse(text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim()),
-      // 2. Extract first JSON object containing "score" from anywhere in the text
-      () => {
-        const match = text.match(/\{[\s\S]*?"score"[\s\S]*?\}/);
-        if (!match) throw new Error("No JSON with score found");
-        return JSON.parse(match[0]);
-      },
-      // 3. Find JSON between code fences specifically
-      () => {
-        const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-        if (!match) throw new Error("No code fence found");
-        return JSON.parse(match[1].trim());
-      },
-      // 4. Extract score from plain text like "Score: 0.8" or "score=0.8"
-      () => {
-        const scoreMatch = text.match(/score[:\s=]+([0-9.]+)/i);
-        const approvedMatch = text.match(/approved[:\s=]+(true|false)/i);
-        if (!scoreMatch) throw new Error("No score in text");
-        return {
-          score: parseFloat(scoreMatch[1]),
-          approved: approvedMatch ? approvedMatch[1].toLowerCase() === "true" : parseFloat(scoreMatch[1]) >= 0.7,
-          notes: text.slice(0, 200),
-        };
-      },
-    ];
-
-    for (const strategy of strategies) {
-      try {
-        const parsed = strategy();
-        return {
-          approved: Boolean(parsed.approved),
-          score: Math.min(Math.max(Number(parsed.score) || 0, 0), 1),
-          notes: String(parsed.notes ?? ""),
-          revision: parsed.revision ? String(parsed.revision) : undefined,
-        };
-      } catch {
-        continue;
-      }
+    const parsed = extractJSON<Record<string, unknown>>(text, "score");
+    if (parsed && typeof parsed.score !== "undefined") {
+      return {
+        approved: Boolean(parsed.approved),
+        score: Math.min(Math.max(Number(parsed.score) || 0, 0), 1),
+        notes: String(parsed.notes ?? ""),
+        revision: parsed.revision ? String(parsed.revision) : undefined,
+      };
     }
 
-    this.log.warn("All verification parse strategies failed", { textLength: text.length, preview: text.slice(0, 200) });
+    // Fallback: extract score from plain text like "Score: 0.8"
+    const scoreMatch = text.match(/score[:\s=]+([0-9.]+)/i);
+    if (scoreMatch) {
+      const score = parseFloat(scoreMatch[1]);
+      const approvedMatch = text.match(/approved[:\s=]+(true|false)/i);
+      return {
+        approved: approvedMatch ? approvedMatch[1].toLowerCase() === "true" : score >= 0.7,
+        score: Math.min(Math.max(score, 0), 1),
+        notes: text.slice(0, 200),
+      };
+    }
+
     return { approved: false, score: 0, notes: "Failed to parse verification response" };
   }
 
   private parsePRReviewResponse(text: string): PRReviewResult {
-    // Try multiple extraction strategies to handle varied LLM output formats.
-    // Claude often wraps JSON in explanation text or adds trailing commentary.
-    const strategies = [
-      // 1. Strip code fences and parse directly
-      () => JSON.parse(text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim()),
-      // 2. Extract first JSON object containing "decision" from anywhere
-      () => {
-        const match = text.match(/\{[\s\S]*?"decision"[\s\S]*?\}/);
-        if (!match) throw new Error("No JSON object found");
-        return JSON.parse(match[0]);
-      },
-      // 3. Find JSON between code fences specifically
-      () => {
-        const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-        if (!match) throw new Error("No code fence found");
-        return JSON.parse(match[1].trim());
-      },
-    ];
-
-    for (const strategy of strategies) {
-      try {
-        const parsed = strategy();
-        const decision = ["approve", "request-changes", "escalate"].includes(parsed.decision)
-          ? parsed.decision as PRReviewResult["decision"]
-          : "escalate";
-        const comment = String(parsed.comment ?? "");
-        return {
-          decision,
-          comment: decision === "request-changes" ? enforceChecklist(comment) : comment,
-          reason: String(parsed.reason ?? ""),
-        };
-      } catch {
-        continue;
-      }
+    const parsed = extractJSON<Record<string, unknown>>(text, "decision");
+    if (parsed && parsed.decision) {
+      const decision = ["approve", "request-changes", "escalate"].includes(parsed.decision as string)
+        ? parsed.decision as PRReviewResult["decision"]
+        : "escalate";
+      const comment = String(parsed.comment ?? "");
+      return {
+        decision,
+        comment: decision === "request-changes" ? enforceChecklist(comment) : comment,
+        reason: String(parsed.reason ?? ""),
+      };
     }
 
-    this.log.warn("All PR review parse strategies failed — will retry next cycle", { textLength: text.length, preview: text.slice(0, 200) });
+    this.log.warn("PR review parse failed — will retry next cycle", { textLength: text.length, preview: text.slice(0, 200) });
     return { decision: "error", comment: "Could not parse review response — will retry next cycle.", reason: "Parse failure" };
   }
 
   private parseSupervisorResponse(text: string): SupervisorDecision[] {
-    const cleaned = text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim();
     try {
-      const parsed = JSON.parse(cleaned);
+      const parsed = extractJSON<Array<Record<string, unknown>>>(text);
       if (!Array.isArray(parsed)) return [];
       return parsed
         .filter((d: Record<string, unknown>) => d.action && d.reason)
