@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fetchOpenIssues, findApprovedPRForIssue, findExistingPRsForIssue, isIssueOpen, validateGhAuth } from "./github.js";
+import { fetchOpenIssues, countOpenPRs, findApprovedPRForIssue, findExistingPRsForIssue, isIssueOpen, validateGhAuth } from "./github.js";
 
 vi.mock("node:child_process", () => ({
   execSync: vi.fn(),
@@ -85,6 +85,30 @@ describe("fetchOpenIssues", () => {
       expect.stringContaining("repos/rapartlu/agent-proxy/issues"),
       expect.any(Object),
     );
+  });
+});
+
+describe("countOpenPRs", () => {
+  it("returns the number of open PRs in the repo", () => {
+    mockExecSync.mockReturnValue(JSON.stringify([{ number: 1 }, { number: 2 }, { number: 3 }]));
+
+    expect(countOpenPRs("owner/repo")).toBe(3);
+    expect(mockExecSync).toHaveBeenCalledWith(
+      expect.stringContaining("gh pr list --repo owner/repo --state open --json number"),
+      expect.any(Object),
+    );
+  });
+
+  it("returns 0 when there are no open PRs", () => {
+    mockExecSync.mockReturnValue("[]");
+    expect(countOpenPRs("owner/repo")).toBe(0);
+  });
+
+  it("returns null when gh CLI fails (fail-open)", () => {
+    mockExecSync.mockImplementation(() => {
+      throw new Error("gh: command not found");
+    });
+    expect(countOpenPRs("owner/repo")).toBeNull();
   });
 });
 

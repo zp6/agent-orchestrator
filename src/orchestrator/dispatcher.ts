@@ -7,7 +7,7 @@ import { StateStore, type Task, type TaskSource, type TaskType, type AgentHealth
 import { type OrchestratorConfig, getPoolMembers } from "../config/schema.js";
 import { ulid } from "ulid";
 import { createLogger } from "../service/logger.js";
-import { validateGhAuth, GhAuthError } from "../triggers/github.js";
+import { validateGhAuth, GhAuthError, countOpenPRs } from "../triggers/github.js";
 import { cachedValidateForDispatch } from "../triggers/issue-state-bridge.js";
 import { checkDuplicate } from "../triggers/duplicate-guard.js";
 import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
@@ -625,6 +625,48 @@ export class Dispatcher {
       }
     }
 
+    // Repo PR capacity gate (issue #626).
+    // Pause new implementation dispatches when the destination repo already
+    // has too many open PRs so merge conflicts do not snowball.
+    const agentConf = this.config.agents[agentName];
+    const shouldCheckRepoCapacity =
+      taskType !== "research" &&
+      !!agentConf?.github &&
+      (!options?.sourceRef || options?.prevalidated);
+    if (shouldCheckRepoCapacity) {
+      const repo = agentConf?.github;
+      const cap = agentConf?.max_open_prs ?? this.config.dispatch?.max_open_prs ?? 3;
+      const openPRCount = repo ? countOpenPRs(repo) : null;
+      if (repo && openPRCount !== null && openPRCount >= cap) {
+        this.log.warn("Dispatch blocked: repo at PR capacity", {
+          agentName,
+          repo,
+          openPRCount,
+          cap,
+          sourceRef: options?.sourceRef,
+          source: options?.source,
+        });
+        return {
+          taskId: "",
+          agentName,
+          response: {
+            content: `Skipped: repo at PR capacity (${openPRCount}/${cap})`,
+            model: "",
+            usage: { input_tokens: 0, output_tokens: 0 },
+            stop_reason: "skipped",
+          },
+        };
+      }
+      if (openPRCount === null) {
+        this.log.warn("Dispatch repo-capacity check failed open", {
+          agentName,
+          repo,
+          sourceRef: options?.sourceRef,
+          source: options?.source,
+        });
+      }
+    }
+
     // Borrow policy enforcement (issue #448).
     // A "borrow" occurs when the agent's own github repo differs from the
     // source_ref's repo.  If the agent has a borrow config, enforce the
@@ -632,7 +674,6 @@ export class Dispatcher {
     // allowed cross-domain dispatches unchanged (backward compatibility).
     if (options?.sourceRef) {
       const taskRepo = options.sourceRef.split("#")[0] ?? null;
-      const agentConf = this.config.agents[agentName];
       const agentRepo = agentConf?.github ?? null;
       const isBorrowed = taskRepo && agentRepo && taskRepo !== agentRepo;
 

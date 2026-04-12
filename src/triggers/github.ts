@@ -152,6 +152,29 @@ export function findExistingPRsForIssue(repo: string, issueNumber: number): Link
 }
 
 /**
+ * Count the number of open PRs in a repository.
+ *
+ * Returns `null` on failure so callers can fail open when GitHub is
+ * temporarily unavailable.
+ */
+export function countOpenPRs(
+  repo: string,
+  execFn: (cmd: string, opts: { encoding: "utf-8"; timeout: number }) => string = (cmd, opts) =>
+    execSync(cmd, opts),
+): number | null {
+  try {
+    const raw = execFn(
+      `gh pr list --repo ${repo} --state open --json number`,
+      { encoding: "utf-8", timeout: 15000 },
+    );
+    const prs = JSON.parse(raw.trim() || "[]") as Array<{ number: number }>;
+    return prs.length;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Check whether a GitHub issue is still open before dispatching.
  *
  * Fetches the issue state via `gh issue view`. Returns true if the issue is

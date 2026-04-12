@@ -24,6 +24,7 @@ vi.mock("../triggers/github.js", async (importOriginal) => {
   return {
     ...actual,
     validateGhAuth: vi.fn().mockReturnValue({ ok: true }),
+    countOpenPRs: vi.fn().mockReturnValue(0),
     // Default: issues are open so retryTask proceeds normally.
     // Individual tests can override via mockIsIssueOpen.
     isIssueOpen: vi.fn().mockReturnValue(true),
@@ -83,10 +84,11 @@ const mockReportEscalation = vi.mocked(reportEscalation);
 import { notifyOperator } from "../service/notify.js";
 const mockNotifyOperator = vi.mocked(notifyOperator);
 
-import { validateGhAuth, GhAuthError, isIssueOpen, findExistingPRsForIssue } from "../triggers/github.js";
+import { validateGhAuth, GhAuthError, isIssueOpen, findExistingPRsForIssue, countOpenPRs } from "../triggers/github.js";
 const mockValidateGhAuth = vi.mocked(validateGhAuth);
 const mockIsIssueOpen = vi.mocked(isIssueOpen);
 const mockFindExistingPRsForIssue = vi.mocked(findExistingPRsForIssue);
+const mockCountOpenPRs = vi.mocked(countOpenPRs);
 
 import { cachedValidateForDispatch } from "../triggers/issue-state-bridge.js";
 const mockCachedValidateForDispatch = vi.mocked(cachedValidateForDispatch);
@@ -148,6 +150,7 @@ const makeConfig = (): OrchestratorConfig => ({
       description: "A test agent",
       capabilities: ["test"],
       owns_topics: ["test"],
+      github: "owner/repo",
       docker: { port: 3457, api_key: "secret" },
     },
   },
@@ -1258,6 +1261,25 @@ describe("Dispatcher.dispatch — closed-issue guard (issue #444)", () => {
 
     expect(mockRunGitHubPreDispatchValidation).not.toHaveBeenCalled();
     expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips manual implementation dispatches when the target repo is at PR capacity", async () => {
+    mockCountOpenPRs.mockReturnValueOnce(3);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 5 },
+    });
+
+    const result = await dispatcher.dispatch("implement the thing", {
+      agentName: "test-agent",
+      source: "manual",
+    });
+
+    expect(mockCountOpenPRs).toHaveBeenCalledWith("owner/repo");
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(result.taskId).toBe("");
+    expect(result.response.stop_reason).toBe("skipped");
+    expect(result.response.content).toContain("repo at PR capacity");
   });
 
   it("does not check issue state when sourceRef has no issue number", async () => {

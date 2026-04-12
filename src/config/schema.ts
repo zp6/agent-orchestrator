@@ -136,6 +136,11 @@ export interface AgentConfig {
   owns_topics: string[];
   system_prompt?: string;
   max_concurrent?: number;
+  /**
+   * Maximum number of open PRs allowed for this agent's repo before new
+   * dispatches are paused.  Overrides dispatch.max_open_prs.
+   */
+  max_open_prs?: number;
   stale_timeout_ms?: number;
   docker?: AgentDockerConfig;
   /** Per-agent token budget alerts and pause-on-exceeded control. */
@@ -449,6 +454,12 @@ export interface DispatchConfig {
    * Defaults to [30000, 120000, 600000] (30s → 2min → 10min) when omitted.
    */
   retry_delays_ms?: number[];
+  /**
+   * Maximum number of open PRs allowed per repo before dispatching more work.
+   * Can be overridden per-agent via agent.max_open_prs.
+   * Defaults to 3 when omitted.
+   */
+  max_open_prs?: number;
 }
 
 export interface OrchestratorConfig {

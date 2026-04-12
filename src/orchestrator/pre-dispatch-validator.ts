@@ -7,6 +7,7 @@ import type {
 import { cachedGetIssueState } from "../triggers/issue-state-bridge.js";
 import { checkDuplicate } from "../triggers/duplicate-guard.js";
 import {
+  countOpenPRs,
   findApprovedPRForIssue,
   findBranchForIssue,
   findExistingPRsForIssue,
@@ -67,6 +68,10 @@ function makeFailedResult(
     blockingPRNumber: null,
     checks: [...base.checks, { name, status: "failed", code, detail }],
   };
+}
+
+function resolveRepoPrCap(config: OrchestratorConfig, agentName: string): number {
+  return config.agents[agentName]?.max_open_prs ?? config.dispatch?.max_open_prs ?? 3;
 }
 
 /**
@@ -191,6 +196,49 @@ export function runGitHubPreDispatchValidation(params: {
   }
   checks.push(makePassedCheck("agent_availability", "agent_available", `agent "${agentName}" is available`));
 
+  const repoPrCap = resolveRepoPrCap(config, agentName);
+  if (repoPrCap > 0) {
+    const openPrCount = countOpenPRs(issue.repo);
+    if (openPrCount !== null) {
+      if (openPrCount >= repoPrCap) {
+        const failed = makeFailedResult(
+          base,
+          "repo_pr_capacity",
+          "repo_at_pr_capacity",
+          `repo ${issue.repo} already has ${openPrCount} open PR(s), which meets or exceeds the cap of ${repoPrCap}`,
+        );
+        store.addDispatchValidation({
+          source,
+          source_ref: sourceRef,
+          agent_name: agentName,
+          repo: issue.repo,
+          issue_number: issue.number,
+          outcome: failed.outcome,
+          failure_check: failed.failureCheck,
+          failure_code: failed.failureCode,
+          failure_reason: failed.failureReason,
+          checklist: failed.checks,
+        });
+        return failed;
+      }
+      checks.push(
+        makePassedCheck(
+          "repo_pr_capacity",
+          "within_pr_cap",
+          `repo ${issue.repo} has ${openPrCount} open PR(s), below cap ${repoPrCap}`,
+        ),
+      );
+    } else {
+      checks.push(
+        makeInfoCheck(
+          "repo_pr_capacity",
+          "open_pr_count_unavailable",
+          `could not determine open PR count for ${issue.repo}; continuing`,
+        ),
+      );
+    }
+  }
+
   const dupCheck = checkDuplicate(store, "github", sourceRef);
   const bypassableDuplicate =
     allowDuplicateRecencyBypass &&
@@ -230,6 +278,47 @@ export function runGitHubPreDispatchValidation(params: {
     );
   } else {
     checks.push(makePassedCheck("recent_failure_count", "no_duplicate_block", "no active or recent duplicate task"));
+  }
+
+  const openPRCap = agent.max_open_prs ?? config.dispatch?.max_open_prs ?? 3;
+  const openPRCount = countOpenPRs(issue.repo);
+  if (openPRCount !== null) {
+    if (openPRCount >= openPRCap) {
+      const failed = makeFailedResult(
+        base,
+        "repo_capacity",
+        "open_pr_capacity",
+        `repo ${issue.repo} already has ${openPRCount} open PR(s); cap is ${openPRCap}`,
+      );
+      store.addDispatchValidation({
+        source,
+        source_ref: sourceRef,
+        agent_name: agentName,
+        repo: issue.repo,
+        issue_number: issue.number,
+        outcome: failed.outcome,
+        failure_check: failed.failureCheck,
+        failure_code: failed.failureCode,
+        failure_reason: failed.failureReason,
+        checklist: failed.checks,
+      });
+      return failed;
+    }
+    checks.push(
+      makePassedCheck(
+        "repo_capacity",
+        "open_pr_capacity_ok",
+        `${openPRCount} open PR(s) on ${issue.repo}, below cap ${openPRCap}`,
+      ),
+    );
+  } else {
+    checks.push(
+      makeInfoCheck(
+        "repo_capacity",
+        "open_pr_capacity_unavailable",
+        `could not verify open PR count for ${issue.repo}; allowing dispatch`,
+      ),
+    );
   }
 
   const failureLimit = config.escalation?.retry_limit ?? DEFAULT_ESCALATION_RETRY_LIMIT;
