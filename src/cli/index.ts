@@ -35,6 +35,7 @@ import { registerRoutingAccuracyCommand } from "./commands/routing-accuracy.js";
 import { registerSignalsCommand } from "./commands/signals.js";
 import { registerLearnedPatternsCommand } from "./commands/learned-patterns.js";
 import { registerLineageCommand } from "./commands/lineage.js";
+import { registerAntibodiesCommand } from "./commands/antibodies.js";
 
 const program = new Command();
 
@@ -79,5 +80,6 @@ registerRoutingAccuracyCommand(program);
 registerSignalsCommand(program);
 registerLearnedPatternsCommand(program);
 registerLineageCommand(program);
+registerAntibodiesCommand(program);
 
 program.parse();

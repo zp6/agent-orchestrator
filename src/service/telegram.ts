@@ -615,6 +615,11 @@ Steps:
     return `⚡ Prioritized ${resolved.sourceRef} for the next daemon cycle.`;
   }
 
+  // Antibodies — failure immunity panel
+  if (cmd === "antibodies" || cmd === "/antibodies") {
+    return buildAntibodiesPanel(ctx);
+  }
+
   // Help
   // Config — show reload history and current config snapshot
   if (cmd === "config" || cmd === "/config") {
@@ -630,6 +635,7 @@ status — agent status
 health — ping containers
 issues — open issues
 prs — open PRs
+antibodies — failure immunity panel
 config — config reload history & status
 chat <agent> <msg> — talk to agent (persistent)
 newchat <agent> — reset conversation
@@ -1018,6 +1024,50 @@ ${attentionSection}
 ${workingSection}
 
 📊 ${totalDone} done | ${successRate}% success | ${openPRs} open PRs | ${recentMerges.length} merged (2h)`;
+}
+
+/**
+ * Build the /antibodies Telegram response: a concise operator panel showing
+ * self-learned failure immunity — the last 10 PR review decisions from the
+ * antibody log, plus a per-decision-type summary.
+ *
+ * Operators use this to see what patterns the system has learned to approve,
+ * flag for changes, or escalate — without having to query the database directly.
+ */
+function buildAntibodiesPanel(ctx: TelegramContext): string {
+  const entries = ctx.store.getAntibodyEntries({ limit: 10 });
+  const stats = ctx.store.getAntibodyStats();
+
+  if (entries.length === 0) {
+    return "🧬 *Antibody Log*\n\nNo entries recorded yet. Entries appear after the first PR review cycle.";
+  }
+
+  // Stats summary line
+  const statParts = stats.map((s) => {
+    const icon = s.decision === "approve" ? "✅" : s.decision === "request-changes" ? "⚠️" : "🔴";
+    return `${icon} ${s.decision}: ${s.count}`;
+  });
+
+  // Recent entries (compact one-line each)
+  const lines: string[] = [];
+  for (const e of entries) {
+    const ts = e.timestamp.slice(0, 10);
+    const repo = e.repo.split("/")[1] ?? e.repo;
+    const icon = e.decision === "approve" ? "✅" : e.decision === "request-changes" ? "⚠️" : "🔴";
+    const outcome = e.outcome === "clean" ? " ✓" : e.outcome === "regression" ? " ✗" : "";
+    const reason = e.reason ? ` — ${e.reason.slice(0, 50)}` : "";
+    lines.push(`  ${icon}${outcome} ${ts} ${repo}#${e.pr_number}${reason}`);
+  }
+
+  return `🧬 *Antibody Log*
+
+*Summary*
+  ${statParts.join(" | ")}
+
+*Recent decisions (newest first)*
+${lines.join("\n")}
+
+_Run \`orch antibodies\` for full panel with diff shapes and filters._`;
 }
 
 /**
