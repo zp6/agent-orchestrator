@@ -1354,6 +1354,13 @@ export class Daemon {
           console.error(`  ${r.agentName}: ${r.detail}`);
         }
       }
+      // Re-sync after deploy: deployer Docker calls can corrupt proxy's
+      // in-memory registry. Re-register all agents to ensure the proxy
+      // knows about the full fleet, not just the ones that were restarted.
+      if (results.length > 0) {
+        this.log.info("Post-deploy re-sync: ensuring proxy has full agent registry");
+        await this.syncAgents();
+      }
     } catch (err) {
       console.error(`[${time}] Deploy check failed: ${err instanceof Error ? err.message : err}`);
     }
