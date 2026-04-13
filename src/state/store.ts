@@ -4376,6 +4376,70 @@ export class StateStore {
     return results;
   }
 
+  // ── Iteration cost metrics (issue #748) ──────────────────────────────────
+
+  /**
+   * Per-agent rolling average of revision_count across recent non-research tasks.
+   *
+   * Returns one row per agent that has >= minTasks completed/failed/escalated
+   * implementation tasks, ordered by avg_revision_count descending.
+   *
+   * @param windowDays - How many calendar days of history to consider (default 30).
+   * @param minTasks   - Minimum task count before the metric is meaningful (default 10).
+   */
+  getAgentIterationCostMetrics(
+    windowDays = 30,
+    minTasks = 10,
+  ): Array<{
+    agent_name: string;
+    task_count: number;
+    avg_revision_count: number;
+    /** Up to 3 task IDs with the highest revision_count (sample evidence). */
+    sample_task_ids: string[];
+  }> {
+    const rows = this.db.prepare(`
+      SELECT
+        agent_name,
+        COUNT(*)                    AS task_count,
+        AVG(revision_count)         AS avg_revision_count
+      FROM tasks
+      WHERE agent_name IS NOT NULL
+        AND parent_task_id IS NULL
+        AND task_type != 'research'
+        AND status IN ('done', 'failed', 'escalated')
+        AND created_at >= datetime('now', ? || ' days')
+      GROUP BY agent_name
+      HAVING COUNT(*) >= ?
+      ORDER BY avg_revision_count DESC
+    `).all(`-${windowDays}`, minTasks) as Array<{
+      agent_name: string;
+      task_count: number;
+      avg_revision_count: number;
+    }>;
+
+    return rows.map((row) => {
+      // Fetch up to 3 high-revision example tasks for evidence
+      const sampleRows = this.db.prepare(`
+        SELECT id
+        FROM tasks
+        WHERE agent_name = ?
+          AND parent_task_id IS NULL
+          AND task_type != 'research'
+          AND status IN ('done', 'failed', 'escalated')
+          AND created_at >= datetime('now', ? || ' days')
+        ORDER BY revision_count DESC, created_at DESC
+        LIMIT 3
+      `).all(row.agent_name, `-${windowDays}`) as Array<{ id: string }>;
+
+      return {
+        agent_name: row.agent_name,
+        task_count: row.task_count,
+        avg_revision_count: row.avg_revision_count,
+        sample_task_ids: sampleRows.map((r) => r.id),
+      };
+    });
+  }
+
   // ── Dispatch efficiency / waste-rate widget (issue #517) ────────────────
 
   private runDispatchWasteMigration(): void {

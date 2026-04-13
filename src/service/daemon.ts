@@ -38,6 +38,7 @@ import { checkAgedIssues } from "../orchestrator/issue-age-monitor.js";
 import { runProactiveScan } from "../orchestrator/proactive-scanner.js";
 import { validateMergedPR } from "../orchestrator/staging-validator.js";
 import { proposeAndFileRoadmapItems } from "../orchestrator/roadmap-proposer.js";
+import { detectHighIterationAgents } from "../orchestrator/iteration-cost-detector.js";
 import {
   type GateResult,
   detectImprovements,
@@ -517,6 +518,8 @@ export class Daemon {
       // 3b. Periodically detect improvements and create issues
       if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
         await this.detectImprovements(time);
+        // Also run the lightweight iteration-cost check (no LLM needed)
+        this.detectIterationCostImprovements(time);
       }
 
       // 3c. Daily standup — blockers, opportunities, action items
@@ -1531,6 +1534,31 @@ export class Daemon {
       }
     } catch (err) {
       console.error(`[${time}] Improvement detection failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  /**
+   * Check per-agent PR iteration cost and file improvement issues when the
+   * rolling average exceeds the threshold.  Runs at the same cadence as
+   * the LLM-based improvement detector but requires no LLM call — reads
+   * only from state.db (issue #748).
+   */
+  private detectIterationCostImprovements(time: string): void {
+    try {
+      const improvements = detectHighIterationAgents(this.store, this.config);
+      if (improvements.length === 0) return;
+
+      console.log(`[${time}] Iteration-cost detector: ${improvements.length} agent(s) above threshold`);
+      for (const imp of improvements) {
+        const created = this.issueCreator.createAcrossRepos(imp, ["iteration-cost-triggered"]);
+        for (const issue of created) {
+          console.log(`  [iteration-cost] Created: ${issue.url}`);
+        }
+      }
+    } catch (err) {
+      console.error(
+        `[${time}] Iteration-cost improvement detection failed: ${err instanceof Error ? err.message : err}`,
+      );
     }
   }
 

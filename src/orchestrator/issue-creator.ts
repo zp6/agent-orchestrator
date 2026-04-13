@@ -132,7 +132,7 @@ export class IssueCreator {
     return false;
   }
 
-  createAcrossRepos(improvement: DetectedImprovement): CreatedIssue[] {
+  createAcrossRepos(improvement: DetectedImprovement, extraLabels: string[] = []): CreatedIssue[] {
     const created: CreatedIssue[] = [];
 
     for (const agentName of improvement.affected_agents) {
@@ -157,11 +157,17 @@ export class IssueCreator {
 
       const body = this.formatIssueBody(improvement, agentName);
 
+      // Ensure any extra labels exist on the repo before creating the issue
+      for (const label of extraLabels) {
+        this.ensureLabel(agent.github, label);
+      }
+
       try {
         const issue = this.createIssue(
           agent.github,
           candidateTitle,
           body,
+          ["orchestrator", ...extraLabels],
         );
         created.push(issue);
       } catch {
@@ -170,6 +176,32 @@ export class IssueCreator {
     }
 
     return created;
+  }
+
+  /**
+   * Idempotently ensure a GitHub label exists on a repo.
+   * Creates it with a neutral colour if missing; silently ignores errors
+   * (e.g. permission issues or network timeouts) so the caller can proceed.
+   */
+  ensureLabel(repo: string, label: string, color = "ededed"): void {
+    try {
+      // Check if label already exists
+      execSync(
+        `gh label list --repo ${shellEscape(repo)} --json name -L 500`,
+        { encoding: "utf-8", timeout: 15000 },
+      );
+      // Attempt to create; gh returns non-zero if it already exists but we catch that
+      try {
+        execSync(
+          `gh label create ${shellEscape(label)} --repo ${shellEscape(repo)} --color ${shellEscape(color)} --force`,
+          { encoding: "utf-8", timeout: 15000, stdio: "pipe" },
+        );
+      } catch {
+        // Label already exists or insufficient permissions — either way, proceed
+      }
+    } catch {
+      // Could not list labels — skip label creation and let createIssue handle it
+    }
   }
 
   private formatIssueBody(improvement: DetectedImprovement, agentName: string): string {
