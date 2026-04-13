@@ -100,6 +100,13 @@ export interface PRReviewResult {
    * and to compute cycles lost to merge conflicts in the weekly summary.
    */
   branchStalenessHours?: number;
+  /**
+   * Set to true when a PR should be closed instead of merged.
+   * Used for zero-action standup PRs that shouldn't appear in merge history.
+   * When true, executeDecision will close the PR with an explanatory comment
+   * instead of enqueueing it for merge.
+   */
+  shouldCloseInsteadOfMerge?: boolean;
 }
 
 const SYSTEM_PROMPT = `You are a code reviewer for a multi-agent system. Your job is to catch real bugs and security issues, NOT to enforce style preferences.
@@ -299,21 +306,21 @@ export class PRReviewer {
     if (standupIssueNumber !== null) {
       const wasHandledAsStandup = await this.handleStandupIssueIfNeeded(repo, standupIssueNumber);
       if (wasHandledAsStandup) {
-        // Zero-action standup was handled — no PR review needed, auto-approve
-        this.log.info("PR skipped (zero-action standup handled separately)", {
+        // Zero-action standup was handled — close the PR instead of merging it
+        this.log.info("Closing zero-action standup PR", {
           repo,
           prNumber,
           issueNumber: standupIssueNumber,
           branch: pr.branch,
         });
-        return {
+        const result: PRReviewResult = {
           decision: "approve",
-          comment:
-            "**[orchestrator] PR auto-approved** ✅\n\n" +
-            "This PR is associated with a zero-action standup issue, which was acknowledged in the corresponding issue. " +
-            "No further PR review is needed.",
-          reason: "Zero-action standup — handled via issue acknowledgment",
+          comment: "Auto-closed: no action items in this standup cycle. The associated standup issue has been acknowledged.",
+          reason: "Zero-action standup — PR closed, issue acknowledged",
+          shouldCloseInsteadOfMerge: true,
         };
+        await this.executeDecision(repo, prNumber, result, pr.branch);
+        return result;
       }
     }
 
@@ -815,6 +822,26 @@ export class PRReviewer {
     switch (result.decision) {
       case "approve": {
         try {
+          // Check if this PR should be closed instead of merged
+          if (result.shouldCloseInsteadOfMerge) {
+            // Close the PR with an explanatory comment
+            execSync(
+              `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**[orchestrator] PR Closed** 🔄\n\n${result.comment}`)}`,
+              { encoding: "utf-8", timeout: 30000 },
+            );
+            execSync(`gh pr close ${prNumber} --repo ${repo} --delete-branch`, {
+              encoding: "utf-8",
+              timeout: 30000,
+            });
+            this.log.info("PR closed (not merged)", {
+              repo,
+              prNumber,
+              reason: result.reason,
+            });
+            this.recordReview(repo, prNumber, "approve", result, agentName);
+            break;
+          }
+
           const branch = prBranch ?? this.fetchPRBranch(repo, prNumber);
           if (this.store.isPRInMergeQueue(repo, prNumber)) {
             this.log.info("PR already in merge queue, skipping re-enqueue", {

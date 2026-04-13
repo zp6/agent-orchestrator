@@ -131,6 +131,16 @@ function buildExecSyncMock(opts: {
       return "";
     }
 
+    // executeDecision — gh pr comment for closure
+    if (cmd.includes("gh pr comment") && cmd.includes("42")) {
+      return "";
+    }
+
+    // executeDecision — gh pr close
+    if (cmd.includes("gh pr close") && cmd.includes("--delete-branch")) {
+      return "";
+    }
+
     // gh pr view for PR merge status check
     if (cmd.includes("gh pr view") && cmd.includes("merged")) {
       return "true";
@@ -167,7 +177,7 @@ No adjustments proposed.
     issueLabels: ["team-meeting", "standup"],
   };
 
-  it("skips PR review for zero-action standup with issue-N branch", async () => {
+  it("closes PR for zero-action standup with issue-N branch", async () => {
     const mockExecSync = buildExecSyncMock({
       branch: "issue-721-standup-response",
       prBody: "Standup response\n\nCloses #721",
@@ -177,18 +187,31 @@ No adjustments proposed.
     const reviewer = makeReviewer();
     const result = await reviewer.reviewPR("rapartlu/agent-orchestrator", 42);
 
-    // Should auto-approve without LLM review
+    // Should approve but with closure flag set
     expect(result.decision).toBe("approve");
     expect(result.reason).toContain("Zero-action standup");
+    expect(result.shouldCloseInsteadOfMerge).toBe(true);
 
     // Should have posted acknowledgment comment on the issue
-    const commentCalls = mockExecSync.mock.calls.filter(
+    const issueCommentCalls = mockExecSync.mock.calls.filter(
       ([cmd]: [string]) => typeof cmd === "string" && cmd.includes("gh issue comment"),
     );
-    expect(commentCalls.length).toBeGreaterThanOrEqual(1);
+    expect(issueCommentCalls.length).toBeGreaterThanOrEqual(1);
+
+    // Should have posted comment and closed the PR
+    const prCommentCalls = mockExecSync.mock.calls.filter(
+      ([cmd]: [string]) => typeof cmd === "string" && cmd.includes("gh pr comment") && cmd.includes("42"),
+    );
+    expect(prCommentCalls.length).toBeGreaterThanOrEqual(1);
+    expect(prCommentCalls.some(([cmd]) => typeof cmd === "string" && cmd.includes("Auto-closed"))).toBe(true);
+
+    const closeCall = mockExecSync.mock.calls.find(
+      ([cmd]: [string]) => typeof cmd === "string" && cmd.includes("gh pr close") && cmd.includes("--delete-branch"),
+    );
+    expect(closeCall).toBeDefined();
   });
 
-  it("skips PR review for zero-action standup with non-standard branch name", async () => {
+  it("closes PR for zero-action standup with non-standard branch name", async () => {
     // This is the specific bug: branch named "standup-721-response" instead of "issue-721-..."
     const mockExecSync = buildExecSyncMock({
       branch: "standup-721-response",
@@ -199,18 +222,25 @@ No adjustments proposed.
     const reviewer = makeReviewer();
     const result = await reviewer.reviewPR("rapartlu/agent-orchestrator", 42);
 
-    // Should STILL auto-approve — the body contains "Closes #721"
+    // Should approve with closure flag set
     expect(result.decision).toBe("approve");
     expect(result.reason).toContain("Zero-action standup");
+    expect(result.shouldCloseInsteadOfMerge).toBe(true);
 
-    // Should have posted acknowledgment comment
-    const commentCalls = mockExecSync.mock.calls.filter(
+    // Should have posted acknowledgment comment on issue
+    const issueCommentCalls = mockExecSync.mock.calls.filter(
       ([cmd]: [string]) => typeof cmd === "string" && cmd.includes("gh issue comment"),
     );
-    expect(commentCalls.length).toBeGreaterThanOrEqual(1);
+    expect(issueCommentCalls.length).toBeGreaterThanOrEqual(1);
+
+    // Should have closed the PR
+    const closeCall = mockExecSync.mock.calls.find(
+      ([cmd]: [string]) => typeof cmd === "string" && cmd.includes("gh pr close") && cmd.includes("--delete-branch"),
+    );
+    expect(closeCall).toBeDefined();
   });
 
-  it("skips PR review when issue ref uses fully qualified form", async () => {
+  it("closes PR when issue ref uses fully qualified form", async () => {
     const mockExecSync = buildExecSyncMock({
       branch: "standup-2026-04-12",
       prBody: "Standup response\n\nCloses rapartlu/agent-orchestrator#721",
@@ -222,6 +252,13 @@ No adjustments proposed.
 
     expect(result.decision).toBe("approve");
     expect(result.reason).toContain("Zero-action standup");
+    expect(result.shouldCloseInsteadOfMerge).toBe(true);
+
+    // Should have closed the PR
+    const closeCall = mockExecSync.mock.calls.find(
+      ([cmd]: [string]) => typeof cmd === "string" && cmd.includes("gh pr close") && cmd.includes("--delete-branch"),
+    );
+    expect(closeCall).toBeDefined();
   });
 
   it("does NOT skip PR review for standup with action items", async () => {
