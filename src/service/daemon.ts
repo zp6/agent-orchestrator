@@ -164,6 +164,21 @@ export const HEALTH_RECOVERY_CONFIRM_CYCLES = 3;
 export const HEALTH_GRACE_PERIOD_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
+ * Maximum number of auto-recovery attempts the orchestrator makes before
+ * escalating to a human.  Each attempt: checks secrets health, restarts
+ * the agent, and re-runs the health check.  Health check failures that
+ * self-resolve within this many retries produce no human notification.
+ */
+export const HEALTH_AUTO_RECOVERY_MAX_ATTEMPTS = 2;
+
+/**
+ * Health check delays used during auto-recovery restarts.  Shorter than the
+ * default (168 s) to keep the total recovery window within the daemon cycle
+ * watchdog.  Two attempts at this schedule ≈ 70 s total.
+ */
+const RECOVERY_HEALTH_CHECK_DELAYS_MS = [5_000, 10_000, 20_000]; // max ~35 s per attempt
+
+/**
  * Format a health-failure duration for console and Telegram output.
  * Seconds are used below a minute, minutes below an hour, and `h m` beyond.
  */
@@ -222,6 +237,14 @@ export class Daemon {
    * (task exists and should be auto-resolved).
    */
   private healthEscalatedAgents = new Set<string>();
+
+  /**
+   * Per-agent log of auto-recovery steps attempted before escalation.
+   * Populated by `runAutoRecoveryPlaybook`; included in the escalation task
+   * description so operators see exactly what was tried and why it failed.
+   * Cleared when escalation fires or the agent recovers.
+   */
+  private healthAutoRecoveryHistory = new Map<string, string[]>();
 
   /** Tracks when the daily Slack digest was last sent (re-arms on new calendar day). */
   private digestState: DigestSchedulerState = { lastDigestDate: null };
@@ -1662,126 +1685,203 @@ export class Daemon {
   }
 
   /**
-   * Called when an agent fails a health check.  Starts a grace-period timer on
-   * the first failure; only escalates (Telegram + dashboard task) if the agent
-   * remains unhealthy past HEALTH_GRACE_PERIOD_MS.  Agents that self-recover
-   * within the window produce zero incident tasks.
+   * Execute the auto-recovery playbook for a failing agent.
    *
-   * The escalated task description embeds a structured incident response
-   * playbook so the dispatched agent runs concrete diagnostics rather than
-   * returning a canned "recovered" string.
+   * Called by `redeployStale` and `preventiveRestart` when a health check
+   * fails, BEFORE escalating to a human operator.  Performs up to
+   * HEALTH_AUTO_RECOVERY_MAX_ATTEMPTS restart cycles, each preceded by a
+   * secrets-health probe:
+   *
+   *   1. GET /secrets/health — identify missing credentials early.
+   *   2. Graceful restart (stop + start) with a shortened health-check window.
+   *   3. If the restart succeeds → silent recovery, no operator notification.
+   *
+   * If all attempts are exhausted the recovery history is stored in
+   * `healthAutoRecoveryHistory` and `onHealthCheckFailed` is called to
+   * escalate the incident with a full report of what was tried.
+   *
+   * Guards against concurrent playbook runs for the same agent: if the agent
+   * is already being tracked (i.e. a previous attempt is still in flight or
+   * has already escalated), the call is a no-op.
    */
-  private onHealthCheckFailed(agentName: string, detail: string): void {
+  private async runAutoRecoveryPlaybook(agentName: string, originalDetail: string): Promise<void> {
+    // Guard: don't start a new playbook if one is already tracking this agent.
+    if (this.healthFailingAgents.has(agentName)) {
+      this.log.info("Auto-recovery skipped — agent already being tracked", { agentName });
+      return;
+    }
+
+    // Start tracking so checkHealthRecoveries can confirm recovery between attempts.
+    this.healthFailingAgents.add(agentName);
+    if (!this.healthFailureStartTimes.has(agentName)) {
+      this.healthFailureStartTimes.set(agentName, Date.now());
+    }
     this.healthRecoveryConfirmCycles.set(agentName, 0);
     clearNotifyRateLimit(`health-recovery:${agentName}`);
 
+    this.log.info("Starting auto-recovery playbook", { agentName, originalDetail, maxAttempts: HEALTH_AUTO_RECOVERY_MAX_ATTEMPTS });
+    console.log(`  ${agentName}: 🔄 auto-recovery playbook started (${originalDetail})`);
+
+    const steps: string[] = [];
+
+    for (let attempt = 1; attempt <= HEALTH_AUTO_RECOVERY_MAX_ATTEMPTS; attempt++) {
+      const attemptPrefix = `**Attempt ${attempt}/${HEALTH_AUTO_RECOVERY_MAX_ATTEMPTS}**`;
+
+      // ── Step 1: Secrets health probe ────────────────────────────────────────
+      try {
+        const secretsResult = await this.deployer.checkSecretsHealth(agentName);
+        if (!secretsResult.reachable) {
+          steps.push(`${attemptPrefix} — Secrets check: agent unreachable (${secretsResult.error ?? "connection failed"})`);
+        } else if (!secretsResult.healthy) {
+          const names = secretsResult.unhealthySecrets.length > 0
+            ? secretsResult.unhealthySecrets.join(", ")
+            : "unknown";
+          steps.push(`${attemptPrefix} — Secrets check FAILED: unhealthy secrets: ${names}`);
+          this.log.warn("Auto-recovery: secrets unhealthy", { agentName, attempt, unhealthySecrets: secretsResult.unhealthySecrets });
+        } else {
+          steps.push(`${attemptPrefix} — Secrets check: all required secrets healthy ✓`);
+        }
+      } catch (err) {
+        steps.push(`${attemptPrefix} — Secrets check error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      // ── Step 2: Graceful restart ─────────────────────────────────────────────
+      this.log.info("Auto-recovery: attempting graceful restart", { agentName, attempt });
+      let restartResult: Awaited<ReturnType<typeof this.deployer.restartAgent>>;
+      try {
+        restartResult = await this.deployer.restartAgent(agentName);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        steps.push(`${attemptPrefix} — Graceful restart threw: ${msg}`);
+        this.log.error("Auto-recovery restart threw", { agentName, attempt, error: msg });
+        continue; // Move on to next attempt
+      }
+
+      // ── Step 3: Evaluate restart result ─────────────────────────────────────
+      if (restartResult.action === "redeployed") {
+        steps.push(`${attemptPrefix} — Graceful restart succeeded, health check passing ✓`);
+        this.log.info("Auto-recovery succeeded", { agentName, attempt });
+        console.log(`  ${agentName}: ✅ auto-recovery succeeded on attempt ${attempt}/${HEALTH_AUTO_RECOVERY_MAX_ATTEMPTS}`);
+
+        // Clear all tracking — operator was never notified, so no recovery alert needed.
+        this.healthFailingAgents.delete(agentName);
+        this.healthFailureStartTimes.delete(agentName);
+        this.healthRecoveryConfirmCycles.delete(agentName);
+        this.healthAutoRecoveryHistory.delete(agentName);
+        clearNotifyRateLimit(`health-fail:${agentName}`);
+        clearNotifyRateLimit(`health-recovery:${agentName}`);
+        return;
+      }
+
+      // Restart failed (health check still failing after restart).
+      const restartDetail = restartResult.detail ?? "agent did not respond after restart";
+      steps.push(`${attemptPrefix} — Graceful restart completed but agent still unhealthy: ${restartDetail}`);
+      this.log.warn("Auto-recovery attempt failed", { agentName, attempt, restartAction: restartResult.action, detail: restartDetail });
+      console.log(`  ${agentName}: ⚠ auto-recovery attempt ${attempt}/${HEALTH_AUTO_RECOVERY_MAX_ATTEMPTS} failed`);
+    }
+
+    // All recovery attempts exhausted — hand off to escalation.
+    this.log.warn("Auto-recovery exhausted — escalating to operator", {
+      agentName,
+      attempts: HEALTH_AUTO_RECOVERY_MAX_ATTEMPTS,
+    });
+    this.healthAutoRecoveryHistory.set(agentName, steps);
+    this.onHealthCheckFailed(agentName, originalDetail);
+  }
+
+  /**
+   * Called when an agent fails a health check after all auto-recovery attempts
+   * have been exhausted.  Immediately escalates via Telegram and creates a
+   * dashboard task with a structured incident response playbook that includes
+   * the auto-recovery steps already tried.
+   *
+   * Guards against duplicate escalations: if an escalation task has already
+   * been created for this agent the call is a no-op.
+   */
+  private onHealthCheckFailed(agentName: string, detail: string): void {
+    // Ensure tracking state is initialised (handles direct calls in tests).
     if (!this.healthFailingAgents.has(agentName)) {
-      // First observed failure — start the grace-period clock but do NOT
-      // escalate yet.  The agent may self-recover within the grace window
-      // (e.g. container restart + normal initialisation).
       this.healthFailingAgents.add(agentName);
       this.healthFailureStartTimes.set(agentName, Date.now());
-      this.log.info(
-        "Health check failed — grace period started, escalation suppressed until threshold",
-        {
-          agentName,
-          gracePeriodMs: HEALTH_GRACE_PERIOD_MS,
-        },
-      );
-      return;
     }
+    this.healthRecoveryConfirmCycles.set(agentName, 0);
+    clearNotifyRateLimit(`health-recovery:${agentName}`);
 
-    // Already tracking — check whether we are still inside the grace window.
-    const startedAt = this.healthFailureStartTimes.get(agentName) ?? Date.now();
-    const elapsedMs = Date.now() - startedAt;
-    if (elapsedMs < HEALTH_GRACE_PERIOD_MS) {
-      this.log.info("Health check still failing within grace period — awaiting self-recovery", {
-        agentName,
-        elapsedMs,
-        gracePeriodMs: HEALTH_GRACE_PERIOD_MS,
-        remainingMs: HEALTH_GRACE_PERIOD_MS - elapsedMs,
-      });
-      return;
-    }
-
-    // Grace period expired and agent is still unhealthy.
     // Guard against re-escalating on every subsequent cycle.
     if (this.healthEscalatedAgents.has(agentName)) {
-      return; // Escalation already created — nothing more to do here.
+      return;
     }
     this.healthEscalatedAgents.add(agentName);
 
-    this.log.warn("Health check failure persisted past grace period — escalating now", {
-      agentName,
-      elapsedMs,
-      gracePeriodMs: HEALTH_GRACE_PERIOD_MS,
-    });
+    const startedAt = this.healthFailureStartTimes.get(agentName) ?? Date.now();
+    const elapsedMs = Date.now() - startedAt;
+
+    this.log.warn("Health check failure — escalating to operator", { agentName, detail, elapsedMs });
 
     notifyOperator(
       `Health check failed: ${agentName}`,
-      `Agent ${agentName} has been unhealthy for ${formatHealthDuration(elapsedMs)} (grace period expired). Detail: ${detail}`,
+      `Agent ${agentName} has been unhealthy for ${formatHealthDuration(elapsedMs)} — ${HEALTH_AUTO_RECOVERY_MAX_ATTEMPTS} auto-recovery attempt(s) exhausted. Detail: ${detail}`,
       "critical",
       `health-fail:${agentName}`,
     ).catch(() => {});
 
     // Create an escalated task so the dashboard surfaces the failure.
     // Use a stable source_ref so we can find and resolve it on recovery.
-    // Check if there's already an active incident task to prevent duplicate dispatches.
     const sourceRef = `health-check-fail:${agentName}`;
     const existing = this.store.findActiveIncidentTask(sourceRef);
     if (!existing) {
       const port = this.config.agents[agentName]?.docker?.port;
       const portInfo = port ? `port ${port}` : "unknown port";
-      const containerName = agentName; // Docker container names match agent names
+      const containerName = agentName;
 
-      // Build a structured incident response playbook. This replaces the old
-      // one-liner description that caused agents to return canned boilerplate.
-      // Every field must be answered with actual command output, not assumptions.
+      // Include auto-recovery history so the operator sees what was already tried.
+      const recoverySteps = this.healthAutoRecoveryHistory.get(agentName) ?? [];
+      const recoverySection = recoverySteps.length > 0
+        ? `\n### Auto-Recovery Attempts (exhausted before escalation)\n\n${recoverySteps.map((s) => `- ${s}`).join("\n")}\n`
+        : `\n### Auto-Recovery Attempts\n\nNo automated recovery was attempted before escalation.\n`;
+
       const incidentPlaybook = `## Health Check Incident: ${agentName}
 
 **Trigger:** ${detail}
 **Container:** ${containerName} (${portInfo})
 **Time:** ${new Date().toISOString()}
-
-You are responding to a health check failure. A bare "agent recovered" claim is a
-quality failure. You MUST run every diagnostic step below and include the actual
-command output in your response.
-
+**Auto-recovery:** ${HEALTH_AUTO_RECOVERY_MAX_ATTEMPTS} attempt(s) exhausted — manual intervention required.
+${recoverySection}
 ---
 
+You are responding to a health check failure that survived automated recovery. A bare
+"agent recovered" claim is a quality failure. You MUST run every diagnostic step below
+and include the actual command output in your response.
+
 ### Step 1 — Container state and recent logs
-Run the following and include the full output:
 \`\`\`
 docker logs ${containerName} --tail 50 2>&1
 docker inspect ${containerName} --format '{{.State.Status}} started={{.State.StartedAt}} restarts={{.RestartCount}}' 2>&1
 \`\`\`
 
 ### Step 2 — Port binding
-Verify whether the HTTP port is bound:
 \`\`\`
 ss -tlnp | grep ${port ?? "<port>"} || netstat -tlnp 2>/dev/null | grep ${port ?? "<port>"}
 curl -sv --max-time 5 http://localhost:${port ?? "<port>"}/ 2>&1; echo "curl exit: $?"
 \`\`\`
-Include the full curl output with HTTP status code and timestamp.
 
-### Step 3 — Docker healthcheck configuration
-Check whether a \`start_period\` is configured (absent in most containers per prior
-analysis, which means restarts trigger false-positive health failures):
+### Step 3 — Secrets health
 \`\`\`
-grep -A 10 "healthcheck\\|start_period" docker-compose.generated.yml 2>/dev/null || echo "ABSENT — no healthcheck block found"
+curl -s http://localhost:${port ?? "<port>"}/secrets/health | jq .
+\`\`\`
+Include the full JSON response. If \`healthy\` is false, identify which secret is missing
+and where to mount it.
+
+### Step 4 — Docker healthcheck configuration
+\`\`\`
+grep -A 10 "healthcheck\\|start_period" docker-compose.generated.yml 2>/dev/null || echo "ABSENT"
 docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
 \`\`\`
 
-### Step 4 — Recovery status
-After running the above:
-- State whether the health check is now passing or still failing (with evidence)
-- State whether self-recovery occurred or manual intervention was required
-- If still failing, identify the root cause from the docker logs output
-
-### Step 5 — Recurrence risk
-If \`start_period\` is absent from \`docker-compose.generated.yml\`, note this as a
-systemic risk: every container restart will produce a false-positive health failure
-until fixed. File a GitHub issue if one doesn't already exist.
+### Step 5 — Recovery status and root cause
+- State whether the health check is now passing or still failing (with evidence).
+- Identify the root cause from the docker logs output.
+- If \`start_period\` is absent, note this as a systemic risk and file a GitHub issue.
 
 **DO NOT** close this task with a one-sentence claim. All five steps are required.`;
 
@@ -1798,6 +1898,8 @@ until fixed. File a GitHub issue if one doesn't already exist.
         result: `Health check failed: ${detail}`,
       });
       this.log.info("Created health-check escalation task with diagnostic playbook", { agentName, port, taskId: task.id });
+      // Recovery history consumed — clear it to avoid stale data on next incident.
+      this.healthAutoRecoveryHistory.delete(agentName);
     }
   }
 
@@ -1868,12 +1970,16 @@ until fixed. File a GitHub issue if one doesn't already exist.
             }
           }
         } else if (r.action === "health-check-failed") {
-          console.error(`  ${r.agentName}: ⚠ deployed but health check failed — agent may be broken. ${r.detail}`);
-          this.log.warn("Agent health check failed after deploy", { agentName: r.agentName, detail: r.detail });
-          this.onHealthCheckFailed(
+          console.error(`  ${r.agentName}: ⚠ deployed but health check failed — starting auto-recovery playbook. ${r.detail}`);
+          this.log.warn("Agent health check failed after deploy — running auto-recovery", { agentName: r.agentName, detail: r.detail });
+          // Fire-and-forget: auto-recovery is async (restarts + health checks) and
+          // runs within the daemon cycle watchdog window (~70s for 2 attempts).
+          this.runAutoRecoveryPlaybook(
             r.agentName,
             r.detail ?? "Container rebuild triggered but agent did not respond to health check",
-          );
+          ).catch((err) => {
+            this.log.error("Auto-recovery playbook threw", { agentName: r.agentName, error: err instanceof Error ? err.message : String(err) });
+          });
         } else if (r.action === "error") {
           console.error(`  ${r.agentName}: ${r.detail}`);
         }
@@ -1907,11 +2013,14 @@ until fixed. File a GitHub issue if one doesn't already exist.
       try {
         const result = await this.deployer.restartAgent(name);
         if (result.action === "health-check-failed") {
-          this.log.warn("Agent unhealthy after preventive restart", { agentName: name });
-          this.onHealthCheckFailed(
+          this.log.warn("Agent unhealthy after preventive restart — running auto-recovery", { agentName: name });
+          // Fire-and-forget: auto-recovery is async but bounded (~70s for 2 attempts).
+          this.runAutoRecoveryPlaybook(
             name,
             result.detail ?? "Container restarted but agent did not respond to health check",
-          );
+          ).catch((err) => {
+            this.log.error("Auto-recovery playbook threw", { agentName: name, error: err instanceof Error ? err.message : String(err) });
+          });
         } else if (result.action === "redeployed") {
           // If the agent was previously failing health checks, recover it.
           // Use silent recovery if the grace period hadn't expired (no escalation created).

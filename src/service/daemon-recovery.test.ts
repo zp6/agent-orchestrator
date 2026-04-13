@@ -15,6 +15,8 @@ const {
   const mockNotifyOperator = vi.fn().mockResolvedValue(undefined);
   const mockClearNotifyRateLimit = vi.fn();
   const mockHealthCheck = vi.fn();
+  const mockRestartAgent = vi.fn();
+  const mockCheckSecretsHealth = vi.fn();
 
   class MockStateStore {
     private tasks = new Map<string, {
@@ -131,6 +133,8 @@ const {
       mockHealthCheck,
       mockNotifyOperator,
       mockClearNotifyRateLimit,
+      mockRestartAgent,
+      mockCheckSecretsHealth,
     },
     MockStateStore,
     MockDispatcher,
@@ -246,11 +250,12 @@ vi.mock("../service/logger.js", () => ({
 vi.mock("../orchestrator/deployer.js", () => ({
   Deployer: class {
     healthCheck = mocks.mockHealthCheck;
+    restartAgent = mocks.mockRestartAgent;
+    checkSecretsHealth = mocks.mockCheckSecretsHealth;
     getRegisteredAgents = vi.fn();
     getStaleAgents = vi.fn(() => []);
     getStaleRepoAgents = vi.fn(() => []);
     redeployStale = vi.fn(() => []);
-    restartAgent = vi.fn();
   },
 }));
 
@@ -258,7 +263,7 @@ vi.mock("../config/watcher.js", () => ({
   ConfigWatcher: MockConfigWatcher,
 }));
 
-import { Daemon, HEALTH_RECOVERY_CONFIRM_CYCLES, formatHealthDuration } from "./daemon.js";
+import { Daemon, HEALTH_RECOVERY_CONFIRM_CYCLES, HEALTH_AUTO_RECOVERY_MAX_ATTEMPTS, formatHealthDuration } from "./daemon.js";
 
 describe("formatHealthDuration", () => {
   it("formats seconds under a minute", () => {
@@ -278,6 +283,10 @@ describe("daemon health recovery", () => {
   beforeEach(() => {
     mocks.mockHealthCheck.mockReset();
     mocks.mockHealthCheck.mockResolvedValue(true);
+    mocks.mockRestartAgent.mockReset();
+    mocks.mockRestartAgent.mockResolvedValue({ agentName: "agent-a", action: "redeployed" });
+    mocks.mockCheckSecretsHealth.mockReset();
+    mocks.mockCheckSecretsHealth.mockResolvedValue({ reachable: true, healthy: true, unhealthySecrets: [] });
     mocks.mockNotifyOperator.mockClear();
     mocks.mockClearNotifyRateLimit.mockClear();
     vi.useFakeTimers();
@@ -288,12 +297,39 @@ describe("daemon health recovery", () => {
     vi.useRealTimers();
   });
 
+  // ─── onHealthCheckFailed (direct escalation, called after recovery exhausted) ─
+
+  it("immediately escalates with Telegram alert when called directly", () => {
+    const daemon = new Daemon();
+
+    (daemon as any).onHealthCheckFailed("agent-a", "container stopped responding");
+
+    expect(mocks.mockNotifyOperator).toHaveBeenCalledWith(
+      "Health check failed: agent-a",
+      expect.stringContaining("container stopped responding"),
+      "critical",
+      "health-fail:agent-a",
+    );
+  });
+
+  it("does not send a second Telegram alert if called again after escalation", () => {
+    const daemon = new Daemon();
+
+    (daemon as any).onHealthCheckFailed("agent-a", "detail one");
+    mocks.mockNotifyOperator.mockClear();
+    (daemon as any).onHealthCheckFailed("agent-a", "detail two");
+
+    expect(mocks.mockNotifyOperator).not.toHaveBeenCalled();
+  });
+
   it("debounces recovery for three consecutive passing checks and reports the duration", async () => {
     expect(HEALTH_RECOVERY_CONFIRM_CYCLES).toBe(3);
 
     const daemon = new Daemon();
     const deployer = {
       healthCheck: mocks.mockHealthCheck,
+      restartAgent: mocks.mockRestartAgent,
+      checkSecretsHealth: mocks.mockCheckSecretsHealth,
     };
     (daemon as unknown as { deployer: typeof deployer }).deployer = deployer;
 
@@ -346,5 +382,95 @@ describe("daemon health recovery", () => {
       "health-recovery:agent-a",
     );
     expect(mocks.mockHealthCheck).toHaveBeenCalledTimes(6);
+  });
+
+  // ─── runAutoRecoveryPlaybook ────────────────────────────────────────────────
+
+  it("exports HEALTH_AUTO_RECOVERY_MAX_ATTEMPTS = 2", () => {
+    expect(HEALTH_AUTO_RECOVERY_MAX_ATTEMPTS).toBe(2);
+  });
+
+  it("recovers silently without operator notification when first restart succeeds", async () => {
+    // restartAgent returns "redeployed" (default mock) — first attempt succeeds.
+    const daemon = new Daemon();
+
+    await (daemon as any).runAutoRecoveryPlaybook("agent-a", "health check timed out");
+
+    // No escalation — operator is never notified.
+    expect(mocks.mockNotifyOperator).not.toHaveBeenCalled();
+    // Agent removed from failing set.
+    expect((daemon as any).healthFailingAgents.has("agent-a")).toBe(false);
+    // Secrets and restart called exactly once.
+    expect(mocks.mockCheckSecretsHealth).toHaveBeenCalledTimes(1);
+    expect(mocks.mockRestartAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("tries second restart when first attempt fails and recovers silently", async () => {
+    mocks.mockRestartAgent
+      .mockResolvedValueOnce({ agentName: "agent-a", action: "health-check-failed", detail: "still down" })
+      .mockResolvedValueOnce({ agentName: "agent-a", action: "redeployed" });
+
+    const daemon = new Daemon();
+    await (daemon as any).runAutoRecoveryPlaybook("agent-a", "port unreachable");
+
+    expect(mocks.mockNotifyOperator).not.toHaveBeenCalled();
+    expect(mocks.mockRestartAgent).toHaveBeenCalledTimes(2);
+    expect(mocks.mockCheckSecretsHealth).toHaveBeenCalledTimes(2);
+    expect((daemon as any).healthFailingAgents.has("agent-a")).toBe(false);
+  });
+
+  it("escalates via Telegram after exhausting all recovery attempts", async () => {
+    // Both restart attempts fail.
+    mocks.mockRestartAgent.mockResolvedValue({
+      agentName: "agent-a",
+      action: "health-check-failed",
+      detail: "container won't start",
+    });
+
+    const daemon = new Daemon();
+    await (daemon as any).runAutoRecoveryPlaybook("agent-a", "ECONNREFUSED");
+
+    expect(mocks.mockNotifyOperator).toHaveBeenCalledWith(
+      "Health check failed: agent-a",
+      expect.stringContaining("ECONNREFUSED"),
+      "critical",
+      "health-fail:agent-a",
+    );
+    // All attempts tried.
+    expect(mocks.mockRestartAgent).toHaveBeenCalledTimes(HEALTH_AUTO_RECOVERY_MAX_ATTEMPTS);
+  });
+
+  it("includes secrets check results in the escalation task description", async () => {
+    mocks.mockCheckSecretsHealth.mockResolvedValue({
+      reachable: true,
+      healthy: false,
+      unhealthySecrets: ["gh_token"],
+    });
+    mocks.mockRestartAgent.mockResolvedValue({
+      agentName: "agent-a",
+      action: "health-check-failed",
+      detail: "still unhealthy",
+    });
+
+    const daemon = new Daemon();
+    await (daemon as any).runAutoRecoveryPlaybook("agent-a", "startup failure");
+
+    // The task description should mention the unhealthy secret.
+    const store = (daemon as any).store;
+    const createTaskCall = store.createTask.mock.calls[0]?.[0];
+    expect(createTaskCall).toBeDefined();
+    expect(createTaskCall.description).toContain("gh_token");
+  });
+
+  it("is a no-op when agent is already being tracked (prevents concurrent playbooks)", async () => {
+    const daemon = new Daemon();
+
+    // Simulate agent already tracked.
+    (daemon as any).healthFailingAgents.add("agent-a");
+
+    await (daemon as any).runAutoRecoveryPlaybook("agent-a", "second call");
+
+    expect(mocks.mockRestartAgent).not.toHaveBeenCalled();
+    expect(mocks.mockCheckSecretsHealth).not.toHaveBeenCalled();
   });
 });

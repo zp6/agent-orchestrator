@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { ManagementClient, type ProxyAgentConfig } from "../client/management-client.js";
 import { AgentClient } from "../client/agent-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
+import { getAgentBaseUrl } from "../config/schema.js";
 import { createLogger } from "../service/logger.js";
 
 const REPO_SHA_DIR = resolve(homedir(), ".claude-orchestrator", "repo-deploy-shas");
@@ -13,6 +14,18 @@ export interface DeployResult {
   agentName: string;
   action: "redeployed" | "up-to-date" | "error" | "health-check-failed";
   detail?: string;
+}
+
+/** Result of probing an agent's /secrets/health endpoint. */
+export interface SecretsHealthResult {
+  /** True if the HTTP call succeeded (false means agent was unreachable). */
+  reachable: boolean;
+  /** True when all required secrets are readable and non-empty. */
+  healthy: boolean;
+  /** Names of required secrets that are missing or unreadable. */
+  unhealthySecrets: string[];
+  /** Error description when reachable=false or the call threw. */
+  error?: string;
 }
 
 /**
@@ -198,6 +211,50 @@ export class Deployer {
       return new Set(agents.map((a) => a.name));
     } catch {
       return new Set();
+    }
+  }
+
+  /**
+   * Probe an agent's /secrets/health endpoint to determine whether its required
+   * secrets (oauth_token, gh_token) are mounted and readable.
+   *
+   * Called during the auto-recovery playbook to distinguish "agent process
+   * crashed" from "agent started but can't authenticate" — the recovery action
+   * differs in each case.
+   *
+   * Returns `reachable: false` when the agent's HTTP port is not responding
+   * (e.g. the container is stopped).  Returns `healthy: false` with
+   * `unhealthySecrets` populated when the port is up but secrets are missing.
+   */
+  async checkSecretsHealth(agentName: string): Promise<SecretsHealthResult> {
+    const baseUrl = getAgentBaseUrl(this.config, agentName);
+    if (!baseUrl) {
+      return { reachable: false, healthy: false, unhealthySecrets: [], error: "no port configured" };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const res = await fetch(`${baseUrl}/secrets/health`, { signal: controller.signal });
+      clearTimeout(timer);
+
+      // 200 = all healthy, 207 = some unhealthy — both are valid JSON responses
+      if (!res.ok && res.status !== 207) {
+        return { reachable: true, healthy: false, unhealthySecrets: [], error: `HTTP ${res.status}` };
+      }
+
+      const data = await res.json() as {
+        healthy: boolean;
+        secrets?: Array<{ name: string; readable: boolean; non_empty: boolean }>;
+      };
+      const unhealthySecrets = (data.secrets ?? [])
+        .filter((s) => !s.readable || !s.non_empty)
+        .map((s) => s.name);
+      return { reachable: true, healthy: data.healthy, unhealthySecrets };
+    } catch (err) {
+      clearTimeout(timer);
+      const msg = err instanceof Error ? err.message : String(err);
+      return { reachable: false, healthy: false, unhealthySecrets: [], error: msg };
     }
   }
 
