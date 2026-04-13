@@ -43,6 +43,7 @@ import { proposeAndFileRoadmapItems } from "../orchestrator/roadmap-proposer.js"
 import { detectHighIterationAgents } from "../orchestrator/iteration-cost-detector.js";
 import { runIterationBudgetAlerts } from "../orchestrator/iteration-budget-alert.js";
 import { runSkipPatternCheck } from "../orchestrator/skip-pattern-aggregator.js";
+import { buildConflictRedispatchMessage } from "../orchestrator/conflict-redispatch.js";
 import {
   type GateResult,
   detectImprovements,
@@ -2406,13 +2407,21 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
 
               if (closed) {
                 // Re-dispatch the original issue so the agent starts fresh from main.
+                // Inject conflict context (issue #810): original issue spec + diff hunks
+                // + structured resolution guide so the agent understands what conflicted
+                // and how to approach the fresh implementation.
                 const issueNumbers = extractClosedIssueNumbers(prBody);
                 if (issueNumbers.length > 0 && !this.store.hasActiveTask(agentName)) {
                   const issueNum = issueNumbers[0];
                   this.log.info("Re-dispatching linked issue after auto-close of conflicting PR", { repo, prNumber, issueNum, agentName });
-                  this.dispatcher.dispatch(
-                    `Issue #${issueNum} on ${repo} needs to be re-implemented. The previous PR #${prNumber} was auto-closed because it had persistent merge conflicts that could not be resolved automatically. Please start fresh from the latest \`main\` branch, create a new feature branch, implement the issue, and open a new PR with "Closes #${issueNum}" in the body.`,
-                    {
+                  const redispatchMessage = buildConflictRedispatchMessage({
+                    repo,
+                    prNumber,
+                    prBranch,
+                    issueNum,
+                    prDiff,
+                  });
+                  this.dispatcher.dispatch(redispatchMessage, {
                       agentName,
                       source: "github",
                       sourceRef: `${repo}#${issueNum}`,

@@ -278,18 +278,18 @@ export class PRReviewer {
     for (const pr of prs) {
       try {
         const result = await this.reviewPR(repo, pr.number);
-        // Fetch diff only for request-changes decisions — used to build structured
-        // feedback context (flagged files + relevant hunks) without paying the cost
-        // for approve/escalate decisions where the diff is not dispatched to the agent.
+        // Fetch diff for request-changes decisions (structured feedback) and for
+        // conflict escalations (conflict re-dispatch context injection, issue #810).
+        // Approve/non-conflict-escalate decisions skip the fetch to avoid the cost.
         let prDiff = "";
-        if (result.decision === "request-changes") {
+        if (result.decision === "request-changes" || result.conflictEscalation) {
           try {
             prDiff = execSync(
               `gh pr diff ${pr.number} --repo ${repo}`,
               { encoding: "utf-8", timeout: 30000 },
             );
           } catch {
-            // Non-fatal — feedback message degrades gracefully without diff context
+            // Non-fatal — feedback/re-dispatch message degrades gracefully without diff
           }
         }
         results.push({ prNumber: pr.number, result, prBody: pr.body, prBranch: pr.branch, prDiff });
