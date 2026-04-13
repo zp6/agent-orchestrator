@@ -99,6 +99,7 @@ export type {
   IScoreOutcomeStore,
   IPRIterationStore,
   IStandupHealthStore,
+  IVerificationResultStore,
   ITelegramStateStore,
   Task,
   MergeQueueEntry,
@@ -126,6 +127,8 @@ export type {
   StandupSynthesisEvent,
   StandupHealthPoint,
   StandupHealthSummary,
+  VerificationResultRecord,
+  VerificationStats,
 } from "./state/types.js";
 
 // Supervisor decision log — queryable log for orch CLI and dashboard consumers

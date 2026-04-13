@@ -43,6 +43,8 @@ import type {
   StandupSynthesisLabel,
   StandupHealthPoint,
   StandupHealthSummary,
+  VerificationResultRecord,
+  VerificationStats,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -325,6 +327,27 @@ export class StateStore implements ITelegramStateStore {
 
       CREATE INDEX IF NOT EXISTS idx_standup_synthesis_events_label_recorded_at
         ON standup_synthesis_events (label, recorded_at DESC);
+    `);
+
+    // Verification results table (idempotent — issue #120).
+    // Records every scoring decision for calibration drift and first-pass rate monitoring.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS verification_results (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id          TEXT NOT NULL,
+        score            REAL NOT NULL,
+        first_pass       INTEGER NOT NULL,
+        rejection_reason TEXT,
+        threshold        REAL NOT NULL,
+        agent_id         TEXT NOT NULL,
+        timestamp        TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_verification_results_agent_id_timestamp
+        ON verification_results (agent_id, timestamp DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_verification_results_task_id
+        ON verification_results (task_id);
     `);
   }
 
@@ -1704,6 +1727,86 @@ export class StateStore implements ITelegramStateStore {
       points,
       fallback_count_24h,
       should_escalate: fallback_count_24h > 2,
+    };
+  }
+
+  // ── Verification results ──────────────────────────────────────────────────
+
+  /**
+   * Persist a verification result record after each LLM scoring decision.
+   *
+   * Fire-and-forget — errors are swallowed so instrumentation never interrupts
+   * the main verification flow.
+   */
+  insertVerificationResult(record: Omit<VerificationResultRecord, "id">): void {
+    this.db
+      .prepare(
+        `INSERT INTO verification_results
+           (task_id, score, first_pass, rejection_reason, threshold, agent_id, timestamp)
+         VALUES
+           (@task_id, @score, @first_pass, @rejection_reason, @threshold, @agent_id, @timestamp)`,
+      )
+      .run(record);
+  }
+
+  /**
+   * Return aggregated verification statistics for a single agent.
+   *
+   * @param agentId - Agent name to filter by (matches the `agent_id` column).
+   * @param since   - Optional ISO-8601 lower bound on `timestamp`.
+   *                  When omitted, all records for the agent are included.
+   * @returns Aggregated stats, or null when no records exist for this agent.
+   */
+  getVerificationStats(agentId: string, since?: string): VerificationStats | null {
+    const row = since
+      ? (this.db
+          .prepare(
+            `SELECT
+               agent_id,
+               COUNT(*)                          AS total_verifications,
+               SUM(first_pass)                   AS first_pass_count,
+               SUM(1 - first_pass)               AS rejection_count,
+               AVG(score)                        AS avg_score
+             FROM verification_results
+             WHERE agent_id = ?
+               AND timestamp >= ?`,
+          )
+          .get(agentId, since) as {
+          agent_id: string;
+          total_verifications: number;
+          first_pass_count: number;
+          rejection_count: number;
+          avg_score: number | null;
+        } | undefined)
+      : (this.db
+          .prepare(
+            `SELECT
+               agent_id,
+               COUNT(*)                          AS total_verifications,
+               SUM(first_pass)                   AS first_pass_count,
+               SUM(1 - first_pass)               AS rejection_count,
+               AVG(score)                        AS avg_score
+             FROM verification_results
+             WHERE agent_id = ?`,
+          )
+          .get(agentId) as {
+          agent_id: string;
+          total_verifications: number;
+          first_pass_count: number;
+          rejection_count: number;
+          avg_score: number | null;
+        } | undefined);
+
+    if (!row || row.total_verifications === 0) return null;
+
+    return {
+      agent_id: row.agent_id,
+      total_verifications: row.total_verifications,
+      first_pass_count: row.first_pass_count,
+      first_pass_rate:
+        row.total_verifications > 0 ? row.first_pass_count / row.total_verifications : null,
+      avg_score: row.avg_score,
+      rejection_count: row.rejection_count,
     };
   }
 }

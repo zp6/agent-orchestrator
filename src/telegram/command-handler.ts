@@ -27,7 +27,7 @@
  */
 
 import { createLogger } from "../service/logger.js";
-import type { ITelegramStateStore, Task, LlmTokenStats } from "../state/types.js";
+import type { ITelegramStateStore, Task, LlmTokenStats, VerificationStats } from "../state/types.js";
 import type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 import { buildIssueAgeHeatmap, formatIssueAgeHeatmap } from "../reviewer/issue-age.js";
 import type { CalibrationDriftProvider } from "../reviewer/calibration-drift.js";
@@ -635,7 +635,17 @@ async function handleAgents(store: ITelegramStateStore): Promise<string> {
       s.total > 0
         ? ` (${((s.failed / s.total) * 100).toFixed(0)}% fail rate)`
         : "";
-    lines.push(`*${s.agent_name}*${score}`);
+
+    // First-pass rate from verification_results (all-time)
+    const vStats: VerificationStats | null = store.getVerificationStats(s.agent_name);
+    let firstPassStr = "";
+    if (vStats !== null && vStats.first_pass_rate !== null) {
+      const fpr = (vStats.first_pass_rate * 100).toFixed(0);
+      const warn = vStats.first_pass_rate < 0.70 ? " ⚠️" : "";
+      firstPassStr = ` · first-pass ${fpr}%${warn}`;
+    }
+
+    lines.push(`*${s.agent_name}*${score}${firstPassStr}`);
     lines.push(`  Total: ${s.total} · Done: ${s.done} · Failed: ${s.failed}${failRate}`);
     lines.push(``);
   }
@@ -698,6 +708,27 @@ function handleWeeklySummary(
       lines.push(
         `  • \`${s.agent_name}\`: ${s.done}/${s.total} done${score}`,
       );
+    }
+  }
+
+  // First-pass rates section (7d) — data from verification_results table (issue #120)
+  const sevenDaysAgoIso = sevenDaysAgo.toISOString();
+  const fpRates: Array<{ agent_id: string; rate: number }> = [];
+  for (const s of agentStats) {
+    const vStats: VerificationStats | null = store.getVerificationStats(
+      s.agent_name,
+      sevenDaysAgoIso,
+    );
+    if (vStats !== null && vStats.first_pass_rate !== null) {
+      fpRates.push({ agent_id: s.agent_name, rate: vStats.first_pass_rate });
+    }
+  }
+  if (fpRates.length > 0) {
+    lines.push(``, `*First-pass rates (7d)*`);
+    for (const fp of fpRates) {
+      const pct = (fp.rate * 100).toFixed(0);
+      const warn = fp.rate < 0.70 ? " ⚠️" : "";
+      lines.push(`  • \`${fp.agent_id}\`: ${pct}%${warn}`);
     }
   }
 

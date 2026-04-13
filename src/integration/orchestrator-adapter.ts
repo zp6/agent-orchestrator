@@ -24,7 +24,7 @@ import { RoutingAccuracyTracker } from "../reviewer/routing-accuracy.js";
 import { CalibrationDriftMonitor } from "../reviewer/calibration-drift.js";
 import { ScoreCalibrator } from "../reviewer/score-calibrator.js";
 import type { ReviewerConfig } from "../config.js";
-import type { IStateStore, IScoreOutcomeStore } from "../state/types.js";
+import type { IStateStore, IScoreOutcomeStore, IVerificationResultStore } from "../state/types.js";
 
 export interface ReviewerInstances {
   /** Reviews open PRs, manages the merge queue, and auto-rebases stale branches. */
@@ -98,9 +98,17 @@ export function createReviewerInstances(
       ? new ScoreCalibrator(store as unknown as IScoreOutcomeStore)
       : undefined;
 
+  // Wire IVerificationResultStore if the store implements it.
+  // The reviewer's own StateStore does; the orchestrator's StateStore may not (yet).
+  const verificationResultStore =
+    typeof (store as unknown as IVerificationResultStore).insertVerificationResult === "function" &&
+    typeof (store as unknown as IVerificationResultStore).getVerificationStats === "function"
+      ? (store as unknown as IVerificationResultStore)
+      : undefined;
+
   return {
     reviewer,
-    verifier: new Verifier(store),
+    verifier: new Verifier(store, undefined, verificationResultStore),
     supervisor: new Supervisor(config, store, {
       conflictStatsProvider: reviewer,
       prConfidenceProvider,

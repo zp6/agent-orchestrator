@@ -13,7 +13,13 @@
 
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
-import type { IStateStore, SubtaskRollupPolicy, SubtaskRollupResult, SubtaskChildSummary } from "../state/types.js";
+import type {
+  IStateStore,
+  IVerificationResultStore,
+  SubtaskRollupPolicy,
+  SubtaskRollupResult,
+  SubtaskChildSummary,
+} from "../state/types.js";
 import type { Notifier } from "../notify.js";
 
 export interface VerificationResult {
@@ -39,6 +45,12 @@ export interface VerificationResult {
     agreed: boolean;
   };
 }
+
+/**
+ * Minimum score required to approve a task.
+ * Also recorded as the `threshold` field in `verification_results`.
+ */
+const APPROVAL_THRESHOLD = 0.80;
 
 /**
  * Score range that triggers automatic second-pass review.
@@ -123,7 +135,47 @@ export class Verifier {
   constructor(
     private store: IStateStore,
     private notifier?: Notifier,
+    private verificationResultStore?: IVerificationResultStore,
   ) {}
+
+  /**
+   * Record a verification result to the `verification_results` table.
+   * Fire-and-forget — errors are swallowed so instrumentation never interrupts
+   * the main verification flow.
+   */
+  private recordVerificationResult(
+    taskId: string,
+    agentId: string,
+    score: number,
+    approved: boolean,
+    rejectionReason?: string,
+  ): void {
+    // Prefer the explicitly-wired store; fall back to a runtime check on the
+    // main store (the reviewer's own StateStore implements IVerificationResultStore).
+    const vStore =
+      this.verificationResultStore ??
+      (typeof (this.store as unknown as IVerificationResultStore).insertVerificationResult ===
+      "function"
+        ? (this.store as unknown as IVerificationResultStore)
+        : undefined);
+
+    if (!vStore) return;
+
+    try {
+      vStore.insertVerificationResult({
+        task_id: taskId,
+        score,
+        first_pass: approved ? 1 : 0,
+        rejection_reason: approved ? null : (rejectionReason ?? null),
+        threshold: APPROVAL_THRESHOLD,
+        agent_id: agentId,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err) {
+      // Never let instrumentation interrupt the main flow.
+      this.log.warn("Failed to record verification result", { taskId, err });
+    }
+  }
 
   async verify(taskId: string): Promise<VerificationResult> {
     const task = this.store.getTask(taskId);
@@ -249,6 +301,14 @@ export class Verifier {
         quality_explanation: finalExplanation ?? null,
       });
 
+      this.recordVerificationResult(
+        taskId,
+        task.agent_name ?? "unknown",
+        firstPassResult.score,
+        finalApproved,
+        finalApproved ? undefined : (finalExplanation ?? finalResult.revision),
+      );
+
       return finalResult;
     }
 
@@ -275,6 +335,14 @@ export class Verifier {
       verification_notes: firstPassResult.notes,
       quality_explanation: firstPassResult.explanation ?? null,
     });
+
+    this.recordVerificationResult(
+      taskId,
+      task.agent_name ?? "unknown",
+      firstPassResult.score,
+      firstPassResult.approved,
+      firstPassResult.approved ? undefined : (firstPassResult.explanation ?? firstPassResult.revision),
+    );
 
     return { ...firstPassResult, revision: enrichedRevision };
   }
@@ -316,8 +384,6 @@ export class Verifier {
     if (!parent) {
       throw new Error(`Parent task not found: ${parentTaskId}`);
     }
-
-    const APPROVAL_THRESHOLD = 0.80;
 
     const children = this.store.getChildTasks(parentTaskId);
 

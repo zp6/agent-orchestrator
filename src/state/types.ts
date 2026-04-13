@@ -879,7 +879,82 @@ export interface IStandupHealthStore {
   getStandupHealth(days?: number): StandupHealthSummary;
 }
 
-export interface ITelegramStateStore extends IStateStore, IScoreOutcomeStore, IPRIterationStore, IStandupHealthStore {
+// ── Verification result types ─────────────────────────────────────────────
+
+/**
+ * A single verification event recorded after each task scoring decision.
+ * Stored in the `verification_results` table for calibration and monitoring.
+ *
+ * Schema agreed in rapartlu/agent-orchestrator#768.
+ */
+export interface VerificationResultRecord {
+  id?: number;
+  task_id: string;
+  score: number;
+  /** 1 = approved on first try, 0 = revision dispatched. */
+  first_pass: number;
+  /** LLM explanation when the task was rejected; null when approved. */
+  rejection_reason: string | null;
+  /** The min_score threshold configured at the time of verification (e.g. 0.80). */
+  threshold: number;
+  /** The agent whose task was verified (agent_name from the task record). */
+  agent_id: string;
+  /** ISO-8601 UTC timestamp of the verification event. */
+  timestamp: string;
+}
+
+/**
+ * Aggregated verification statistics for one agent over an optional time window.
+ * Returned by `IVerificationResultStore.getVerificationStats()`.
+ *
+ * Used by calibration drift monitors and the score distribution dashboard.
+ * Data source for agent-dashboard first-pass rate widget (issue #88) — now available
+ * via `IVerificationResultStore.getVerificationStats()`. Surfaced in the Telegram
+ * `/s` summary and `/agents` command as of issue #122.
+ */
+export interface VerificationStats {
+  agent_id: string;
+  total_verifications: number;
+  /** Count of tasks approved on the first pass. */
+  first_pass_count: number;
+  /** Fraction of tasks approved on first pass (0–1), or null if no verifications. */
+  first_pass_rate: number | null;
+  /** Mean verification score across all tasks in the window. */
+  avg_score: number | null;
+  /** Count of tasks that were rejected (first_pass = 0). */
+  rejection_count: number;
+}
+
+/**
+ * Store interface for verification result persistence.
+ *
+ * Implemented by the reviewer's own StateStore.
+ * The orchestrator's StateStore may not implement these methods — callers should
+ * check at runtime (e.g. via `typeof store.insertVerificationResult === 'function'`).
+ */
+export interface IVerificationResultStore {
+  /**
+   * Persist a verification result record after each scoring decision.
+   * Fire-and-forget — callers should swallow errors from this method.
+   */
+  insertVerificationResult(record: Omit<VerificationResultRecord, "id">): void;
+  /**
+   * Return aggregated verification statistics for a single agent.
+   *
+   * @param agentId - Agent name to filter by (matches `agent_id` column).
+   * @param since   - Optional ISO-8601 lower bound on the `timestamp` column.
+   *                  When omitted, all historical records are included.
+   * @returns Stats object, or null when no records exist for the agent.
+   */
+  getVerificationStats(agentId: string, since?: string): VerificationStats | null;
+}
+
+export interface ITelegramStateStore
+  extends IStateStore,
+    IScoreOutcomeStore,
+    IPRIterationStore,
+    IStandupHealthStore,
+    IVerificationResultStore {
   // System flags (pause/resume, operator overrides)
   getSystemFlag(key: string): string | null;
   setSystemFlag(key: string, value: string): void;
