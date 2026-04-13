@@ -6,17 +6,23 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 
 ## Architecture
 
-### Agent Fleet (8 agents across 6 repos)
+### Agent Fleet (11 agents across 5 repos)
+
+Each functional pool runs a Claude instance (primary) and a Codex/OpenAI instance (parallel throughput + rate-limit resilience).
 
 | Agent | Port | Model | Pool | Purpose |
 |-------|------|-------|------|---------|
-| claude-agent-orchestrator | 3472 | Opus | — | Core daemon, state store, dispatching, triggers |
-| claude-orchestrator-dashboard | 3473 | Sonnet | — | Dashboard UI, CLI commands, metrics |
-| claude-orchestrator-reviewer | 3474 | Sonnet | reviewer | PR review, verification, supervisor (primary) |
-| claude-orchestrator-reviewer-2 | 3475 | Sonnet | reviewer | Reviewer pool instance 2 |
-| claude-orchestrator-telegram | 3477 | Haiku | — | Telegram command handling |
-| claude-research-agent | 3478 | Opus | — | Research, investigation, technology evaluation |
-| claude-proxy | 3471 | Opus | — | Proxy server, container management |
+| claude-agent-orchestrator | 3472 | claude-opus-4-6 | orchestrator | Core daemon, state store, dispatching, triggers |
+| codex-agent-orchestrator | 3480 | gpt-5.4-mini | orchestrator | Orchestrator (Codex) — parallel throughput |
+| claude-orchestrator-reviewer | 3474 | claude-sonnet-4-6 | reviewer | PR review, verification, supervisor (primary) |
+| codex-orchestrator-reviewer | 3481 | gpt-5.4-mini | reviewer | Reviewer (Codex) — parallel throughput |
+| claude-orchestrator-dashboard | 3473 | claude-sonnet-4-6 | dashboard | Dashboard UI, CLI commands, metrics |
+| codex-orchestrator-dashboard | 3482 | gpt-5.4-mini | dashboard | Dashboard (Codex) — parallel throughput |
+| claude-orchestrator-telegram | 3477 | claude-haiku-4-5 | — | Telegram command handling |
+| claude-research-agent | 3478 | claude-opus-4-6 | research | Research, investigation, technology evaluation |
+| codex-research-agent | 3483 | gpt-5.4-mini | research | Research (Codex) — parallel throughput |
+| claude-proxy | 3471 | claude-opus-4-6 | proxy | Proxy server, container management |
+| codex-proxy | 3484 | gpt-5.4-mini | proxy | Proxy (Codex) — parallel throughput |
 
 ### Repos
 
@@ -30,12 +36,17 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 
 ### Key Features
 
-- **Agent pools** — multiple instances share workload via round-robin (reviewer pool: 2 instances)
+- **Multi-provider pools** — each pool runs Claude + Codex in parallel for throughput and rate-limit resilience
+- **Agent pools** — multiple instances share workload via round-robin (orchestrator, reviewer, dashboard, research, proxy)
 - **Persistent sessions** — conversations resume across requests via `x-conversation-id` header
-- **Per-agent models** — Opus for coding, Sonnet for reviews, Haiku for Telegram
+- **Per-agent models** — Opus for coding, Sonnet for reviews, Haiku for Telegram, gpt-5.4-mini for Codex variants
 - **Auto-rebase** — pre-submit validator auto-rebases stale branches before PR creation
 - **Telegram bot** — two-way communication: `@TheSupervisor_rapartlu_bot`
-- **Multi-provider ready** — OpenAI Codex CLI integration in progress
+- **Antibody log** — pre-dispatch failure prediction filter; blocks known-bad agent/task combos
+- **Daemon lifecycle auditor** — immutable audit trail of daemon start/stop/restart events
+- **Iteration cost tracking** — per-PR revision cost leaderboard with automatic improvement issue routing
+- **Cross-repo feature tracker** — detects feature consistency gaps across Claude/Codex pool members
+- **Health check postmortem** — auto-files structured incident reports for recurring health failures
 
 ## CRITICAL: NEVER Push Directly to Main
 
