@@ -507,6 +507,9 @@ export interface OrchestratorConfig {
   llm?: LLMConfig;
   base_dir: string;
   orchestrator_dir: string;
+  /** Directory containing the agent template for scaffolding new agents.
+   *  Defaults to `${base_dir}/agent-template`. */
+  template_dir?: string;
   providers?: Record<string, ProviderConfig>;
   verification?: VerificationConfig;
   pr_review?: PRReviewConfig;

@@ -198,7 +198,24 @@ You may see a "## Recent Research Findings" section containing approved research
 
 Be specific and actionable. Only suggest actions that address real gaps. Return [] if everything is on track.`;
 
-const IMPROVEMENT_SYSTEM_PROMPT = `You are a product improvement analyst for a multi-agent system. Each agent is a product with users. Analyze recent task results and suggest improvements that make agents more useful, not just more technically polished.
+/**
+ * Build the improvement detection system prompt dynamically from config.
+ * Lists all agents (one per pool) so the LLM knows about the full fleet.
+ */
+function buildImprovementSystemPrompt(config: OrchestratorConfig): string {
+  const seenPools = new Set<string>();
+  const agentLines = Object.entries(config.agents)
+    .filter(([, a]) => {
+      if (!a.github && !a.description) return false;
+      const key = a.pool ?? "none";
+      if (seenPools.has(key)) return false;
+      seenPools.add(key);
+      return true;
+    })
+    .map(([name, a]) => `- ${name}: ${a.description}`)
+    .join("\n");
+
+  return `You are a product improvement analyst for a multi-agent system. Each agent is a product with users. Analyze recent task results and suggest improvements that make agents more useful, not just more technically polished.
 
 PRIORITIZE (in order):
 1. **New product features** — endpoints, commands, content, or capabilities that make the agent more useful or interesting to users
@@ -212,8 +229,7 @@ AVOID suggesting:
 - Generic "add error handling" or "improve documentation" unless tied to a specific user-facing gap
 
 Each agent has a specific product identity:
-- claude-agent-orchestrator: The orchestrator control plane — should suggest improvements to autonomous oversight, routing accuracy, PR review quality, or supervisor intelligence
-- claude-proxy: Developer tool for running Claude Code — should suggest UX improvements, dashboards, or developer productivity features
+${agentLines}
 
 Respond with ONLY a JSON array (no markdown, no code fences):
 [
@@ -227,6 +243,7 @@ Respond with ONLY a JSON array (no markdown, no code fences):
 
 If no improvements are detected, return an empty array: []
 Be specific and product-focused. Every suggestion should answer: "what can a user do after this that they couldn't before?"`;
+}
 
 // ─── Utility: enforce checklist format on request-changes comments ───────────
 
@@ -425,7 +442,7 @@ export class ReviewerClient {
         response = await client.messages.create({
           model: getLLMModel(this.config, "improvement") ?? model,
           max_tokens: 4096,
-          system: IMPROVEMENT_SYSTEM_PROMPT,
+          system: buildImprovementSystemPrompt(this.config),
           messages: [{ role: "user", content: prompt }],
         }, { signal: abortController.signal });
       } finally {
