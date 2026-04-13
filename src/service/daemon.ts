@@ -2424,6 +2424,20 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
       const justMerged = prsBefore.filter((p) => !afterNumbers.has(`${p.repo}#${p.prNumber}`));
 
       for (const pr of justMerged) {
+        // Skip validation if the agent for this repo is currently failing health checks —
+        // the container is broken and validation would just timeout with a connection error.
+        const agentForRepo = Object.entries(this.config.agents).find(
+          ([, a]) => a.github === pr.repo && a.docker?.port,
+        );
+        if (agentForRepo && this.healthFailingAgents.has(agentForRepo[0])) {
+          this.log.info("Post-merge validation skipped: agent health check failing", {
+            repo: pr.repo,
+            prNumber: pr.prNumber,
+            agentName: agentForRepo[0],
+          });
+          continue;
+        }
+
         try {
           const sha = execSync(
             `gh api repos/${pr.repo}/commits/main --jq .sha`,
