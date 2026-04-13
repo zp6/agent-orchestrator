@@ -1232,6 +1232,7 @@ export class StateStore {
     this.runLineageMigration();
     this.runAntibodyLogMigration();
     this.runDaemonLifecycleMigration();
+    this.runSecretMountStatusMigration();
   }
 
   private runPhase2Migration(): void {
@@ -6359,5 +6360,60 @@ export class StateStore {
     return this.db
       .prepare("SELECT * FROM daemon_lifecycle ORDER BY timestamp DESC LIMIT ?")
       .all(limit) as DaemonLifecycleEntry[];
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Secret mount status tracking (issue #764)
+  //
+  // Persists per-agent, per-secret mount states so the pre-dispatch validator
+  // can make synchronous gating decisions without needing to call the agent's
+  // HTTP endpoint inline.  The data is written by the auto-recovery playbook
+  // each time it probes /secrets/health.
+  // ────────────────────────────────────────────────────────────────────────
+
+  private runSecretMountStatusMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_secret_mount_status (
+        agent_name TEXT NOT NULL,
+        secret_name TEXT NOT NULL,
+        status TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        checked_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (agent_name, secret_name)
+      );
+    `);
+  }
+
+  /**
+   * Upsert the three-state mount status for every secret belonging to an agent.
+   * Called after each /secrets/health probe so the pre-dispatch validator has
+   * fresh data without making its own HTTP call.
+   */
+  upsertSecretMountStatus(
+    agentName: string,
+    details: Array<{ name: string; status: string; reason: string }>,
+  ): void {
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      INSERT INTO agent_secret_mount_status (agent_name, secret_name, status, reason, checked_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(agent_name, secret_name) DO UPDATE SET
+        status = excluded.status,
+        reason = excluded.reason,
+        checked_at = excluded.checked_at
+    `);
+    for (const d of details) {
+      stmt.run(agentName, d.name, d.status, d.reason, now);
+    }
+  }
+
+  /**
+   * Return the most recent mount status for every secret of an agent.
+   * Returns an empty array if no probe has been recorded yet (fail-open).
+   */
+  getSecretMountStatus(agentName: string): Array<{ name: string; status: string; reason: string; checked_at: string }> {
+    return this.db
+      .prepare("SELECT secret_name AS name, status, reason, checked_at FROM agent_secret_mount_status WHERE agent_name = ?")
+      .all(agentName) as Array<{ name: string; status: string; reason: string; checked_at: string }>;
   }
 }

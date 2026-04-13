@@ -1736,9 +1736,39 @@ export class Daemon {
           const names = secretsResult.unhealthySecrets.length > 0
             ? secretsResult.unhealthySecrets.join(", ")
             : "unknown";
+
+          // Persist the three-state mount details so the pre-dispatch validator
+          // can distinguish 'not-mounted' (hard block) from 'mounted-but-empty'
+          // (soft warning) without issuing its own HTTP call.
+          const mountDetails = secretsResult.mountDetails ?? [];
+          if (mountDetails.length > 0) {
+            this.store.upsertSecretMountStatus(agentName, mountDetails);
+          }
+
+          // Send a targeted Telegram warning for 'mounted-but-empty' secrets so
+          // the operator knows the host-side mount is misconfigured even before a
+          // task is dispatched and fails.
+          const emptySecrets = mountDetails.filter((d) => d.status === "mounted-but-empty");
+          if (emptySecrets.length > 0) {
+            const emptyNames = emptySecrets.map((d) => d.name).join(", ");
+            notifyOperator(
+              `Secret misconfiguration: ${agentName}`,
+              `Agent \`${agentName}\` has secret(s) mounted but empty: **${emptyNames}**.\n` +
+                "The file path exists but contains no content — check the host-side bind mount or secrets injector.\n" +
+                "Dispatch will be allowed but tasks that need these credentials will fail.",
+              "warning",
+              `secret-empty:${agentName}`,
+            ).catch(() => {});
+          }
+
           steps.push(`${attemptPrefix} — Secrets check FAILED: unhealthy secrets: ${names}`);
           this.log.warn("Auto-recovery: secrets unhealthy", { agentName, attempt, unhealthySecrets: secretsResult.unhealthySecrets });
         } else {
+          // All healthy — persist to clear any previous not-mounted/empty states.
+          const healthyMountDetails = secretsResult.mountDetails ?? [];
+          if (healthyMountDetails.length > 0) {
+            this.store.upsertSecretMountStatus(agentName, healthyMountDetails);
+          }
           steps.push(`${attemptPrefix} — Secrets check: all required secrets healthy ✓`);
         }
       } catch (err) {

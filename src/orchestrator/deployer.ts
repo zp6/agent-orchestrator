@@ -16,14 +16,46 @@ export interface DeployResult {
   detail?: string;
 }
 
+/**
+ * Three distinct mount states for a secret file.
+ *
+ * - `present-and-valid`: file exists on disk and contains non-empty content.
+ * - `mounted-but-empty`: file path is reachable (no ENOENT) but the content is
+ *   empty — typically a misconfigured host-side bind mount or a race during
+ *   container startup where the secrets injector hasn't written the value yet.
+ * - `not-mounted`: the path does not exist (ENOENT) or the agent could not
+ *   read it at all — the secret was never injected.
+ *
+ * The distinction matters for the pre-dispatch validator: `not-mounted` is a
+ * hard block (the agent cannot authenticate), while `mounted-but-empty` is a
+ * soft warning (the agent may succeed if the injector writes the value before
+ * the task starts).
+ */
+export type SecretMountStatus = "present-and-valid" | "mounted-but-empty" | "not-mounted";
+
+/** Per-secret mount state returned by checkSecretsHealth(). */
+export interface SecretMountDetail {
+  /** Secret name as reported by the agent (e.g. "oauth_token", "gh_token"). */
+  name: string;
+  /** Classified mount state. */
+  status: SecretMountStatus;
+  /** Human-readable reason string for dashboards and incident reports. */
+  reason: string;
+}
+
 /** Result of probing an agent's /secrets/health endpoint. */
 export interface SecretsHealthResult {
   /** True if the HTTP call succeeded (false means agent was unreachable). */
   reachable: boolean;
-  /** True when all required secrets are readable and non-empty. */
+  /** True when all required secrets are present-and-valid. */
   healthy: boolean;
-  /** Names of required secrets that are missing or unreadable. */
+  /** Names of required secrets that are missing or unreadable (legacy field). */
   unhealthySecrets: string[];
+  /**
+   * Per-secret mount details with three-state classification.
+   * Empty when reachable=false or the agent does not return a `secrets` array.
+   */
+  mountDetails: SecretMountDetail[];
   /** Error description when reachable=false or the call threw. */
   error?: string;
 }
@@ -229,7 +261,7 @@ export class Deployer {
   async checkSecretsHealth(agentName: string): Promise<SecretsHealthResult> {
     const baseUrl = getAgentBaseUrl(this.config, agentName);
     if (!baseUrl) {
-      return { reachable: false, healthy: false, unhealthySecrets: [], error: "no port configured" };
+      return { reachable: false, healthy: false, unhealthySecrets: [], mountDetails: [], error: "no port configured" };
     }
 
     const controller = new AbortController();
@@ -240,21 +272,56 @@ export class Deployer {
 
       // 200 = all healthy, 207 = some unhealthy — both are valid JSON responses
       if (!res.ok && res.status !== 207) {
-        return { reachable: true, healthy: false, unhealthySecrets: [], error: `HTTP ${res.status}` };
+        return { reachable: true, healthy: false, unhealthySecrets: [], mountDetails: [], error: `HTTP ${res.status}` };
       }
 
       const data = await res.json() as {
         healthy: boolean;
-        secrets?: Array<{ name: string; readable: boolean; non_empty: boolean }>;
+        secrets?: Array<{ name: string; readable: boolean; non_empty: boolean; mount_status?: string }>;
       };
-      const unhealthySecrets = (data.secrets ?? [])
-        .filter((s) => !s.readable || !s.non_empty)
-        .map((s) => s.name);
-      return { reachable: true, healthy: data.healthy, unhealthySecrets };
+
+      // Classify each secret into one of three distinct mount states.
+      // The agent may already return a `mount_status` field (newer agents); if
+      // not, we derive the state from the existing `readable` + `non_empty`
+      // flags so the orchestrator is backward-compatible.
+      const mountDetails: SecretMountDetail[] = (data.secrets ?? []).map((s) => {
+        let status: SecretMountStatus;
+        let reason: string;
+
+        if (s.mount_status === "present-and-valid" || s.mount_status === "mounted-but-empty" || s.mount_status === "not-mounted") {
+          // Agent already classified the state — trust it.
+          status = s.mount_status as SecretMountStatus;
+          reason =
+            status === "present-and-valid"
+              ? "secret is mounted and readable"
+              : status === "mounted-but-empty"
+                ? "file exists but has no content (misconfigured mount or injector not yet run)"
+                : "file not found or unreadable (ENOENT — secret was never injected)";
+        } else if (!s.readable) {
+          // Older agent: readable=false means ENOENT or permission error.
+          status = "not-mounted";
+          reason = "file not found or unreadable (ENOENT — secret was never injected)";
+        } else if (!s.non_empty) {
+          // Older agent: readable=true but empty content.
+          status = "mounted-but-empty";
+          reason = "file exists but has no content (misconfigured mount or injector not yet run)";
+        } else {
+          status = "present-and-valid";
+          reason = "secret is mounted and readable";
+        }
+
+        return { name: s.name, status, reason };
+      });
+
+      const unhealthySecrets = mountDetails
+        .filter((d) => d.status !== "present-and-valid")
+        .map((d) => d.name);
+
+      return { reachable: true, healthy: data.healthy, unhealthySecrets, mountDetails };
     } catch (err) {
       clearTimeout(timer);
       const msg = err instanceof Error ? err.message : String(err);
-      return { reachable: false, healthy: false, unhealthySecrets: [], error: msg };
+      return { reachable: false, healthy: false, unhealthySecrets: [], mountDetails: [], error: msg };
     }
   }
 

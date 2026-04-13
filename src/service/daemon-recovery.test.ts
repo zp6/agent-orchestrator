@@ -78,6 +78,8 @@ const {
       Object.assign(task, updates, { updated_at: new Date().toISOString() });
       return task;
     });
+    upsertSecretMountStatus = vi.fn();
+    getSecretMountStatus = vi.fn(() => []);
   }
 
   class MockDispatcher {
@@ -286,7 +288,7 @@ describe("daemon health recovery", () => {
     mocks.mockRestartAgent.mockReset();
     mocks.mockRestartAgent.mockResolvedValue({ agentName: "agent-a", action: "redeployed" });
     mocks.mockCheckSecretsHealth.mockReset();
-    mocks.mockCheckSecretsHealth.mockResolvedValue({ reachable: true, healthy: true, unhealthySecrets: [] });
+    mocks.mockCheckSecretsHealth.mockResolvedValue({ reachable: true, healthy: true, unhealthySecrets: [], mountDetails: [] });
     mocks.mockNotifyOperator.mockClear();
     mocks.mockClearNotifyRateLimit.mockClear();
     vi.useFakeTimers();
@@ -445,6 +447,7 @@ describe("daemon health recovery", () => {
       reachable: true,
       healthy: false,
       unhealthySecrets: ["gh_token"],
+      mountDetails: [{ name: "gh_token", status: "not-mounted", reason: "file not found or unreadable (ENOENT — secret was never injected)" }],
     });
     mocks.mockRestartAgent.mockResolvedValue({
       agentName: "agent-a",

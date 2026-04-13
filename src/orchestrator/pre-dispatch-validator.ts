@@ -480,6 +480,64 @@ export function runGitHubPreDispatchValidation(params: {
     }
   }
 
+  // ── Secret mount health check ────────────────────────────────────────────
+  // Read the most-recently-persisted mount status for this agent's secrets
+  // (written by the daemon's auto-recovery playbook after each /secrets/health
+  // probe).  We only gate on stored data so this check is synchronous and
+  // never blocks on network.  If no data exists we skip the check (fail-open)
+  // to avoid blocking dispatches for agents that have never needed recovery.
+  const secretStatuses = store.getSecretMountStatus(agentName);
+  if (secretStatuses.length > 0) {
+    const notMounted = secretStatuses.filter((s) => s.status === "not-mounted");
+    const mountedEmpty = secretStatuses.filter((s) => s.status === "mounted-but-empty");
+
+    if (notMounted.length > 0) {
+      const names = notMounted.map((s) => s.name).join(", ");
+      const failed = makeFailedResult(
+        base,
+        "secret_mount_health",
+        "secret_not_mounted",
+        `agent "${agentName}" is missing required secret(s): ${names} — file not found (ENOENT). ` +
+          "Fix the host-side bind mount before dispatching.",
+      );
+      store.addDispatchValidation({
+        source,
+        source_ref: sourceRef,
+        agent_name: agentName,
+        repo: issue.repo,
+        issue_number: issue.number,
+        outcome: failed.outcome,
+        failure_check: failed.failureCheck,
+        failure_code: failed.failureCode,
+        failure_reason: failed.failureReason,
+        checklist: failed.checks,
+      });
+      return failed;
+    }
+
+    if (mountedEmpty.length > 0) {
+      // Soft warning: allow dispatch but surface the misconfiguration.
+      const names = mountedEmpty.map((s) => s.name).join(", ");
+      checks.push(
+        makeInfoCheck(
+          "secret_mount_health",
+          "secret_mounted_but_empty",
+          `agent "${agentName}" has secret(s) mounted but empty: ${names}. ` +
+            "The file path exists with no content — check the host-side bind mount. " +
+            "Dispatch is allowed but tasks requiring these credentials may fail.",
+        ),
+      );
+    } else {
+      checks.push(
+        makePassedCheck(
+          "secret_mount_health",
+          "secrets_present_and_valid",
+          `all checked secrets for agent "${agentName}" are mounted and readable`,
+        ),
+      );
+    }
+  }
+
   // ── Conflict-risk check ───────────────────────────────────────────────────
   const conflictRiskEnabled = config.conflict_risk?.enabled !== false;
   if (conflictRiskEnabled && (issueTitle || issueBody)) {
