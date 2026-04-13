@@ -218,7 +218,61 @@ This issue has been reassigned from ${task.agent_name} to ${autoReroute.agentNam
 
 `
     : "";
-  const revisionMessage = `${rerouteHeader}Your previous response to this task was reviewed and needs revision.\n\n## Original Task\n${task.description ?? task.title}\n\n## Reviewer Feedback\n${result.revision}\n\nPlease address the feedback and provide an improved response.`;
+
+  // Build the revision message with original context and dimension feedback
+  const revisionParts = [
+    rerouteHeader ? rerouteHeader : "",
+    "Your previous response to this task was reviewed and needs revision.",
+    "",
+    "## Original Task",
+    task.description ?? task.title,
+    "",
+  ];
+
+  // Include original result preview (truncated to 600 chars)
+  if (task.result) {
+    const preview = task.result.length > 600
+      ? task.result.slice(0, 600) + "...[truncated]"
+      : task.result;
+    revisionParts.push("## Original Result");
+    revisionParts.push(preview);
+    revisionParts.push("");
+  }
+
+  // Include per-dimension score breakdown if available
+  if (result.dimensions && Object.keys(result.dimensions).length > 0) {
+    revisionParts.push("## Quality Assessment by Dimension");
+    for (const [dimension, score] of Object.entries(result.dimensions)) {
+      if (score !== undefined) {
+        const scorePercent = (score * 100).toFixed(0);
+        const indicator = score >= 0.7 ? "✓" : score >= 0.5 ? "~" : "✗";
+        revisionParts.push(`- **${dimension}**: ${scorePercent}% ${indicator}`);
+      }
+    }
+    revisionParts.push("");
+  }
+
+  // Include PR URL if available in source_ref
+  if (task.source_ref) {
+    const repo = extractRepoFromSourceRef(task.source_ref);
+    if (repo && task.source_ref.includes("#")) {
+      const issueMatch = task.source_ref.match(/#(\d+)$/);
+      if (issueMatch) {
+        const issueNum = issueMatch[1];
+        revisionParts.push(`## Related GitHub Issue`);
+        revisionParts.push(`${repo}#${issueNum}: ${task.title}`);
+        revisionParts.push("");
+      }
+    }
+  }
+
+  // Include the reviewer feedback
+  revisionParts.push("## Reviewer Feedback");
+  revisionParts.push(result.revision ?? "No specific feedback provided");
+  revisionParts.push("");
+  revisionParts.push("Please address the feedback and provide an improved response.");
+
+  const revisionMessage = revisionParts.join("\n");
 
   try {
     const revisionResult = await dispatcher.dispatch(revisionMessage, {

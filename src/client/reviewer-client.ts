@@ -24,6 +24,13 @@ export interface VerificationResult {
   score: number;
   notes: string;
   revision?: string;
+  /** Per-dimension score breakdown (only present if rejected) */
+  dimensions?: {
+    correctness?: number;
+    completeness?: number;
+    test_coverage?: number;
+    code_quality?: number;
+  };
 }
 
 export interface PRReviewResult {
@@ -60,7 +67,13 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   "approved": true/false,
   "score": 0.0-1.0,
   "notes": "Brief assessment of quality, completeness, correctness",
-  "revision": "If not approved, specific guidance for improvement (omit if approved)"
+  "revision": "If not approved, specific guidance for improvement (omit if approved)",
+  "dimensions": {
+    "correctness": 0.0-1.0 (does the solution work and achieve the goal?),
+    "completeness": 0.0-1.0 (does it fully address all requirements?),
+    "test_coverage": 0.0-1.0 (are tests passing and coverage adequate?),
+    "code_quality": 0.0-1.0 (is the code maintainable and well-structured?)
+  }
 }
 
 Scoring guide:
@@ -76,7 +89,13 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   "approved": true/false,
   "score": 0.0-1.0,
   "notes": "Brief assessment of research quality",
-  "revision": "If not approved, specific guidance for improvement (omit if approved)"
+  "revision": "If not approved, specific guidance for improvement (omit if approved)",
+  "dimensions": {
+    "thoroughness": 0.0-1.0 (did the agent investigate fully, or leave gaps?),
+    "evidence": 0.0-1.0 (are claims backed by concrete examples and data?),
+    "alternatives": 0.0-1.0 (were multiple approaches considered and compared?),
+    "honesty": 0.0-1.0 (acknowledged uncertainty, risks, and limitations?)
+  }
 }
 
 Evaluate research quality on:
@@ -429,12 +448,29 @@ export class ReviewerClient {
   private parseVerificationResponse(text: string): VerificationResult {
     const parsed = extractJSON<Record<string, unknown>>(text, "score");
     if (parsed && typeof parsed.score !== "undefined") {
-      return {
+      const result: VerificationResult = {
         approved: Boolean(parsed.approved),
         score: Math.min(Math.max(Number(parsed.score) || 0, 0), 1),
         notes: String(parsed.notes ?? ""),
         revision: parsed.revision ? String(parsed.revision) : undefined,
       };
+
+      // Extract per-dimension scores if present
+      if (parsed.dimensions && typeof parsed.dimensions === "object") {
+        const dims = parsed.dimensions as Record<string, unknown>;
+        const dimensions: Record<string, number> = {};
+        for (const key of ["correctness", "completeness", "test_coverage", "code_quality", "thoroughness", "evidence", "alternatives", "honesty"]) {
+          const val = dims[key];
+          if (typeof val === "number") {
+            dimensions[key] = Math.min(Math.max(val, 0), 1);
+          }
+        }
+        if (Object.keys(dimensions).length > 0) {
+          result.dimensions = dimensions as VerificationResult["dimensions"];
+        }
+      }
+
+      return result;
     }
 
     // Fallback: extract score from plain text like "Score: 0.8"
