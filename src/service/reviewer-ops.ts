@@ -22,6 +22,9 @@ const supervisorLog = createLogger("supervisor");
 
 const REVISION_ESCALATION_THRESHOLD = 3;
 const ISSUE_REF_RE = /#\d+/;
+
+/** Timeout in milliseconds for each artifact existence `gh` call. */
+const ARTIFACT_CHECK_TIMEOUT_MS = 2000;
 const ARTIFACT_KEYWORDS = [
   "create file",
   "open a pr",
@@ -338,6 +341,132 @@ This issue has been reassigned from ${task.agent_name} to ${autoReroute.agentNam
   }
 }
 
+/** Result of a single GitHub artifact existence check. */
+export interface ArtifactCheckResult {
+  /** true if the artifact (issue or PR) was found in the repo. */
+  exists: boolean;
+  /** "issue" or "pr" when found; null when not found or on unknown errors. */
+  type: "issue" | "pr" | null;
+  /** The canonical ref that was checked, e.g. "owner/repo#123". */
+  ref: string;
+}
+
+/**
+ * Check whether a GitHub artifact (issue or PR) actually exists.
+ *
+ * Tries `gh issue view` first; if that fails with a "not found" error, tries
+ * `gh pr view`.  Both calls use a short timeout so dispatch latency stays
+ * well under 500 ms per artifact.  On ambiguous errors (network, auth) the
+ * function fails open (returns `exists: true`) to avoid false-positive blocks.
+ */
+export function checkGitHubArtifactExists(
+  repo: string,
+  number: number,
+): ArtifactCheckResult {
+  const ref = `${repo}#${number}`;
+  const execOpts = {
+    encoding: "utf-8" as const,
+    timeout: ARTIFACT_CHECK_TIMEOUT_MS,
+    stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"],
+  };
+
+  // Helper: is the error clearly "not found" rather than auth/network?
+  function isNotFoundError(err: unknown): boolean {
+    const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+    return msg.includes("not found") || msg.includes("could not resolve");
+  }
+
+  // Try as an issue first.
+  try {
+    execSync(`gh issue view ${number} --repo ${repo} --json number --jq '.number'`, execOpts);
+    return { exists: true, type: "issue", ref };
+  } catch (err) {
+    if (!isNotFoundError(err)) {
+      // Unknown failure (auth, network, rate-limit) — fail open.
+      return { exists: true, type: null, ref };
+    }
+  }
+
+  // Try as a PR.
+  try {
+    execSync(`gh pr view ${number} --repo ${repo} --json number --jq '.number'`, execOpts);
+    return { exists: true, type: "pr", ref };
+  } catch (err) {
+    if (!isNotFoundError(err)) {
+      return { exists: true, type: null, ref };
+    }
+  }
+
+  return { exists: false, type: null, ref };
+}
+
+/** Outcome of pre-dispatch artifact existence filtering. */
+export interface PhantomArtifactFilterResult {
+  passed: SupervisorDecision[];
+  phantom: Array<{ decision: SupervisorDecision; missingRef: string }>;
+}
+
+/**
+ * Filter supervisor dispatch/follow-up decisions by validating that every
+ * GitHub artifact referenced in the message or reason actually exists in the
+ * target agent's repo.
+ *
+ * Decisions that reference phantom artifacts are removed from the dispatch
+ * queue and returned in the `phantom` array so the caller can escalate them.
+ * Valid decisions and non-dispatch decisions are passed through unchanged.
+ */
+export function filterPhantomArtifactDispatches(
+  config: OrchestratorConfig,
+  decisions: SupervisorDecision[],
+): PhantomArtifactFilterResult {
+  const passed: SupervisorDecision[] = [];
+  const phantom: PhantomArtifactFilterResult["phantom"] = [];
+
+  for (const d of decisions) {
+    // Only validate dispatch/follow-up decisions — other actions don't create
+    // tasks and therefore can't produce phantom revision cycles.
+    if (d.action !== "dispatch" && d.action !== "follow-up") {
+      passed.push(d);
+      continue;
+    }
+
+    // Need an agent name to determine which repo to check.
+    if (!d.agentName) {
+      passed.push(d);
+      continue;
+    }
+
+    const agentRepo = config.agents[d.agentName]?.github;
+    if (!agentRepo) {
+      passed.push(d);
+      continue;
+    }
+
+    const issueRefs = extractIssueRefs(`${d.message ?? ""} ${d.reason ?? ""}`);
+    if (issueRefs.length === 0) {
+      passed.push(d);
+      continue;
+    }
+
+    let phantomRef: string | null = null;
+    for (const num of issueRefs) {
+      const result = checkGitHubArtifactExists(agentRepo, num);
+      if (!result.exists) {
+        phantomRef = result.ref;
+        break;
+      }
+    }
+
+    if (phantomRef) {
+      phantom.push({ decision: d, missingRef: phantomRef });
+    } else {
+      passed.push(d);
+    }
+  }
+
+  return { passed, phantom };
+}
+
 export async function reviewSupervisorState(
   config: OrchestratorConfig,
   store: StateStore,
@@ -352,11 +481,54 @@ export async function reviewSupervisorState(
     supervisorLog.warn("Supervisor: dropped vague idle-agent dispatches", { dropped });
   }
 
+  // Pre-dispatch GitHub artifact existence validation (issue #786):
+  // ensure every referenced issue/PR actually exists before dispatching.
+  // Phantom artifact decisions are escalated to the operator instead of
+  // reaching agent queues.
+  const { passed: existenceValidated, phantom } = filterPhantomArtifactDispatches(config, validated);
+
+  if (phantom.length > 0) {
+    for (const { decision, missingRef } of phantom) {
+      supervisorLog.warn("Supervisor: phantom artifact — dispatch blocked", {
+        agentName: decision.agentName,
+        missingRef,
+        reason: decision.reason,
+      });
+
+      await notifyOperator(
+        "Phantom Artifact — Dispatch Blocked",
+        `Supervisor attempted to dispatch to ${decision.agentName ?? "unknown"} referencing ` +
+          `${missingRef}, but that artifact does not exist in the target repo.\n\n` +
+          `Original reason: ${decision.reason}\n\n` +
+          `The dispatch was blocked. Verify the artifact reference is correct before retrying.`,
+        "warning",
+        `phantom-artifact:${missingRef}`,
+      );
+
+      store.addSupervisorDecision({
+        action: "none",
+        agent_name: decision.agentName,
+        reason: "phantom-artifact",
+        rationale:
+          `Dispatch blocked: ${missingRef} does not exist in the target repo. ` +
+          `Original reason: ${decision.reason}`,
+        issue_refs: [],
+        hard_gates: [`phantom-artifact:${missingRef}`],
+        outcome: "skipped",
+      });
+    }
+
+    supervisorLog.warn("Supervisor: blocked phantom artifact dispatch(es)", {
+      blocked: phantom.length,
+      refs: phantom.map((p) => p.missingRef),
+    });
+  }
+
   supervisorLog.info("Supervisor review complete", {
-    decisions: validated.length,
-    actions: validated.map((d) => d.action),
+    decisions: existenceValidated.length,
+    actions: existenceValidated.map((d) => d.action),
   });
-  return validated;
+  return existenceValidated;
 }
 
 export function gateResolvedIssues(

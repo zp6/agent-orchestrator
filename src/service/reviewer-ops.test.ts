@@ -4,8 +4,10 @@ import type { OrchestratorConfig } from "../config/schema.js";
 import { StateStore, type Task } from "../state/store.js";
 import {
   buildSupervisorContext,
+  checkGitHubArtifactExists,
   detectImprovements,
   extractIssueRefs,
+  filterPhantomArtifactDispatches,
   gateResolvedIssues,
   isConcreteDispatch,
   isDecisionAlreadyResolved,
@@ -286,5 +288,128 @@ describe("reviewer-ops", () => {
     vi.mocked(execSync).mockReturnValueOnce("OPEN");
 
     expect(isDecisionAlreadyResolved("Fix issue #42", "Still open", "owner/a")).toBe(false);
+  });
+});
+
+describe("checkGitHubArtifactExists", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("returns exists:true type:issue when gh issue view succeeds", async () => {
+    const { execSync } = await import("node:child_process");
+    vi.mocked(execSync).mockReturnValueOnce("42\n");
+
+    const result = checkGitHubArtifactExists("owner/repo", 42);
+    expect(result).toEqual({ exists: true, type: "issue", ref: "owner/repo#42" });
+  });
+
+  it("falls back to pr check when issue view returns not found", async () => {
+    const { execSync } = await import("node:child_process");
+    const notFoundError = Object.assign(new Error("Could not resolve to an Issue"), { status: 1 });
+    vi.mocked(execSync)
+      .mockImplementationOnce(() => { throw notFoundError; }) // issue check fails
+      .mockReturnValueOnce("42\n"); // pr check succeeds
+
+    const result = checkGitHubArtifactExists("owner/repo", 42);
+    expect(result).toEqual({ exists: true, type: "pr", ref: "owner/repo#42" });
+  });
+
+  it("returns exists:false when both issue and pr checks return not found", async () => {
+    const { execSync } = await import("node:child_process");
+    const notFoundError = Object.assign(new Error("not found"), { status: 1 });
+    vi.mocked(execSync)
+      .mockImplementationOnce(() => { throw notFoundError; })
+      .mockImplementationOnce(() => { throw notFoundError; });
+
+    const result = checkGitHubArtifactExists("owner/repo", 999);
+    expect(result).toEqual({ exists: false, type: null, ref: "owner/repo#999" });
+  });
+
+  it("fails open (exists:true) on unknown/auth errors", async () => {
+    const { execSync } = await import("node:child_process");
+    const authError = new Error("authentication failed");
+    vi.mocked(execSync).mockImplementationOnce(() => { throw authError; });
+
+    const result = checkGitHubArtifactExists("owner/repo", 42);
+    expect(result.exists).toBe(true);
+  });
+});
+
+describe("filterPhantomArtifactDispatches", () => {
+  const phantomConfig: OrchestratorConfig = {
+    ...config,
+    agents: {
+      "agent-a": {
+        ...config.agents["agent-a"],
+        github: "owner/a",
+      },
+    },
+  };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("passes through non-dispatch decisions unchanged", () => {
+    const decisions = [
+      { action: "verify" as const, reason: "verify task #42" },
+      { action: "none" as const, reason: "all good" },
+    ];
+    const { passed, phantom } = filterPhantomArtifactDispatches(phantomConfig, decisions);
+    expect(passed).toHaveLength(2);
+    expect(phantom).toHaveLength(0);
+  });
+
+  it("passes through dispatch decisions with no issue refs", async () => {
+    const decisions = [
+      {
+        action: "dispatch" as const,
+        agentName: "agent-a",
+        message: "Please do general cleanup work",
+        reason: "improve code quality",
+      },
+    ];
+    const { passed, phantom } = filterPhantomArtifactDispatches(phantomConfig, decisions);
+    expect(passed).toHaveLength(1);
+    expect(phantom).toHaveLength(0);
+  });
+
+  it("blocks dispatch when referenced artifact does not exist", async () => {
+    const { execSync } = await import("node:child_process");
+    const notFoundError = Object.assign(new Error("not found"), { status: 1 });
+    vi.mocked(execSync)
+      .mockImplementationOnce(() => { throw notFoundError; }) // issue check
+      .mockImplementationOnce(() => { throw notFoundError; }); // pr check
+
+    const decisions = [
+      {
+        action: "dispatch" as const,
+        agentName: "agent-a",
+        message: "Revise PR #999 in owner/a",
+        reason: "needs improvement",
+      },
+    ];
+    const { passed, phantom } = filterPhantomArtifactDispatches(phantomConfig, decisions);
+    expect(passed).toHaveLength(0);
+    expect(phantom).toHaveLength(1);
+    expect(phantom[0].missingRef).toBe("owner/a#999");
+  });
+
+  it("allows dispatch when all referenced artifacts exist", async () => {
+    const { execSync } = await import("node:child_process");
+    vi.mocked(execSync).mockReturnValue("42\n");
+
+    const decisions = [
+      {
+        action: "dispatch" as const,
+        agentName: "agent-a",
+        message: "Implement issue #42",
+        reason: "new feature request",
+      },
+    ];
+    const { passed, phantom } = filterPhantomArtifactDispatches(phantomConfig, decisions);
+    expect(passed).toHaveLength(1);
+    expect(phantom).toHaveLength(0);
   });
 });
