@@ -425,8 +425,8 @@ export class PRReviewer {
       }
     }
 
-    // ── PR body linter: agent PRs must include "Closes #N" ────────────────
-    if (this.isAgentPR(pr) && !this.hasIssueRef(pr)) {
+    // ── PR body linter: all PRs must include "Closes #N" (issue #137) ───────
+    if (!this.hasIssueRef(pr)) {
       this.log.warn("PR body linter: missing Closes #N", {
         repo,
         prNumber,
@@ -1646,13 +1646,6 @@ export class PRReviewer {
     } catch {
       return 0;
     }
-  }
-
-  private isAgentPR(pr: PRInfo): boolean {
-    const agentNames = Object.keys(this.config.agents);
-    if (agentNames.some((name) => pr.title.includes(`[${name}]`))) return true;
-    if (extractIssueNumberFromBranch(pr.branch) !== null) return true;
-    return false;
   }
 
   private hasIssueRef(pr: PRInfo): boolean {
