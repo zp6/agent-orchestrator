@@ -215,3 +215,19 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
       health_check_delays_ms: [5000, 10000, 20000, 30000]
+
+  # ── Meeting Facilitator ────────────────────────────────────────
+  meeting-facilitator-agent:
+    dir: "meeting-facilitator-agent"
+    repo: "git@github.com:rapartlu/meeting-facilitator-agent.git"
+    provider: "claude"
+    model: "claude-sonnet-4-6"
+    description: "Meeting facilitator. Evaluates requests, selects format and participants, runs structured discussions, synthesises outcomes."
+    capabilities: ["facilitation", "synthesis", "coordination"]
+    github: "rapartlu/meeting-facilitator-agent"
+    owns_topics: ["facilitation", "meetings", "coordination"]
+    docker:
+      port: 3485
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"

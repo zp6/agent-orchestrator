@@ -66,6 +66,12 @@ export interface MeetingSummary {
 export interface MeetingOptions {
   type?: MeetingType;
   rounds?: number;
+  /** Custom format overriding the built-in standup/bluesky types. */
+  format?: import("./meeting-formats.js").MeetingFormat;
+  /** Explicit participant list (overrides selectAgents). */
+  participants?: string[];
+  /** Topic/title prepended to the meeting agenda. */
+  topic?: string;
 }
 
 // ── Prompts per meeting type ────────────────────────────────────────────────
@@ -322,19 +328,31 @@ export async function runTeamMeeting(
   options?: MeetingOptions,
 ): Promise<MeetingSummary> {
   const meetingType = options?.type ?? "standup";
-  const roundPrompts = PROMPTS[meetingType];
+
+  // Custom format overrides built-in prompts
+  const customFormat = options?.format;
+  const roundPrompts = customFormat
+    ? customFormat.rounds.map((r) => r.prompt)
+    : PROMPTS[meetingType];
   const numRounds = options?.rounds ?? roundPrompts.length;
 
-  log.info("Starting team meeting", { type: meetingType, rounds: numRounds });
+  const formatLabel = customFormat ? customFormat.name : meetingType;
+  log.info("Starting team meeting", { type: formatLabel, rounds: numRounds, topic: options?.topic });
 
   const goals = loadGoals(config.orchestrator_dir);
   const progress = goals.goals.length > 0 ? measureGoalProgress(goals, store) : [];
-  const goalsContext = buildGoalsContext(progress);
+  let goalsContext = buildGoalsContext(progress);
+
+  // Prepend topic to context if provided
+  if (options?.topic) {
+    goalsContext = `## Meeting Topic\n${options.topic}\n\n${goalsContext}`;
+  }
 
   const client = new AgentClient(config);
-  const agents = selectAgents(config);
+  // Use explicit participants if provided, otherwise auto-select
+  const agents = options?.participants ?? selectAgents(config);
 
-  log.info("Meeting participants", { agents, type: meetingType });
+  log.info("Meeting participants", { agents, type: formatLabel });
 
   // Run rounds sequentially (each round needs prior round context)
   const rounds: MeetingRound[] = [];

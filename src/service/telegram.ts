@@ -526,6 +526,44 @@ Steps:
     return formatCalibrationForTelegram(report) || "No calibration data yet.";
   }
 
+  // Request an ad-hoc meeting
+  if (cmd.startsWith("request-meeting ") || cmd.startsWith("/request-meeting ")) {
+    const parts = text.trim().split(/\s+/).slice(1);
+    let format: string | undefined;
+    let topic: string;
+    if (parts[0] === "--format" && parts[1]) {
+      format = parts[1];
+      topic = parts.slice(2).join(" ");
+    } else {
+      topic = parts.join(" ");
+    }
+    if (!topic) return "Usage: request-meeting [--format rfc|retrospective|design-review|triage|incident-postmortem|investigation-spike] <topic>";
+    const validFormats = ["rfc", "retrospective", "design-review", "triage", "incident-postmortem", "investigation-spike"];
+    if (format && !validFormats.includes(format)) {
+      return `❌ Unknown format "${format}". Available: ${validFormats.join(", ")}`;
+    }
+    ctx.store.writeSignal({
+      agent: "operator",
+      signal_type: "meeting_request",
+      key: topic.slice(0, 50).replace(/\s+/g, "-").toLowerCase(),
+      value: JSON.stringify({ topic, suggestedFormat: format, urgency: "normal" }),
+      confidence: 0.9,
+      ttl_hours: 168,
+    });
+    return `✅ Meeting request filed: "${topic}"${format ? ` (suggested format: ${format})` : ""}\nThe facilitator will evaluate and schedule it.`;
+  }
+
+  // List pending meeting requests
+  if (cmd === "meetings" || cmd === "/meetings") {
+    const signals = ctx.store.readSignals({ signal_type: "meeting_request", limit: 10 });
+    if (signals.length === 0) return "No pending meeting requests.";
+    const lines = signals.map((s) => {
+      const val = s.value ? JSON.parse(s.value) : {};
+      return `• ${val.topic ?? s.key} (from ${s.agent}${val.suggestedFormat ? `, format: ${val.suggestedFormat}` : ""})`;
+    });
+    return `*Pending Meeting Requests (${signals.length}):*\n${lines.join("\n")}`;
+  }
+
   // Reset PR escalation
   if (cmd.startsWith("reset-pr ") || cmd.startsWith("/reset-pr ")) {
     const ref = text.trim().split(/\s+/)[1];
