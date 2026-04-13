@@ -284,6 +284,92 @@ describe("VerificationResult combined notes format", () => {
   });
 });
 
+describe("Marginal approval flagging (score 0.60–0.74)", () => {
+  it("VerificationResult includes optional marginalApproval and marginalReason fields", () => {
+    const result: VerificationResult = {
+      approved: true,
+      score: 0.68,
+      notes: "⚠️ MARGINAL APPROVAL — score 68% — Missing edge-case handling reduced confidence.\n\nCore logic is sound.",
+      marginalApproval: true,
+      marginalReason: "Missing edge-case handling reduced confidence despite correct core logic.",
+    };
+    expect(result.marginalApproval).toBe(true);
+    expect(result.marginalReason).toBeDefined();
+    expect(result.marginalReason).toContain("confidence");
+  });
+
+  it("marginalApproval is absent for high-confidence approvals", () => {
+    const result: VerificationResult = {
+      approved: true,
+      score: 0.90,
+      notes: "Excellent work",
+    };
+    expect(result.marginalApproval).toBeUndefined();
+    expect(result.marginalReason).toBeUndefined();
+  });
+
+  it("marginalApproval range is [0.60, 0.74]", () => {
+    const MARGINAL_LOW = 0.60;
+    const MARGINAL_HIGH = 0.74;
+
+    const marginalScores = [0.60, 0.65, 0.70, 0.74];
+    const nonMarginalApprovalScores = [0.59, 0.75, 0.80, 0.90];
+
+    for (const score of marginalScores) {
+      const isMarginal = score >= MARGINAL_LOW && score <= MARGINAL_HIGH;
+      expect(isMarginal, `Expected ${score} to be in marginal range`).toBe(true);
+    }
+
+    for (const score of nonMarginalApprovalScores) {
+      const isMarginal = score >= MARGINAL_LOW && score <= MARGINAL_HIGH;
+      expect(isMarginal, `Expected ${score} to NOT be in marginal range`).toBe(false);
+    }
+  });
+
+  it("marginalReason is only populated for approved tasks in the marginal range", () => {
+    const isMarginalApproval = (approved: boolean, score: number) =>
+      approved && score >= 0.60 && score <= 0.74;
+
+    // Approved, marginal score → marginalApproval
+    expect(isMarginalApproval(true, 0.68)).toBe(true);
+    // Rejected, marginal score → no marginalApproval (rejected tasks get explanation instead)
+    expect(isMarginalApproval(false, 0.68)).toBe(false);
+    // Approved, score above marginal threshold → no marginalApproval
+    expect(isMarginalApproval(true, 0.80)).toBe(false);
+    // Approved, score below marginal threshold → no marginalApproval
+    expect(isMarginalApproval(true, 0.50)).toBe(false);
+  });
+
+  it("marginal badge prefix includes score percentage and reason", () => {
+    const score = 0.68;
+    const marginalReason = "Missing error handling in the retry path reduced confidence.";
+
+    const marginalBadge =
+      `⚠️ MARGINAL APPROVAL — score ${(score * 100).toFixed(0)}%` +
+      ` — ${marginalReason}` +
+      "\n\n";
+
+    expect(marginalBadge).toContain("⚠️ MARGINAL APPROVAL");
+    expect(marginalBadge).toContain("score 68%");
+    expect(marginalBadge).toContain(marginalReason);
+  });
+
+  it("marginal badge is prepended to notes so dashboard can render it as a distinct label", () => {
+    const score = 0.71;
+    const marginalReason = "Incomplete test coverage for edge cases.";
+    const rawNotes = "Core implementation is correct with minor gaps.";
+
+    const marginalBadge =
+      `⚠️ MARGINAL APPROVAL — score ${(score * 100).toFixed(0)}% — ${marginalReason}\n\n`;
+    const enrichedNotes = `${marginalBadge}${rawNotes}`;
+
+    expect(enrichedNotes.startsWith("⚠️ MARGINAL APPROVAL")).toBe(true);
+    expect(enrichedNotes).toContain(rawNotes);
+    // Badge appears before the raw notes
+    expect(enrichedNotes.indexOf("⚠️")).toBeLessThan(enrichedNotes.indexOf(rawNotes));
+  });
+});
+
 describe("Quality dimensions breakdown", () => {
   it("VerificationResult includes optional dimensions field", () => {
     const result: VerificationResult = {

@@ -69,6 +69,20 @@ export interface VerificationResult {
     /** Dimensions from second-pass review (when available). */
     dimensions?: QualityDimensions;
   };
+  /**
+   * True when the task was approved but its score falls in the marginal range
+   * (MARGINAL_APPROVAL_LOW–MARGINAL_APPROVAL_HIGH, i.e. 0.60–0.74).
+   * Operators should spot-audit these tasks before technical debt accumulates —
+   * a marginal approval is meaningfully weaker than a high-confidence approval.
+   */
+  marginalApproval?: boolean;
+  /**
+   * One-sentence summary of what prevented a higher score for a marginal approval.
+   * Surfaces in the verification comment as a distinct badge so operators can
+   * quickly understand the quality gap without reading the full notes.
+   * Populated when marginalApproval is true; undefined otherwise.
+   */
+  marginalReason?: string;
 }
 
 /**
@@ -85,6 +99,16 @@ const APPROVAL_THRESHOLD = 0.80;
 const BORDERLINE_LOW = 0.70;
 const BORDERLINE_HIGH = 0.79;
 
+/**
+ * Score range for marginal approvals.
+ * Tasks approved with a score in [MARGINAL_APPROVAL_LOW, MARGINAL_APPROVAL_HIGH]
+ * receive a distinct ⚠️ MARGINAL badge in the dashboard and a one-sentence
+ * summary of what prevented a higher score, enabling operators to spot-audit
+ * the weakest approved PRs before they accumulate technical debt.
+ */
+const MARGINAL_APPROVAL_LOW = 0.60;
+const MARGINAL_APPROVAL_HIGH = 0.74;
+
 const SYSTEM_PROMPT = `You are a quality reviewer for an AI agent orchestrator. Given a task description and the agent's response, assess the quality of the work.
 
 Respond with ONLY a JSON object (no markdown, no code fences):
@@ -94,6 +118,7 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   "notes": "Brief assessment of quality, completeness, correctness",
   "revision": "If not approved, specific guidance for improvement (omit if approved)",
   "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — e.g. which acceptance criteria were unmet, what gaps were found, or why the work was hard to verify. Omit entirely when score >= 0.80.",
+  "marginal_reason": "REQUIRED when approved is true AND score is between 0.60 and 0.74: one sentence explaining what prevented a higher score (e.g. 'Missing error handling in the retry path reduced confidence despite correct core logic.'). Omit entirely otherwise.",
   "dimensions": {
     "correctness": 0.0-1.0,
     "completeness": 0.0-1.0,
@@ -104,8 +129,9 @@ Respond with ONLY a JSON object (no markdown, no code fences):
 
 Scoring guide:
 - 0.9-1.0: Excellent — thorough, correct, well-structured
-- 0.7-0.89: Good — meets requirements with minor gaps
-- 0.5-0.69: Acceptable — partially addresses the task
+- 0.75-0.89: Good — meets requirements with minor gaps
+- 0.60-0.74: Marginal — meets minimum bar but with meaningful quality gaps; use marginal_reason
+- 0.5-0.59: Acceptable — partially addresses the task
 - Below 0.5: Needs revision — incomplete or incorrect
 
 Dimension guide:
@@ -123,6 +149,7 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   "notes": "Brief assessment of research quality",
   "revision": "If not approved, specific guidance for improvement (omit if approved)",
   "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — e.g. which research dimensions were thin, what evidence was missing, or why the analysis was hard to act on. Omit entirely when score >= 0.80.",
+  "marginal_reason": "REQUIRED when approved is true AND score is between 0.60 and 0.74: one sentence explaining what prevented a higher score (e.g. 'Analysis lacked comparative alternatives, limiting its actionability despite sound core findings.'). Omit entirely otherwise.",
   "dimensions": {
     "correctness": 0.0-1.0,
     "completeness": 0.0-1.0,
@@ -141,8 +168,9 @@ Evaluate research quality on:
 
 Scoring guide:
 - 0.9-1.0: Excellent — comprehensive analysis with evidence, alternatives, and clear recommendation
-- 0.7-0.89: Good — solid analysis with minor gaps in coverage or evidence
-- 0.5-0.69: Acceptable — addresses the question but lacks depth or alternatives
+- 0.75-0.89: Good — solid analysis with minor gaps in coverage or evidence
+- 0.60-0.74: Marginal — addresses the question but with meaningful depth or evidence gaps; use marginal_reason
+- 0.5-0.59: Acceptable — addresses the question but lacks depth or alternatives
 - Below 0.5: Needs revision — superficial, missing key considerations, or not actionable
 
 Dimension guide (for research tasks):
@@ -170,6 +198,7 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   "notes": "Independent assessment — be specific about what is missing or wrong",
   "revision": "If not approved, concrete guidance for what needs to change (omit if approved)",
   "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — which criteria were unmet, what gaps were found, or what made the work hard to verify. Omit entirely when score >= 0.80.",
+  "marginal_reason": "REQUIRED when approved is true AND score is between 0.60 and 0.74: one sentence explaining what prevented a higher score (e.g. 'Missing error handling in the retry path reduced confidence despite correct core logic.'). Omit entirely otherwise.",
   "dimensions": {
     "correctness": 0.0-1.0,
     "completeness": 0.0-1.0,
@@ -180,8 +209,9 @@ Respond with ONLY a JSON object (no markdown, no code fences):
 
 Scoring guide:
 - 0.9-1.0: Excellent — thorough, correct, well-structured
-- 0.7-0.89: Good — meets requirements with minor gaps
-- 0.5-0.69: Acceptable — partially addresses the task
+- 0.75-0.89: Good — meets requirements with minor gaps
+- 0.60-0.74: Marginal — meets minimum bar but with meaningful quality gaps; use marginal_reason
+- 0.5-0.59: Acceptable — partially addresses the task
 - Below 0.5: Needs revision — incomplete or incorrect
 
 Dimension guide:
@@ -355,10 +385,30 @@ export class Verifier {
           ? `${finalExplanation}${dimensionsBreakdown}\n\n${baseRevision}`
           : baseRevision;
 
+      // Marginal approval detection for second-pass results.
+      // Use second-pass marginal_reason if available; otherwise fall back to first pass.
+      const finalMarginalApproval =
+        finalApproved &&
+        firstPassResult.score >= MARGINAL_APPROVAL_LOW &&
+        firstPassResult.score <= MARGINAL_APPROVAL_HIGH;
+      const finalMarginalReason =
+        finalMarginalApproval
+          ? (secondPassResult.marginalReason ?? firstPassResult.marginalReason)
+          : undefined;
+
+      // Prefix combined notes with marginal badge when applicable.
+      const marginalBadge =
+        finalMarginalApproval
+          ? `⚠️ MARGINAL APPROVAL — score ${(firstPassResult.score * 100).toFixed(0)}%` +
+            (finalMarginalReason ? ` — ${finalMarginalReason}` : "") +
+            "\n\n"
+          : "";
+      const enrichedNotes = `${marginalBadge}${combinedNotes}`;
+
       const finalResult: VerificationResult = {
         approved: finalApproved,
         score: firstPassResult.score,
-        notes: combinedNotes,
+        notes: enrichedNotes,
         revision: finalApproved ? undefined : enrichedRevision,
         explanation: finalExplanation,
         dimensions: usedDimensions,
@@ -368,6 +418,8 @@ export class Verifier {
           agreed,
           dimensions: secondPassResult.dimensions,
         },
+        ...(finalMarginalApproval && { marginalApproval: true }),
+        ...(finalMarginalReason && { marginalReason: finalMarginalReason }),
       };
 
       this.log.info("Second-pass review complete", {
@@ -378,12 +430,13 @@ export class Verifier {
         finalApproved,
         agent: task.agent_name,
         ...(finalExplanation && { explanation: finalExplanation }),
+        ...(finalMarginalApproval && { marginalApproval: true, marginalReason: finalMarginalReason }),
       });
 
       this.store.updateTask(taskId, {
         verification_status: finalApproved ? "approved" : "rejected",
         quality_score: firstPassResult.score,
-        verification_notes: combinedNotes,
+        verification_notes: enrichedNotes,
         quality_explanation: finalExplanation ?? null,
       });
 
@@ -405,6 +458,7 @@ export class Verifier {
       score: firstPassResult.score,
       agent: task.agent_name,
       ...(firstPassResult.explanation && { explanation: firstPassResult.explanation }),
+      ...(firstPassResult.marginalApproval && { marginalApproval: true, marginalReason: firstPassResult.marginalReason }),
     });
 
     // Enrich revision with explanation and dimension breakdown so agents understand the low score.
@@ -419,10 +473,19 @@ export class Verifier {
         ? `${firstPassResult.explanation}${dimensionsBreakdown}\n\n${firstPassResult.revision}`
         : firstPassResult.revision;
 
+    // Prefix notes with marginal badge so the dashboard task list can surface it.
+    const marginalBadge =
+      firstPassResult.marginalApproval
+        ? `⚠️ MARGINAL APPROVAL — score ${(firstPassResult.score * 100).toFixed(0)}%` +
+          (firstPassResult.marginalReason ? ` — ${firstPassResult.marginalReason}` : "") +
+          "\n\n"
+        : "";
+    const enrichedNotes = `${marginalBadge}${firstPassResult.notes}`;
+
     this.store.updateTask(taskId, {
       verification_status: firstPassResult.approved ? "approved" : "rejected",
       quality_score: firstPassResult.score,
-      verification_notes: firstPassResult.notes,
+      verification_notes: enrichedNotes,
       quality_explanation: firstPassResult.explanation ?? null,
     });
 
@@ -434,7 +497,7 @@ export class Verifier {
       firstPassResult.approved ? undefined : (firstPassResult.explanation ?? firstPassResult.revision),
     );
 
-    return { ...firstPassResult, revision: enrichedRevision };
+    return { ...firstPassResult, notes: enrichedNotes, revision: enrichedRevision };
   }
 
   /**
@@ -698,10 +761,21 @@ export class Verifier {
       .trim();
     try {
       const parsed = JSON.parse(cleaned);
+      const approved = Boolean(parsed.approved);
       const score = Math.min(Math.max(Number(parsed.score) || 0, 0), 1);
       // Only surface explanation when score is genuinely sub-0.80
       const explanation =
         score < 0.80 && parsed.explanation ? String(parsed.explanation) : undefined;
+
+      // Detect marginal approvals: approved tasks scoring in [0.60, 0.74]
+      const isMarginalApproval =
+        approved &&
+        score >= MARGINAL_APPROVAL_LOW &&
+        score <= MARGINAL_APPROVAL_HIGH;
+      const marginalReason =
+        isMarginalApproval && parsed.marginal_reason
+          ? String(parsed.marginal_reason)
+          : undefined;
 
       // Parse dimensions if provided
       let dimensions: QualityDimensions | undefined;
@@ -731,12 +805,14 @@ export class Verifier {
       }
 
       return {
-        approved: Boolean(parsed.approved),
+        approved,
         score,
         notes: String(parsed.notes ?? ""),
         revision: parsed.revision ? String(parsed.revision) : undefined,
         explanation,
         dimensions,
+        ...(isMarginalApproval && { marginalApproval: true }),
+        ...(marginalReason && { marginalReason }),
       };
     } catch {
       return {
