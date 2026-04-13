@@ -74,7 +74,14 @@ const SKIP_PATTERN_CHECK_EVERY_N_CYCLES = 288; // ~24h at 5min interval
  * kills it and moves on to the next cycle. Prevents a hung LLM call or
  * Docker operation from deadlocking the entire daemon for hours.
  */
-const CYCLE_WATCHDOG_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+/** Soft alert threshold: notify operator when a cycle exceeds this. */
+const CYCLE_SLOW_ALERT_MS = 10 * 60 * 1000; // 10 minutes
+
+/** Hard deadlock timeout: if a cycle exceeds this, abandon it and move on.
+ *  Set high enough that it only fires for true deadlocks (infinite hangs),
+ *  not for slow-but-completing cycles. At 20 min, normal cycles (4-8 min)
+ *  and deploy-heavy cycles (10-15 min) all complete without triggering. */
+const CYCLE_HARD_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
 
 /**
  * Default quality-score floor for reviewer-pool approvals.  Any completed
@@ -427,28 +434,55 @@ export class Daemon {
     startTelegramPolling({ config: this.config, store: this.store, dispatcher: this.dispatcher });
 
     while (this.running) {
-      // Watchdog: kill the cycle if it runs longer than CYCLE_WATCHDOG_TIMEOUT_MS.
-      // A hung LLM call or Docker operation should not deadlock the entire daemon.
-      const cyclePromise = this.pollCycle();
-      const watchdog = new Promise<"timeout">((resolve) =>
-        setTimeout(() => resolve("timeout"), CYCLE_WATCHDOG_TIMEOUT_MS),
-      );
+      // Two-tier cycle protection:
+      //   1. Soft alert at 10 min — notify operator but keep waiting
+      //   2. Hard timeout at 20 min — abandon the cycle (true deadlock)
+      //
+      // The old 5-min watchdog created zombie cycles that caused cascading
+      // slowdowns (366s → 695s → 984s). This two-tier approach lets normal
+      // cycles (4-8 min) and deploy-heavy cycles (10-15 min) complete
+      // naturally, while still recovering from true infinite hangs.
 
-      const result = await Promise.race([cyclePromise.then(() => "done" as const), watchdog]);
-      if (result === "timeout") {
-        this.log.error("WATCHDOG: Cycle exceeded timeout — aborting and starting next cycle", {
-          timeoutMs: CYCLE_WATCHDOG_TIMEOUT_MS,
+      const cyclePromise = this.pollCycle();
+
+      // Soft alert: warn but don't interrupt
+      const softAlert = setTimeout(() => {
+        this.log.warn("Slow cycle: exceeding expected duration", {
+          thresholdMs: CYCLE_SLOW_ALERT_MS,
           cycle: this.cycleCount,
         });
-        console.error(`[WATCHDOG] Cycle #${this.cycleCount} exceeded ${CYCLE_WATCHDOG_TIMEOUT_MS / 1000}s — moving on`);
+        console.warn(`[SLOW CYCLE] Cycle #${this.cycleCount} running for ${CYCLE_SLOW_ALERT_MS / 1000}s — still waiting`);
         notifyOperator(
-          "Cycle watchdog triggered",
-          `Cycle #${this.cycleCount} exceeded the ${CYCLE_WATCHDOG_TIMEOUT_MS / 1000}s watchdog timeout and was aborted. A step (likely LLM call or Docker operation) is hanging.`,
-          "critical",
-          `watchdog:${this.cycleCount}`,
+          "Slow cycle detected",
+          `Cycle #${this.cycleCount} has been running for ${CYCLE_SLOW_ALERT_MS / 1000}s. ` +
+          `Waiting for completion (hard timeout at ${CYCLE_HARD_TIMEOUT_MS / 1000}s).`,
+          "warning",
+          `slow-cycle:${this.cycleCount}`,
         ).catch(() => {});
-        // The hung cycle continues in the background but we don't await it.
-        // The next cycle will start fresh.
+      }, CYCLE_SLOW_ALERT_MS);
+
+      // Hard timeout: abandon cycle only for true deadlocks
+      const hardTimeout = new Promise<"deadlock">((resolve) =>
+        setTimeout(() => resolve("deadlock"), CYCLE_HARD_TIMEOUT_MS),
+      );
+
+      const result = await Promise.race([cyclePromise.then(() => "done" as const), hardTimeout]);
+      clearTimeout(softAlert);
+
+      if (result === "deadlock") {
+        this.log.error("DEADLOCK: Cycle exceeded hard timeout — abandoning", {
+          timeoutMs: CYCLE_HARD_TIMEOUT_MS,
+          cycle: this.cycleCount,
+        });
+        console.error(`[DEADLOCK] Cycle #${this.cycleCount} exceeded ${CYCLE_HARD_TIMEOUT_MS / 1000}s — abandoning (zombie may persist)`);
+        notifyOperator(
+          "Cycle deadlocked — hard timeout",
+          `Cycle #${this.cycleCount} exceeded the ${CYCLE_HARD_TIMEOUT_MS / 1000}s hard timeout. ` +
+          `This indicates a true deadlock. The daemon will start a new cycle but the stuck ` +
+          `cycle may continue in the background.`,
+          "critical",
+          `deadlock:${this.cycleCount}`,
+        ).catch(() => {});
       }
 
       if (!this.running) break;
