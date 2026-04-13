@@ -5960,6 +5960,11 @@ export class StateStore {
    *
    * @returns number of rows deleted.
    */
+  /** Delete a specific signal by ID (e.g. after dispatching a meeting request). */
+  deleteSignal(id: number): void {
+    this.db.prepare("DELETE FROM signals WHERE id = ?").run(id);
+  }
+
   pruneExpiredSignals(): number {
     const now = new Date().toISOString();
     const result = this.db

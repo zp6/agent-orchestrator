@@ -552,6 +552,7 @@ export class Daemon {
         batch4.push(this.detectImprovements(time));
         this.detectIterationCostImprovements(time);
         batch4.push(this.checkIterationBudgetAlerts(time));
+        batch4.push(this.checkMeetingRequests(time));
       }
       if (this.cycleCount % STANDUP_MEETING_EVERY_N_CYCLES === 0) {
         batch4.push(this.runMeeting(time, "standup"));
@@ -1524,6 +1525,84 @@ export class Daemon {
       }
     } catch (err) {
       console.error(`[${time}] Improvement detection failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  /**
+   * Check for pending meeting_request signals and dispatch them to the
+   * meeting facilitator agent. The facilitator evaluates the request,
+   * picks a format, selects participants, and runs the meeting.
+   */
+  private async checkMeetingRequests(time: string): Promise<void> {
+    try {
+      const signals = this.store.readSignals({ signal_type: "meeting_request", limit: 5 });
+      if (signals.length === 0) return;
+
+      // Find the facilitator agent
+      const facilitatorName = Object.keys(this.config.agents).find(
+        (name) => name.includes("facilitator") || this.config.agents[name].capabilities?.includes("facilitation"),
+      );
+
+      if (!facilitatorName) {
+        this.log.info("Meeting request found but no facilitator agent configured", { count: signals.length });
+        return;
+      }
+
+      // Check weekly cap: max 1 ad-hoc meeting per 7 days
+      const recentMeetings = this.store.getMeetings(10);
+      const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const adHocThisWeek = recentMeetings.filter(
+        (m) => m.type !== "standup" && m.type !== "bluesky" && m.created_at >= oneWeekAgo,
+      );
+      if (adHocThisWeek.length >= 1) {
+        this.log.info("Meeting request deferred: weekly ad-hoc cap reached", {
+          pending: signals.length,
+          adHocThisWeek: adHocThisWeek.length,
+        });
+        return;
+      }
+
+      // Dispatch the highest-confidence request to the facilitator
+      const request = signals[0];
+      let payload: Record<string, unknown> = {};
+      try {
+        payload = request.value ? JSON.parse(request.value) : {};
+      } catch {
+        payload = { topic: request.key };
+      }
+
+      // Delete the signal so it's not re-dispatched on the next cycle.
+      // If dispatch fails, the operator can re-request via Telegram.
+      try {
+        this.store.deleteSignal(request.id);
+      } catch {
+        // Non-critical — duplicate dispatch is better than no dispatch
+      }
+
+      console.log(`[${time}] Dispatching meeting request to facilitator: "${payload.topic ?? request.key}"`);
+
+      this.dispatcher.dispatch(
+        `Meeting request: ${payload.topic ?? request.key}\n\nFormat suggestion: ${payload.suggestedFormat ?? "auto"}\nRequested by: ${request.agent}\nContext: ${payload.context ?? "none"}\nUrgency: ${payload.urgency ?? "normal"}`,
+        {
+          agentName: facilitatorName,
+          source: "manual",
+          sourceRef: `meeting-request:${request.key}`,
+          title: `[meeting] ${payload.topic ?? request.key}`,
+        },
+      ).then(() => {
+        this.log.info("Meeting request dispatched to facilitator", {
+          facilitator: facilitatorName,
+          topic: payload.topic ?? request.key,
+        });
+      }).catch((err) => {
+        this.log.warn("Failed to dispatch meeting request", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    } catch (err) {
+      this.log.warn("Meeting request check failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
