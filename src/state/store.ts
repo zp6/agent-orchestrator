@@ -856,6 +856,37 @@ export interface AgentHealth {
   auth_degraded_at: string | null;
 }
 
+/**
+ * Unified agent reliability score (0–100) combining three key components:
+ * - Crash frequency (consecutive failures)
+ * - Iteration cost (avg PR revision rounds)
+ * - Antibody hit rate (approval/rejection frequency)
+ */
+export interface AgentReliabilityScore {
+  agent_name: string;
+  /** Composite reliability score 0–100. Higher is better. */
+  reliability_score: number;
+  /** Number of consecutive failures (0 = healthy). */
+  consecutive_failures: number;
+  /** Average revision rounds per PR (1.0 = no revisions, 2.0+ = needs feedback). */
+  avg_iteration_cost: number | null;
+  /** Approval rate: approved/(approved+rejected). 0–1 scale (null = insufficient data). */
+  antibody_hit_rate: number | null;
+  /** Trend direction over the window: improving/stable/declining/insufficient_data. */
+  trend: "improving" | "stable" | "declining" | "insufficient_data";
+}
+
+/**
+ * Daily reliability score snapshot for trend charting (sparkline).
+ */
+export interface DailyReliabilityScore {
+  /** ISO date string: 'YYYY-MM-DD'. */
+  date: string;
+  agent_name: string;
+  /** Reliability score for that day (0–100). */
+  reliability_score: number;
+}
+
 // ── Stigmergy signals ─────────────────────────────────────────────────────────
 
 /**
@@ -4438,6 +4469,181 @@ export class StateStore {
         sample_task_ids: sampleRows.map((r) => r.id),
       };
     });
+  }
+
+  // ── Unified reliability score (issue #758) ──────────────────────────────
+
+  /**
+   * Compute unified agent reliability scores (0–100) combining three components:
+   * 1. Crash frequency (consecutive failures)
+   * 2. Iteration cost (avg revision rounds per PR)
+   * 3. Antibody hit rate (approval rate: approved/(approved+rejected))
+   *
+   * Formula (weighted):
+   *   reliability_score = 100 - [
+   *     crash_penalty(40%)  +
+   *     iteration_penalty(30%) +
+   *     antibody_penalty(30%)
+   *   ]
+   *
+   * Clamped to [0, 100].
+   *
+   * @param windowDays - How many calendar days of history to consider (default 30).
+   * @returns Array of AgentReliabilityScore, ordered by reliability_score DESC.
+   */
+  getAgentReliabilityScores(windowDays = 30): AgentReliabilityScore[] {
+    // 1. Get all agents with recent tasks
+    const agents = this.db.prepare(`
+      SELECT DISTINCT agent_name
+      FROM tasks
+      WHERE agent_name IS NOT NULL
+        AND parent_task_id IS NULL
+        AND created_at >= datetime('now', ? || ' days')
+      ORDER BY agent_name
+    `).all(`-${windowDays}`) as Array<{ agent_name: string }>;
+
+    const results: AgentReliabilityScore[] = [];
+
+    for (const { agent_name } of agents) {
+      // 2. Get crash frequency (consecutive failures)
+      const health = this.getAgentHealth(agent_name);
+      const crashPenalty = Math.min(health.consecutive_failures * 10, 40); // Max 40% penalty (4+ failures)
+
+      // 3. Get iteration cost (avg revision_count in window)
+      const iterationData = this.db.prepare(`
+        SELECT
+          AVG(revision_count) AS avg_revision_count,
+          COUNT(*) AS task_count
+        FROM tasks
+        WHERE agent_name = ?
+          AND parent_task_id IS NULL
+          AND task_type != 'research'
+          AND status IN ('done', 'failed', 'escalated')
+          AND created_at >= datetime('now', ? || ' days')
+      `).get(agent_name, `-${windowDays}`) as { avg_revision_count: number | null; task_count: number } | undefined;
+
+      const avgIterationCost = iterationData?.avg_revision_count ?? null;
+      // Iteration cost: >2 rounds = max penalty, 1 round = no penalty
+      const iterationPenalty = avgIterationCost ? Math.min(Math.max(avgIterationCost - 1, 0) * 15, 30) : 0;
+
+      // 4. Get antibody hit rate (approval rate)
+      const antibodyData = this.db.prepare(`
+        SELECT
+          COALESCE(
+            SUM(CASE WHEN verification_status = 'approved' THEN 1 ELSE 0 END) * 1.0 /
+            NULLIF(SUM(CASE WHEN verification_status IN ('approved', 'rejected') THEN 1 ELSE 0 END), 0),
+            1.0
+          ) AS approval_rate
+        FROM tasks
+        WHERE agent_name = ?
+          AND parent_task_id IS NULL
+          AND verification_status IS NOT NULL
+          AND created_at >= datetime('now', ? || ' days')
+      `).get(agent_name, `-${windowDays}`) as { approval_rate: number } | undefined;
+
+      const approvalRate = antibodyData?.approval_rate ?? null;
+      // Antibody penalty: if approval_rate is low (rejected a lot), penalize
+      const antibodyPenalty = approvalRate !== null ? Math.max((1 - approvalRate) * 30, 0) : 0;
+
+      // 5. Calculate composite score
+      const totalPenalty = crashPenalty + iterationPenalty + antibodyPenalty;
+      const reliabilityScore = Math.max(0, Math.min(100 - totalPenalty, 100));
+
+      // 6. Get trend direction
+      const trend = this.getAgentScoreTrend(agent_name);
+
+      results.push({
+        agent_name,
+        reliability_score: reliabilityScore,
+        consecutive_failures: health.consecutive_failures,
+        avg_iteration_cost: avgIterationCost,
+        antibody_hit_rate: approvalRate,
+        trend: trend.direction,
+      });
+    }
+
+    // Sort by reliability_score descending (healthiest first)
+    results.sort((a, b) => b.reliability_score - a.reliability_score);
+    return results;
+  }
+
+  /**
+   * Get daily reliability scores for the last N days (for sparkline trending).
+   *
+   * This recomputes scores for each day in the window, giving a time-series
+   * of how reliability has trended.
+   *
+   * @param agentName - Agent to fetch trend for.
+   * @param windowDays - How many calendar days of history (default 7 for dashboard sparkline).
+   * @returns Array of DailyReliabilityScore in chronological order.
+   */
+  getAgentReliabilityTrend(agentName: string, windowDays = 7): DailyReliabilityScore[] {
+    // Generate date range for the window
+    const dates: string[] = [];
+    for (let i = windowDays - 1; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+      dates.push(d.toISOString().split("T")[0]);
+    }
+
+    const results: DailyReliabilityScore[] = [];
+
+    for (const date of dates) {
+      const dayStart = `${date}T00:00:00Z`;
+      const dayEnd = new Date(new Date(dayStart).getTime() + 24 * 60 * 60 * 1000).toISOString();
+
+      // Get health on that day
+      const health = this.db.prepare(`
+        SELECT consecutive_failures FROM agent_health
+        WHERE agent_name = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `).get(agentName) as { consecutive_failures: number } | undefined;
+
+      const crashPenalty = (health?.consecutive_failures ?? 0) * 10;
+
+      // Get iteration cost on that day
+      const iterationData = this.db.prepare(`
+        SELECT AVG(revision_count) AS avg_revision_count
+        FROM tasks
+        WHERE agent_name = ?
+          AND parent_task_id IS NULL
+          AND task_type != 'research'
+          AND status IN ('done', 'failed', 'escalated')
+          AND created_at >= ? AND created_at < ?
+      `).get(agentName, dayStart, dayEnd) as { avg_revision_count: number | null } | undefined;
+
+      const avgIterationCost = iterationData?.avg_revision_count ?? null;
+      const iterationPenalty = avgIterationCost ? Math.min(Math.max(avgIterationCost - 1, 0) * 15, 30) : 0;
+
+      // Get antibody rate on that day
+      const antibodyData = this.db.prepare(`
+        SELECT
+          COALESCE(
+            SUM(CASE WHEN verification_status = 'approved' THEN 1 ELSE 0 END) * 1.0 /
+            NULLIF(SUM(CASE WHEN verification_status IN ('approved', 'rejected') THEN 1 ELSE 0 END), 0),
+            1.0
+          ) AS approval_rate
+        FROM tasks
+        WHERE agent_name = ?
+          AND parent_task_id IS NULL
+          AND verification_status IS NOT NULL
+          AND created_at >= ? AND created_at < ?
+      `).get(agentName, dayStart, dayEnd) as { approval_rate: number } | undefined;
+
+      const approvalRate = antibodyData?.approval_rate ?? null;
+      const antibodyPenalty = approvalRate !== null ? Math.max((1 - approvalRate) * 30, 0) : 0;
+
+      const totalPenalty = Math.min(crashPenalty, 40) + iterationPenalty + antibodyPenalty;
+      const score = Math.max(0, Math.min(100 - totalPenalty, 100));
+
+      results.push({
+        date,
+        agent_name: agentName,
+        reliability_score: score,
+      });
+    }
+
+    return results;
   }
 
   // ── Dispatch efficiency / waste-rate widget (issue #517) ────────────────
