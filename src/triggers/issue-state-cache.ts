@@ -168,15 +168,12 @@ export class IssueStateCache {
       return `issue ${repo}#${issueNumber} is closed`;
     }
 
-    if (entry.hasMergedPR) {
-      this.metrics.staleDispatchesPrevented++;
-      log.info("Stale dispatch prevented: issue has merged PR", {
-        repo,
-        issueNumber,
-        cachedAge: Date.now() - entry.fetchedAt,
-      });
-      return `issue ${repo}#${issueNumber} has a merged PR`;
-    }
+    // NOTE: We intentionally do NOT block on hasMergedPR here when the issue
+    // is still open. A merged PR that did not close the issue (e.g. missing
+    // "Closes #N", partial fix, or manually reopened issue) means there is
+    // legitimate remaining work. Gating on issue state (above) is sufficient:
+    // if the issue is closed, dispatch is already blocked. If it is open,
+    // dispatch must proceed regardless of prior PR history. See issue #775.
 
     if (entry.hasOpenPR) {
       this.metrics.staleDispatchesPrevented++;

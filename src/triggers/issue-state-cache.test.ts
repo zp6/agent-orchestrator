@@ -128,10 +128,20 @@ describe("IssueStateCache", () => {
     expect(cache.getMetrics().staleDispatchesPrevented).toBe(1);
   });
 
-  it("blocks dispatch for issues with merged PR", () => {
+  it("allows dispatch for open issues with a merged PR (issue #775)", () => {
+    // An open issue with a merged PR means the PR did not close the issue —
+    // there is still work to do. Dispatch must be allowed; only issue state
+    // (open/closed) is authoritative.
     const fetcher = makeFetcher("open", false, true);
     const reason = cache.validateForDispatch("owner/repo", 1, fetcher);
-    expect(reason).toContain("merged PR");
+    expect(reason).toBeNull();
+    expect(cache.getMetrics().staleDispatchesPrevented).toBe(0);
+  });
+
+  it("blocks dispatch for closed issues even when no merged PR", () => {
+    const fetcher = makeFetcher("closed", false, false);
+    const reason = cache.validateForDispatch("owner/repo", 1, fetcher);
+    expect(reason).toContain("closed");
     expect(cache.getMetrics().staleDispatchesPrevented).toBe(1);
   });
 

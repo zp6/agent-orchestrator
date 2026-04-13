@@ -340,6 +340,8 @@ describe("duplicate PR detection before dispatch", () => {
       updateClaimTaskId: vi.fn(),
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
+      // Secret mount health check (added in #775)
+      getSecretMountStatus: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -365,23 +367,30 @@ describe("duplicate PR detection before dispatch", () => {
     );
   });
 
-  it("skips dispatch when a merged PR already addresses the issue", async () => {
+  it("proceeds with dispatch when open issue has a prior merged PR (issue #775)", async () => {
+    // An open issue with a merged PR means the prior PR did not close the issue.
+    // There is still work to do, so dispatch must proceed. Only issue state
+    // (open/closed) is authoritative — a merged PR on an open issue is NOT a blocker.
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
     ]);
     mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: false, hasMergedPR: true });
-    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
     mockFindExistingPRs.mockReturnValue([
       { number: 10, title: "Fix bug", url: "https://github.com/owner/my-repo/pull/10", state: "merged", isDraft: false },
     ]);
+    mockDispatcher.dispatch.mockResolvedValue({
+      taskId: "task-1",
+      agentName: "claude-agent-orchestrator",
+      response: { content: "ok", model: "", usage: { input_tokens: 0, output_tokens: 0 }, stop_reason: "end_turn" },
+    });
 
     const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
-    expect(result.dispatched).toBe(0);
-    expect(result.skipped).toBe(1);
-    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
-    // Bug 2: markProcessed must be called so the issue isn't re-polled every cycle
-    expect(mockStore.markProcessed).toHaveBeenCalledWith("github", "owner/my-repo#42", expect.stringContaining("merged-pr-10"));
+    expect(result.dispatched).toBe(1);
+    expect(result.skipped).toBe(0);
+    expect(mockDispatcher.dispatch).toHaveBeenCalled();
+    // Must NOT mark processed — issue is still open and should be re-evaluated
+    expect(mockStore.markProcessed).not.toHaveBeenCalledWith("github", "owner/my-repo#42", expect.stringContaining("merged-pr-10"));
   });
 
   it("skips dispatch when a non-draft open PR already exists (open-PR dispatch guard)", async () => {
@@ -994,6 +1003,8 @@ describe("dispatchIdleAgentBacklog", () => {
       updateClaimTaskId: vi.fn(),
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
+      // Secret mount health check (added in #775)
+      getSecretMountStatus: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1100,20 +1111,24 @@ describe("dispatchIdleAgentBacklog", () => {
     expect(result.dispatched).toBe(0);
   });
 
-  it("skips issues with a merged PR (no double-dispatch)", async () => {
+  it("proceeds with dispatch for open issues with a prior merged PR (issue #775)", async () => {
+    // An open issue with a merged PR means the prior PR did not close the issue.
+    // Dispatch must proceed — issue state is authoritative, not PR history.
     mockFetchIssues.mockReturnValue([
-      { repo: "owner/my-repo", number: 1, title: "Already fixed", body: "", url: "https://...", labels: [] },
+      { repo: "owner/my-repo", number: 1, title: "Still open after partial fix", body: "", url: "https://...", labels: [] },
     ]);
-    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: false, hasMergedPR: true });
     mockFindExistingPRs.mockReturnValue([
       { number: 5, title: "Fix", url: "url", state: "merged", isDraft: false },
     ]);
 
     const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
 
-    expect(result.dispatched).toBe(0);
-    expect(result.skipped).toBe(1);
-    expect(mockStore.markProcessed).toHaveBeenCalledWith(
+    expect(result.dispatched).toBe(1);
+    expect(result.skipped).toBe(0);
+    expect(mockDispatcher.dispatch).toHaveBeenCalled();
+    // Must NOT mark processed — issue is open and needs continued work
+    expect(mockStore.markProcessed).not.toHaveBeenCalledWith(
       "github", "owner/my-repo#1", expect.stringContaining("merged-pr-5"),
     );
   });

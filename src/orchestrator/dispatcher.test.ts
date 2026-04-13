@@ -1314,7 +1314,10 @@ describe("Dispatcher.dispatch — already-resolved guard (issue #457)", () => {
     mockValidateGhAuth.mockReturnValue({ ok: true });
   });
 
-  it("skips dispatch when issue has a merged PR", async () => {
+  it("skips dispatch when pre-dispatch validation returns blocked (e.g. closed issue)", async () => {
+    // Note: as of issue #775, a merged PR on an OPEN issue no longer blocks dispatch.
+    // This test verifies that the dispatcher correctly handles any blocked validation
+    // outcome (here we use issue_closed as the representative blocking code).
     mockRunGitHubPreDispatchValidation.mockReturnValueOnce({
       outcome: "blocked",
       source: "github",
@@ -1323,10 +1326,10 @@ describe("Dispatcher.dispatch — already-resolved guard (issue #457)", () => {
       repo: "owner/repo",
       issueNumber: 99,
       checks: [],
-      failureCheck: "branch_conflicts",
-      failureCode: "merged_pr_exists",
-      failureReason: "issue owner/repo#99 has a merged PR",
-      blockingPRNumber: 10,
+      failureCheck: "issue_state",
+      failureCode: "issue_closed",
+      failureReason: "issue owner/repo#99 is already closed",
+      blockingPRNumber: null,
       draftPR: null,
       existingBranch: null,
     });
@@ -1344,11 +1347,11 @@ describe("Dispatcher.dispatch — already-resolved guard (issue #457)", () => {
     const tasks = store.listTasks({});
     expect(tasks).toHaveLength(0);
 
-    // Should return a skip result with merged PR info
+    // Should return a skip result
     expect(result.taskId).toBe("");
     expect(result.agentName).toBe("test-agent");
     expect(result.response.stop_reason).toBe("skipped");
-    expect(result.response.content).toContain("merged PR");
+    expect(result.response.content).toContain("already closed");
   });
 
   it("proceeds with dispatch when no merged PR exists", async () => {

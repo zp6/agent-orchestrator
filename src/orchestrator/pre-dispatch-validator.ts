@@ -384,26 +384,18 @@ export function runGitHubPreDispatchValidation(params: {
   }
   const mergedPR = linkedPRs.find((pr) => pr.state === "merged") ?? null;
   if (mergedPR) {
-    const failed = makeFailedResult(
-      base,
-      "branch_conflicts",
-      "merged_pr_exists",
-      `issue ${sourceRef} is already addressed by merged PR #${mergedPR.number}`,
+    // Issue #775: A merged PR against an OPEN issue does NOT block dispatch.
+    // The issue being open means there is still legitimate work to do (the PR
+    // did not close the issue, e.g. missing "Closes #N", partial fix, or the
+    // issue was manually reopened). Record as INFO so the agent can build on
+    // the prior merged work rather than starting from scratch.
+    checks.push(
+      makeInfoCheck(
+        "branch_conflicts",
+        "prior_merged_pr",
+        `issue ${sourceRef} had prior merged PR #${mergedPR.number} but is still open — dispatch allowed; agent should build on that prior work`,
+      ),
     );
-    failed.blockingPRNumber = mergedPR.number;
-    store.addDispatchValidation({
-      source,
-      source_ref: sourceRef,
-      agent_name: agentName,
-      repo: issue.repo,
-      issue_number: issue.number,
-      outcome: failed.outcome,
-      failure_check: failed.failureCheck,
-      failure_code: failed.failureCode,
-      failure_reason: failed.failureReason,
-      checklist: failed.checks,
-    });
-    return failed;
   }
 
   const approvedPR = findApprovedPRForIssue(issue.repo, issue.number);
