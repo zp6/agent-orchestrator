@@ -715,6 +715,39 @@ export interface PRIterationReport {
   top_categories: ReviewCategoryCount[];
 }
 
+/** One weekly bucket in the revision-rate trend. */
+export interface PRIterationTrendPoint {
+  /** ISO date of the week start (Monday). */
+  week_start: string;
+  total_prs: number;
+  prs_with_revisions: number;
+  revision_rate: number | null;
+  avg_rounds_to_merge: number | null;
+}
+
+/** Weekly revision-rate trend series. */
+export interface PRIterationTrend {
+  window_days: number;
+  points: PRIterationTrendPoint[];
+  /** Direction of the most recent 2-week comparison: "improving" | "worsening" | "stable" | "insufficient_data" */
+  direction: "improving" | "worsening" | "stable" | "insufficient_data";
+  /** Absolute change in revision_rate between last 2 weeks (positive = worse). */
+  delta: number | null;
+}
+
+/** Coaching directive for an agent whose revision rate exceeds the threshold. */
+export interface AgentCoachingDirective {
+  agent_name: string;
+  revision_pct: number;
+  feedback_tasks: number;
+  /** Top patterns that are driving revisions for this agent */
+  top_patterns: Array<{ pattern: string; count: number }>;
+  /** Top redispatch categories attributed to this agent's PRs */
+  top_categories: Array<{ category: string; count: number }>;
+  /** Short actionable summary for the agent */
+  directive: string;
+}
+
 /**
  * Store interface for PR iteration tracking persistence.
  *

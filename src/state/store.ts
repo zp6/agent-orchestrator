@@ -37,6 +37,9 @@ import type {
   PRIterationStat,
   AgentIterationStat,
   ReviewCategoryCount,
+  PRIterationTrend,
+  PRIterationTrendPoint,
+  AgentCoachingDirective,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -1387,5 +1390,209 @@ export class StateStore implements ITelegramStateStore {
         const avg = scores.length > 0 ? scores.reduce((sum, s) => sum + s, 0) / scores.length : 0;
         return { agent_name: t.agent_name, avg_score: avg, threshold_min: t.min_avg_score };
       });
+  }
+
+  // ── PR iteration trend and coaching ─────────────────────────────────────
+
+  /**
+   * Generate weekly revision-rate trend data, comparing PRs needing revisions
+   * to total PRs reviewed in each week.
+   *
+   * Uses `weekday 0` (Sunday) with -6 days offset to correctly map every
+   * weekday to its Monday (week start).
+   *
+   * Part of the improvement-detector integration for issue #159.
+   */
+  getPRIterationTrend(windowDays = 90): PRIterationTrend {
+    const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+
+    // Aggregate per (repo, pr_number, week).  We use strftime('%Y-%W', …)
+    // as a compact week key and derive the Monday date for display.
+    const rawRows = this.db.prepare(`
+      SELECT
+        strftime('%Y-%W', created_at) AS week_key,
+        date(created_at, 'weekday 0', '-6 days') AS week_start,
+        repo,
+        pr_number,
+        MAX(CASE WHEN decision = 'approve'         THEN 1 ELSE 0 END) AS approved,
+        SUM(CASE WHEN decision = 'request-changes' THEN 1 ELSE 0 END) AS change_requests
+      FROM pr_reviews
+      WHERE created_at >= ?
+      GROUP BY week_key, week_start, repo, pr_number
+      ORDER BY week_key ASC
+    `).all(since) as Array<{
+      week_key: string;
+      week_start: string;
+      repo: string;
+      pr_number: number;
+      approved: number;
+      change_requests: number;
+    }>;
+
+    // Roll up to one point per week
+    const weekMap = new Map<string, {
+      week_start: string;
+      total: number;
+      with_revisions: number;
+      total_rounds: number;
+      approved: number;
+    }>();
+
+    for (const row of rawRows) {
+      const entry = weekMap.get(row.week_key) ?? {
+        week_start: row.week_start,
+        total: 0,
+        with_revisions: 0,
+        total_rounds: 0,
+        approved: 0,
+      };
+      entry.total++;
+      if (row.change_requests > 0) entry.with_revisions++;
+      if (row.approved) {
+        entry.approved++;
+        entry.total_rounds += row.change_requests + 1;
+      }
+      weekMap.set(row.week_key, entry);
+    }
+
+    const points: PRIterationTrendPoint[] = [];
+    for (const [, w] of weekMap) {
+      points.push({
+        week_start: w.week_start,
+        total_prs: w.total,
+        prs_with_revisions: w.with_revisions,
+        revision_rate: w.total > 0 ? w.with_revisions / w.total : null,
+        avg_rounds_to_merge: w.approved > 0 ? w.total_rounds / w.approved : null,
+      });
+    }
+
+    // Direction: compare the last two complete weeks
+    let direction: PRIterationTrend["direction"] = "insufficient_data";
+    let delta: number | null = null;
+
+    if (points.length >= 2) {
+      const prev = points[points.length - 2].revision_rate;
+      const last = points[points.length - 1].revision_rate;
+      if (prev !== null && last !== null) {
+        delta = last - prev;
+        const THRESHOLD = 0.03; // 3pp change = meaningful
+        if (delta < -THRESHOLD) direction = "improving";
+        else if (delta > THRESHOLD) direction = "worsening";
+        else direction = "stable";
+      }
+    }
+
+    return { window_days: windowDays, points, direction, delta };
+  }
+
+  /**
+   * Generate coaching directives for agents whose revision rate exceeds
+   * `thresholdPct` (default 40 %).  For each such agent, surface the top
+   * feedback patterns and redispatch categories driving the high rate.
+   *
+   * Part of the improvement-detector integration for issue #159.
+   */
+  getAgentCoachingDirectives(
+    windowDays = 30,
+    thresholdPct = 40,
+  ): AgentCoachingDirective[] {
+    const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+
+    // Per-agent feedback task stats
+    const agentFeedbackRows = this.db.prepare(`
+      SELECT
+        t.agent_name,
+        COUNT(DISTINCT t.source_ref) AS unique_prs,
+        COUNT(*) AS feedback_tasks,
+        COALESCE(SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END), 0) AS done
+      FROM tasks t
+      WHERE t.source = 'pr-feedback'
+        AND t.created_at >= ?
+        AND t.agent_name IS NOT NULL
+      GROUP BY t.agent_name
+    `).all(since) as Array<{
+      agent_name: string;
+      unique_prs: number;
+      feedback_tasks: number;
+      done: number;
+    }>;
+
+    // First-pass task counts for computing revision %
+    const firstPassRows = this.db.prepare(`
+      SELECT agent_name, COUNT(*) AS total_tasks
+      FROM tasks
+      WHERE parent_task_id IS NULL
+        AND created_at >= ?
+        AND agent_name IS NOT NULL
+        AND source != 'pr-feedback'
+        AND title NOT LIKE '[revision]%'
+      GROUP BY agent_name
+    `).all(since) as Array<{ agent_name: string; total_tasks: number }>;
+
+    const firstPassMap = new Map(firstPassRows.map(r => [r.agent_name, r.total_tasks]));
+
+    const directives: AgentCoachingDirective[] = [];
+
+    for (const row of agentFeedbackRows) {
+      const firstPass = firstPassMap.get(row.agent_name) ?? 0;
+      const totalWork = firstPass + row.feedback_tasks;
+      const revPct = totalWork > 0 ? (row.feedback_tasks / totalWork) * 100 : 0;
+
+      if (revPct < thresholdPct) continue;
+
+      // Top feedback patterns for this specific agent
+      const agentPatterns = this.db.prepare(`
+        SELECT title, COUNT(*) AS count
+        FROM tasks
+        WHERE source = 'pr-feedback'
+          AND created_at >= ?
+          AND agent_name = ?
+        GROUP BY title
+        ORDER BY count DESC
+        LIMIT 5
+      `).all(since, row.agent_name) as Array<{ title: string; count: number }>;
+
+      // Top redispatch categories linked to this agent's PRs (via source_ref match)
+      const agentCategories = this.db.prepare(`
+        SELECT r.redispatch_category AS category, COUNT(*) AS count
+        FROM pr_reviews r
+        INNER JOIN tasks t
+          ON t.source_ref = (r.repo || '#' || r.pr_number)
+          OR t.source_ref = CAST(r.pr_number AS TEXT)
+        WHERE r.created_at >= ?
+          AND r.redispatch_category IS NOT NULL
+          AND t.agent_name = ?
+          AND t.source = 'pr-feedback'
+        GROUP BY r.redispatch_category
+        ORDER BY count DESC
+        LIMIT 5
+      `).all(since, row.agent_name) as Array<{ category: string; count: number }>;
+
+      // Build directive text
+      const topPatternSummary = agentPatterns.slice(0, 3)
+        .map(p => `"${p.title.slice(0, 60)}"`)
+        .join(", ");
+      const topCatSummary = agentCategories.slice(0, 3)
+        .map(c => c.category)
+        .join(", ");
+
+      let directive = `Revision rate is ${Math.round(revPct)}% (${row.feedback_tasks} feedback tasks / ${totalWork} total). `;
+      if (topPatternSummary) directive += `Top recurring issues: ${topPatternSummary}. `;
+      if (topCatSummary) directive += `Review categories: ${topCatSummary}. `;
+      directive += "Consider adding pre-dispatch checklists or self-review steps for these patterns.";
+
+      directives.push({
+        agent_name: row.agent_name,
+        revision_pct: Math.round(revPct * 10) / 10,
+        feedback_tasks: row.feedback_tasks,
+        top_patterns: agentPatterns.map(p => ({ pattern: p.title.slice(0, 120), count: p.count })),
+        top_categories: agentCategories,
+        directive,
+      });
+    }
+
+    // Sort by revision_pct descending (worst first)
+    directives.sort((a, b) => b.revision_pct - a.revision_pct);
+    return directives;
   }
 }
