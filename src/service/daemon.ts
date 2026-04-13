@@ -459,6 +459,18 @@ export class Daemon {
     this.running = false;
   }
 
+  /** Run a batch of steps in parallel, logging any that reject. */
+  private async runBatch(name: string, promises: Promise<unknown>[]): Promise<void> {
+    const results = await Promise.allSettled(promises);
+    for (const r of results) {
+      if (r.status === "rejected") {
+        this.log.error(`Batch "${name}" step failed`, {
+          error: r.reason instanceof Error ? r.reason.message : String(r.reason),
+        });
+      }
+    }
+  }
+
   private async pollCycle(): Promise<void> {
     const cycleStartedAt = new Date();
     const time = cycleStartedAt.toLocaleTimeString();
@@ -468,94 +480,79 @@ export class Daemon {
     let registeredAgents: Set<string> = new Set();
 
     try {
-      // Fetch which agents are actually deployed on the proxy
+      // ── Sequential: must be first ──────────────────────────────────────
       registeredAgents = await this.deployer.getRegisteredAgents();
 
-      // 0a. Self-update: pull + rebuild if behind origin/main, then re-exec.
-      //     Runs on the same cadence as agent sync (~5 min) so merged PRs are
-      //     picked up quickly without operator intervention.
+      // Self-update: pull + rebuild if behind origin/main, then re-exec.
       if (this.cycleCount % SELF_UPDATE_EVERY_N_CYCLES === 0) {
         await this.selfUpdate();
       }
 
-      // 0c. Sync agents every 10 cycles (~5 min) to recover from proxy restarts.
-      //     The management API loses agent state when the proxy restarts, so periodic
-      //     sync ensures agents are re-registered without requiring a daemon restart.
-      //     Also check for auth recovery on quarantined agents (issue #418).
+      // Agent sync (every 10 cycles): recover from proxy restarts.
       if (this.cycleCount % AGENT_SYNC_EVERY_N_CYCLES === 0) {
         await this.syncAgents();
-        // Re-fetch registered agents after sync in case new ones were created
         registeredAgents = await this.deployer.getRegisteredAgents();
-        // Periodic container token scan (issue #430): detect agents whose
-        // GH_TOKEN has gone missing since the last check and quarantine them
-        // before any work is dispatched. Previously only ran at startup.
         await this.checkAgentGhAuth();
-        // Check if quarantined agents have recovered their GH_TOKEN
         await this.checkAuthRecovery();
       }
 
-      // 0d. Poll Telegram for operator commands (lightweight — single HTTP call)
-      await pollTelegram({ config: this.config, store: this.store, dispatcher: this.dispatcher });
-
-      // 0c. Confirm recovery for agents that were previously failing health checks.
-      await this.checkHealthRecoveries();
-
-      // 1. Check for stale dispatched tasks (stuck or crashed agents).
-      //    Timeout failures are scheduled for retry (up to TIMEOUT_RETRY_MAX times)
-      //    rather than being permanently failed immediately.
+      // ── Parallel Batch 1: Housekeeping (no LLM, fast) ─────────────────
+      const batch1: Promise<unknown>[] = [
+        pollTelegram({ config: this.config, store: this.store, dispatcher: this.dispatcher }),
+        this.checkHealthRecoveries(),
+        this.checkResultMissingTasks(time),
+        this.processRetries(time),
+      ];
+      // Sync tasks are wrapped as resolved promises
       this.checkStaleTasks(time);
-
-      // 1a. Flag 'done' tasks older than 30 min with no recorded result as
-      //     'result_missing', alert the operator, and schedule for re-dispatch.
-      await this.checkResultMissingTasks(time);
-
-      // 1b. Cancel in-flight tasks whose source issue has been closed externally
-      //     (issue #431). Runs periodically to avoid excessive GitHub API calls.
       if (this.cycleCount % CLOSED_ISSUE_CHECK_EVERY_N_CYCLES === 0) {
         this.cancelClosedIssueTasks(time);
       }
+      await this.runBatch("housekeeping", batch1);
 
-      // 1c. Process tasks whose retry backoff has elapsed.
-      await this.processRetries(time);
+      // ── Parallel Batch 2: Dispatch + Verify (LLM heavy) ──────────────
+      await this.runBatch("dispatch+verify", [
+        this.dispatchTriggers(time, registeredAgents),
+        this.verifyCompleted(time),
+      ]);
 
-      // 2. Dispatch new work from all trigger sources
-      await this.dispatchTriggers(time, registeredAgents);
-
-      // 2. Verify recently completed tasks
-      await this.verifyCompleted(time);
-
-      // 2b. Idle-agent pickup: immediately dispatch the next GitHub issue to agents
-      //     that just became idle (completed their task this cycle). Without this,
-      //     agents sit idle until the next full poll cycle — previously the supervisor
-      //     filled this gap with manual "agent is idle" dispatches.
+      // ── Sequential: depends on dispatch/verify results ────────────────
       await this.pickupIdleAgents(time, registeredAgents);
 
-      // 3. Create PRs for any branches pushed since the last cycle.
-      //    Runs every cycle (ORPHAN_PR_CHECK_EVERY_N_CYCLES = 1) so that a
-      //    pushed branch is picked up within a single poll interval.  This
-      //    prevents the supervisor-intervention failure mode seen in tasks
-      //    01KNDFMP, 01KNDAVJ, and 01KNDB9C where branches sat without PRs
-      //    for multiple cycles.
+      // ── Parallel Batch 3: PR Review/Merge + Supervisor + Deploy ───────
+      // Note: preventiveRestart is NOT in this batch — it conflicts with
+      // redeployStale when both target the same agents. It runs sequentially
+      // after this batch instead.
+      const batch3: Promise<unknown>[] = [
+        this.redeployStale(time, registeredAgents),
+      ];
+      if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
+        batch3.push(this.reviewAndMerge(time));
+        batch3.push(this.runSupervisor(time));
+      } else {
+        batch3.push(this.processMergeQueue(time));
+      }
+      await this.runBatch("pr-lifecycle+deploy", batch3);
+
+      // Preventive restart — runs AFTER deploy to avoid double-restarting
+      // agents that redeployStale already handled this cycle.
+      if (this.cycleCount % CONTAINER_RESTART_EVERY_N_CYCLES === 0) {
+        await this.preventiveRestart(time, registeredAgents);
+      }
+
+      // ── Parallel Batch 4: Periodic tasks (only when cycle matches) ────
+      const batch4: Promise<unknown>[] = [];
+
       if (this.cycleCount % ORPHAN_PR_CHECK_EVERY_N_CYCLES === 0) {
-        await this.createOrphanPRs(time);
+        batch4.push(this.createOrphanPRs(time));
       }
-
-      // 3b. Periodically detect improvements and create issues
       if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
-        await this.detectImprovements(time);
-        // Also run the lightweight iteration-cost check (no LLM needed)
+        batch4.push(this.detectImprovements(time));
         this.detectIterationCostImprovements(time);
-        // Fire Telegram alerts for issues that have exceeded the revision ceiling
-        await this.checkIterationBudgetAlerts(time);
+        batch4.push(this.checkIterationBudgetAlerts(time));
       }
-
-      // 3c. Daily standup — blockers, opportunities, action items
       if (this.cycleCount % STANDUP_MEETING_EVERY_N_CYCLES === 0) {
-        await this.runMeeting(time, "standup");
-      }
-
-      // 3d. Daily aged issue check — nudge at 14d, force-boost at 30d
-      if (this.cycleCount % STANDUP_MEETING_EVERY_N_CYCLES === 0) {
+        batch4.push(this.runMeeting(time, "standup"));
         try {
           const { nudged, boosted } = checkAgedIssues(this.config, this.store);
           if (nudged.length + boosted.length > 0) {
@@ -565,68 +562,25 @@ export class Daemon {
           this.log.warn("Aged issue check failed", { error: err instanceof Error ? err.message : String(err) });
         }
       }
-
-      // 3e. Weekly blue sky — creative ideation, bold proposals
       if (this.cycleCount % BLUESKY_MEETING_EVERY_N_CYCLES === 0) {
-        await this.runMeeting(time, "bluesky");
+        batch4.push(this.runMeeting(time, "bluesky"));
       }
-
-      // 3f. Daily roadmap proposals — strategic blue-sky ideas filed as issues
       if (this.cycleCount % ROADMAP_PROPOSAL_EVERY_N_CYCLES === 0) {
-        try {
-          const filed = await proposeAndFileRoadmapItems(this.config, this.store);
-          if (filed > 0) console.log(`[${time}] Roadmap proposer: filed ${filed} proposal(s)`);
-        } catch (err) {
-          this.log.warn("Roadmap proposal failed", { error: err instanceof Error ? err.message : String(err) });
-        }
+        batch4.push(
+          proposeAndFileRoadmapItems(this.config, this.store)
+            .then((filed) => { if (filed > 0) console.log(`[${time}] Roadmap proposer: filed ${filed} proposal(s)`); })
+            .catch((err) => { this.log.warn("Roadmap proposal failed", { error: err instanceof Error ? err.message : String(err) }); }),
+        );
       }
-
-      // 3g. Link approved research findings to implementation issues
       if (this.cycleCount % RESEARCH_LINK_EVERY_N_CYCLES === 0) {
-        await this.linkResearchToImplementation(time);
+        batch4.push(this.linkResearchToImplementation(time));
       }
-
-      // 4. Review open PRs (kept at a slower cadence — review is more expensive)
-      if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
-        await this.reviewPRs(time);
-      }
-
-      // 4b. Sweep approved-but-unqueued PRs into the merge queue, then process it.
-      //     The sweep runs at the same cadence as PR review (~15 min) so that
-      //     PRs approved in the previous review cycle are picked up promptly.
-      //     processMergeQueue runs every cycle so queued PRs land without delay.
-      if (this.cycleCount % AUTO_MERGE_SWEEP_EVERY_N_CYCLES === 0) {
-        await this.sweepAndMergeApprovedPRs(time);
-      }
-      await this.processMergeQueue(time);
-
-      // 5. Redeploy agents with new code (only registered ones)
-      await this.redeployStale(time, registeredAgents);
-
-      // 5b. Preventive container restart — clear accumulated state before containers stall
-      if (this.cycleCount % CONTAINER_RESTART_EVERY_N_CYCLES === 0) {
-        await this.preventiveRestart(time, registeredAgents);
-      }
-
-      // 6. Supervisor review — strategic reasoning about what needs attention
-      if (this.cycleCount % SUPERVISOR_CHECK_EVERY_N_CYCLES === 0) {
-        await this.runSupervisor(time);
-      }
-
-      // 7. Clean up stale issues (issues with merged PRs that didn't auto-close)
-      //    Also reap orchestrator-labeled issues open >7 days with no linked PR
       if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
         this.cleanupStaleIssues(time);
         this.reapStaleOrchestratorIssues(time);
       }
-
-      // 8. Periodic backlog triage — dispatch housekeeping task to each agent (~every 5h)
       if (this.cycleCount % BACKLOG_TRIAGE_EVERY_N_CYCLES === 0) {
-        await this.triageBacklogs(time);
-      }
-
-      // 9. Proactive issue discovery (~every 4h) — scan for CI failures, stale branches
-      if (this.cycleCount % BACKLOG_TRIAGE_EVERY_N_CYCLES === 0) {
+        batch4.push(this.triageBacklogs(time));
         try {
           const filed = runProactiveScan(this.config, this.store);
           if (filed > 0) console.log(`[${time}] Proactive scan: filed ${filed} issue(s)`);
@@ -634,20 +588,15 @@ export class Daemon {
           this.log.warn("Proactive scan failed", { error: err instanceof Error ? err.message : String(err) });
         }
       }
-
-      // 10. Daily Slack digest — posts once per day at the configured wall-clock time
-      await maybePostDailyDigest(this.digestState, this.store, this.config);
-
-      // 10. Daily security scan — checks agent repos for plaintext secrets (issue #544)
-      await maybeRunDailySecurityScan(this.securityScanState, this.config);
-
-      // 11. Quality SLA breach detection — alert when an agent's rolling avg
-      //     drops below its configured threshold (issue #669).
+      batch4.push(maybePostDailyDigest(this.digestState, this.store, this.config));
+      batch4.push(maybeRunDailySecurityScan(this.securityScanState, this.config));
       if (this.cycleCount % QUALITY_SLA_CHECK_EVERY_N_CYCLES === 0) {
-        await this.checkQualitySlaBreaches(time);
+        batch4.push(this.checkQualitySlaBreaches(time));
       }
 
-      // 12. Stigmergy signal pruning — remove expired signals (issue #689).
+      if (batch4.length > 0) await this.runBatch("periodic", batch4);
+
+      // ── Cleanup (sync, fast) ──────────────────────────────────────────
       try {
         const pruned = this.store.pruneExpiredSignals();
         if (pruned > 0) {
@@ -2405,6 +2354,14 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
     } catch (err) {
       console.error(`[${time}] Auto-merge sweep failed: ${err instanceof Error ? err.message : err}`);
     }
+  }
+
+  /** Combined review + merge step for parallel batch 3. Keeps the review→merge
+   *  dependency while allowing the combined step to run parallel to supervisor and deploy. */
+  private async reviewAndMerge(time: string): Promise<void> {
+    await this.reviewPRs(time);
+    await this.sweepAndMergeApprovedPRs(time);
+    await this.processMergeQueue(time);
   }
 
   private async processMergeQueue(time: string): Promise<void> {
