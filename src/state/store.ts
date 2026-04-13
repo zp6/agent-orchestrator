@@ -45,6 +45,11 @@ import type {
   StandupHealthSummary,
   VerificationResultRecord,
   VerificationStats,
+  SecretMountStatus,
+  SecretHealthEntry,
+  SecretsHealthCheckRecord,
+  AgentSecretsHealthSummary,
+  SecretsFleetHealthSummary,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -348,6 +353,26 @@ export class StateStore implements ITelegramStateStore {
 
       CREATE INDEX IF NOT EXISTS idx_verification_results_task_id
         ON verification_results (task_id);
+    `);
+
+    // Secrets health checks table (idempotent — issue #125).
+    // Records per-agent, per-secret mount status snapshots for fleet health monitoring.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS secrets_health_checks (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_name  TEXT NOT NULL,
+        secret_name TEXT NOT NULL,
+        status      TEXT NOT NULL,
+        readable    INTEGER NOT NULL DEFAULT 0,
+        non_empty   INTEGER NOT NULL DEFAULT 0,
+        checked_at  TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_secrets_health_checks_agent_checked_at
+        ON secrets_health_checks (agent_name, checked_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_secrets_health_checks_checked_at
+        ON secrets_health_checks (checked_at DESC);
     `);
   }
 
@@ -1807,6 +1832,121 @@ export class StateStore implements ITelegramStateStore {
         row.total_verifications > 0 ? row.first_pass_count / row.total_verifications : null,
       avg_score: row.avg_score,
       rejection_count: row.rejection_count,
+    };
+  }
+
+  // ── Secrets health checks ────────────────────────────────────────────────
+
+  /**
+   * Persist one or more secret-health check results for a single agent.
+   *
+   * Called after querying the agent-proxy `/v1/agents/:name/secrets` endpoint.
+   * Each element of `secrets` produces one row in `secrets_health_checks`.
+   *
+   * @param agentName - Agent name (e.g. "claude-proxy").
+   * @param secrets   - Array of per-secret health entries from the proxy response.
+   * @param checkedAt - ISO-8601 timestamp of the check (defaults to UTC now).
+   */
+  recordSecretsHealthCheck(
+    agentName: string,
+    secrets: ReadonlyArray<Pick<SecretHealthEntry, "name" | "status" | "readable" | "non_empty">>,
+    checkedAt: string = new Date().toISOString(),
+  ): void {
+    const insert = this.db.prepare(
+      `INSERT INTO secrets_health_checks
+         (agent_name, secret_name, status, readable, non_empty, checked_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    const insertMany = this.db.transaction(
+      (rows: ReadonlyArray<Pick<SecretHealthEntry, "name" | "status" | "readable" | "non_empty">>) => {
+        for (const s of rows) {
+          insert.run(agentName, s.name, s.status, s.readable ? 1 : 0, s.non_empty ? 1 : 0, checkedAt);
+        }
+      },
+    );
+    insertMany(secrets);
+  }
+
+  /**
+   * Return the most-recent health snapshot for a single agent.
+   *
+   * Finds the latest `checked_at` timestamp for the agent, then reads all
+   * secret rows recorded at that exact timestamp.
+   *
+   * @returns Summary, or null when no checks exist for the agent.
+   */
+  getAgentSecretsHealth(agentName: string): AgentSecretsHealthSummary | null {
+    // Required secrets whose absence marks an agent as unhealthy.
+    const REQUIRED = new Set(["oauth_token", "gh_token"]);
+
+    // Find the most recent check timestamp for this agent.
+    const latestRow = this.db
+      .prepare(
+        `SELECT checked_at FROM secrets_health_checks
+         WHERE agent_name = ?
+         ORDER BY checked_at DESC
+         LIMIT 1`,
+      )
+      .get(agentName) as { checked_at: string } | undefined;
+
+    if (!latestRow) return null;
+
+    const rows = this.db
+      .prepare(
+        `SELECT secret_name, status, readable, non_empty
+         FROM secrets_health_checks
+         WHERE agent_name = ? AND checked_at = ?`,
+      )
+      .all(agentName, latestRow.checked_at) as Array<{
+        secret_name: string;
+        status: SecretMountStatus;
+        readable: number;
+        non_empty: number;
+      }>;
+
+    const secretsSummary = rows.map((r) => ({ name: r.secret_name, status: r.status }));
+    const requiredRows = rows.filter((r) => REQUIRED.has(r.secret_name));
+    const healthy =
+      requiredRows.length > 0 && requiredRows.every((r) => r.status === "present-and-valid");
+    const missing_count = rows.filter((r) => r.status !== "present-and-valid").length;
+
+    return {
+      agent_name: agentName,
+      last_checked_at: latestRow.checked_at,
+      healthy,
+      secrets: secretsSummary,
+      missing_count,
+    };
+  }
+
+  /**
+   * Return the fleet-wide secrets health summary.
+   *
+   * Aggregates the most-recent check per agent across all agents in the
+   * `secrets_health_checks` table.
+   */
+  getSecretsFleetHealth(): SecretsFleetHealthSummary {
+    // Get the distinct list of agents with check records.
+    const agentRows = this.db
+      .prepare(
+        `SELECT DISTINCT agent_name FROM secrets_health_checks ORDER BY agent_name ASC`,
+      )
+      .all() as Array<{ agent_name: string }>;
+
+    const agents: AgentSecretsHealthSummary[] = [];
+    for (const { agent_name } of agentRows) {
+      const summary = this.getAgentSecretsHealth(agent_name);
+      if (summary) agents.push(summary);
+    }
+
+    const healthy_count = agents.filter((a) => a.healthy).length;
+    const degraded_count = agents.length - healthy_count;
+
+    return {
+      agent_count: agents.length,
+      healthy_count,
+      degraded_count,
+      agents,
     };
   }
 }

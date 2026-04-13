@@ -949,12 +949,143 @@ export interface IVerificationResultStore {
   getVerificationStats(agentId: string, since?: string): VerificationStats | null;
 }
 
+// ── Secrets health types ─────────────────────────────────────────────────
+
+/**
+ * Coarse mount-status classification for a single secret.
+ *
+ * Mirrors the `SecretStatus` type in agent-proxy/src/routes/secrets.ts so
+ * both systems share the same vocabulary when recording and querying events.
+ *
+ * - "present-and-valid"  Secret file (or env-var fallback) is readable and non-empty.
+ * - "mounted-but-empty"  The Docker secret path exists on disk but the file is
+ *                        empty or unreadable.  Compose config is correct; only the
+ *                        host-side secret file needs to be populated.
+ * - "not-mounted"        No file mount and no env-var fallback found.  Hard-block
+ *                        state — the pre-dispatch validator must reject dispatch.
+ */
+export type SecretMountStatus = "present-and-valid" | "mounted-but-empty" | "not-mounted";
+
+/**
+ * A single secret's status as returned by the proxy `/health/secrets` endpoint.
+ * One element of the `secrets` array in the API response.
+ */
+export interface SecretHealthEntry {
+  name: string;
+  env_fallback: string;
+  mounted: boolean;
+  readable: boolean;
+  non_empty: boolean;
+  source: "file" | "env" | null;
+  status: SecretMountStatus;
+  reason: string;
+}
+
+/**
+ * One persisted secret-health check event, stored in `secrets_health_checks`.
+ * Each row captures the health snapshot for a single secret on a single agent
+ * at a given point in time.
+ */
+export interface SecretsHealthCheckRecord {
+  id?: number;
+  /** The agent name (matches `agent_name` in the tasks table). */
+  agent_name: string;
+  /** The Docker Compose secret name (e.g. "gh_token"). */
+  secret_name: string;
+  /** Mount status at the time of the check. */
+  status: SecretMountStatus;
+  /** True when the secret value could be read. */
+  readable: boolean;
+  /** True when the value is non-empty. */
+  non_empty: boolean;
+  /** ISO-8601 UTC timestamp of the health check. */
+  checked_at: string;
+}
+
+/**
+ * Aggregated secret-health summary for a single agent.
+ * Returned by `ISecretsHealthStore.getAgentSecretsHealth()`.
+ */
+export interface AgentSecretsHealthSummary {
+  agent_name: string;
+  /** ISO-8601 timestamp of the most recent health check for this agent. */
+  last_checked_at: string | null;
+  /**
+   * True when all required secrets (`oauth_token`, `gh_token`) were
+   * present-and-valid at the last check.
+   */
+  healthy: boolean;
+  /** Per-secret status from the most recent check. */
+  secrets: Array<{ name: string; status: SecretMountStatus }>;
+  /** Count of secrets currently in a degraded state (mounted-but-empty or not-mounted). */
+  missing_count: number;
+}
+
+/**
+ * Fleet-wide secrets health summary: one entry per known agent.
+ * Returned by `ISecretsHealthStore.getSecretsFleetHealth()`.
+ */
+export interface SecretsFleetHealthSummary {
+  /** Number of distinct agents for which at least one check is recorded. */
+  agent_count: number;
+  /** Count of agents with all required secrets healthy. */
+  healthy_count: number;
+  /** Count of agents with at least one required secret missing or degraded. */
+  degraded_count: number;
+  /** Per-agent summaries, ordered by agent_name. */
+  agents: AgentSecretsHealthSummary[];
+}
+
+/**
+ * Store interface for secrets health persistence.
+ *
+ * Implemented by the reviewer's own StateStore.  The orchestrator's StateStore
+ * is not required to implement these methods — callers should check at runtime.
+ */
+export interface ISecretsHealthStore {
+  /**
+   * Persist one or more secret-health check results for a single agent.
+   *
+   * Called after querying the agent-proxy `/v1/agents/:name/secrets` endpoint.
+   * Each element of `secrets` produces one row in `secrets_health_checks`.
+   *
+   * @param agentName - Agent name (e.g. "claude-proxy").
+   * @param secrets   - Array of per-secret health entries from the proxy response.
+   * @param checkedAt - ISO-8601 timestamp of the check (defaults to `new Date().toISOString()`).
+   */
+  recordSecretsHealthCheck(
+    agentName: string,
+    secrets: ReadonlyArray<Pick<SecretHealthEntry, "name" | "status" | "readable" | "non_empty">>,
+    checkedAt?: string,
+  ): void;
+
+  /**
+   * Return the most-recent health snapshot for a single agent.
+   *
+   * Reads the latest `checked_at` timestamp across all secrets for the agent,
+   * then returns the status of each secret at that timestamp.
+   *
+   * @returns Summary, or null when no checks exist for the agent.
+   */
+  getAgentSecretsHealth(agentName: string): AgentSecretsHealthSummary | null;
+
+  /**
+   * Return the fleet-wide secrets health summary.
+   *
+   * Aggregates the most-recent check per agent across all agents in the
+   * `secrets_health_checks` table.  The result is intended for the
+   * `/secrets/fleet` dashboard panel and the Telegram `/s` status summary.
+   */
+  getSecretsFleetHealth(): SecretsFleetHealthSummary;
+}
+
 export interface ITelegramStateStore
   extends IStateStore,
     IScoreOutcomeStore,
     IPRIterationStore,
     IStandupHealthStore,
-    IVerificationResultStore {
+    IVerificationResultStore,
+    ISecretsHealthStore {
   // System flags (pause/resume, operator overrides)
   getSystemFlag(key: string): string | null;
   setSystemFlag(key: string, value: string): void;
