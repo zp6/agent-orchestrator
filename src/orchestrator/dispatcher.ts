@@ -13,6 +13,7 @@ import { checkDuplicate } from "../triggers/duplicate-guard.js";
 import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
 import { buildRejectionHistoryBlock } from "./rejection-history.js";
 import { getAndApplyRules } from "./learned-rules.js";
+import { runAntibodyPreDispatchCheck } from "./antibody-filter.js";
 import { notifyOperator } from "../service/notify.js";
 import { resolveAgentBudget } from "../cli/commands/budget.js";
 import {
@@ -908,6 +909,32 @@ export class Dispatcher {
           content: `[learned-rules] Applied rule IDs: ${ruleIds.join(",")}`,
         });
       }
+    }
+
+    // Antibody pre-dispatch check: attach known-risk warning when the task
+    // matches failure patterns from the antibody log (issue #750).
+    const antibodyRepo = sourceRepo ?? undefined;
+    const antibodyCheck = runAntibodyPreDispatchCheck(this.store, message, antibodyRepo);
+    if (antibodyCheck.flagged) {
+      this.log.warn("Antibody pre-dispatch: task matches known failure pattern(s)", {
+        taskId: task.id,
+        agentName,
+        repo: antibodyRepo,
+        matchCount: antibodyCheck.matches.length,
+        topScore: antibodyCheck.matches[0]?.score?.toFixed(3),
+      });
+      messageToSend = messageToSend + antibodyCheck.warningBlock;
+      // Record the flag as a system log so operators and dashboards can query for
+      // antibody-flagged tasks via task_logs (same pattern as [learned-rules]).
+      const matchSummary = antibodyCheck.matches
+        .map((m) => `${m.entry.repo}#${m.entry.pr_number}(${(m.score * 100).toFixed(0)}%)`)
+        .join(",");
+      this.store.addLog({
+        task_id: task.id,
+        direction: "system",
+        agent_name: agentName,
+        content: `[antibody-flagged] Matched ${antibodyCheck.matches.length} risk pattern(s): ${matchSummary}`,
+      });
     }
 
     // Log the outgoing message

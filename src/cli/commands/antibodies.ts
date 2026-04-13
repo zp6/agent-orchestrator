@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { StateStore, type AntibodyLogEntry, type DiffShape } from "../../state/store.js";
+import { StateStore, type AntibodyLogEntry, type DiffShape, type Task } from "../../state/store.js";
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
 
@@ -71,6 +71,34 @@ function formatRow(entry: AntibodyLogEntry): string {
   return line;
 }
 
+/** Colour-coded status badge for task status. */
+function statusColour(status: string): string {
+  switch (status) {
+    case "done":         return chalk.green(status.padEnd(12));
+    case "failed":       return chalk.red(status.padEnd(12));
+    case "escalated":    return chalk.magenta(status.padEnd(12));
+    case "in_progress":  return chalk.blue(status.padEnd(12));
+    case "dispatched":   return chalk.cyan(status.padEnd(12));
+    default:             return chalk.dim(status.padEnd(12));
+  }
+}
+
+/** Format a single antibody-flagged task row. */
+function formatFlaggedTaskRow(row: Task & { antibody_log_entry: string }): string {
+  const ts = row.created_at.slice(0, 16).replace("T", " ");
+  const title = row.title.length > 60 ? row.title.slice(0, 57) + "..." : row.title;
+  const agent = (row.agent_name ?? "—").replace("claude-orchestrator-", "").replace("claude-", "");
+  // Extract match summary from the log entry, e.g. "[antibody-flagged] Matched 1 risk pattern(s): ..."
+  const matchInfo = row.antibody_log_entry.replace(/^\[antibody-flagged\]\s*/, "");
+
+  return (
+    `  ${chalk.dim(ts)}  ${statusColour(row.status)} ` +
+    `${chalk.yellow("⚠ ANTIBODY-FLAGGED")}  ${chalk.bold(row.id.slice(-8))} ` +
+    `${String(agent).padEnd(20)} ${chalk.dim(title)}\n` +
+    `  ${" ".repeat(18)} ${chalk.dim(matchInfo)}`
+  );
+}
+
 /** Format the stats summary block. */
 function formatStats(stats: Array<{ decision: string; count: number; with_outcome: number }>): string {
   if (stats.length === 0) return chalk.dim("  No entries recorded yet.");
@@ -95,6 +123,10 @@ export function registerAntibodiesCommand(program: Command): void {
       "Filter by decision type: approve | request-changes | escalate",
     )
     .option("--stats", "Show summary statistics only (grouped by decision type)")
+    .option(
+      "--flagged-tasks",
+      "Show tasks dispatched with known-risk antibody warnings (pre-dispatch filter hits)",
+    )
     .option("--json", "Output raw JSON instead of formatted table")
     .action(
       (opts: {
@@ -102,6 +134,7 @@ export function registerAntibodiesCommand(program: Command): void {
         repo?: string;
         decision?: string;
         stats?: boolean;
+        flaggedTasks?: boolean;
         json?: boolean;
       }) => {
         const limit = Math.max(1, parseInt(opts.limit, 10) || 30);
@@ -127,6 +160,51 @@ export function registerAntibodiesCommand(program: Command): void {
         }
 
         try {
+          if (opts.flaggedTasks) {
+            const flagged = store.getAntibodyFlaggedTasks(limit);
+            if (opts.json) {
+              console.log(JSON.stringify(flagged, null, 2));
+              return;
+            }
+            console.log(chalk.bold("\n🧬 Antibody Log — Flagged Tasks (Pre-dispatch Risk Hits)\n"));
+            console.log(
+              chalk.dim(
+                "  Tasks below were dispatched with a known-risk antibody warning injected.\n" +
+                "  Compare their failure rates against unflagged tasks to measure filter quality.\n",
+              ),
+            );
+            if (flagged.length === 0) {
+              console.log(chalk.dim("  No antibody-flagged tasks found. Filter hits appear here after the first matching dispatch."));
+              console.log();
+              return;
+            }
+            console.log(
+              chalk.dim(
+                `  ${"Timestamp".padEnd(18)} ${"Status".padEnd(12)} ${"Flag".padEnd(20)} ` +
+                `${"Task ID".padEnd(10)} ${"Agent".padEnd(20)} Title`,
+              ),
+            );
+            console.log(chalk.dim("  " + "─".repeat(130)));
+            for (const row of flagged) {
+              console.log(formatFlaggedTaskRow(row));
+            }
+            console.log();
+            // Summarise failure rate for flagged tasks
+            const failed = flagged.filter((r) => r.status === "failed" || r.status === "escalated").length;
+            const done   = flagged.filter((r) => r.status === "done").length;
+            const total  = flagged.length;
+            const failPct = total > 0 ? Math.round((failed / total) * 100) : 0;
+            console.log(
+              chalk.bold("  Outcome summary for flagged tasks:"),
+              `done=${chalk.green(String(done))}`,
+              `failed/escalated=${chalk.red(String(failed))}`,
+              `failure-rate=${chalk.yellow(String(failPct) + "%")}`,
+              `(${total} total)`,
+            );
+            console.log();
+            return;
+          }
+
           if (opts.stats) {
             const stats = store.getAntibodyStats();
             if (opts.json) {

@@ -6008,6 +6008,27 @@ export class StateStore {
     `).all() as Array<{ decision: string; count: number; with_outcome: number }>;
   }
 
+  /**
+   * Return tasks that were dispatched with at least one antibody-risk warning
+   * (i.e. tasks whose logs contain an `[antibody-flagged]` system entry).
+   *
+   * Useful for operator dashboards to track whether flagged tasks still fail
+   * at higher rates than unflagged ones.
+   *
+   * @param limit - Max tasks to return (default 50, newest first).
+   */
+  getAntibodyFlaggedTasks(limit = 50): Array<Task & { antibody_log_entry: string }> {
+    return this.db.prepare(`
+      SELECT t.*, tl.content AS antibody_log_entry
+      FROM tasks t
+      JOIN task_logs tl ON tl.task_id = t.id
+      WHERE tl.content LIKE '[antibody-flagged]%'
+        AND tl.direction = 'system'
+      ORDER BY t.created_at DESC
+      LIMIT ?
+    `).all(limit) as Array<Task & { antibody_log_entry: string }>;
+  }
+
   // ── Daemon Lifecycle Audit ────────────────────────────────────────────────────
 
   private runDaemonLifecycleMigration(): void {
