@@ -325,6 +325,31 @@ export interface DispatchWasteMetrics {
   avg_waste_rate_pct: number | null;
 }
 
+/** Per-day health check efficiency metrics (issue #749) */
+export interface HealthCheckEfficiencyDay {
+  /** ISO date string: 'YYYY-MM-DD' */
+  date: string;
+  /** Total health check dispatch tasks created (source_ref LIKE 'health-check-fail:%') */
+  total_dispatches: number;
+  /** Dispatches auto-resolved by daemon without agent intervention */
+  false_positives: number;
+  /** False positive rate as a percentage (0–100), null if no dispatches */
+  false_positive_rate_pct: number | null;
+}
+
+/**
+ * Aggregated health check efficiency metrics over a rolling N-day window.
+ * Tracks false positive rate — health check failures that self-resolved
+ * without requiring agent action — to verify grace-period and dedup fixes.
+ */
+export interface HealthCheckEfficiencyMetrics {
+  days: number;
+  daily: HealthCheckEfficiencyDay[];
+  total_dispatches: number;
+  total_false_positives: number;
+  avg_false_positive_rate_pct: number | null;
+}
+
 /**
  * Per-provider aggregated metrics for the Claude vs Codex fleet comparison panel.
  * Provider is inferred from agent_name prefix: "claude-" → "claude", "codex-" → "openai".
@@ -4450,6 +4475,82 @@ export class StateStore {
       total_stale_prevented: totalStale,
       total_dispatches: totalDispatches,
       avg_waste_rate_pct: rates.length > 0 ? rates.reduce((a, b) => a + b, 0) / rates.length : null,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Health Check Efficiency Metrics (issue #749)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Return per-day health check efficiency metrics for the last `days` days.
+   *
+   * "Total dispatches" = tasks created with source_ref LIKE 'health-check-fail:%'.
+   * "False positives"  = dispatches auto-resolved by the daemon (result contains
+   *                      'Auto-resolved by daemon') without any agent intervention.
+   *
+   * A falling false-positive rate confirms the grace-period fix (#739) and
+   * dedup fix (#731) are reducing unnecessary health check escalations.
+   */
+  getHealthCheckEfficiencyMetrics(days = 7): HealthCheckEfficiencyMetrics {
+    // All top-level health-check dispatch tasks per day
+    const totalRows = this.db
+      .prepare(
+        `SELECT
+          date(created_at)  AS date,
+          COUNT(*)          AS total_dispatches
+        FROM tasks
+        WHERE parent_task_id IS NULL
+          AND source_ref LIKE 'health-check-fail:%'
+          AND date(created_at) >= date('now', ? || ' days')
+        GROUP BY date(created_at)
+        ORDER BY date(created_at) ASC`,
+      )
+      .all(`-${days}`) as Array<{ date: string; total_dispatches: number }>;
+
+    // False positives: done tasks auto-resolved by the daemon (agent did not act)
+    const fpRows = this.db
+      .prepare(
+        `SELECT
+          date(created_at)  AS date,
+          COUNT(*)          AS false_positives
+        FROM tasks
+        WHERE parent_task_id IS NULL
+          AND source_ref LIKE 'health-check-fail:%'
+          AND status = 'done'
+          AND result LIKE '%Auto-resolved by daemon%'
+          AND date(created_at) >= date('now', ? || ' days')
+        GROUP BY date(created_at)
+        ORDER BY date(created_at) ASC`,
+      )
+      .all(`-${days}`) as Array<{ date: string; false_positives: number }>;
+
+    // Index false-positive counts by date
+    const fpByDate = new Map<string, number>();
+    for (const r of fpRows) {
+      fpByDate.set(r.date, r.false_positives);
+    }
+
+    const daily: HealthCheckEfficiencyDay[] = totalRows.map((r) => {
+      const fp = fpByDate.get(r.date) ?? 0;
+      return {
+        date: r.date,
+        total_dispatches: r.total_dispatches,
+        false_positives: fp,
+        false_positive_rate_pct: r.total_dispatches > 0 ? (fp / r.total_dispatches) * 100 : null,
+      };
+    });
+
+    const totalDispatches = daily.reduce((s, d) => s + d.total_dispatches, 0);
+    const totalFP = daily.reduce((s, d) => s + d.false_positives, 0);
+    const rates = daily.map((d) => d.false_positive_rate_pct).filter((v): v is number => v !== null);
+
+    return {
+      days,
+      daily,
+      total_dispatches: totalDispatches,
+      total_false_positives: totalFP,
+      avg_false_positive_rate_pct: rates.length > 0 ? rates.reduce((a, b) => a + b, 0) / rates.length : null,
     };
   }
 

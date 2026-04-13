@@ -36,6 +36,7 @@ import { registerSignalsCommand } from "./commands/signals.js";
 import { registerLearnedPatternsCommand } from "./commands/learned-patterns.js";
 import { registerLineageCommand } from "./commands/lineage.js";
 import { registerAntibodiesCommand } from "./commands/antibodies.js";
+import { registerHealthCheckEfficiencyCommand } from "./commands/health-check-efficiency.js";
 
 const program = new Command();
 
@@ -81,5 +82,6 @@ registerSignalsCommand(program);
 registerLearnedPatternsCommand(program);
 registerLineageCommand(program);
 registerAntibodiesCommand(program);
+registerHealthCheckEfficiencyCommand(program);
 
 program.parse();
