@@ -163,6 +163,35 @@ describe("reviewer-ops", () => {
     expect(store.getTask(task.id)?.verification_status).toBeNull();
   });
 
+  it("verifyAndReviseTask skips revision when source_ref is already resolved", async () => {
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify({ approved: false, score: 0.2, notes: "Bad", revision: "Fix it" }) }],
+    });
+    mockLiveValidateForDispatch.mockReturnValueOnce("issue already closed");
+
+    const task = store.createTask({
+      title: "Needs work",
+      description: "Do something",
+      source: "github",
+      source_ref: "owner/a#42",
+      agent_name: "agent-a",
+    });
+    store.updateTask(task.id, { status: "done", result: "Partial" });
+
+    const result = await verifyAndReviseTask(config, store, new ReviewerClient(config), task.id);
+
+    expect(result.approved).toBe(true);
+    expect(result.notes).toBe("no-op: already resolved");
+    expect(mockDispatch).not.toHaveBeenCalled();
+    // Task verification_status should be set to approved (not re-queued for revision)
+    expect(store.getTask(task.id)?.verification_status).toBe("approved");
+    // A supervisor decision should be recorded for observability
+    const decisions = store.getRecentSupervisorDecisions(5);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0].outcome).toBe("skipped");
+    expect(decisions[0].hard_gates).toContain("no-op: already resolved");
+  });
+
   it("reviewSupervisorState builds context and filters vague idle dispatches", async () => {
     const task = store.createTask({ title: "Finished task", source: "manual", agent_name: "agent-a" });
     store.updateTask(task.id, { status: "done", result: "Done" });

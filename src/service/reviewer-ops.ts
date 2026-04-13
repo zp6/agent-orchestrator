@@ -134,6 +134,50 @@ export async function verifyAndReviseTask(
   }
 
   const task = store.getTask(taskId)!;
+
+  // Pre-flight state check (issue #769): before committing to a revision
+  // dispatch, verify the triggering issue/PR is still open.  When a PR is
+  // merged and the issue closed between the moment of rejection and the
+  // moment we process the revision, dispatching would waste supervisor
+  // capacity and risk conflicting actions on already-resolved work.
+  if (task.source_ref && task.agent_name) {
+    const repo = extractRepoFromSourceRef(task.source_ref);
+    const issueMatch = task.source_ref.match(/#(\d+)$/);
+    if (repo && issueMatch) {
+      const issueNumber = parseInt(issueMatch[1], 10);
+      try {
+        const skipReason = liveValidateForDispatch(repo, issueNumber);
+        if (skipReason) {
+          verifierLog.info("Revision skipped: source already resolved", {
+            taskId,
+            sourceRef: task.source_ref,
+            skipReason,
+          });
+          store.addSupervisorDecision({
+            action: "none",
+            agent_name: task.agent_name,
+            reason: "no-op: already resolved",
+            rationale: `Revision skipped for task ${taskId}: ${task.source_ref} is already resolved (${skipReason}). No revision dispatched.`,
+            issue_refs: [task.source_ref],
+            hard_gates: ["no-op: already resolved"],
+            outcome: "skipped",
+          });
+          store.incrementStat("supervisor_preflight_noop");
+          // Reset verification_status so the task isn't re-queued for revision
+          store.updateTask(taskId, { verification_status: "approved" });
+          return { ...result, approved: true, notes: "no-op: already resolved" };
+        }
+      } catch (preflightErr) {
+        // GitHub check failed — allow revision to proceed rather than blocking on uncertainty
+        verifierLog.warn("Pre-flight state check failed, proceeding with revision", {
+          taskId,
+          sourceRef: task.source_ref,
+          error: preflightErr instanceof Error ? preflightErr.message : String(preflightErr),
+        });
+      }
+    }
+  }
+
   const newRevisionCount = (task.revision_count ?? 0) + 1;
   store.updateTask(taskId, { revision_count: newRevisionCount });
 
