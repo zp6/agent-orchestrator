@@ -28,6 +28,7 @@ import { resolve } from "node:path";
 import { ManagementClient } from "../client/management-client.js";
 import { planSync, executeSync } from "../orchestrator/sync.js";
 import { notifyOperator, clearNotifyRateLimit, setTelegramRateLimitMs } from "./notify.js";
+import { buildHealthPostmortem, renderPostmortemBlock } from "./health-postmortem.js";
 import { setRecencyWindowHours } from "../triggers/duplicate-guard.js";
 import { startTelegramPolling, stopTelegramPolling, pollTelegram } from "./telegram.js";
 import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.js";
@@ -1885,13 +1886,29 @@ export class Daemon {
       const portInfo = port ? `port ${port}` : "unknown port";
       const containerName = agentName;
 
+      // Build post-mortem: capture docker logs and infer root cause at the
+      // moment of escalation so operators know WHY the agent failed (issue #771).
+      const postmortem = buildHealthPostmortem(
+        containerName,
+        detail,
+        startedAt,
+        elapsedMs,
+      );
+      const postmortemSection = renderPostmortemBlock(postmortem);
+      this.log.info("Health post-mortem collected", {
+        agentName,
+        rootCause: postmortem.rootCause,
+        rootCauseLabel: postmortem.rootCauseLabel,
+        durationLabel: postmortem.durationLabel,
+      });
+
       // Include auto-recovery history so the operator sees what was already tried.
       const recoverySteps = this.healthAutoRecoveryHistory.get(agentName) ?? [];
       const recoverySection = recoverySteps.length > 0
         ? `\n### Auto-Recovery Attempts (exhausted before escalation)\n\n${recoverySteps.map((s) => `- ${s}`).join("\n")}\n`
         : `\n### Auto-Recovery Attempts\n\nNo automated recovery was attempted before escalation.\n`;
 
-      const incidentPlaybook = `## Health Check Incident: ${agentName}
+      const incidentPlaybook = `${postmortemSection}## Health Check Incident: ${agentName}
 
 **Trigger:** ${detail}
 **Container:** ${containerName} (${portInfo})
