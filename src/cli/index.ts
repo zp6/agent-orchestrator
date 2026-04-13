@@ -38,6 +38,7 @@ import { registerLearnedPatternsCommand } from "./commands/learned-patterns.js";
 import { registerLineageCommand } from "./commands/lineage.js";
 import { registerAntibodiesCommand } from "./commands/antibodies.js";
 import { registerHealthCheckEfficiencyCommand } from "./commands/health-check-efficiency.js";
+import { registerCostCommand } from "./commands/cost.js";
 
 const program = new Command();
 
@@ -85,5 +86,6 @@ registerLearnedPatternsCommand(program);
 registerLineageCommand(program);
 registerAntibodiesCommand(program);
 registerHealthCheckEfficiencyCommand(program);
+registerCostCommand(program);
 
 program.parse();

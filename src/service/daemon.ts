@@ -39,6 +39,7 @@ import { runProactiveScan } from "../orchestrator/proactive-scanner.js";
 import { validateMergedPR } from "../orchestrator/staging-validator.js";
 import { proposeAndFileRoadmapItems } from "../orchestrator/roadmap-proposer.js";
 import { detectHighIterationAgents } from "../orchestrator/iteration-cost-detector.js";
+import { runIterationBudgetAlerts } from "../orchestrator/iteration-budget-alert.js";
 import {
   type GateResult,
   detectImprovements,
@@ -543,6 +544,8 @@ export class Daemon {
         await this.detectImprovements(time);
         // Also run the lightweight iteration-cost check (no LLM needed)
         this.detectIterationCostImprovements(time);
+        // Fire Telegram alerts for issues that have exceeded the revision ceiling
+        await this.checkIterationBudgetAlerts(time);
       }
 
       // 3c. Daily standup — blockers, opportunities, action items
@@ -1581,6 +1584,24 @@ export class Daemon {
     } catch (err) {
       console.error(
         `[${time}] Iteration-cost improvement detection failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  /**
+   * Fire Telegram alerts for any GitHub issue whose cumulative revision count
+   * has exceeded the configured ceiling (default: 3 revisions).
+   *
+   * Rate-limited by notifyOperator() so repeated cycles do not spam.
+   */
+  private async checkIterationBudgetAlerts(time: string): Promise<void> {
+    try {
+      const cfg = this.config as unknown as Record<string, unknown>;
+      const iterBudget = cfg["iteration_budget"] as { ceiling?: number } | undefined;
+      await runIterationBudgetAlerts(this.store, { ceiling: iterBudget?.ceiling });
+    } catch (err) {
+      console.error(
+        `[${time}] Iteration budget alert check failed: ${err instanceof Error ? err.message : err}`,
       );
     }
   }

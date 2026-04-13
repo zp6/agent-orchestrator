@@ -4472,6 +4472,132 @@ export class StateStore {
     });
   }
 
+  // ── Iteration cost leaderboard (issue #763) ─────────────────────────────
+
+  /**
+   * Return the top-N most expensive issues by cumulative revision count.
+   *
+   * Groups tasks by source_ref (GitHub issue / PR reference) and sums all
+   * revision rounds across every task attempt for that issue.  Returns the
+   * worst offenders first so they can be surfaced in the `orch cost` view
+   * and used to trigger budget alerts when a ceiling is exceeded.
+   *
+   * @param limit     - Max rows to return (default 10).
+   * @param windowDays - Look-back window in calendar days (default 30). Pass 0 for all-time.
+   * @param agentName  - Optional filter to a single agent.
+   */
+  getIterationCostLeaderboard(
+    limit = 10,
+    windowDays = 30,
+    agentName?: string,
+  ): Array<{
+    source_ref: string;
+    total_revisions: number;
+    task_count: number;
+    agent_name: string | null;
+    /** Labels attached to the source GitHub issue (parsed from title/source_ref). */
+    labels: string[];
+    avg_quality_score: number | null;
+    last_updated_at: string;
+  }> {
+    // Build the query dynamically so we can conditionally add filters
+    // while keeping all values as bound parameters (no string interpolation of user data).
+    const conditions: string[] = [
+      "t.source_ref IS NOT NULL",
+      "t.parent_task_id IS NULL",
+    ];
+    const params: (string | number)[] = [];
+
+    if (windowDays > 0) {
+      conditions.push(`t.created_at >= datetime('now', '-' || ? || ' days')`);
+      params.push(windowDays);
+    }
+    if (agentName) {
+      conditions.push("t.agent_name = ?");
+      params.push(agentName);
+    }
+    params.push(limit);
+
+    const rows = this.db.prepare(`
+      SELECT
+        t.source_ref,
+        SUM(t.revision_count)                             AS total_revisions,
+        COUNT(*)                                          AS task_count,
+        MAX(t.agent_name)                                 AS agent_name,
+        AVG(CASE WHEN t.quality_score IS NOT NULL THEN t.quality_score END) AS avg_quality_score,
+        MAX(t.updated_at)                                 AS last_updated_at
+      FROM tasks t
+      WHERE ${conditions.join(" AND ")}
+      GROUP BY t.source_ref
+      HAVING SUM(t.revision_count) >= 1
+      ORDER BY total_revisions DESC, last_updated_at DESC
+      LIMIT ?
+    `).all(...params) as Array<{
+      source_ref: string;
+      total_revisions: number;
+      task_count: number;
+      agent_name: string | null;
+      avg_quality_score: number | null;
+      last_updated_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      ...row,
+      // Labels can't be reliably parsed from SQLite so we return an empty
+      // array here; callers may enrich this via the GitHub API if needed.
+      labels: [],
+    }));
+  }
+
+  /**
+   * Return all issues whose total revision count exceeds `ceiling`.
+   *
+   * Used by the iteration budget alert to fire Telegram alerts when a
+   * single issue accumulates too many revision rounds.
+   *
+   * @param ceiling   - Revision count above which an issue is "over budget" (default 3).
+   * @param windowDays - Look-back window in calendar days (default 30).
+   */
+  getOverBudgetIssues(
+    ceiling = 3,
+    windowDays = 30,
+  ): Array<{
+    source_ref: string;
+    total_revisions: number;
+    agent_name: string | null;
+    last_updated_at: string;
+  }> {
+    const conditions: string[] = [
+      "source_ref IS NOT NULL",
+      "parent_task_id IS NULL",
+    ];
+    const params: (string | number)[] = [];
+
+    if (windowDays > 0) {
+      conditions.push(`created_at >= datetime('now', '-' || ? || ' days')`);
+      params.push(windowDays);
+    }
+    params.push(ceiling);
+
+    return this.db.prepare(`
+      SELECT
+        source_ref,
+        SUM(revision_count) AS total_revisions,
+        MAX(agent_name)     AS agent_name,
+        MAX(updated_at)     AS last_updated_at
+      FROM tasks
+      WHERE ${conditions.join(" AND ")}
+      GROUP BY source_ref
+      HAVING SUM(revision_count) > ?
+      ORDER BY total_revisions DESC
+    `).all(...params) as Array<{
+      source_ref: string;
+      total_revisions: number;
+      agent_name: string | null;
+      last_updated_at: string;
+    }>;
+  }
+
   // ── Unified reliability score (issue #758) ──────────────────────────────
 
   /**
