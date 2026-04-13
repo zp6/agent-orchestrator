@@ -9,6 +9,9 @@ import {
   isSynthesisFailed,
   generateFallbackActionItems,
   postFallbackActionItems,
+  detectSynthesisLabel,
+  applyGitHubSynthesisLabel,
+  checkAndEscalateFallbackThreshold,
   type GitHubIssue,
 } from "../reviewer/standup-handler.js";
 
@@ -385,20 +388,24 @@ Closes #200`,
     const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
     mockExecSync.mockClear();
 
-    // Make it only match the comment call
+    // Allow the comment call and synthesis label stamping calls, but not PR checks
     mockExecSync.mockImplementation((cmd: string) => {
       if (cmd.includes("gh issue comment")) return "";
+      if (cmd.includes("gh label create")) return "";
+      if (cmd.includes("gh issue edit") && cmd.includes("--add-label")) return "";
       throw new Error("Unexpected command");
     });
 
     await handleZeroActionStandup("rapartlu/test-repo", 100, issue, false);
 
-    // Should only have the comment call, not PR checks
-    expect(mockExecSync).toHaveBeenCalledTimes(1);
+    // Should have comment + label create + label apply calls, but NOT PR merge checks
     expect(mockExecSync).toHaveBeenCalledWith(
       expect.stringContaining("gh issue comment"),
       expect.any(Object),
     );
+    // Verify no PR merge check was made (the key assertion for autoClose=false)
+    const calls = mockExecSync.mock.calls.map((c: [string]) => c[0]);
+    expect(calls.some((c: string) => c.includes("gh pr view"))).toBe(false);
   });
 });
 
@@ -701,5 +708,147 @@ No action items.`,
     await handleZeroActionStandup("rapartlu/test-repo", 100, issue, false);
 
     expect(listCalled).toBe(false);
+  });
+});
+
+// ── detectSynthesisLabel ──────────────────────────────────────────────────
+
+describe("detectSynthesisLabel", () => {
+  it("returns 'synthesized' for an issue with action items", () => {
+    const issue = makeStandupIssue(); // has 3 action items
+    expect(detectSynthesisLabel(issue)).toBe("synthesized");
+  });
+
+  it("returns 'synthesis-fallback' for a zero-action standup without sentinel", () => {
+    const issue = makeZeroActionStandup();
+    expect(detectSynthesisLabel(issue)).toBe("synthesis-fallback");
+  });
+
+  it("returns 'synthesis-fallback' when synthesis sentinel is present", () => {
+    const issue = makeZeroActionStandup({
+      body: `### Synthesis
+Synthesis failed — LLM timeout.
+
+### Action Items
+No action items.`,
+    });
+    expect(detectSynthesisLabel(issue)).toBe("synthesis-fallback");
+  });
+
+  it("returns 'empty-retry' when already labelled synthesis-fallback and still 0 items", () => {
+    const issue = makeZeroActionStandup({
+      labels: ["standup", "synthesis-fallback"],
+    });
+    expect(detectSynthesisLabel(issue)).toBe("empty-retry");
+  });
+
+  it("returns 'empty-retry' when already labelled empty-retry and still 0 items", () => {
+    const issue = makeZeroActionStandup({
+      labels: ["standup", "empty-retry"],
+    });
+    expect(detectSynthesisLabel(issue)).toBe("empty-retry");
+  });
+
+  it("returns 'synthesized' even with synthesis-fallback label if action items > 0", () => {
+    const issue = makeStandupIssue({
+      labels: ["standup", "synthesis-fallback"],
+    });
+    expect(detectSynthesisLabel(issue)).toBe("synthesized");
+  });
+});
+
+// ── applyGitHubSynthesisLabel ─────────────────────────────────────────────
+
+describe("applyGitHubSynthesisLabel", () => {
+  it("calls gh label create and gh issue edit for a synthesis-fallback label", () => {
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    mockExecSync.mockClear();
+    mockExecSync.mockReturnValue("");
+
+    applyGitHubSynthesisLabel("rapartlu/test-repo", 42, "synthesis-fallback");
+
+    const calls: string[] = mockExecSync.mock.calls.map((c: [string]) => c[0]);
+    expect(calls.some((c) => c.includes("gh label create") && c.includes("synthesis-fallback"))).toBe(true);
+    expect(calls.some((c) => c.includes("gh issue edit") && c.includes("--add-label"))).toBe(true);
+  });
+
+  it("does not throw when gh label create fails (label already exists)", () => {
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    mockExecSync.mockClear();
+    let callCount = 0;
+    mockExecSync.mockImplementation((cmd: string) => {
+      callCount++;
+      if (cmd.includes("gh label create")) throw new Error("already exists");
+      return "";
+    });
+
+    // Should not throw
+    expect(() => applyGitHubSynthesisLabel("rapartlu/test-repo", 42, "synthesized")).not.toThrow();
+    // The issue edit call should still be made
+    expect(callCount).toBe(2);
+  });
+});
+
+// ── checkAndEscalateFallbackThreshold ────────────────────────────────────
+
+describe("checkAndEscalateFallbackThreshold", () => {
+  it("calls notifyOperator when should_escalate is true", async () => {
+    const mockStore = {
+      getStandupHealth: vi.fn().mockReturnValue({
+        window_days: 1,
+        points: [],
+        fallback_count_24h: 3,
+        should_escalate: true,
+      }),
+    };
+    const mockNotifier = {
+      notifyOperator: vi.fn().mockResolvedValue(true),
+    };
+
+    await checkAndEscalateFallbackThreshold(
+      mockStore as never,
+      mockNotifier as never,
+    );
+
+    expect(mockNotifier.notifyOperator).toHaveBeenCalledWith(
+      expect.stringContaining("fallback threshold"),
+      expect.stringContaining("3"),
+      "high",
+    );
+  });
+
+  it("does NOT call notifyOperator when below threshold", async () => {
+    const mockStore = {
+      getStandupHealth: vi.fn().mockReturnValue({
+        window_days: 1,
+        points: [],
+        fallback_count_24h: 1,
+        should_escalate: false,
+      }),
+    };
+    const mockNotifier = {
+      notifyOperator: vi.fn(),
+    };
+
+    await checkAndEscalateFallbackThreshold(
+      mockStore as never,
+      mockNotifier as never,
+    );
+
+    expect(mockNotifier.notifyOperator).not.toHaveBeenCalled();
+  });
+
+  it("swallows errors from store/notifier gracefully", async () => {
+    const mockStore = {
+      getStandupHealth: vi.fn().mockImplementation(() => {
+        throw new Error("DB error");
+      }),
+    };
+    const mockNotifier = { notifyOperator: vi.fn() };
+
+    // Should not throw
+    await expect(
+      checkAndEscalateFallbackThreshold(mockStore as never, mockNotifier as never),
+    ).resolves.toBeUndefined();
   });
 });

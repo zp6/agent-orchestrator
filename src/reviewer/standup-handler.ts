@@ -16,11 +16,40 @@
 
 import { execSync } from "child_process";
 import { createLogger } from "../service/logger.js";
+import type { StandupSynthesisLabel, IStandupHealthStore } from "../state/types.js";
+import type { Notifier } from "../notify.js";
+
+export type { StandupSynthesisLabel };
 
 const log = createLogger("standup-handler");
 
 /** Sentinel text written by the orchestrator when synthesis LLM call fails. */
 const SYNTHESIS_FAILURE_SENTINEL = "Synthesis failed";
+
+/**
+ * Threshold for auto-escalation: if more than this many fallback events occur
+ * in a rolling 24h window, send a Telegram alert.
+ */
+const FALLBACK_ESCALATION_THRESHOLD = 2;
+
+/**
+ * GitHub label definitions for synthesis confidence badges.
+ * Each label is created idempotently before being applied.
+ */
+const SYNTHESIS_LABEL_DEFS: Record<StandupSynthesisLabel, { color: string; description: string }> = {
+  synthesized: {
+    color: "0e8a16",
+    description: "Standup synthesis succeeded — action items were generated",
+  },
+  "synthesis-fallback": {
+    color: "e4e669",
+    description: "Standup synthesis fell back — 0 action items after synthesis",
+  },
+  "empty-retry": {
+    color: "d93f0b",
+    description: "Standup synthesis still empty after retry — manual review suggested",
+  },
+};
 
 /**
  * GitHub issue metadata needed for standup processing.
@@ -178,6 +207,121 @@ export function buildStandupAcknowledgmentComment(issue: GitHubIssue): string {
  */
 export function isSynthesisFailed(issue: GitHubIssue): boolean {
   return issue.body.includes(SYNTHESIS_FAILURE_SENTINEL);
+}
+
+/**
+ * Detect the synthesis confidence label for a standup issue.
+ *
+ * Rules (applied in order):
+ * 1. If the issue has action items (count > 0) → `synthesized`
+ * 2. If already labelled synthesis-fallback + still 0 items → `empty-retry`
+ * 3. If synthesis sentinel present or 0 items → `synthesis-fallback`
+ * 4. Otherwise → `synthesized`
+ */
+export function detectSynthesisLabel(issue: GitHubIssue): StandupSynthesisLabel {
+  const actionItemCount = extractActionItemCount(issue);
+
+  // Has real action items → success
+  if (actionItemCount > 0) {
+    return "synthesized";
+  }
+
+  // Check for a retry scenario: already labelled synthesis-fallback + still empty
+  const alreadyFallback =
+    issue.labels.includes("synthesis-fallback") || issue.labels.includes("empty-retry");
+  if (alreadyFallback && actionItemCount === 0) {
+    return "empty-retry";
+  }
+
+  // Synthesis failed (sentinel present) or genuinely 0 items
+  if (isSynthesisFailed(issue) || actionItemCount === 0) {
+    return "synthesis-fallback";
+  }
+
+  return "synthesized";
+}
+
+/**
+ * Ensure a synthesis confidence label exists on GitHub and apply it to an issue.
+ *
+ * Creates the label in the repo if it doesn't exist yet (idempotent via --force).
+ * Errors are swallowed and logged — label stamping is best-effort and should
+ * never block the main standup handling flow.
+ *
+ * @param repo - Repository in owner/repo format
+ * @param issueNumber - GitHub issue number to label
+ * @param label - Synthesis confidence label to apply
+ */
+export function applyGitHubSynthesisLabel(
+  repo: string,
+  issueNumber: number,
+  label: StandupSynthesisLabel,
+): void {
+  const def = SYNTHESIS_LABEL_DEFS[label];
+
+  try {
+    // Ensure the label exists in the repo (idempotent via --force flag)
+    try {
+      execSync(
+        `gh label create ${shellEscape(label)} --repo ${shellEscape(repo)} --color ${def.color} --description ${shellEscape(def.description)} --force`,
+        { encoding: "utf-8", timeout: 15000 },
+      );
+    } catch {
+      // Label may already exist without --force support on older gh versions — ignore
+    }
+
+    // Apply the label to the issue
+    execSync(
+      `gh issue edit ${issueNumber} --repo ${shellEscape(repo)} --add-label ${shellEscape(label)}`,
+      { encoding: "utf-8", timeout: 15000 },
+    );
+
+    log.info("Applied synthesis confidence label to standup issue", {
+      repo,
+      issueNumber,
+      label,
+    });
+  } catch (err) {
+    log.warn("Failed to apply synthesis label — continuing without badge", {
+      repo,
+      issueNumber,
+      label,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Check the rolling 24h fallback count and auto-escalate to Telegram if needed.
+ *
+ * Escalates when more than `FALLBACK_ESCALATION_THRESHOLD` (2) synthesis
+ * fallbacks are recorded within the last 24 hours.
+ *
+ * @param store - State store implementing IStandupHealthStore
+ * @param notifier - Telegram notifier
+ */
+export async function checkAndEscalateFallbackThreshold(
+  store: IStandupHealthStore,
+  notifier: Notifier,
+): Promise<void> {
+  try {
+    const health = store.getStandupHealth(1); // 1-day window for escalation check
+    if (health.should_escalate) {
+      await notifier.notifyOperator(
+        "Standup synthesis fallback threshold exceeded",
+        `${health.fallback_count_24h} standup synthesis fallbacks in the last 24h (threshold: ${FALLBACK_ESCALATION_THRESHOLD}).\n\nStandup reports are repeatedly shipping with 0 action items. Check the orchestrator's LLM synthesis pipeline — there may be a recurring failure causing the fallback path to activate.`,
+        "high",
+      );
+      log.warn("Standup synthesis fallback threshold exceeded — escalated to Telegram", {
+        fallback_count_24h: health.fallback_count_24h,
+        threshold: FALLBACK_ESCALATION_THRESHOLD,
+      });
+    }
+  } catch (err) {
+    log.warn("Failed to check/escalate standup fallback threshold", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -342,6 +486,8 @@ export async function postFallbackActionItems(
  * @param issue - Issue metadata (for synthesis extraction)
  * @param autoClose - Whether to close the issue if all referenced PRs are merged
  * @param fallbackRepos - Additional repos to query when synthesis fails (for fallback items)
+ * @param store - Optional state store for recording synthesis health events
+ * @param notifier - Optional Telegram notifier for fallback escalation alerts
  */
 export async function handleZeroActionStandup(
   repo: string,
@@ -349,6 +495,8 @@ export async function handleZeroActionStandup(
   issue: GitHubIssue,
   autoClose = true,
   fallbackRepos?: string[],
+  store?: IStandupHealthStore,
+  notifier?: Notifier,
 ): Promise<void> {
   try {
     // Build and post acknowledgment comment
@@ -359,11 +507,27 @@ export async function handleZeroActionStandup(
       { encoding: "utf-8", timeout: 30000 },
     );
 
+    const actionItemCount = extractActionItemCount(issue);
+
     log.info("Posted standup acknowledgment comment", {
       repo,
       issueNumber,
-      actionItems: extractActionItemCount(issue),
+      actionItems: actionItemCount,
     });
+
+    // Detect synthesis confidence label and stamp it on the issue
+    const synthesisLabel = detectSynthesisLabel(issue);
+    applyGitHubSynthesisLabel(repo, issueNumber, synthesisLabel);
+
+    // Record synthesis health event in the store (for sparkline + escalation tracking)
+    if (store) {
+      store.recordStandupSynthesisEvent(repo, issueNumber, synthesisLabel, Math.max(0, actionItemCount));
+
+      // Check if we've exceeded the fallback threshold and escalate if needed
+      if (notifier && synthesisLabel !== "synthesized") {
+        await checkAndEscalateFallbackThreshold(store, notifier);
+      }
+    }
 
     // If synthesis failed, attempt to recover action items from open issues.
     // This ensures standup reports never ship empty solely because of an LLM

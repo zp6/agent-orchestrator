@@ -40,6 +40,9 @@ import type {
   PRIterationTrend,
   PRIterationTrendPoint,
   AgentCoachingDirective,
+  StandupSynthesisLabel,
+  StandupHealthPoint,
+  StandupHealthSummary,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -304,6 +307,25 @@ export class StateStore implements ITelegramStateStore {
     } catch {
       // Older databases may not have all columns yet; leave them untouched.
     }
+
+    // Standup synthesis health table (idempotent — issue #118).
+    // Tracks synthesis confidence labels and action-item counts per standup.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS standup_synthesis_events (
+        id TEXT PRIMARY KEY,
+        repo TEXT NOT NULL,
+        issue_number INTEGER NOT NULL,
+        label TEXT NOT NULL,
+        action_item_count INTEGER NOT NULL DEFAULT 0,
+        recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_standup_synthesis_events_recorded_at
+        ON standup_synthesis_events (recorded_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_standup_synthesis_events_label_recorded_at
+        ON standup_synthesis_events (label, recorded_at DESC);
+    `);
   }
 
   // ── Task operations ──────────────────────────────────────────────────────
@@ -1594,5 +1616,94 @@ export class StateStore implements ITelegramStateStore {
     // Sort by revision_pct descending (worst first)
     directives.sort((a, b) => b.revision_pct - a.revision_pct);
     return directives;
+  }
+
+  // ── Standup synthesis health ──────────────────────────────────────────────
+
+  /**
+   * Record a standup synthesis event.
+   *
+   * Called each time a standup issue is processed by the reviewer.
+   * `label` indicates whether synthesis succeeded ('synthesized') or fell back
+   * ('synthesis-fallback', 'empty-retry').
+   */
+  recordStandupSynthesisEvent(
+    repo: string,
+    issueNumber: number,
+    label: StandupSynthesisLabel,
+    actionItemCount: number,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO standup_synthesis_events (id, repo, issue_number, label, action_item_count)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(ulid(), repo, issueNumber, label, actionItemCount);
+  }
+
+  /**
+   * Return standup synthesis health metrics for the given look-back window.
+   *
+   * Returns a per-day breakdown (sparkline data) and a rolling 24h fallback
+   * count for escalation decisions.
+   *
+   * @param days - Look-back window (default: 7 days).
+   */
+  getStandupHealth(days = 7): StandupHealthSummary {
+    // Use datetime('now', ?) with relative-offset strings so the comparison
+    // value uses the same 'YYYY-MM-DD HH:MM:SS' format as the stored
+    // recorded_at column (which comes from DEFAULT (datetime('now'))).
+    // Using toISOString() produces 'YYYY-MM-DDTHH:MM:SS.mmmZ' where the 'T'
+    // separator (ASCII 84) sorts after the space separator (ASCII 32) used by
+    // SQLite, causing rows on the boundary day to be incorrectly excluded.
+    const sinceOffset = `-${days} days`;
+    const since24hOffset = "-1 days";
+
+    // Per-day aggregation
+    const dailyRows = this.db
+      .prepare(
+        `SELECT
+          date(recorded_at) AS date,
+          COUNT(*) AS total,
+          SUM(CASE WHEN label = 'synthesized' THEN 1 ELSE 0 END) AS synthesized,
+          SUM(CASE WHEN label != 'synthesized' THEN 1 ELSE 0 END) AS fallback
+        FROM standup_synthesis_events
+        WHERE recorded_at >= datetime('now', ?)
+        GROUP BY date(recorded_at)
+        ORDER BY date ASC`,
+      )
+      .all(sinceOffset) as Array<{
+        date: string;
+        total: number;
+        synthesized: number;
+        fallback: number;
+      }>;
+
+    const points: StandupHealthPoint[] = dailyRows.map((row) => ({
+      date: row.date,
+      total: row.total,
+      synthesized: row.synthesized,
+      fallback: row.fallback,
+      success_rate: row.total > 0 ? row.synthesized / row.total : null,
+    }));
+
+    // Rolling 24h fallback count for escalation check
+    const fallbackRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS cnt
+         FROM standup_synthesis_events
+         WHERE recorded_at >= datetime('now', ?)
+           AND label != 'synthesized'`,
+      )
+      .get(since24hOffset) as { cnt: number };
+
+    const fallback_count_24h = fallbackRow?.cnt ?? 0;
+
+    return {
+      window_days: days,
+      points,
+      fallback_count_24h,
+      should_escalate: fallback_count_24h > 2,
+    };
   }
 }

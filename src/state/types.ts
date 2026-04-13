@@ -793,7 +793,93 @@ export interface IPRIterationStore {
  * this interface; reviewer modules wired into the orchestrator use
  * the narrower IStateStore above.
  */
-export interface ITelegramStateStore extends IStateStore, IScoreOutcomeStore, IPRIterationStore {
+// ── Standup synthesis health types ───────────────────────────────────────
+
+/**
+ * Synthesis confidence label stamped on every standup PR and issue.
+ *
+ * - `synthesized`:        Action items were successfully synthesized from standup content.
+ * - `synthesis-fallback`: Synthesis produced 0 action items; fallback/retry logic ran.
+ * - `empty-retry`:        A retry was attempted after an initial empty synthesis; still 0 items.
+ */
+export type StandupSynthesisLabel = "synthesized" | "synthesis-fallback" | "empty-retry";
+
+/**
+ * A single standup synthesis event recorded each time a standup is processed.
+ * Stored in the `standup_synthesis_events` table.
+ */
+export interface StandupSynthesisEvent {
+  id: string;
+  repo: string;
+  issue_number: number;
+  label: StandupSynthesisLabel;
+  action_item_count: number;
+  recorded_at: string;
+}
+
+/**
+ * One calendar day's standup synthesis health metrics.
+ * Used to build the 7-day sparkline on the dashboard.
+ */
+export interface StandupHealthPoint {
+  /** "YYYY-MM-DD" calendar date. */
+  date: string;
+  /** Total standup synthesis events on this day. */
+  total: number;
+  /** Events with label "synthesized" (successful). */
+  synthesized: number;
+  /** Events with label "synthesis-fallback" or "empty-retry". */
+  fallback: number;
+  /**
+   * synthesized / total as a 0-1 fraction, or null when there were no
+   * standup events on this day.
+   */
+  success_rate: number | null;
+}
+
+/**
+ * Full standup health summary returned by `IStandupHealthStore.getStandupHealth()`.
+ */
+export interface StandupHealthSummary {
+  /** Number of days in the look-back window (default: 7). */
+  window_days: number;
+  /** Daily health points for the sparkline. */
+  points: StandupHealthPoint[];
+  /** Number of fallback events in the rolling 24h window. */
+  fallback_count_24h: number;
+  /**
+   * True when fallback_count_24h > 2 — signals that auto-escalation
+   * to Telegram should fire.
+   */
+  should_escalate: boolean;
+}
+
+/**
+ * Store interface for standup synthesis health persistence.
+ *
+ * Implemented by the reviewer's own StateStore.
+ */
+export interface IStandupHealthStore {
+  /**
+   * Record a standup synthesis event.
+   * Called each time a standup issue is processed.
+   */
+  recordStandupSynthesisEvent(
+    repo: string,
+    issueNumber: number,
+    label: StandupSynthesisLabel,
+    actionItemCount: number,
+  ): void;
+
+  /**
+   * Return standup health metrics for the given look-back window.
+   *
+   * @param days - Look-back window (default: 7 days).
+   */
+  getStandupHealth(days?: number): StandupHealthSummary;
+}
+
+export interface ITelegramStateStore extends IStateStore, IScoreOutcomeStore, IPRIterationStore, IStandupHealthStore {
   // System flags (pause/resume, operator overrides)
   getSystemFlag(key: string): string | null;
   setSystemFlag(key: string, value: string): void;

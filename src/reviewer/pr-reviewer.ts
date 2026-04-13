@@ -20,7 +20,7 @@ import { unlinkSync, readFileSync, writeFileSync } from "node:fs";
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
-import type { IStateStore, MergeQueueEntry, ReviewCategory } from "../state/types.js";
+import type { IStateStore, IStandupHealthStore, MergeQueueEntry, ReviewCategory } from "../state/types.js";
 import {
   detectSchemaChanges,
   extractChangedFilesFromDiff,
@@ -752,7 +752,19 @@ export class PRReviewer {
         title: issue.title,
       });
 
-      await handleZeroActionStandup(repo, issueNumber, issue, true);
+      // Pass the store for synthesis health tracking (cast to IStandupHealthStore
+      // since StateStore implements it but IStateStore doesn't declare it)
+      const standupStore = (this.store as unknown as IStandupHealthStore);
+      const hasStandupHealthStore =
+        typeof standupStore.recordStandupSynthesisEvent === "function";
+      await handleZeroActionStandup(
+        repo,
+        issueNumber,
+        issue,
+        true,
+        undefined,
+        hasStandupHealthStore ? standupStore : undefined,
+      );
       return true;
     } catch (err) {
       // If we can't process as standup, let normal flow handle it
