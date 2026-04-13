@@ -233,4 +233,55 @@ export function registerServiceCommand(program: Command): void {
         // Config not available
       }
     });
+
+  serviceCmd
+    .command("history")
+    .description("Show daemon lifecycle history (start/stop/crash events)")
+    .option("-n, --limit <n>", "Number of events to show", "20")
+    .action((opts: { limit: string }) => {
+      const limit = Math.max(1, parseInt(opts.limit, 10) || 20);
+      try {
+        const store = new StateStore();
+        const events = store.getDaemonLifecycleHistory(limit);
+        store.close();
+
+        if (events.length === 0) {
+          console.log(chalk.dim("No daemon lifecycle events recorded yet."));
+          return;
+        }
+
+        console.log(chalk.bold(`\nDaemon Lifecycle History (last ${events.length})\n`));
+        for (const entry of events) {
+          const ts = new Date(entry.timestamp);
+          const dateStr = ts.toLocaleString();
+          const eventColor =
+            entry.event === "start" ? chalk.green :
+            entry.event === "stop"  ? chalk.blue  :
+            chalk.red; // crash
+
+          const eventLabel = eventColor(entry.event.toUpperCase().padEnd(5));
+          const pidStr = entry.pid != null ? chalk.dim(`PID ${entry.pid}`) : "";
+          const durationStr = entry.duration_ms != null
+            ? chalk.dim(` uptime=${formatUptime(entry.duration_ms)}`)
+            : "";
+          const exitStr = entry.exit_code != null ? chalk.dim(` exit=${entry.exit_code}`) : "";
+          const reasonStr = entry.reason ? `  ${chalk.yellow(entry.reason)}` : "";
+
+          console.log(`  ${eventLabel}  ${chalk.cyan(dateStr)}  ${pidStr}${durationStr}${exitStr}${reasonStr}`);
+        }
+        console.log();
+      } catch (err) {
+        console.error(chalk.red("Could not read lifecycle history:"), err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    });
+}
+
+function formatUptime(ms: number): string {
+  const secs = Math.floor(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ${secs % 60}s`;
+  const hours = Math.floor(mins / 60);
+  return `${hours}h ${mins % 60}m`;
 }

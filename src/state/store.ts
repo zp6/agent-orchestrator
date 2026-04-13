@@ -4,6 +4,28 @@ import { join, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { ulid } from "ulid";
 
+// ── Daemon lifecycle audit types ──────────────────────────────────────────────
+
+/** The type of daemon lifecycle event recorded in the audit trail. */
+export type DaemonLifecycleEvent = "start" | "stop" | "crash";
+
+/** A single daemon lifecycle event as persisted in the `daemon_lifecycle` table. */
+export interface DaemonLifecycleEntry {
+  id: number;
+  /** Event type: start | stop | crash */
+  event: DaemonLifecycleEvent;
+  /** PID of the daemon process at the time of the event. */
+  pid: number | null;
+  /** Human-readable reason (e.g. signal name, error message). */
+  reason: string | null;
+  /** Process exit code, if applicable (crash events). */
+  exit_code: number | null;
+  /** Wall-clock duration of the daemon run in milliseconds (stop/crash events). */
+  duration_ms: number | null;
+  /** ISO 8601 timestamp of the event. */
+  timestamp: string;
+}
+
 // ── Config reload audit types ─────────────────────────────────────────────────
 
 /** What triggered a config reload event. */
@@ -1153,6 +1175,7 @@ export class StateStore {
     this.runLearnedPatternsMigration();
     this.runLineageMigration();
     this.runAntibodyLogMigration();
+    this.runDaemonLifecycleMigration();
   }
 
   private runPhase2Migration(): void {
@@ -5882,5 +5905,67 @@ export class StateStore {
       GROUP BY decision
       ORDER BY count DESC
     `).all() as Array<{ decision: string; count: number; with_outcome: number }>;
+  }
+
+  // ── Daemon Lifecycle Audit ────────────────────────────────────────────────────
+
+  private runDaemonLifecycleMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS daemon_lifecycle (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        event       TEXT    NOT NULL,
+        pid         INTEGER,
+        reason      TEXT,
+        exit_code   INTEGER,
+        duration_ms INTEGER,
+        timestamp   TEXT    NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_daemon_lifecycle_event ON daemon_lifecycle(event);
+      CREATE INDEX IF NOT EXISTS idx_daemon_lifecycle_ts    ON daemon_lifecycle(timestamp);
+    `);
+  }
+
+  /**
+   * Record a daemon lifecycle event (start, stop, or crash) in the audit trail.
+   *
+   * @param params.event      - "start" | "stop" | "crash"
+   * @param params.pid        - Process ID (defaults to current process.pid)
+   * @param params.reason     - Human-readable description (e.g. "SIGTERM", error message)
+   * @param params.exit_code  - Process exit code for crash events
+   * @param params.duration_ms - Daemon uptime in ms for stop/crash events
+   */
+  recordDaemonLifecycleEvent(params: {
+    event: DaemonLifecycleEvent;
+    pid?: number;
+    reason?: string;
+    exit_code?: number;
+    duration_ms?: number;
+  }): DaemonLifecycleEntry {
+    const now = new Date().toISOString();
+    const result = this.db.prepare(`
+      INSERT INTO daemon_lifecycle (event, pid, reason, exit_code, duration_ms, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      params.event,
+      params.pid ?? process.pid,
+      params.reason ?? null,
+      params.exit_code ?? null,
+      params.duration_ms ?? null,
+      now,
+    );
+    return this.db
+      .prepare("SELECT * FROM daemon_lifecycle WHERE id = ?")
+      .get(result.lastInsertRowid) as DaemonLifecycleEntry;
+  }
+
+  /**
+   * Retrieve the most recent daemon lifecycle events, newest-first.
+   *
+   * @param limit - Maximum number of entries to return (default 20).
+   */
+  getDaemonLifecycleHistory(limit = 20): DaemonLifecycleEntry[] {
+    return this.db
+      .prepare("SELECT * FROM daemon_lifecycle ORDER BY timestamp DESC LIMIT ?")
+      .all(limit) as DaemonLifecycleEntry[];
   }
 }

@@ -1,7 +1,7 @@
 import { loadConfig, type OrchestratorConfig } from "../config/schema.js";
 import { validateConfig } from "../config/validator.js";
 import { ConfigWatcher, type ConfigChange } from "../config/watcher.js";
-import { StateStore, type DispatchRationale, type ConfigReloadTrigger } from "../state/store.js";
+import { StateStore, type DispatchRationale, type ConfigReloadTrigger, type DaemonLifecycleEvent } from "../state/store.js";
 import { setLLMUsageRecorder } from "../client/llm-client.js";
 import { ReviewerClient, type SupervisorDecision } from "../client/reviewer-client.js";
 import { Dispatcher, MAX_RETRIES, TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS, extractRepoFromSourceRef } from "../orchestrator/dispatcher.js";
@@ -231,6 +231,12 @@ export class Daemon {
   /** Watches agents.yaml for changes and triggers hot-reload. */
   private configWatcher: ConfigWatcher | null = null;
 
+  /** Wall-clock timestamp (ms) when the daemon was last started — used to compute uptime. */
+  private startedAt = 0;
+
+  /** Reason the daemon is stopping — populated before cleanup() so crash handlers can read it. */
+  private stopReason: string | undefined = undefined;
+
   constructor(configPath?: string, pollIntervalMs?: number) {
     this.configPath = configPath;
     this.config = loadConfig(configPath);
@@ -270,14 +276,50 @@ export class Daemon {
 
   async start(): Promise<void> {
     this.running = true;
+    this.startedAt = Date.now();
     writePid();
 
-    const handleSignal = () => {
-      console.log("\nShutting down...");
+    // Record daemon start in the lifecycle audit trail.
+    try {
+      this.store.recordDaemonLifecycleEvent({ event: "start", pid: process.pid });
+    } catch (err) {
+      this.log.warn("Failed to record daemon start lifecycle event", { error: String(err) });
+    }
+
+    const handleSignal = (signal: string) => {
+      console.log(`\nShutting down (${signal})...`);
+      this.stopReason = signal;
       this.stop();
     };
-    process.on("SIGINT", handleSignal);
-    process.on("SIGTERM", handleSignal);
+    process.on("SIGINT", () => handleSignal("SIGINT"));
+    process.on("SIGTERM", () => handleSignal("SIGTERM"));
+
+    // Capture unhandled errors and record them as crash events before exiting.
+    const handleCrash = (err: unknown, origin: string) => {
+      const message = err instanceof Error ? err.message : String(err);
+      const durationMs = this.startedAt > 0 ? Date.now() - this.startedAt : undefined;
+      const reason = `${origin}: ${message}`;
+      console.error(`[daemon] FATAL — ${reason}`);
+      try {
+        this.store.recordDaemonLifecycleEvent({
+          event: "crash",
+          pid: process.pid,
+          reason,
+          exit_code: 1,
+          duration_ms: durationMs,
+        });
+      } catch {
+        // Best-effort — don't let recording failure mask the original error.
+      }
+      try {
+        this.cleanup("crash");
+      } catch {
+        // Ignore cleanup errors during crash path.
+      }
+      process.exit(1);
+    };
+    process.on("uncaughtException", (err, origin) => handleCrash(err, origin));
+    process.on("unhandledRejection", (reason) => handleCrash(reason, "unhandledRejection"));
 
     // SIGUSR1 triggers a config reload (used by `orch config reload`)
     process.on("SIGUSR1", () => {
@@ -2493,13 +2535,28 @@ until fixed. File a GitHub issue if one doesn't already exist.
     }
   }
 
-  private cleanup(): void {
+  private cleanup(event: DaemonLifecycleEvent = "stop"): void {
     stopTelegramPolling();
     if (this.configWatcher) {
       this.configWatcher.stop();
       this.configWatcher = null;
     }
     removePid();
+
+    // Record the stop/crash event before closing the store.
+    const durationMs = this.startedAt > 0 ? Date.now() - this.startedAt : undefined;
+    try {
+      this.store.recordDaemonLifecycleEvent({
+        event,
+        pid: process.pid,
+        reason: event === "stop" ? (this.stopReason ?? "graceful shutdown") : undefined,
+        duration_ms: durationMs,
+      });
+    } catch (err) {
+      // Don't let audit recording block shutdown.
+      this.log.warn("Failed to record daemon lifecycle event", { event, error: String(err) });
+    }
+
     this.store.close();
     console.log("Daemon stopped.");
   }
