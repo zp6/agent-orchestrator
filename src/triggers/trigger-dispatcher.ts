@@ -1,4 +1,4 @@
-import { fetchOpenIssues, validateGhAuth, type GitHubIssue } from "./github.js";
+import { fetchOpenIssues, countOpenPRs, validateGhAuth, type GitHubIssue } from "./github.js";
 import { reportResult } from "./reporters.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { StateStore } from "../state/store.js";
@@ -221,6 +221,16 @@ export async function dispatchGitHubIssues(
     return result;
   }
 
+  // Cache PR counts per repo for this cycle — avoids duplicate gh api calls
+  // when multiple pool members share the same repo (e.g. claude + codex variants).
+  const prCountCache = new Map<string, number | null>();
+  function getCachedPRCount(repo: string): number | null {
+    if (prCountCache.has(repo)) return prCountCache.get(repo)!;
+    const count = countOpenPRs(repo);
+    prCountCache.set(repo, count);
+    return count;
+  }
+
   // Evict expired claims at the start of each cycle so stale entries from
   // crashed agents never permanently block an issue from being dispatched.
   const expiredClaims = store.cleanExpiredClaims();
@@ -248,6 +258,17 @@ export async function dispatchGitHubIssues(
       });
       result.skipped++;
       continue;
+    }
+
+    // Early exit: skip entire repo if at PR capacity (saves all per-issue validation calls).
+    // Agent busy check already handled by hasInFlightTask above.
+    const repoPrCap = config.agents[agentName]?.max_open_prs ?? config.dispatch?.max_open_prs ?? 3;
+    if (repoPrCap > 0) {
+      const openPrs = getCachedPRCount(agent.github);
+      if (openPrs !== null && openPrs >= repoPrCap) {
+        log.info("Skipping repo: at PR capacity", { repo: agent.github, openPrs, cap: repoPrCap });
+        continue;
+      }
     }
 
     let issues: GitHubIssue[];
@@ -454,6 +475,16 @@ export async function dispatchIdleAgentBacklog(
     }
 
     const forceReclaim = forceReclaimAgents?.has(agentName) ?? false;
+
+    // Early exit: skip repo if at PR capacity (saves per-issue API calls)
+    const idleRepoPrCap = config.agents[agentName]?.max_open_prs ?? config.dispatch?.max_open_prs ?? 3;
+    if (idleRepoPrCap > 0) {
+      const openPrs = countOpenPRs(agent.github);
+      if (openPrs !== null && openPrs >= idleRepoPrCap) {
+        log.info("Idle pickup: skipping repo at PR capacity", { repo: agent.github, openPrs, cap: idleRepoPrCap });
+        continue;
+      }
+    }
 
     let issues: GitHubIssue[];
     try {
