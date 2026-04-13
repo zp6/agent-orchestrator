@@ -24,13 +24,11 @@ export interface VerificationResult {
   score: number;
   notes: string;
   revision?: string;
-  /** Per-dimension score breakdown (only present if rejected) */
-  dimensions?: {
-    correctness?: number;
-    completeness?: number;
-    test_coverage?: number;
-    code_quality?: number;
-  };
+  /** Per-dimension score breakdown — keys vary by task type.
+   *  Implementation: correctness, completeness, test_coverage, code_quality
+   *  Research: thoroughness, evidence, alternatives, honesty
+   *  Facilitation: decision_quality, format_selection, participant_selection, clarity */
+  dimensions?: Record<string, number>;
 }
 
 export interface PRReviewResult {
@@ -111,6 +109,37 @@ Scoring guide:
 - 0.7-0.89: Good — solid analysis with minor gaps in coverage or evidence
 - 0.5-0.69: Acceptable — addresses the question but lacks depth or alternatives
 - Below 0.5: Needs revision — superficial, missing key considerations, or not actionable`;
+
+const VERIFY_FACILITATION_SYSTEM_PROMPT = `You are a quality reviewer for meeting facilitation decisions produced by an AI agent. The agent evaluates meeting requests, decides whether to run/skip/defer meetings, selects formats and participants, and synthesises outcomes.
+
+Respond with ONLY a JSON object (no markdown, no code fences):
+{
+  "approved": true/false,
+  "score": 0.0-1.0,
+  "notes": "Brief assessment of facilitation quality",
+  "revision": "If not approved, specific guidance for improvement (omit if approved)",
+  "dimensions": {
+    "decision_quality": 0.0-1.0 (was the run/skip/defer decision well-reasoned?),
+    "format_selection": 0.0-1.0 (was the chosen format appropriate for the topic?),
+    "participant_selection": 0.0-1.0 (were the right agents included?),
+    "clarity": 0.0-1.0 (is the outcome clear and actionable?)
+  }
+}
+
+Evaluate facilitation quality on:
+- **Decision quality**: Was the run/skip/defer decision appropriate? Skipping a vague topic is CORRECT. Deferring when the cap is reached is CORRECT. These are good facilitation, not failures.
+- **Format selection**: If a meeting was run, was the format appropriate for the topic?
+- **Participant selection**: Were the right agents included (not too many, not too few)?
+- **Clarity**: Is the output clear? Does it state the decision, reasoning, and next steps?
+- **Efficiency**: Did the facilitator avoid unnecessary work? A well-reasoned "skip" is better than running a pointless meeting.
+
+Scoring guide:
+- 0.9-1.0: Excellent — clear decision with solid reasoning, appropriate format/participants
+- 0.7-0.89: Good — reasonable decision, minor gaps in reasoning or participant selection
+- 0.5-0.69: Acceptable — decision made but reasoning is thin or format choice is questionable
+- Below 0.5: Needs revision — no clear decision, wrong format, or missing key participants
+
+IMPORTANT: A "skip" or "defer" decision is NOT automatically low quality. Evaluate the REASONING, not the outcome.`;
 
 const PR_REVIEW_SYSTEM_PROMPT = `You are a code reviewer for a multi-agent system. Your job is to catch real bugs and security issues, NOT to enforce style preferences.
 
@@ -305,10 +334,18 @@ export class ReviewerClient {
   async verifyTask(task: Task): Promise<VerificationResult> {
     const { client, model } = createLLMClient(this.config, "verifier");
 
-    const isResearch = task.task_type === "research";
-    const prompt = isResearch
+    const taskType = task.task_type ?? "implementation";
+    const prompt = taskType === "research"
       ? `## Research Question\n${task.description ?? task.title}\n\n## Agent Analysis (${task.agent_name})\n${task.result ?? "(no result)"}`
-      : `## Task\n${task.description ?? task.title}\n\n## Agent Response (${task.agent_name})\n${task.result ?? "(no result)"}`;
+      : taskType === "facilitation"
+        ? `## Meeting Request\n${task.description ?? task.title}\n\n## Facilitator Response (${task.agent_name})\n${task.result ?? "(no result)"}`
+        : `## Task\n${task.description ?? task.title}\n\n## Agent Response (${task.agent_name})\n${task.result ?? "(no result)"}`;
+
+    const systemPrompt = taskType === "research"
+      ? VERIFY_RESEARCH_SYSTEM_PROMPT
+      : taskType === "facilitation"
+        ? VERIFY_FACILITATION_SYSTEM_PROMPT
+        : VERIFY_SYSTEM_PROMPT;
 
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), DEFAULT_LLM_TIMEOUT_MS);
@@ -318,7 +355,7 @@ export class ReviewerClient {
         response = await client.messages.create({
           model: getLLMModel(this.config, "verifier") ?? model,
           max_tokens: 1024,
-          system: isResearch ? VERIFY_RESEARCH_SYSTEM_PROMPT : VERIFY_SYSTEM_PROMPT,
+          system: systemPrompt,
           messages: [{ role: "user", content: prompt }],
         }, { signal: abortController.signal });
       } finally {
@@ -476,7 +513,9 @@ export class ReviewerClient {
       if (parsed.dimensions && typeof parsed.dimensions === "object") {
         const dims = parsed.dimensions as Record<string, unknown>;
         const dimensions: Record<string, number> = {};
-        for (const key of ["correctness", "completeness", "test_coverage", "code_quality", "thoroughness", "evidence", "alternatives", "honesty"]) {
+        // Extract all numeric dimension scores — covers implementation, research,
+        // facilitation, and any future task type dimensions without hardcoding keys.
+        for (const key of Object.keys(dims)) {
           const val = dims[key];
           if (typeof val === "number") {
             dimensions[key] = Math.min(Math.max(val, 0), 1);

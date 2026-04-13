@@ -1623,6 +1623,7 @@ export class Daemon {
           source: "manual",
           sourceRef: `meeting-request:${request.key}`,
           title: `[meeting] ${payload.topic ?? request.key}`,
+          taskType: "facilitation",
         },
       ).then(() => {
         this.log.info("Meeting request dispatched to facilitator", {

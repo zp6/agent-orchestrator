@@ -50,7 +50,7 @@ export interface ConfigReloadRecord {
 
 export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed" | "escalated" | "result_missing" | "superseded";
 export type TaskSource = "github" | "linear" | "slack" | "manual" | "pr-feedback";
-export type TaskType = "implementation" | "research";
+export type TaskType = "implementation" | "research" | "facilitation";
 
 export type VerificationStatus = "pending" | "approved" | "rejected" | null;
 
