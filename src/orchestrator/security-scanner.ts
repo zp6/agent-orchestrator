@@ -16,6 +16,7 @@
  */
 
 import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { notifyOperator } from "../service/notify.js";
 import { createLogger } from "../service/logger.js";
@@ -309,6 +310,119 @@ export function scanDockerComposeForEnvFiles(
   return findings;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// YAML local-config scanner (issue #756 — follow-up from agent-proxy#390)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * YAML key names (case-insensitive) that may hold plaintext credentials in
+ * agents.yaml or other local YAML config files.
+ */
+const YAML_SENSITIVE_KEYS = [
+  "api_key",
+  "api_secret",
+  "access_token",
+  "auth_token",
+  "secret_key",
+  "secret_token",
+  "private_key",
+  "password",
+  "passwd",
+  "token",
+  "secret",
+  "credential",
+];
+
+/**
+ * Per-line regex that matches YAML scalar assignments of the form:
+ *   api_key: "value"
+ *   api_key: 'value'
+ *   api_key: value
+ *
+ * Group 1 = key name.
+ * Group 2 = double-quoted value (without surrounding quotes).
+ * Group 3 = single-quoted value (without surrounding quotes).
+ * Group 4 = unquoted value (trimmed; stripped of inline comments).
+ *
+ * Note: this is intentionally applied line-by-line (not with `gm` flags) to
+ * avoid module-level regex state contamination between invocations.
+ */
+const YAML_LINE_PATTERN =
+  /^\s*([\w-]+)\s*:\s*(?:"([^"]*)"|'([^']*)'|((?:[^#"'\s][^\n]*?)?))(?:\s*#.*)?$/;
+
+/**
+ * Scan YAML-formatted content (e.g. agents.yaml) for plaintext secrets in
+ * key: value pairs.  This complements `scanContentForSecrets` which targets
+ * shell-style KEY=VALUE files.
+ *
+ * Returns one SecurityFinding per detected line.
+ */
+export function scanYamlContentForSecrets(
+  content: string,
+  label: string,
+  filePath: string,
+): SecurityFinding[] {
+  const findings: SecurityFinding[] = [];
+  const lines = content.split("\n");
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // Skip comments and empty lines
+    if (/^\s*#/.test(line) || /^\s*$/.test(line)) continue;
+
+    const match = YAML_LINE_PATTERN.exec(line);
+    if (!match) continue;
+
+    const keyName = match[1];
+    // Value is whichever capture group matched; prefer quoted groups
+    const rawValue = match[2] ?? match[3] ?? match[4] ?? "";
+    const value = rawValue.trim();
+
+    const lowerKey = keyName.toLowerCase();
+    const isSensitive = YAML_SENSITIVE_KEYS.some(
+      (s) =>
+        lowerKey === s ||
+        lowerKey.endsWith(`_${s}`) ||
+        lowerKey.startsWith(`${s}_`),
+    );
+    if (!isSensitive) continue;
+    if (!looksLikeRealSecret(value)) continue;
+
+    const maskedValue = value.slice(0, 4) + "***";
+
+    findings.push({
+      repo: label,
+      filePath,
+      lineNumber: i + 1,
+      patternName: "plaintext secret in YAML config",
+      description:
+        `\`${keyName}\` appears to contain a real credential value (\`${maskedValue}\`) in \`${filePath}\` — ` +
+        `use an environment variable reference (e.g. \`\${MY_VAR}\`) or a secrets manager instead`,
+      severity: "high",
+    });
+  }
+
+  return findings;
+}
+
+/**
+ * Read a local file and scan it for YAML-format plaintext secrets.
+ * Returns an empty array if the file cannot be read (fail-open).
+ */
+export function scanLocalYamlFile(
+  filePath: string,
+  label: string,
+): SecurityFinding[] {
+  let content: string;
+  try {
+    content = readFileSync(filePath, "utf-8");
+  } catch {
+    log.warn("Security scan: could not read local config file", { filePath });
+    return [];
+  }
+  return scanYamlContentForSecrets(content, label, filePath);
+}
+
 /**
  * Run a full security scan of one repository.
  * Returns all findings (may be empty).
@@ -461,22 +575,53 @@ function shellEscape(s: string): string {
 
 /**
  * Scan all agent repos and create issues / send alerts for any findings.
+ * Also scans the orchestrator's own local config file (agents.yaml) for
+ * YAML-format plaintext secrets (follow-up from agent-proxy#390, issue #756).
  * Groups findings by file to avoid one issue per finding line.
  */
-export async function runSecurityScan(config: OrchestratorConfig): Promise<void> {
+export async function runSecurityScan(
+  config: OrchestratorConfig,
+  configPath?: string,
+): Promise<void> {
   const repos = new Set<string>();
   for (const agent of Object.values(config.agents)) {
     if (agent.github) repos.add(agent.github);
   }
 
-  if (repos.size === 0) {
-    log.info("Security scan: no repos configured, skipping");
-    return;
+  log.info("Security scan: starting daily scan", { repoCount: repos.size });
+
+  // ── 1. Scan the orchestrator's own local config file ──────────────────────
+  // Local findings are not tracked as GitHub issues (the file is not in a
+  // remote repo) — we log a warning and send a Telegram alert instead.
+  const localConfigPath =
+    configPath ?? (config.orchestrator_dir
+      ? `${config.orchestrator_dir}/agents.yaml`
+      : undefined);
+
+  if (localConfigPath) {
+    const localFindings = scanLocalYamlFile(localConfigPath, "local-config");
+    if (localFindings.length > 0) {
+      log.warn("Security scan: plaintext secrets found in local config", {
+        filePath: localConfigPath,
+        count: localFindings.length,
+      });
+      const summary = localFindings
+        .map(
+          (f) =>
+            `\`${f.filePath}\` line ${f.lineNumber ?? "?"}: ${f.patternName}`,
+        )
+        .join("\n");
+      await notifyOperator(
+        `Security scan: plaintext secrets in local config`,
+        `Found ${localFindings.length} plaintext secret(s) in \`${localConfigPath}\`:\n\n${summary}\n\nReplace hardcoded values with environment variable references.`,
+        "warning",
+        "security-scan-local-config",
+      );
+    }
   }
 
-  log.info("Security scan: starting daily scan", { repoCount: repos.size });
+  // ── 2. Scan each agent's GitHub repo ─────────────────────────────────────
   const allFindings: SecurityFinding[] = [];
-
   for (const repo of repos) {
     const findings = scanRepo(repo);
     allFindings.push(...findings);

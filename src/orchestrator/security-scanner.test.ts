@@ -4,6 +4,7 @@ import {
   looksLikeRealSecret,
   scanContentForSecrets,
   scanDockerComposeForEnvFiles,
+  scanYamlContentForSecrets,
   todayDateString,
   maybeRunDailySecurityScan,
   type SecurityScanState,
@@ -246,6 +247,91 @@ services:
 `;
     const findings = scanDockerComposeForEnvFiles(content, "owner/repo", "docker-compose.yml");
     expect(findings).toHaveLength(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// scanYamlContentForSecrets (issue #756 — local YAML config scanning)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("scanYamlContentForSecrets", () => {
+  it("detects a plaintext api_key in double-quoted YAML", () => {
+    const content = `
+docker:
+  api_key: "sk-realtoken12345678"
+  port: 3472
+`;
+    const findings = scanYamlContentForSecrets(content, "local-config", "agents.yaml");
+    expect(findings.length).toBeGreaterThanOrEqual(1);
+    const f = findings[0];
+    expect(f.patternName).toContain("YAML config");
+    expect(f.filePath).toBe("agents.yaml");
+    expect(f.description).toContain("api_key");
+    expect(f.description).not.toContain("sk-realtoken12345678");
+  });
+
+  it("detects a plaintext api_key in unquoted YAML", () => {
+    const content = `api_key: sk-realtoken12345678\n`;
+    const findings = scanYamlContentForSecrets(content, "local-config", "agents.yaml");
+    expect(findings.length).toBeGreaterThanOrEqual(1);
+    expect(findings[0].description).toContain("api_key");
+  });
+
+  it("detects a plaintext api_key in single-quoted YAML", () => {
+    const content = `api_key: 'sk-realtoken12345678'\n`;
+    const findings = scanYamlContentForSecrets(content, "local-config", "agents.yaml");
+    expect(findings.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("detects password field", () => {
+    const content = `password: "supersecretpassword123"\n`;
+    const findings = scanYamlContentForSecrets(content, "local-config", "agents.yaml");
+    expect(findings.length).toBeGreaterThanOrEqual(1);
+    expect(findings[0].description).toContain("password");
+  });
+
+  it("detects token field", () => {
+    const content = `token: "ghp_abc123XYZ456defghijklmnopqrstuvwxyz"\n`;
+    const findings = scanYamlContentForSecrets(content, "local-config", "agents.yaml");
+    expect(findings.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("ignores placeholder values (your_api_key_here)", () => {
+    const content = `api_key: "your_api_key_here"\n`;
+    const findings = scanYamlContentForSecrets(content, "local-config", "agents.yaml");
+    expect(findings).toHaveLength(0);
+  });
+
+  it("ignores angle-bracket placeholders", () => {
+    const content = `api_key: "<replace-me>"\n`;
+    const findings = scanYamlContentForSecrets(content, "local-config", "agents.yaml");
+    expect(findings).toHaveLength(0);
+  });
+
+  it("ignores very short values", () => {
+    const content = `api_key: "ab"\n`;
+    const findings = scanYamlContentForSecrets(content, "local-config", "agents.yaml");
+    expect(findings).toHaveLength(0);
+  });
+
+  it("ignores non-sensitive keys", () => {
+    const content = `port: 3472\nmodel: claude-opus-4-6\ndir: /home/claude/repo\n`;
+    const findings = scanYamlContentForSecrets(content, "local-config", "agents.yaml");
+    expect(findings).toHaveLength(0);
+  });
+
+  it("masks the secret value in the description", () => {
+    const content = `api_key: "sk-supersecretvalue9876"\n`;
+    const findings = scanYamlContentForSecrets(content, "local-config", "agents.yaml");
+    expect(findings[0].description).toContain("***");
+    expect(findings[0].description).not.toContain("sk-supersecretvalue9876");
+  });
+
+  it("reports correct line number", () => {
+    const content = `proxy:\n  url: http://localhost:3000\n  api_key: "sk-realtoken12345678"\n`;
+    const findings = scanYamlContentForSecrets(content, "local-config", "agents.yaml");
+    expect(findings.length).toBeGreaterThanOrEqual(1);
+    expect(findings[0].lineNumber).toBe(3);
   });
 });
 
