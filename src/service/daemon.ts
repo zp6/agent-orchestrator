@@ -34,6 +34,7 @@ import { startTelegramPolling, stopTelegramPolling, pollTelegram } from "./teleg
 import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.js";
 import { maybeRunDailySecurityScan, type SecurityScanState } from "../orchestrator/security-scanner.js";
 import { runTeamMeeting } from "../orchestrator/team-meeting.js";
+import { StandupActionClient } from "../orchestrator/standup-action-client.js";
 import { seedFromClaudeMd } from "../orchestrator/learned-rules.js";
 import { checkAgedIssues } from "../orchestrator/issue-age-monitor.js";
 import { runProactiveScan } from "../orchestrator/proactive-scanner.js";
@@ -1656,8 +1657,50 @@ export class Daemon {
       const summary = await runTeamMeeting(this.config, this.store, { type });
       const responded = summary.rounds[0]?.entries.filter((e) => e.response).length ?? 0;
       console.log(`[${time}] ${label} complete: ${summary.rounds.length} rounds, ${summary.actionItems.length} action items, ${responded} agents`);
+
+      // Post standup action items to the dashboard (issue #801)
+      if (type === "standup" && summary.actionItems.length > 0) {
+        await this.postStandupActionItems(time, summary.date, summary.actionItems).catch(
+          (err) =>
+            console.warn(
+              `[${time}] Failed to post standup action items to dashboard: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            ),
+        );
+      }
     } catch (err) {
       console.error(`[${time}] ${label} failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  /**
+   * Post standup action items to the dashboard after standup synthesis.
+   * Converts synthesized action items to dashboard API format and POSTs
+   * them to the standup-items tracking endpoint (issue #801).
+   */
+  private async postStandupActionItems(
+    time: string,
+    standupDate: string,
+    actionItems: Array<{ description: string; owner: string; priority: string }>,
+  ): Promise<void> {
+    const dashboardUrl = "http://localhost:3473";
+    const client = new StandupActionClient(dashboardUrl);
+
+    // Convert orchestrator ActionItem format to dashboard StandupActionItemInput format
+    const items = actionItems.map((item) => ({
+      standup_date: standupDate,
+      action_item: item.description,
+      status: "deferred" as const,
+      reason: `Synthesized by orchestrator (${item.priority} priority, owner: ${item.owner})`,
+      agent_name: undefined,
+      task_id: undefined,
+      source_ref: undefined,
+    }));
+
+    const ids = await client.recordBatch(items);
+    if (ids) {
+      console.log(`[${time}] Posted ${ids.length} standup action items to dashboard`);
     }
   }
 
