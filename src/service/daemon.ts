@@ -41,6 +41,7 @@ import { validateMergedPR } from "../orchestrator/staging-validator.js";
 import { proposeAndFileRoadmapItems } from "../orchestrator/roadmap-proposer.js";
 import { detectHighIterationAgents } from "../orchestrator/iteration-cost-detector.js";
 import { runIterationBudgetAlerts } from "../orchestrator/iteration-budget-alert.js";
+import { runSkipPatternCheck } from "../orchestrator/skip-pattern-aggregator.js";
 import {
   type GateResult,
   detectImprovements,
@@ -65,6 +66,7 @@ const STALE_ISSUE_AGE_DAYS = 7;
 const STANDUP_MEETING_EVERY_N_CYCLES = 288;  // ~24h at 5min interval
 const BLUESKY_MEETING_EVERY_N_CYCLES = 2016; // ~7 days at 5min interval
 const ROADMAP_PROPOSAL_EVERY_N_CYCLES = 288; // ~24h at 5min interval
+const SKIP_PATTERN_CHECK_EVERY_N_CYCLES = 288; // ~24h at 5min interval
 
 /**
  * Maximum time a single poll cycle is allowed to run before the watchdog
@@ -592,6 +594,18 @@ export class Daemon {
       batch4.push(maybeRunDailySecurityScan(this.securityScanState, this.config));
       if (this.cycleCount % QUALITY_SLA_CHECK_EVERY_N_CYCLES === 0) {
         batch4.push(this.checkQualitySlaBreaches(time));
+      }
+      // Daily skip-pattern aggregation — auto-create GitHub issues for systemic
+      // dispatch blockers when any reason exceeds the 5-skip-in-7-days threshold
+      // (issue #787).  Fires a Telegram alert for each new blocker so operators
+      // are notified in real-time rather than waiting for the next standup
+      // (issue #795).
+      if (this.cycleCount % SKIP_PATTERN_CHECK_EVERY_N_CYCLES === 0) {
+        batch4.push(
+          runSkipPatternCheck(this.config, this.store)
+            .then((created) => { if (created > 0) console.log(`[${time}] Skip-pattern aggregator: created ${created} blocker issue(s)`); })
+            .catch((err) => { this.log.warn("Skip-pattern check failed", { error: err instanceof Error ? err.message : String(err) }); }),
+        );
       }
 
       if (batch4.length > 0) await this.runBatch("periodic", batch4);

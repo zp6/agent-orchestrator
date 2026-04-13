@@ -300,6 +300,25 @@ export interface DailyCycleMetrics {
   avg_duration_ms: number | null;
 }
 
+/**
+ * Aggregated skip-reason pattern for the rolling 7-day window.
+ * Used by the skip-pattern aggregator (issue #787) to surface systemic blockers.
+ */
+export interface SkipPatternRow {
+  /** The normalized skip reason text. */
+  reason: string;
+  /** Number of skips matching this reason in the window. */
+  skip_count: number;
+  /** Distinct agent names that encountered this skip reason. */
+  affected_agents: string[];
+  /** Sample issue refs (GitHub #NNN) associated with these skips. */
+  sample_issue_refs: string[];
+  /** ISO timestamp of the earliest matching skip in the window. */
+  first_seen: string;
+  /** ISO timestamp of the most recent matching skip in the window. */
+  last_seen: string;
+}
+
 /** Per-day dispatch efficiency metrics for the waste-rate widget (issue #517) */
 export interface DispatchWasteDay {
   /** ISO date string: 'YYYY-MM-DD' */
@@ -1233,6 +1252,7 @@ export class StateStore {
     this.runAntibodyLogMigration();
     this.runDaemonLifecycleMigration();
     this.runSecretMountStatusMigration();
+    this.runSkipPatternMigration();
   }
 
   private runPhase2Migration(): void {
@@ -6541,5 +6561,130 @@ export class StateStore {
     return this.db
       .prepare("SELECT secret_name AS name, status, reason, checked_at FROM agent_secret_mount_status WHERE agent_name = ?")
       .all(agentName) as Array<{ name: string; status: string; reason: string; checked_at: string }>;
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Skip pattern tracking (issue #787)
+  //
+  // Aggregates skip reasons from supervisor_decisions over rolling windows
+  // and records which blockers have already had auto-created GitHub issues,
+  // preventing duplicate issue creation for the same active blocker.
+  // ────────────────────────────────────────────────────────────────────────
+
+  private runSkipPatternMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS skip_pattern_issues (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        reason_key TEXT NOT NULL UNIQUE,
+        issue_number INTEGER NOT NULL,
+        issue_url TEXT NOT NULL,
+        repo TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_skip_pattern_issues_reason ON skip_pattern_issues(reason_key);
+    `);
+  }
+
+  /**
+   * Aggregate skip reasons from supervisor_decisions over a rolling window.
+   * Returns rows sorted by count descending.
+   */
+  getSkipPatterns(windowDays = 7): SkipPatternRow[] {
+    const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+    const rows = this.db.prepare(`
+      SELECT
+        reason,
+        COUNT(*) AS skip_count,
+        GROUP_CONCAT(DISTINCT agent_name) AS affected_agents_csv,
+        GROUP_CONCAT(DISTINCT issue_refs) AS issue_refs_json_csv,
+        MIN(created_at) AS first_seen,
+        MAX(created_at) AS last_seen
+      FROM supervisor_decisions
+      WHERE outcome = 'skipped'
+        AND created_at >= ?
+        AND reason IS NOT NULL
+        AND reason != ''
+      GROUP BY reason
+      ORDER BY skip_count DESC
+    `).all(since) as Array<{
+      reason: string;
+      skip_count: number;
+      affected_agents_csv: string | null;
+      issue_refs_json_csv: string | null;
+      first_seen: string;
+      last_seen: string;
+    }>;
+
+    return rows.map((row) => {
+      const agents = row.affected_agents_csv
+        ? [...new Set(row.affected_agents_csv.split(",").map((a) => a.trim()).filter(Boolean))]
+        : [];
+
+      const issueRefs: string[] = [];
+      if (row.issue_refs_json_csv) {
+        for (const chunk of row.issue_refs_json_csv.split(",")) {
+          try {
+            const parsed = JSON.parse(chunk.trim());
+            if (Array.isArray(parsed)) issueRefs.push(...parsed);
+          } catch {
+            // ignore malformed
+          }
+        }
+      }
+
+      return {
+        reason: row.reason,
+        skip_count: row.skip_count,
+        affected_agents: agents,
+        sample_issue_refs: [...new Set(issueRefs)].slice(0, 10),
+        first_seen: row.first_seen,
+        last_seen: row.last_seen,
+      };
+    });
+  }
+
+  /**
+   * Record that a GitHub issue was created for a skip pattern blocker.
+   * Uses INSERT OR IGNORE so re-runs are idempotent if the issue was already created.
+   */
+  recordSkipPatternIssue(params: {
+    reason_key: string;
+    issue_number: number;
+    issue_url: string;
+    repo: string;
+  }): void {
+    this.db.prepare(`
+      INSERT INTO skip_pattern_issues (reason_key, issue_number, issue_url, repo, created_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(reason_key) DO NOTHING
+    `).run(
+      params.reason_key,
+      params.issue_number,
+      params.issue_url,
+      params.repo,
+      new Date().toISOString(),
+    );
+  }
+
+  /**
+   * Return the set of reason_key values that already have an open GitHub issue.
+   * A blocker whose issue has been resolved (resolved_at set) is eligible for
+   * re-creation if it recurs.
+   */
+  getActiveSkipPatternIssueKeys(): Set<string> {
+    const rows = this.db.prepare(`
+      SELECT reason_key FROM skip_pattern_issues WHERE resolved_at IS NULL
+    `).all() as Array<{ reason_key: string }>;
+    return new Set(rows.map((r) => r.reason_key));
+  }
+
+  /**
+   * Mark a skip pattern issue as resolved (e.g. the GitHub issue was closed).
+   */
+  resolveSkipPatternIssue(reasonKey: string): void {
+    this.db.prepare(`
+      UPDATE skip_pattern_issues SET resolved_at = ? WHERE reason_key = ?
+    `).run(new Date().toISOString(), reasonKey);
   }
 }

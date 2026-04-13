@@ -40,6 +40,7 @@ import { registerLineageCommand } from "./commands/lineage.js";
 import { registerAntibodiesCommand } from "./commands/antibodies.js";
 import { registerHealthCheckEfficiencyCommand } from "./commands/health-check-efficiency.js";
 import { registerCostCommand } from "./commands/cost.js";
+import { registerSkipBlockersCommand } from "./commands/skip-blockers.js";
 
 const program = new Command();
 
@@ -89,5 +90,6 @@ registerAntibodiesCommand(program);
 registerHealthCheckEfficiencyCommand(program);
 registerCostCommand(program);
 registerAgentGapsCommand(program);
+registerSkipBlockersCommand(program);
 
 program.parse();
