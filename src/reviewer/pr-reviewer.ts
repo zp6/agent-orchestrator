@@ -20,7 +20,7 @@ import { unlinkSync, readFileSync, writeFileSync } from "node:fs";
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
-import type { IStateStore, MergeQueueEntry } from "../state/types.js";
+import type { IStateStore, MergeQueueEntry, ReviewCategory } from "../state/types.js";
 import {
   detectSchemaChanges,
   extractChangedFilesFromDiff,
@@ -34,6 +34,7 @@ import {
   handleZeroActionStandup,
   type GitHubIssue,
 } from "./standup-handler.js";
+import { categoriseReviewComment } from "./pr-iteration-metrics.js";
 
 export interface PRInfo {
   number: number;
@@ -659,7 +660,7 @@ export class PRReviewer {
         redispatchCategory: result.redispatchCategory,
       });
 
-      await this.executeDecision(repo, prNumber, result, pr.branch, schemaHits);
+      await this.executeDecision(repo, prNumber, result, pr.branch, schemaHits, pr.author);
       return result;
     } catch (err) {
       this.log.error("PR review failed", {
@@ -806,6 +807,7 @@ export class PRReviewer {
     result: PRReviewResult,
     prBranch?: string,
     schemaHits: SchemaImpactHit[] = [],
+    agentName?: string | null,
   ): Promise<void> {
     // Build downstream impact section if schema changes were detected
     const downstreamImpact = buildDownstreamImpactSection(schemaHits);
@@ -836,7 +838,7 @@ export class PRReviewer {
             prNumber,
             position: entry.position,
           });
-          this.store.recordPRReview(repo, prNumber, "approve", result.confidence ?? null);
+          this.recordReview(repo, prNumber, "approve", result, agentName);
         } catch (err) {
           this.log.error("Failed to approve/enqueue PR", {
             repo,
@@ -854,7 +856,7 @@ export class PRReviewer {
             { encoding: "utf-8", timeout: 30000 },
           );
           this.log.info("PR changes requested", { repo, prNumber });
-          this.store.recordPRReview(repo, prNumber, "request-changes", result.confidence ?? null);
+          this.recordReview(repo, prNumber, "request-changes", result, agentName);
         } catch (err) {
           this.log.error("Failed to request changes on PR", {
             repo,
@@ -891,7 +893,7 @@ export class PRReviewer {
             prNumber,
             reason: result.reason,
           });
-          this.store.recordPRReview(repo, prNumber, "escalate", result.confidence ?? null);
+          this.recordReview(repo, prNumber, "escalate", result, agentName);
         } catch (err) {
           this.log.error("Failed to escalate PR", {
             repo,
@@ -901,6 +903,47 @@ export class PRReviewer {
         }
         break;
       }
+    }
+  }
+
+  /**
+   * Persist a PR review record, enriching it with iteration metadata when the
+   * store supports `recordPRReviewDetails` (IPRIterationStore).
+   *
+   * Falls back to the narrower `recordPRReview` for orchestrator-injected stores
+   * that only implement `IStateStore`.
+   */
+  private recordReview(
+    repo: string,
+    prNumber: number,
+    decision: string,
+    result: PRReviewResult,
+    agentName?: string | null,
+  ): void {
+    const store = this.store as unknown as Record<string, unknown>;
+    if (typeof store["recordPRReviewDetails"] === "function") {
+      // Extract review categories from the comment for request-changes outcomes
+      const reviewCategories: ReviewCategory[] =
+        decision === "request-changes" || decision === "escalate"
+          ? categoriseReviewComment(result.comment)
+          : [];
+
+      (store["recordPRReviewDetails"] as (
+        repo: string,
+        prNumber: number,
+        decision: string,
+        opts?: {
+          confidence?: number | null;
+          agentName?: string | null;
+          reviewCategories?: ReviewCategory[];
+        },
+      ) => void)(repo, prNumber, decision, {
+        confidence: result.confidence ?? null,
+        agentName: agentName ?? null,
+        reviewCategories,
+      });
+    } else {
+      this.store.recordPRReview(repo, prNumber, decision, result.confidence ?? null);
     }
   }
 
@@ -1015,7 +1058,13 @@ export class PRReviewer {
         "Auto-closed persistently conflicting PR and deleted branch",
         { repo, prNumber, branch, conflictCount },
       );
-      this.store.recordPRReview(repo, prNumber, "escalate", null);
+      this.recordReview(
+        repo,
+        prNumber,
+        "escalate",
+        { decision: "escalate", comment: "Auto-closed persistently conflicting PR", reason: "merge-conflict" },
+        null,
+      );
 
       // Track for conflict stats
       const repoKey = repo.split("/").pop() ?? repo;

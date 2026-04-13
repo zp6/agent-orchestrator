@@ -73,6 +73,10 @@ export type {
 export { ImprovementDetector } from "./reviewer/improvement-detector.js";
 export type { DetectedImprovement } from "./reviewer/improvement-detector.js";
 
+// PR iteration metrics (issue #110)
+export { PRIterationMetrics, categoriseReviewComment, formatIterationReport } from "./reviewer/pr-iteration-metrics.js";
+export type { PRIterationStorePort } from "./reviewer/pr-iteration-metrics.js";
+
 export { IssueCreator } from "./reviewer/issue-creator.js";
 export type { CreatedIssue } from "./reviewer/issue-creator.js";
 
@@ -93,6 +97,7 @@ export { StateStore } from "./state/store.js";
 export type {
   IStateStore,
   IScoreOutcomeStore,
+  IPRIterationStore,
   ITelegramStateStore,
   Task,
   MergeQueueEntry,
@@ -111,6 +116,11 @@ export type {
   AgentQualityByTaskType,
   AgentTaskTypeQuality,
   PROutcomeRecord,
+  ReviewCategory,
+  PRIterationStat,
+  AgentIterationStat,
+  ReviewCategoryCount,
+  PRIterationReport,
 } from "./state/types.js";
 
 // Supervisor decision log — queryable log for orch CLI and dashboard consumers

@@ -32,6 +32,11 @@ import type {
   PROutcomeRecord,
   ScoreCalibrationRow,
   AdjustedThreshold,
+  ReviewCategory,
+  PRIterationReport,
+  PRIterationStat,
+  AgentIterationStat,
+  ReviewCategoryCount,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -216,6 +221,30 @@ export class StateStore implements ITelegramStateStore {
     } catch {
       // Column already exists — ignore
     }
+
+    // Add PR iteration tracking columns to pr_reviews (idempotent — issue #110)
+    try {
+      this.db.exec("ALTER TABLE pr_reviews ADD COLUMN review_number INTEGER NOT NULL DEFAULT 1");
+    } catch {
+      // Column already exists — ignore
+    }
+    try {
+      this.db.exec("ALTER TABLE pr_reviews ADD COLUMN agent_name TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+    try {
+      // Stores a JSON array of ReviewCategory strings (e.g. '["logic","security"]')
+      this.db.exec("ALTER TABLE pr_reviews ADD COLUMN review_categories TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+
+    // Index for efficient per-PR iteration queries (idempotent)
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_pr_reviews_repo_pr_number
+        ON pr_reviews (repo, pr_number, created_at ASC);
+    `);
 
     // Add quality_explanation column to tasks (idempotent).
     // Stores the natural-language narrative for sub-0.80 quality scores.
@@ -901,6 +930,144 @@ export class StateStore implements ITelegramStateStore {
         "INSERT INTO pr_reviews (id, repo, pr_number, decision, confidence) VALUES (?, ?, ?, ?, ?)",
       )
       .run(ulid(), repo, prNumber, decision, confidence ?? null);
+  }
+
+  /**
+   * Persist extended PR review metadata for iteration tracking.
+   *
+   * Stores review_number (auto-computed from existing rows), agent_name, and
+   * review_categories alongside the standard review fields.  Also inserts the
+   * standard `recordPRReview` data so callers can call this method alone.
+   */
+  recordPRReviewDetails(
+    repo: string,
+    prNumber: number,
+    decision: string,
+    opts?: {
+      confidence?: number | null;
+      agentName?: string | null;
+      reviewCategories?: ReviewCategory[];
+    },
+  ): void {
+    // Auto-compute review_number as count of existing reviews + 1
+    const existing = this.db
+      .prepare("SELECT COUNT(*) AS cnt FROM pr_reviews WHERE repo = ? AND pr_number = ?")
+      .get(repo, prNumber) as { cnt: number };
+    const reviewNumber = (existing?.cnt ?? 0) + 1;
+
+    const categories = opts?.reviewCategories?.length
+      ? JSON.stringify(opts.reviewCategories)
+      : null;
+
+    this.db
+      .prepare(
+        `INSERT INTO pr_reviews
+           (id, repo, pr_number, decision, confidence, review_number, agent_name, review_categories)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        ulid(),
+        repo,
+        prNumber,
+        decision,
+        opts?.confidence ?? null,
+        reviewNumber,
+        opts?.agentName ?? null,
+        categories,
+      );
+  }
+
+  /**
+   * Return a PR iteration report for the given look-back window.
+   *
+   * Aggregates:
+   * - multi_round_prs: PRs with > 1 review round
+   * - agent_stats:     per-agent avg / max iteration counts
+   * - top_categories:  most frequent review feedback categories
+   */
+  getPRIterationReport(days: number = 30): PRIterationReport {
+    const lookback = Number.isFinite(days) && days >= 1 ? Math.floor(days) : 30;
+    const since = `-${lookback} days`;
+
+    // 1. Per-PR aggregates (only rows that have review_number populated)
+    const prRows = this.db
+      .prepare(
+        `SELECT
+           repo,
+           pr_number,
+           MAX(agent_name)    AS agent_name,
+           COUNT(*)           AS review_count,
+           MAX(decision)      AS final_decision,
+           MIN(created_at)    AS first_review_at,
+           MAX(created_at)    AS last_review_at
+         FROM pr_reviews
+         WHERE created_at >= datetime('now', ?)
+         GROUP BY repo, pr_number
+         HAVING COUNT(*) > 1
+         ORDER BY review_count DESC`,
+      )
+      .all(since) as PRIterationStat[];
+
+    // 2. Per-agent aggregates (only rows that have agent_name populated)
+    const agentRows = this.db
+      .prepare(
+        `SELECT
+           agent_name,
+           COUNT(DISTINCT repo || '#' || pr_number) AS total_prs,
+           SUM(CASE WHEN review_count > 1 THEN 1 ELSE 0 END) AS multi_round_prs,
+           AVG(review_count) AS avg_rounds,
+           MAX(review_count) AS max_rounds
+         FROM (
+           SELECT
+             agent_name,
+             repo,
+             pr_number,
+             COUNT(*) AS review_count
+           FROM pr_reviews
+           WHERE created_at >= datetime('now', ?)
+             AND agent_name IS NOT NULL
+           GROUP BY agent_name, repo, pr_number
+         )
+         GROUP BY agent_name
+         ORDER BY avg_rounds DESC`,
+      )
+      .all(since) as AgentIterationStat[];
+
+    // 3. Review category frequency (unpack JSON arrays)
+    // SQLite doesn't have native JSON_EACH support in all builds, so we pull
+    // raw rows and aggregate in TypeScript.
+    const categoryRows = this.db
+      .prepare(
+        `SELECT review_categories
+         FROM pr_reviews
+         WHERE created_at >= datetime('now', ?)
+           AND review_categories IS NOT NULL`,
+      )
+      .all(since) as Array<{ review_categories: string }>;
+
+    const categoryCounts: Record<string, number> = {};
+    for (const row of categoryRows) {
+      try {
+        const cats: string[] = JSON.parse(row.review_categories);
+        for (const cat of cats) {
+          categoryCounts[cat] = (categoryCounts[cat] ?? 0) + 1;
+        }
+      } catch {
+        // Malformed JSON — skip
+      }
+    }
+
+    const topCategories: ReviewCategoryCount[] = Object.entries(categoryCounts)
+      .map(([category, count]) => ({ category, count }))
+      .sort((a, b) => b.count - a.count);
+
+    return {
+      generated_at: new Date().toISOString(),
+      window_days: lookback,
+      multi_round_prs: prRows,
+      agent_stats: agentRows,
+      top_categories: topCategories,
+    };
   }
 
   /**

@@ -628,6 +628,128 @@ export interface IScoreOutcomeStore {
   getAdjustedThresholds(targetMergeRate?: number, currentMinScore?: number): AdjustedThreshold[];
 }
 
+// ── PR iteration tracking types ───────────────────────────────────────────
+
+/**
+ * Well-known categories of review feedback that can be extracted from
+ * review comments to surface systemic patterns across PRs and agents.
+ *
+ * - `logic`             — Incorrect behaviour, wrong algorithm, off-by-one errors
+ * - `security`          — Credential exposure, injection risk, unsafe practices
+ * - `missing-closes-ref`— PR body is missing a valid `Closes #N` reference
+ * - `merge-conflict`    — PR has unresolved merge conflicts
+ * - `test-coverage`     — Missing or insufficient test coverage
+ * - `schema-breaking`   — Breaking schema change not flagged in the diff
+ * - `feedback-ceiling`  — PR hit the max revision round cap
+ * - `diff-too-large`    — Diff exceeds safe automated review size
+ * - `stale-branch`      — Branch is significantly behind `origin/main`
+ * - `code-quality`      — General code style, structure, or readability issues
+ * - `other`             — Any feedback not matching a specific category above
+ */
+export type ReviewCategory =
+  | "logic"
+  | "security"
+  | "missing-closes-ref"
+  | "merge-conflict"
+  | "test-coverage"
+  | "schema-breaking"
+  | "feedback-ceiling"
+  | "diff-too-large"
+  | "stale-branch"
+  | "code-quality"
+  | "other";
+
+/**
+ * Iteration history for a single PR (one row per repo+pr_number combination
+ * in the `pr_reviews` table).
+ */
+export interface PRIterationStat {
+  repo: string;
+  pr_number: number;
+  /** Agent that authored the PR, if known (from the pr_reviews record). */
+  agent_name: string | null;
+  /** Total number of review rounds recorded for this PR. */
+  review_count: number;
+  /** Most recent review decision (approve / request-changes / escalate). */
+  final_decision: string | null;
+  /** ISO-8601 timestamp of the first review for this PR. */
+  first_review_at: string;
+  /** ISO-8601 timestamp of the most recent review for this PR. */
+  last_review_at: string;
+}
+
+/**
+ * Per-agent PR iteration statistics — which agents generate PRs that
+ * require the most feedback rounds before merging or escalating.
+ */
+export interface AgentIterationStat {
+  agent_name: string;
+  /** Total distinct PRs where this agent is recorded as the author. */
+  total_prs: number;
+  /** PRs that went through more than one revision round. */
+  multi_round_prs: number;
+  /** Average number of review rounds across all PRs for this agent. */
+  avg_rounds: number;
+  /** Maximum revision rounds seen for any single PR from this agent. */
+  max_rounds: number;
+}
+
+/** Frequency of a single review category across all recorded reviews. */
+export interface ReviewCategoryCount {
+  category: string;
+  count: number;
+}
+
+/**
+ * Full PR iteration report returned by `IPRIterationStore.getPRIterationReport()`.
+ */
+export interface PRIterationReport {
+  generated_at: string;
+  /** Look-back window in days used for the report. */
+  window_days: number;
+  /** PRs that required two or more review rounds in the window. */
+  multi_round_prs: PRIterationStat[];
+  /** Per-agent iteration statistics, sorted by avg_rounds descending. */
+  agent_stats: AgentIterationStat[];
+  /** Most frequently recurring review categories, sorted by count descending. */
+  top_categories: ReviewCategoryCount[];
+}
+
+/**
+ * Store interface for PR iteration tracking persistence.
+ *
+ * Implemented by the reviewer's own StateStore.  The orchestrator's StateStore
+ * may not implement these methods — callers should guard with a runtime check
+ * (e.g. `typeof store.recordPRReviewDetails === 'function'`).
+ */
+export interface IPRIterationStore {
+  /**
+   * Persist extended PR review metadata (iteration number, author, categories).
+   *
+   * Callers should invoke this *in addition to* the base `recordPRReview` when
+   * the extra fields are available.  The method auto-computes `review_number`
+   * by counting prior rows for the same (repo, pr_number) pair.
+   */
+  recordPRReviewDetails(
+    repo: string,
+    prNumber: number,
+    decision: string,
+    opts?: {
+      confidence?: number | null;
+      agentName?: string | null;
+      /** Categorised reasons for a `request-changes` decision. */
+      reviewCategories?: ReviewCategory[];
+    },
+  ): void;
+
+  /**
+   * Return a summary report of PR iteration patterns within the given window.
+   *
+   * @param days - Look-back window (default: 30 days).
+   */
+  getPRIterationReport(days?: number): PRIterationReport;
+}
+
 /**
  * Extended interface for the reviewer's own StateStore, which adds
  * Telegram-specific operations (system flags, dispatch requests,
@@ -638,7 +760,7 @@ export interface IScoreOutcomeStore {
  * this interface; reviewer modules wired into the orchestrator use
  * the narrower IStateStore above.
  */
-export interface ITelegramStateStore extends IStateStore, IScoreOutcomeStore {
+export interface ITelegramStateStore extends IStateStore, IScoreOutcomeStore, IPRIterationStore {
   // System flags (pause/resume, operator overrides)
   getSystemFlag(key: string): string | null;
   setSystemFlag(key: string, value: string): void;
