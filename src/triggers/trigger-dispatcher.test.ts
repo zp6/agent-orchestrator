@@ -99,6 +99,7 @@ describe("dispatchGitHubIssues", () => {
       updateClaimTaskId: vi.fn(),
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
+      getSecretMountStatus: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -264,6 +265,7 @@ describe("pre-dispatch issue state validation", () => {
       updateClaimTaskId: vi.fn(),
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
+      getSecretMountStatus: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -554,6 +556,7 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       updateClaimTaskId: vi.fn(),
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
+      getSecretMountStatus: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -669,6 +672,7 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       updateClaimTaskId: vi.fn(),
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
+      getSecretMountStatus: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1258,6 +1262,7 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       updateClaimTaskId: vi.fn(),
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
+      getSecretMountStatus: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1392,6 +1397,7 @@ describe("in-flight branch detection", () => {
       updateClaimTaskId: vi.fn(),
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
+      getSecretMountStatus: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
 
     vi.mocked(mockStore.hasActiveTask).mockReturnValue(false);
@@ -1437,6 +1443,7 @@ describe("in-flight branch detection", () => {
       updateClaimTaskId: vi.fn(),
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
+      getSecretMountStatus: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
 
     await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1483,6 +1490,7 @@ describe("in-flight branch detection", () => {
       updateClaimTaskId: vi.fn(),
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
+      getSecretMountStatus: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
 
     const result = await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1524,6 +1532,7 @@ describe("in-flight branch detection", () => {
       updateClaimTaskId: vi.fn(),
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
+      getSecretMountStatus: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
 
     await dispatchIdleAgentBacklog(branchConfig, mockStore, mockDispatcher);
@@ -1565,6 +1574,7 @@ describe("approved PR skip logic", () => {
       updateClaimTaskId: vi.fn(),
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
+      getSecretMountStatus: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
