@@ -1,21 +1,23 @@
 # Roadmap — claude-orchestrator-reviewer
 
+_Last updated: 2026-04-13_
+
 ## Next up
 
-- **#1 — Bootstrap TypeScript scaffold** (PR #13 open): Finalize the initial project scaffold with PR review, verification, supervision, and improvement-detector modules fully wired up.
-- **#7 — Wire reviewer into orchestrator daemon** (PR #10 open): `createReviewerInstances()` adapter + type compatibility fixes so the orchestrator imports from this package directly.
-- **#4 — Wire Telegram commands to live state.db queries**: `/status`, `/tasks`, `/approve` commands in the Telegram bot should query the shared SQLite state.db in real time rather than returning stubs.
+- **#129 — Structured output schema for research tasks** (PR #130 open): Add a typed output schema so research agent results are validated at review time, catching malformed or incomplete research output before it reaches the supervisor.
+- **#89 — Second-pass outcome tracking**: The borderline second-pass review trigger (0.70–0.79) shipped in PR #83, but there is no tracking of whether second passes improve outcomes. Add a metric: tasks entering second-pass, upgrade vs. reject rate, and final merged quality scores.
+- **#99 — SCHEMA_CONSUMER_MAP auto-discovery**: Replace the hardcoded static registry in `schema-impact.ts` with a live discovery query against state.db access logs. Keeps schema-consumer impact detection accurate as the fleet evolves without manual file updates.
 
 ## Planned
 
-- **#87 — Prompt caching for review rubric prefix**: Cache the system prompt rubric block using `cache_control: { type: "ephemeral", ttl: "1h" }` on all reviewer LLM calls. Research findings available at [rapartlu/research-agent — findings/reviewer-prompt-caching.md](https://github.com/rapartlu/research-agent/blob/main/findings/reviewer-prompt-caching.md). Estimated 71% savings on rubric tokens at 20 reviews/day (Sonnet 4.6).
-- **#2 — Telegram two-way communication**: Operator commands via bot — approve/reject tasks, trigger reruns, escalate to human — all wired to live state.
-- ~~**#9 — Publish package to npm registry**~~ ✅ Done — workflow added in PR for issue #9.
-- **Improvement detector scheduling**: Run `ImprovementDetector.analyze()` on a cron cadence (e.g. every 6 hours) and auto-file GitHub issues for patterns found.
-- **Supervisor dry-run mode**: A `--dry-run` flag that logs decisions without writing to state.db — useful for debugging the supervision loop.
+- **#107 — Reroute quality tracking**: Flag agents where rerouting degrades outcomes. Per-agent quality metrics already exist in `routing-accuracy.ts`; needs outcome comparison logic for rerouted vs. original-agent tasks.
+- **#51 — Conflict-risk annotations in PR review comments**: Surface conflict-risk signals inline in PR review comments (e.g. when a diff touches a file also modified by another open PR), giving reviewers more context before approving.
+- **#103 — Security scanner allowlist sync**: Keep the PR review rubric's credential false-positive allowlist (example/template files) in sync with the security scanner allowlist to prevent independent drift.
 
 ## Ideas
 
-- **PR review dashboard integration**: Push review decisions and scores to the dashboard's alert queue so operators can see quality trends over time.
-- **Configurable escalation thresholds**: Allow per-agent `feedback_ceiling` overrides in config rather than a single global setting.
+- **Second-pass effectiveness Telegram card**: Surface second-pass upgrade/reject rates in `/status` summary so operators can tune the 0.70 threshold based on data.
+- **Supervisor dry-run mode**: A `--dry-run` flag on `supervisor.ts` that logs dispatch decisions to stdout without writing to state.db — useful for debugging the supervision loop in staging.
+- **Configurable escalation thresholds**: Allow per-agent `feedback_ceiling` and `min_score` overrides in `ReviewerConfig` rather than a single global setting.
+- **Improvement detector cron**: Run `ImprovementDetector.analyze()` on a scheduled cadence (every 6h) and auto-file GitHub issues for detected patterns.
 - **Review score history**: Persist `VerificationResult` scores in state.db so the improvement detector can spot regression trends across deploys.

@@ -97,6 +97,8 @@ src/
     types.ts                        — shared TypeScript interfaces and type aliases
   telegram/
     command-handler.ts              — /status, /tasks, /approve and other bot commands
+  util/
+    ulid.ts                         — ULID generation utility for task/event IDs
   __tests__/                        — Vitest unit tests (one file per module)
 ```
 
