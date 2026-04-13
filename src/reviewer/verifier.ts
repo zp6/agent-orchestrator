@@ -22,6 +22,23 @@ import type {
 } from "../state/types.js";
 import type { Notifier } from "../notify.js";
 
+/**
+ * Per-dimension quality scores for verification results.
+ * When a task is rejected, these scores break down which aspects failed.
+ * Each dimension is 0.0–1.0, with agents able to target their revisions
+ * to specific problem areas.
+ */
+export interface QualityDimensions {
+  /** Logic correctness, no bugs or logical errors. */
+  correctness: number;
+  /** All requirements and acceptance criteria addressed. */
+  completeness: number;
+  /** Sufficient test coverage, edge cases handled. */
+  test_coverage: number;
+  /** Code clarity, maintainability, documentation. */
+  code_quality: number;
+}
+
 export interface VerificationResult {
   approved: boolean;
   score: number;
@@ -35,6 +52,12 @@ export interface VerificationResult {
    */
   explanation?: string;
   /**
+   * Per-dimension quality breakdown.
+   * Populated when the LLM provides dimension scores in its response.
+   * Allows agents to understand exactly which aspects of their work need improvement.
+   */
+  dimensions?: QualityDimensions;
+  /**
    * Present when a borderline score (0.70–0.79) triggered an automatic
    * second-pass review. The orchestrator can use this to detect disagreements.
    */
@@ -43,6 +66,8 @@ export interface VerificationResult {
     notes: string;
     /** True when both passes agreed on the approval decision. */
     agreed: boolean;
+    /** Dimensions from second-pass review (when available). */
+    dimensions?: QualityDimensions;
   };
 }
 
@@ -68,14 +93,26 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   "score": 0.0-1.0,
   "notes": "Brief assessment of quality, completeness, correctness",
   "revision": "If not approved, specific guidance for improvement (omit if approved)",
-  "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — e.g. which acceptance criteria were unmet, what gaps were found, or why the work was hard to verify. Omit entirely when score >= 0.80."
+  "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — e.g. which acceptance criteria were unmet, what gaps were found, or why the work was hard to verify. Omit entirely when score >= 0.80.",
+  "dimensions": {
+    "correctness": 0.0-1.0,
+    "completeness": 0.0-1.0,
+    "test_coverage": 0.0-1.0,
+    "code_quality": 0.0-1.0
+  }
 }
 
 Scoring guide:
 - 0.9-1.0: Excellent — thorough, correct, well-structured
 - 0.7-0.89: Good — meets requirements with minor gaps
 - 0.5-0.69: Acceptable — partially addresses the task
-- Below 0.5: Needs revision — incomplete or incorrect`;
+- Below 0.5: Needs revision — incomplete or incorrect
+
+Dimension guide:
+- **correctness**: Does the code work correctly with no logic errors? Is it sound?
+- **completeness**: Are all requirements and acceptance criteria addressed?
+- **test_coverage**: Are edge cases covered? Is test coverage sufficient?
+- **code_quality**: Is the code clear, maintainable, and well-documented?`;
 
 const RESEARCH_SYSTEM_PROMPT = `You are a quality reviewer for research and feasibility analysis produced by an AI agent. Given a research question and the agent's analysis, assess the quality of the research.
 
@@ -85,7 +122,13 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   "score": 0.0-1.0,
   "notes": "Brief assessment of research quality",
   "revision": "If not approved, specific guidance for improvement (omit if approved)",
-  "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — e.g. which research dimensions were thin, what evidence was missing, or why the analysis was hard to act on. Omit entirely when score >= 0.80."
+  "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — e.g. which research dimensions were thin, what evidence was missing, or why the analysis was hard to act on. Omit entirely when score >= 0.80.",
+  "dimensions": {
+    "correctness": 0.0-1.0,
+    "completeness": 0.0-1.0,
+    "test_coverage": 0.0-1.0,
+    "code_quality": 0.0-1.0
+  }
 }
 
 Evaluate research quality on:
@@ -100,7 +143,13 @@ Scoring guide:
 - 0.9-1.0: Excellent — comprehensive analysis with evidence, alternatives, and clear recommendation
 - 0.7-0.89: Good — solid analysis with minor gaps in coverage or evidence
 - 0.5-0.69: Acceptable — addresses the question but lacks depth or alternatives
-- Below 0.5: Needs revision — superficial, missing key considerations, or not actionable`;
+- Below 0.5: Needs revision — superficial, missing key considerations, or not actionable
+
+Dimension guide (for research tasks):
+- **correctness**: Are the claims technically sound and factually accurate?
+- **completeness**: Does the analysis address all relevant aspects of the question?
+- **test_coverage**: Were the findings validated or stress-tested? (Or "evidence coverage" — was evidence gathered comprehensively?)
+- **code_quality**: (Not applicable to research — rate as the analysis clarity/organization instead)`;
 
 /**
  * System prompt for the second-pass reviewer.
@@ -120,14 +169,26 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   "score": 0.0-1.0,
   "notes": "Independent assessment — be specific about what is missing or wrong",
   "revision": "If not approved, concrete guidance for what needs to change (omit if approved)",
-  "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — which criteria were unmet, what gaps were found, or what made the work hard to verify. Omit entirely when score >= 0.80."
+  "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — which criteria were unmet, what gaps were found, or what made the work hard to verify. Omit entirely when score >= 0.80.",
+  "dimensions": {
+    "correctness": 0.0-1.0,
+    "completeness": 0.0-1.0,
+    "test_coverage": 0.0-1.0,
+    "code_quality": 0.0-1.0
+  }
 }
 
 Scoring guide:
 - 0.9-1.0: Excellent — thorough, correct, well-structured
 - 0.7-0.89: Good — meets requirements with minor gaps
 - 0.5-0.69: Acceptable — partially addresses the task
-- Below 0.5: Needs revision — incomplete or incorrect`;
+- Below 0.5: Needs revision — incomplete or incorrect
+
+Dimension guide:
+- **correctness**: Does the code work correctly with no logic errors? Is it sound?
+- **completeness**: Are all requirements and acceptance criteria addressed?
+- **test_coverage**: Are edge cases covered? Is test coverage sufficient?
+- **code_quality**: Is the code clear, maintainable, and well-documented?`;
 
 export class Verifier {
   private log = createLogger("verifier");
@@ -137,6 +198,24 @@ export class Verifier {
     private notifier?: Notifier,
     private verificationResultStore?: IVerificationResultStore,
   ) {}
+
+  /**
+   * Format quality dimensions as a human-readable breakdown for revision messages.
+   * Returns a multi-line string showing per-dimension scores and status indicators.
+   */
+  private formatDimensionsBreakdown(dimensions: QualityDimensions): string {
+    const threshold = 0.8;
+    const formatScore = (d: number) => `${(d * 100).toFixed(0)}/100`;
+    const indicator = (d: number) => (d >= threshold ? "✓" : "✗");
+
+    return [
+      "## Quality Dimensions Breakdown",
+      `- **Correctness**: ${formatScore(dimensions.correctness)} ${indicator(dimensions.correctness)} (logic, no bugs)`,
+      `- **Completeness**: ${formatScore(dimensions.completeness)} ${indicator(dimensions.completeness)} (requirements met)`,
+      `- **Test Coverage**: ${formatScore(dimensions.test_coverage)} ${indicator(dimensions.test_coverage)} (edge cases covered)`,
+      `- **Code Quality**: ${formatScore(dimensions.code_quality)} ${indicator(dimensions.code_quality)} (clarity, documentation)`,
+    ].join("\n");
+  }
 
   /**
    * Record a verification result to the `verification_results` table.
@@ -266,9 +345,14 @@ export class Verifier {
       // When not approved, enrich the revision guidance with the explanation so
       // agents know what specifically drove the low score.
       const baseRevision = secondPassResult.revision ?? firstPassResult.revision;
+      const usedDimensions = secondPassResult.dimensions ?? firstPassResult.dimensions;
+      const dimensionsBreakdown =
+        !finalApproved && usedDimensions
+          ? `\n\n${this.formatDimensionsBreakdown(usedDimensions)}`
+          : "";
       const enrichedRevision =
         !finalApproved && baseRevision && finalExplanation
-          ? `${finalExplanation}\n\n${baseRevision}`
+          ? `${finalExplanation}${dimensionsBreakdown}\n\n${baseRevision}`
           : baseRevision;
 
       const finalResult: VerificationResult = {
@@ -277,10 +361,12 @@ export class Verifier {
         notes: combinedNotes,
         revision: finalApproved ? undefined : enrichedRevision,
         explanation: finalExplanation,
+        dimensions: usedDimensions,
         secondPass: {
           score: secondPassResult.score,
           notes: secondPassResult.notes,
           agreed,
+          dimensions: secondPassResult.dimensions,
         },
       };
 
@@ -321,12 +407,16 @@ export class Verifier {
       ...(firstPassResult.explanation && { explanation: firstPassResult.explanation }),
     });
 
-    // Enrich revision with explanation so agents understand the low score.
+    // Enrich revision with explanation and dimension breakdown so agents understand the low score.
+    const dimensionsBreakdown =
+      !firstPassResult.approved && firstPassResult.dimensions
+        ? `\n\n${this.formatDimensionsBreakdown(firstPassResult.dimensions)}`
+        : "";
     const enrichedRevision =
       !firstPassResult.approved &&
       firstPassResult.revision &&
       firstPassResult.explanation
-        ? `${firstPassResult.explanation}\n\n${firstPassResult.revision}`
+        ? `${firstPassResult.explanation}${dimensionsBreakdown}\n\n${firstPassResult.revision}`
         : firstPassResult.revision;
 
     this.store.updateTask(taskId, {
@@ -612,12 +702,41 @@ export class Verifier {
       // Only surface explanation when score is genuinely sub-0.80
       const explanation =
         score < 0.80 && parsed.explanation ? String(parsed.explanation) : undefined;
+
+      // Parse dimensions if provided
+      let dimensions: QualityDimensions | undefined;
+      if (
+        parsed.dimensions &&
+        typeof parsed.dimensions === "object" &&
+        !Array.isArray(parsed.dimensions)
+      ) {
+        dimensions = {
+          correctness: Math.min(
+            Math.max(Number(parsed.dimensions.correctness) || 0, 0),
+            1,
+          ),
+          completeness: Math.min(
+            Math.max(Number(parsed.dimensions.completeness) || 0, 0),
+            1,
+          ),
+          test_coverage: Math.min(
+            Math.max(Number(parsed.dimensions.test_coverage) || 0, 0),
+            1,
+          ),
+          code_quality: Math.min(
+            Math.max(Number(parsed.dimensions.code_quality) || 0, 0),
+            1,
+          ),
+        };
+      }
+
       return {
         approved: Boolean(parsed.approved),
         score,
         notes: String(parsed.notes ?? ""),
         revision: parsed.revision ? String(parsed.revision) : undefined,
         explanation,
+        dimensions,
       };
     } catch {
       return {

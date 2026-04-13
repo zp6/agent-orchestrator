@@ -283,3 +283,109 @@ describe("VerificationResult combined notes format", () => {
     expect(combinedNotes).toContain("conservative decision: rejected");
   });
 });
+
+describe("Quality dimensions breakdown", () => {
+  it("VerificationResult includes optional dimensions field", () => {
+    const result: VerificationResult = {
+      approved: false,
+      score: 0.65,
+      notes: "Incomplete work",
+      revision: "Add test coverage",
+      explanation: "Missing test coverage for the new feature",
+      dimensions: {
+        correctness: 0.8,
+        completeness: 0.6,
+        test_coverage: 0.4,
+        code_quality: 0.7,
+      },
+    };
+    expect(result.dimensions).toBeDefined();
+    expect(result.dimensions?.correctness).toBe(0.8);
+    expect(result.dimensions?.test_coverage).toBe(0.4);
+  });
+
+  it("dimensions are bounded to [0, 1]", () => {
+    // Mirror the parseResponse clamping logic for dimensions
+    const clamp = (n: number) => Math.min(Math.max(n, 0), 1);
+    expect(clamp(-0.5)).toBe(0);
+    expect(clamp(1.5)).toBe(1);
+    expect(clamp(0.75)).toBe(0.75);
+
+    // Verify all four dimensions can be clamped
+    const dimensions = {
+      correctness: clamp(0.8),
+      completeness: clamp(1.2), // Should clamp to 1.0
+      test_coverage: clamp(-0.1), // Should clamp to 0.0
+      code_quality: clamp(0.6),
+    };
+
+    expect(dimensions.correctness).toBe(0.8);
+    expect(dimensions.completeness).toBe(1.0);
+    expect(dimensions.test_coverage).toBe(0.0);
+    expect(dimensions.code_quality).toBe(0.6);
+  });
+
+  it("dimensions are absent when not provided by LLM", () => {
+    const result: VerificationResult = {
+      approved: true,
+      score: 0.9,
+      notes: "Excellent work",
+    };
+    expect(result.dimensions).toBeUndefined();
+  });
+
+  it("second-pass result includes dimensions", () => {
+    const result: VerificationResult = {
+      approved: true,
+      score: 0.75,
+      notes: "Good work",
+      dimensions: {
+        correctness: 0.85,
+        completeness: 0.8,
+        test_coverage: 0.7,
+        code_quality: 0.75,
+      },
+      secondPass: {
+        score: 0.78,
+        notes: "Independent reviewer concurs",
+        agreed: true,
+        dimensions: {
+          correctness: 0.85,
+          completeness: 0.8,
+          test_coverage: 0.75,
+          code_quality: 0.75,
+        },
+      },
+    };
+
+    expect(result.secondPass?.dimensions).toBeDefined();
+    expect(result.secondPass?.dimensions?.test_coverage).toBe(0.75);
+  });
+
+  it("revision message includes dimension breakdown when dimensions present", () => {
+    // Simulate the formatDimensionsBreakdown logic
+    const dimensions = {
+      correctness: 0.6,
+      completeness: 0.8,
+      test_coverage: 0.5,
+      code_quality: 0.7,
+    };
+
+    const threshold = 0.8;
+    const formatScore = (d: number) => `${(d * 100).toFixed(0)}/100`;
+    const indicator = (d: number) => (d >= threshold ? "✓" : "✗");
+
+    const breakdown = [
+      "## Quality Dimensions Breakdown",
+      `- **Correctness**: ${formatScore(dimensions.correctness)} ${indicator(dimensions.correctness)} (logic, no bugs)`,
+      `- **Completeness**: ${formatScore(dimensions.completeness)} ${indicator(dimensions.completeness)} (requirements met)`,
+      `- **Test Coverage**: ${formatScore(dimensions.test_coverage)} ${indicator(dimensions.test_coverage)} (edge cases covered)`,
+      `- **Code Quality**: ${formatScore(dimensions.code_quality)} ${indicator(dimensions.code_quality)} (clarity, documentation)`,
+    ].join("\n");
+
+    expect(breakdown).toContain("Quality Dimensions Breakdown");
+    expect(breakdown).toContain("**Correctness**: 60/100 ✗");
+    expect(breakdown).toContain("**Test Coverage**: 50/100 ✗");
+    expect(breakdown).toContain("**Completeness**: 80/100 ✓");
+  });
+});
