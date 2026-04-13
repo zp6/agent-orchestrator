@@ -32,7 +32,7 @@ verification:
   max_revisions: 1
 
 agents:
-  # ── Orchestrator pool (Claude + Codex) ──────────────────────────
+  # ── Orchestrator ────────────────────────────────────────────────
   claude-agent-orchestrator:
     dir: "claude-agent-orchestrator"
     repo: "git@github.com:rapartlu/agent-orchestrator.git"
@@ -50,27 +50,7 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
-  codex-agent-orchestrator:
-    dir: "claude-agent-orchestrator"
-    repo: "git@github.com:rapartlu/agent-orchestrator.git"
-    provider: "openai"
-    model: "gpt-5.4-mini"
-    pool: "orchestrator"
-    description: "Core orchestration infrastructure (Codex). Same repo, different provider for parallel throughput."
-    capabilities: ["typescript", "orchestration", "sqlite"]
-    owns_topics: []
-    auto_reroute_rejection_threshold: 4
-    docker:
-      port: 3480
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "fresh"
-      # Codex containers take longer to start (git pull + OpenAI WebSocket warmup).
-      # Extended window: 4 attempts over ~60s vs the default 4 attempts over ~52s.
-      # Addresses recurring "health check failed after restart" failures.
-      health_check_delays_ms: [5000, 10000, 20000, 30000]
-
-  # ── Reviewer pool (Claude + Codex) ──────────────────────────────
+  # ── Reviewer ────────────────────────────────────────────────────
   claude-orchestrator-reviewer:
     dir: "claude-orchestrator-reviewer"
     repo: "git@github.com:rapartlu/agent-reviewer.git"
@@ -87,23 +67,7 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
-  codex-orchestrator-reviewer:
-    dir: "claude-orchestrator-reviewer"
-    repo: "git@github.com:rapartlu/agent-reviewer.git"
-    provider: "openai"
-    model: "gpt-5.4-mini"
-    pool: "reviewer"
-    description: "PR reviewer, verifier, supervisor (Codex). Parallel throughput + rate limit resilience."
-    capabilities: ["typescript", "llm", "review", "verification"]
-    owns_topics: []
-    docker:
-      port: 3481
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "fresh"
-      health_check_delays_ms: [5000, 10000, 20000, 30000]
-
-  # ── Dashboard pool (Claude + Codex) ─────────────────────────────
+  # ── Dashboard ───────────────────────────────────────────────────
   claude-orchestrator-dashboard:
     dir: "claude-orchestrator-dashboard"
     repo: "git@github.com:rapartlu/agent-dashboard.git"
@@ -119,22 +83,6 @@ agents:
       api_key: "cheese"
       permissions: "bypassPermissions"
       session: "fresh"
-
-  codex-orchestrator-dashboard:
-    dir: "claude-orchestrator-dashboard"
-    repo: "git@github.com:rapartlu/agent-dashboard.git"
-    provider: "openai"
-    model: "gpt-5.4-mini"
-    pool: "dashboard"
-    description: "Dashboard, CLI commands, observability UI (Codex)."
-    capabilities: ["typescript", "html", "css", "express", "dashboard"]
-    owns_topics: []
-    docker:
-      port: 3482
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "fresh"
-      health_check_delays_ms: [5000, 10000, 20000, 30000]
 
   # ── Telegram ────────────────────────────────────────────────────
   claude-orchestrator-telegram:
@@ -167,23 +115,7 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
-  codex-research-agent:
-    dir: "claude-research-agent"
-    repo: "git@github.com:rapartlu/research-agent.git"
-    provider: "openai"
-    model: "gpt-5.4-mini"
-    pool: "research"
-    description: "Research agent (Codex). Parallel throughput + rate limit resilience."
-    capabilities: ["research", "web-search", "documentation", "analysis"]
-    owns_topics: []
-    docker:
-      port: 3483
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "fresh"
-      health_check_delays_ms: [5000, 10000, 20000, 30000]
-
-  # ── Proxy pool (Claude + Codex) ────────────────────────────────
+  # ── Proxy ───────────────────────────────────────────────────────
   claude-proxy:
     dir: "claude-proxy"
     repo: "git@github.com:rapartlu/agent-proxy.git"
@@ -199,22 +131,6 @@ agents:
       api_key: "cheese"
       permissions: "bypassPermissions"
       session: "fresh"
-
-  codex-proxy:
-    dir: "claude-proxy"
-    repo: "git@github.com:rapartlu/agent-proxy.git"
-    provider: "openai"
-    model: "gpt-5.4-mini"
-    pool: "proxy"
-    description: "Proxy server (Codex). Parallel throughput + rate limit resilience."
-    capabilities: ["typescript", "docker", "proxy", "api", "infrastructure"]
-    owns_topics: []
-    docker:
-      port: 3484
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "fresh"
-      health_check_delays_ms: [5000, 10000, 20000, 30000]
 
   # ── Meeting Facilitator ────────────────────────────────────────
   meeting-facilitator-agent:
