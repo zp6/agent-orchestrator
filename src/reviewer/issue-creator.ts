@@ -172,12 +172,25 @@ export class IssueCreator {
     return created;
   }
 
-  private formatIssueBody(improvement: DetectedImprovement, agentName: string): string {
+  /** @internal Exposed for testing; prefer createAcrossRepos in production code. */
+  formatIssueBody(improvement: DetectedImprovement, agentName: string): string {
     const evidenceList = improvement.evidence
       .map((e) => `- Task \`${e.taskId.slice(0, 8)}\`: ${e.detail}`)
       .join("\n");
 
-    return `## Improvement Identified by Orchestrator
+    const isResearch = improvement.source === "research-finding";
+
+    const header = isResearch
+      ? "## Implementation Proposal from Research Findings"
+      : "## Improvement Identified by Orchestrator";
+
+    const evidenceLabel = isResearch ? "### Source Research Tasks" : "### Evidence";
+
+    const footer = isResearch
+      ? "*This issue was automatically drafted by the claude-agent-orchestrator from the Recommendation / Next Steps sections of completed research reports.*"
+      : "*This issue was automatically created by the claude-agent-orchestrator based on analysis of recent task patterns.*";
+
+    return `${header}
 
 **Severity:** ${improvement.severity}
 **Affected agent:** ${agentName}
@@ -186,12 +199,12 @@ export class IssueCreator {
 
 ${improvement.description}
 
-### Evidence
+${evidenceLabel}
 
 ${evidenceList || "No specific task evidence available."}
 
 ---
-*This issue was automatically created by the claude-agent-orchestrator based on analysis of recent task patterns.*`;
+${footer}`;
   }
 }
 

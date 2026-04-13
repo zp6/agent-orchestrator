@@ -18,6 +18,8 @@ export interface DetectedImprovement {
   affected_agents: string[];
   severity: "low" | "medium" | "high";
   evidence: Array<{ taskId: string; detail: string }>;
+  /** Indicates whether this improvement was surfaced from a research report. */
+  source?: "task-pattern" | "research-finding";
 }
 
 const SYSTEM_PROMPT = `You are a product improvement analyst for a multi-agent system. Each agent is a product with users. Analyze recent task results and suggest improvements that make agents more useful, not just more technically polished.
@@ -51,6 +53,41 @@ Respond with ONLY a JSON array (no markdown, no code fences):
 If no improvements are detected, return an empty array: []
 Be specific and product-focused. Every suggestion should answer: "what can a user do after this that they couldn't before?"`;
 
+/**
+ * System prompt for extracting implementation proposals from completed research reports.
+ *
+ * Research reports follow a structured markdown format with Recommendation and Next Steps
+ * sections. This prompt instructs the LLM to faithfully extract those proposals (not invent
+ * new ones) and convert them into trackable GitHub issues.
+ */
+const RESEARCH_FINDINGS_SYSTEM_PROMPT = `You are a product analyst extracting actionable implementation proposals from completed research reports.
+
+Research reports follow a standard structure: Summary, Options Evaluated, Findings, Recommendation, and Next Steps. Your job is to extract the concrete implementation proposals from the Recommendation and Next Steps sections and represent them as GitHub issue candidates.
+
+RULES:
+1. Only extract proposals that are explicitly stated in the Recommendation or Next Steps sections — do NOT add your own ideas.
+2. Each proposal must be concrete and implementable, not a vague directive like "improve X".
+3. Prefer user-facing features and capabilities over internal tooling, test infrastructure, or refactoring.
+4. Infer which agent should implement each proposal from context clues in the report (repo names, system descriptions, agent mentions).
+5. One proposal per distinct recommendation. Do not split a single recommendation into multiple items.
+
+Each agent has a specific product identity:
+- claude-agent-orchestrator: The orchestrator control plane — autonomous oversight, routing, PR review quality, supervisor intelligence
+- claude-proxy: Developer tool for running Claude Code — UX improvements, dashboards, developer productivity
+- claude-orchestrator-reviewer: The quality and oversight layer — review accuracy, escalation logic, verification coverage
+
+Respond with ONLY a JSON array (no markdown, no code fences):
+[
+  {
+    "title": "Short, specific implementation title",
+    "description": "What to implement (drawn directly from the research), why it matters, and specific acceptance criteria from the report",
+    "affected_agents": ["agent-name"],
+    "severity": "low|medium|high"
+  }
+]
+
+If no actionable proposals are found, return an empty array: []`;
+
 export class ImprovementDetector {
   private log = createLogger("improvement-detector");
 
@@ -60,7 +97,8 @@ export class ImprovementDetector {
   ) {}
 
   async analyze(recentTasks: Task[]): Promise<DetectedImprovement[]> {
-    // Filter out research tasks — they don't produce code artifacts
+    // Filter out research tasks — they don't produce code artifacts; use
+    // analyzeResearchFindings() to process research results separately.
     const implTasks = recentTasks.filter((t) => t.task_type !== "research");
     if (implTasks.length === 0) return [];
 
@@ -125,7 +163,84 @@ export class ImprovementDetector {
     }
   }
 
-  private parseResponse(text: string, tasks: Task[]): DetectedImprovement[] {
+  /**
+   * Analyze completed research tasks and extract concrete implementation proposals
+   * from their findings. Proposals are returned as `DetectedImprovement` objects with
+   * `source: "research-finding"` so issue bodies can be attributed correctly.
+   *
+   * Unlike `analyze()`, this method includes the full result text (up to 2 000 chars)
+   * so the LLM can read the Recommendation and Next Steps sections of each report.
+   */
+  async analyzeResearchFindings(recentTasks: Task[]): Promise<DetectedImprovement[]> {
+    const researchTasks = recentTasks.filter(
+      (t) => t.task_type === "research" && t.status === "done" && t.result,
+    );
+    if (researchTasks.length === 0) return [];
+
+    const client = createLLMClient();
+
+    const taskSummaries = researchTasks.map((t) => ({
+      id: t.id.slice(0, 8),
+      agent: t.agent_name,
+      title: t.title,
+      // Include substantially more result content for research tasks so the LLM
+      // can read the Recommendation and Next Steps sections of the markdown report.
+      result: t.result?.slice(0, 2000),
+    }));
+
+    const prompt = `Extract actionable implementation proposals from these ${researchTasks.length} completed research reports:\n\n${JSON.stringify(taskSummaries, null, 2)}`;
+
+    const LLM_TIMEOUT_MS = 5 * 60 * 1000;
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
+    const callStart = Date.now();
+    try {
+      let response;
+      try {
+        response = await client.messages.create(
+          {
+            model: "claude-sonnet-4-6",
+            max_tokens: 4096,
+            system: RESEARCH_FINDINGS_SYSTEM_PROMPT,
+            messages: [{ role: "user", content: prompt }],
+          },
+          { signal: abortController.signal },
+        );
+      } finally {
+        clearTimeout(timer);
+      }
+
+      if (this.store && response.usage) {
+        this.store.recordLlmCallEvent({
+          call_type: "improvement",
+          model: response.model,
+          input_tokens: response.usage.input_tokens,
+          output_tokens: response.usage.output_tokens,
+          cache_read_tokens: response.usage.cache_read_input_tokens ?? 0,
+          cache_write_tokens: response.usage.cache_creation_input_tokens ?? 0,
+          duration_ms: Date.now() - callStart,
+        });
+      }
+
+      const text = response.content
+        .filter((b) => b.type === "text")
+        .map((b) => ("text" in b ? b.text : ""))
+        .join("");
+
+      return this.parseResponse(text, researchTasks, "research-finding");
+    } catch (err) {
+      this.log.error("Research findings analysis failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  }
+
+  private parseResponse(
+    text: string,
+    tasks: Task[],
+    source: DetectedImprovement["source"] = "task-pattern",
+  ): DetectedImprovement[] {
     const cleaned = text
       .replace(/```(?:json)?\s*/g, "")
       .replace(/```/g, "")
@@ -154,6 +269,7 @@ export class ImprovementDetector {
             .filter((t) => (item.affected_agents as string[]).includes(t.agent_name ?? ""))
             .slice(0, 3)
             .map((t) => ({ taskId: t.id, detail: t.title })),
+          source,
         }))
         .filter((imp) => imp.affected_agents.length > 0);
     } catch {
