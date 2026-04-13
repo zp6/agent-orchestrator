@@ -14,6 +14,10 @@ import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/re
 import { buildRejectionHistoryBlock } from "./rejection-history.js";
 import { getAndApplyRules } from "./learned-rules.js";
 import { runAntibodyPreDispatchCheck } from "./antibody-filter.js";
+import {
+  findBestReferenceImplementation,
+  buildReferenceImplementationBlock,
+} from "./reference-implementation.js";
 import { notifyOperator } from "../service/notify.js";
 import { resolveAgentBudget } from "../cli/commands/budget.js";
 import {
@@ -887,10 +891,35 @@ export class Dispatcher {
       }
     }
 
+    // Inject cross-repo reference implementation hint (issue #772).
+    // When this task is part of a lineage group (cross-repo feature), find the
+    // highest-scoring peer implementation and attach it as a consistency anchor
+    // so the agent doesn't re-derive the design from scratch.
+    const targetRepo: string | null = options?.sourceRef
+      ? (extractRepoFromSourceRef(options.sourceRef) ?? null)
+      : (this.config.agents[agentName]?.github ?? null);
+    const refImpl = findBestReferenceImplementation(this.store, task, targetRepo);
+    const refImplBlock = buildReferenceImplementationBlock(refImpl);
+    if (refImplBlock) {
+      this.log.info("Injecting reference implementation hint into dispatch", {
+        taskId: task.id,
+        agentName,
+        lineageGroupId: task.lineage_group_id,
+        refTaskId: refImpl!.taskId,
+        refSourceRef: refImpl!.sourceRef,
+        refQualityScore: refImpl!.qualityScore,
+      });
+      messageToSend = messageToSend + refImplBlock;
+      this.store.addLog({
+        task_id: task.id,
+        direction: "system",
+        agent_name: agentName,
+        content: `[reference-impl] Attached peer implementation from ${refImpl!.sourceRef ?? refImpl!.taskId} (score: ${refImpl!.qualityScore.toFixed(2)})`,
+      });
+    }
+
     // Inject per-repo learned rules (conventions from prior PR reviews)
-    const sourceRepo = options?.sourceRef
-      ? extractRepoFromSourceRef(options.sourceRef)
-      : this.config.agents[agentName]?.github;
+    const sourceRepo = targetRepo;
     if (sourceRepo) {
       const { block: rulesBlock, ruleIds } = getAndApplyRules(this.store, sourceRepo);
       if (rulesBlock) {
