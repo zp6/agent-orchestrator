@@ -75,6 +75,7 @@ const STANDUP_ROUND1 = `You are in a daily standup. Share your perspective conci
 1. **Blockers**: What's preventing you from doing your best work?
 2. **Opportunities**: What improvements could make the biggest impact in your domain?
 3. **Suggestions for the team**: What should other agents know?
+4. **Coverage gaps**: Are there tasks in your domain that a more specialised agent should handle?
 
 Be specific — reference actual issues, PRs, or patterns.`;
 
@@ -91,8 +92,9 @@ const BLUESKY_ROUND1 = `This is a blue-sky thinking session. No constraints, no 
 In under 200 words, propose 1-2 bold ideas:
 
 1. **What if**: What capability would be game-changing for this system? Think 10x, not 10%.
-2. **Wild connection**: What would happen if we combined two things that haven't been combined? (e.g. "what if the research agent could propose its own experiments?")
+2. **Wild connection**: What would happen if we combined two things that haven't been combined?
 3. **Inspiration from elsewhere**: What do other systems (biological, social, industrial) do that we should steal?
+4. **New agent idea**: If you could spin up a new sibling agent, what would it specialise in?
 
 Be creative and specific. Bad ideas are welcome — they often lead to good ones.`;
 

@@ -12,6 +12,7 @@ import { createLogger } from "./logger.js";
 import { notifyOperator } from "./notify.js";
 import { cachedGetIssueState, liveValidateForDispatch } from "../triggers/issue-state-bridge.js";
 import { loadGoals, measureGoalProgress, buildGoalsContext } from "../orchestrator/goals.js";
+import { detectCoverageGaps } from "../orchestrator/coverage-gap-detector.js";
 import { scoreIssuePriority } from "../orchestrator/priority-scorer.js";
 import { extractAndStoreRules } from "../orchestrator/learned-rules.js";
 import { extractRepoFromSourceRef } from "../orchestrator/dispatcher.js";
@@ -500,6 +501,17 @@ export function buildSupervisorContext(config: OrchestratorConfig, store: StateS
     }).join("\n");
     sections.push(`## Agent Performance\n${lines}`);
   }
+
+  // Inject coverage gaps so the supervisor can propose new agents
+  try {
+    const gaps = detectCoverageGaps(config, store, 14);
+    if (gaps.length > 0) {
+      const gapLines = gaps.slice(0, 5).map((g) =>
+        `- [${g.type}] "${g.topic}" — ${g.details}`,
+      ).join("\n");
+      sections.push(`## Coverage Gaps (last 14 days)\n${gapLines}`);
+    }
+  } catch { /* coverage gap detection is optional */ }
 
   // Inject monthly goals so the supervisor prioritizes goal-aligned work
   const goals = loadGoals(config.orchestrator_dir);

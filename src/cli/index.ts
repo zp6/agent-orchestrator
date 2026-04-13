@@ -35,6 +35,7 @@ import { registerAuditInfraCommand } from "./commands/audit-infra.js";
 import { registerRoutingAccuracyCommand } from "./commands/routing-accuracy.js";
 import { registerSignalsCommand } from "./commands/signals.js";
 import { registerLearnedPatternsCommand } from "./commands/learned-patterns.js";
+import { registerAgentGapsCommand } from "./commands/agent-gaps.js";
 import { registerLineageCommand } from "./commands/lineage.js";
 import { registerAntibodiesCommand } from "./commands/antibodies.js";
 import { registerHealthCheckEfficiencyCommand } from "./commands/health-check-efficiency.js";
@@ -87,5 +88,6 @@ registerLineageCommand(program);
 registerAntibodiesCommand(program);
 registerHealthCheckEfficiencyCommand(program);
 registerCostCommand(program);
+registerAgentGapsCommand(program);
 
 program.parse();

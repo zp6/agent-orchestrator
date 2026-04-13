@@ -8,6 +8,7 @@
 import { createLLMClient, getLLMModel } from "../client/llm-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore } from "../state/store.js";
+import { detectCoverageGaps } from "./coverage-gap-detector.js";
 import { IssueCreator } from "./issue-creator.js";
 import { loadGoals, measureGoalProgress, buildGoalsContext } from "./goals.js";
 import { createLogger } from "../service/logger.js";
@@ -77,6 +78,15 @@ function buildSystemContext(config: OrchestratorConfig, store: StateStore): stri
     ? buildGoalsContext(measureGoalProgress(goals, store))
     : "";
 
+  // Coverage gaps for new agent proposals
+  let gapsContext = "";
+  try {
+    const gaps = detectCoverageGaps(config, store, 14);
+    if (gaps.length > 0) {
+      gapsContext = `\n## Coverage Gaps\n${gaps.slice(0, 5).map((g) => `- [${g.type}] "${g.topic}" (×${g.frequency}): ${g.details}`).join("\n")}\n`;
+    }
+  } catch { /* optional */ }
+
   return `## Current Fleet
 ${agents.map((a) => `- ${a.name} (${a.provider}, pool: ${a.pool ?? "none"})`).join("\n")}
 
@@ -97,7 +107,8 @@ ${agents.map((a) => `- ${a.name} (${a.provider}, pool: ${a.pool ?? "none"})`).jo
 - Issue age monitoring (14d nudge, 30d force-boost)
 - Follow-up chain depth limiter
 
-${goalsContext}`;
+${goalsContext}
+${gapsContext}`;
 }
 
 export async function proposeRoadmapItems(
