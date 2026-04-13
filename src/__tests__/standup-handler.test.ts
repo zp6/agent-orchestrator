@@ -6,6 +6,9 @@ import {
   extractPRReferences,
   buildStandupAcknowledgmentComment,
   handleZeroActionStandup,
+  isSynthesisFailed,
+  generateFallbackActionItems,
+  postFallbackActionItems,
   type GitHubIssue,
 } from "../reviewer/standup-handler.js";
 
@@ -396,5 +399,307 @@ Closes #200`,
       expect.stringContaining("gh issue comment"),
       expect.any(Object),
     );
+  });
+});
+
+// ── isSynthesisFailed ─────────────────────────────────────────────────────
+
+describe("isSynthesisFailed", () => {
+  it("returns true when synthesis failed sentinel is present", () => {
+    const issue = makeZeroActionStandup({
+      body: `### Synthesis
+Synthesis failed — see round transcripts for raw input.
+
+### Action Items
+No action items.`,
+    });
+    expect(isSynthesisFailed(issue)).toBe(true);
+  });
+
+  it("returns false for a successful synthesis", () => {
+    const issue = makeZeroActionStandup();
+    expect(isSynthesisFailed(issue)).toBe(false);
+  });
+
+  it("returns false for a normal standup with action items", () => {
+    const issue = makeStandupIssue();
+    expect(isSynthesisFailed(issue)).toBe(false);
+  });
+
+  it("handles partial sentinel match correctly (must contain full word)", () => {
+    const issue = makeZeroActionStandup({
+      body: `### Synthesis
+Synthesis failed to produce clean JSON but has some data.
+
+### Action Items
+No action items.`,
+    });
+    // "Synthesis failed" is still present even with more text after
+    expect(isSynthesisFailed(issue)).toBe(true);
+  });
+
+  it("returns false when body is empty", () => {
+    const issue: GitHubIssue = {
+      number: 1,
+      title: "[📋 Standup] 2026-04-12 — 0 action items",
+      body: "",
+      labels: ["standup"],
+      state: "open",
+    };
+    expect(isSynthesisFailed(issue)).toBe(false);
+  });
+});
+
+// ── generateFallbackActionItems ───────────────────────────────────────────
+
+describe("generateFallbackActionItems", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    // Default: return JSON list of open issues
+    mockExecSync.mockReturnValue(
+      JSON.stringify([
+        { number: 10, title: "Fix login bug" },
+        { number: 11, title: "Add dark mode" },
+        { number: 12, title: "Improve performance" },
+      ]),
+    );
+  });
+
+  it("returns action items from open issues", () => {
+    const items = generateFallbackActionItems(["rapartlu/test-repo"]);
+    expect(items.length).toBeGreaterThan(0);
+    expect(items[0]).toMatchObject({
+      priority: "MEDIUM",
+      owner: "orchestrator",
+    });
+    expect(items[0].description).toContain("rapartlu/test-repo");
+  });
+
+  it("includes issue number and title in description", () => {
+    const items = generateFallbackActionItems(["rapartlu/test-repo"]);
+    const descriptions = items.map((i) => i.description);
+    expect(descriptions.some((d) => d.includes("#10"))).toBe(true);
+    expect(descriptions.some((d) => d.includes("Fix login bug"))).toBe(true);
+  });
+
+  it("returns empty array when no open issues exist", () => {
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    mockExecSync.mockReturnValue(JSON.stringify([]));
+
+    const items = generateFallbackActionItems(["rapartlu/test-repo"]);
+    expect(items).toEqual([]);
+  });
+
+  it("returns empty array when gh CLI fails", () => {
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    mockExecSync.mockImplementation(() => {
+      throw new Error("gh: command not found");
+    });
+
+    const items = generateFallbackActionItems(["rapartlu/test-repo"]);
+    expect(items).toEqual([]);
+  });
+
+  it("queries multiple repos when provided", () => {
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    mockExecSync.mockReturnValue(JSON.stringify([{ number: 1, title: "Issue" }]));
+
+    const items = generateFallbackActionItems([
+      "rapartlu/repo-a",
+      "rapartlu/repo-b",
+    ]);
+    expect(mockExecSync).toHaveBeenCalledTimes(2);
+    expect(items.some((i) => i.description.includes("repo-a"))).toBe(true);
+    expect(items.some((i) => i.description.includes("repo-b"))).toBe(true);
+  });
+
+  it("respects maxTotal cap", () => {
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    // Return 8 issues per repo, 3 repos → would be 24 without cap
+    mockExecSync.mockReturnValue(
+      JSON.stringify(Array.from({ length: 8 }, (_, i) => ({ number: i + 1, title: `Issue ${i + 1}` }))),
+    );
+
+    const items = generateFallbackActionItems(["r/a", "r/b", "r/c"], 8, 10);
+    expect(items.length).toBeLessThanOrEqual(10);
+  });
+});
+
+// ── postFallbackActionItems ───────────────────────────────────────────────
+
+describe("postFallbackActionItems", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    mockExecSync.mockReturnValue(
+      JSON.stringify([
+        { number: 10, title: "Fix login bug" },
+        { number: 11, title: "Add dark mode" },
+      ]),
+    );
+  });
+
+  it("posts a fallback comment when open issues exist", async () => {
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    let commentPosted = false;
+    mockExecSync.mockImplementation((cmd: string) => {
+      if (cmd.includes("gh issue list")) {
+        return JSON.stringify([{ number: 10, title: "Fix login bug" }]);
+      }
+      if (cmd.includes("gh issue comment")) {
+        commentPosted = true;
+        return "";
+      }
+      return "";
+    });
+
+    const result = await postFallbackActionItems("rapartlu/test-repo", 100);
+    expect(result).toBe(true);
+    expect(commentPosted).toBe(true);
+  });
+
+  it("comment includes fallback action items", async () => {
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    let postedBody = "";
+    mockExecSync.mockImplementation((cmd: string) => {
+      if (cmd.includes("gh issue list")) {
+        return JSON.stringify([{ number: 42, title: "Deploy new service" }]);
+      }
+      if (cmd.includes("gh issue comment")) {
+        // Extract the --body argument
+        const match = cmd.match(/--body\s+'([\s\S]+?)'\s*$/);
+        if (match) postedBody = match[1];
+        return "";
+      }
+      return "";
+    });
+
+    await postFallbackActionItems("rapartlu/test-repo", 100);
+    expect(postedBody).toContain("Fallback Action Items");
+    expect(postedBody).toContain("#42");
+    expect(postedBody).toContain("Deploy new service");
+  });
+
+  it("returns false when no open issues exist", async () => {
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    mockExecSync.mockReturnValue(JSON.stringify([]));
+
+    const result = await postFallbackActionItems("rapartlu/test-repo", 100);
+    expect(result).toBe(false);
+  });
+
+  it("retries up to maxRetries times on comment failure", async () => {
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    let commentAttempts = 0;
+    mockExecSync.mockImplementation((cmd: string) => {
+      if (cmd.includes("gh issue list")) {
+        return JSON.stringify([{ number: 10, title: "Fix bug" }]);
+      }
+      if (cmd.includes("gh issue comment")) {
+        commentAttempts++;
+        throw new Error("gh comment failed");
+      }
+      return "";
+    });
+
+    const result = await postFallbackActionItems("rapartlu/test-repo", 100, undefined, 2);
+    expect(result).toBe(false);
+    expect(commentAttempts).toBe(2); // retried exactly 2 times
+  });
+
+  it("succeeds on second attempt after first fails", async () => {
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    let commentAttempts = 0;
+    mockExecSync.mockImplementation((cmd: string) => {
+      if (cmd.includes("gh issue list")) {
+        return JSON.stringify([{ number: 10, title: "Fix bug" }]);
+      }
+      if (cmd.includes("gh issue comment")) {
+        commentAttempts++;
+        if (commentAttempts === 1) throw new Error("transient error");
+        return "";
+      }
+      return "";
+    });
+
+    const result = await postFallbackActionItems("rapartlu/test-repo", 100, undefined, 2);
+    expect(result).toBe(true);
+    expect(commentAttempts).toBe(2);
+  });
+
+  it("uses provided fallbackRepos instead of default repo", async () => {
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    const queriedRepos: string[] = [];
+    mockExecSync.mockImplementation((cmd: string) => {
+      if (cmd.includes("gh issue list")) {
+        const match = cmd.match(/--repo\s+(\S+)/);
+        if (match) queriedRepos.push(match[1]);
+        return JSON.stringify([{ number: 1, title: "Issue" }]);
+      }
+      return "";
+    });
+
+    await postFallbackActionItems(
+      "rapartlu/current-repo",
+      100,
+      ["rapartlu/repo-a", "rapartlu/repo-b"],
+    );
+
+    expect(queriedRepos).toContain("rapartlu/repo-a");
+    expect(queriedRepos).toContain("rapartlu/repo-b");
+    expect(queriedRepos).not.toContain("rapartlu/current-repo");
+  });
+});
+
+// ── handleZeroActionStandup with synthesis failure ────────────────────────
+
+describe("handleZeroActionStandup — synthesis failure recovery", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    mockExecSync.mockReturnValue("");
+  });
+
+  it("triggers fallback when synthesis failed sentinel is present", async () => {
+    const issue = makeZeroActionStandup({
+      body: `### Synthesis
+Synthesis failed — see round transcripts for raw input.
+
+### Action Items
+No action items.`,
+    });
+
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    let listCalled = false;
+    mockExecSync.mockImplementation((cmd: string) => {
+      if (cmd.includes("gh issue list")) {
+        listCalled = true;
+        return JSON.stringify([{ number: 5, title: "Open issue" }]);
+      }
+      return "";
+    });
+
+    await handleZeroActionStandup("rapartlu/test-repo", 100, issue, false);
+
+    expect(listCalled).toBe(true);
+  });
+
+  it("does NOT trigger fallback for successful synthesis with 0 items", async () => {
+    const issue = makeZeroActionStandup(); // no failure sentinel
+
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    let listCalled = false;
+    mockExecSync.mockImplementation((cmd: string) => {
+      if (cmd.includes("gh issue list")) {
+        listCalled = true;
+        return JSON.stringify([]);
+      }
+      return "";
+    });
+
+    await handleZeroActionStandup("rapartlu/test-repo", 100, issue, false);
+
+    expect(listCalled).toBe(false);
   });
 });

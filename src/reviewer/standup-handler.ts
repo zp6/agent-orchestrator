@@ -6,6 +6,11 @@
  * 1. Posts a lightweight acknowledgment comment (no PR)
  * 2. Optionally closes the issue if all referenced PRs are merged
  *
+ * When synthesis fails (LLM error), the reviewer detects the failure sentinel
+ * and retries fallback action-item generation (up to 2x) by querying open
+ * GitHub issues directly. This ensures standup reports never ship with 0
+ * action items unless there are genuinely no open issues.
+ *
  * This prevents zero-action standups from creating noise in the PR queue.
  */
 
@@ -13,6 +18,9 @@ import { execSync } from "child_process";
 import { createLogger } from "../service/logger.js";
 
 const log = createLogger("standup-handler");
+
+/** Sentinel text written by the orchestrator when synthesis LLM call fails. */
+const SYNTHESIS_FAILURE_SENTINEL = "Synthesis failed";
 
 /**
  * GitHub issue metadata needed for standup processing.
@@ -162,18 +170,185 @@ export function buildStandupAcknowledgmentComment(issue: GitHubIssue): string {
 }
 
 /**
+ * Detects whether the standup issue's synthesis step failed.
+ *
+ * The orchestrator writes a canonical failure sentinel into the Synthesis
+ * section when the LLM call fails (network error, timeout, rate limit, etc.).
+ * This function checks for that sentinel so the reviewer can attempt recovery.
+ */
+export function isSynthesisFailed(issue: GitHubIssue): boolean {
+  return issue.body.includes(SYNTHESIS_FAILURE_SENTINEL);
+}
+
+/**
+ * Fetch open issues from a GitHub repo using gh CLI.
+ *
+ * Returns an array of `{ number, title }` objects, or an empty array on error.
+ * Errors are silenced so callers can treat missing data as "no issues".
+ */
+function fetchOpenGitHubIssues(
+  repo: string,
+  limit = 10,
+): Array<{ number: number; title: string }> {
+  try {
+    const output = execSync(
+      `gh issue list --repo ${shellEscape(repo)} --state open --limit ${limit} --json number,title`,
+      { encoding: "utf-8", timeout: 15000 },
+    );
+    const parsed = JSON.parse(output.trim());
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Generate a minimal action-item list from open GitHub issues.
+ *
+ * Queries each repo in `repos` for its open issues and converts them into
+ * action items that ask the team to review/triage them. Returns an empty
+ * array when there are genuinely no open issues across all repos.
+ *
+ * @param repos - List of repos (owner/repo) to query
+ * @param issuesPerRepo - Max issues to pull from each repo (default: 5)
+ * @param maxTotal - Hard cap on total action items returned (default: 10)
+ */
+export function generateFallbackActionItems(
+  repos: string[],
+  issuesPerRepo = 5,
+  maxTotal = 10,
+): Array<{ priority: string; description: string; owner: string }> {
+  const items: Array<{ priority: string; description: string; owner: string }> = [];
+
+  for (const repo of repos) {
+    if (items.length >= maxTotal) break;
+
+    const issues = fetchOpenGitHubIssues(repo, issuesPerRepo);
+
+    for (const issue of issues) {
+      if (items.length >= maxTotal) break;
+      items.push({
+        priority: "MEDIUM",
+        description: `[${repo}] Triage open issue #${issue.number}: ${issue.title}`,
+        owner: "orchestrator",
+      });
+    }
+  }
+
+  return items;
+}
+
+/**
+ * Attempt to rescue a failed synthesis by generating fallback action items.
+ *
+ * When the orchestrator's synthesis LLM call fails, standup issues are created
+ * with 0 action items. This function retries the fallback up to `maxRetries`
+ * times (default: 2), querying open GitHub issues directly and posting a
+ * supplementary comment so the standup is never completely empty.
+ *
+ * Returns `true` if fallback items were successfully posted, `false` when
+ * there are genuinely no open issues (acceptable empty standup) or all
+ * retry attempts failed.
+ *
+ * @param repo - Repository in owner/repo format (for the comment target)
+ * @param issueNumber - Standup issue number to comment on
+ * @param fallbackRepos - Repos to query for open issues (defaults to [repo])
+ * @param maxRetries - How many attempts to make (default: 2)
+ */
+export async function postFallbackActionItems(
+  repo: string,
+  issueNumber: number,
+  fallbackRepos?: string[],
+  maxRetries = 2,
+): Promise<boolean> {
+  const repos = fallbackRepos && fallbackRepos.length > 0 ? fallbackRepos : [repo];
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const items = generateFallbackActionItems(repos);
+
+      if (items.length === 0) {
+        log.info("No open issues found across repos — fallback has no items to generate", {
+          repo,
+          issueNumber,
+          repos,
+          attempt,
+        });
+        return false; // Genuinely empty — acceptable standup
+      }
+
+      const lines: string[] = [
+        "**[orchestrator] Synthesis fallback — action items recovered from open issues** ⚠️",
+        "",
+        "_The original synthesis step failed. The following action items were generated from open GitHub issues as a fallback to ensure this standup is not empty:_",
+        "",
+        "### Fallback Action Items",
+        "",
+      ];
+
+      for (const item of items) {
+        lines.push(`- [${item.priority}] ${item.description} (owner: ${item.owner})`);
+      }
+
+      lines.push("");
+      lines.push(
+        `_${items.length} action item(s) recovered from ${repos.length} repo(s). Attempt ${attempt}/${maxRetries}._`,
+      );
+
+      const comment = lines.join("\n");
+
+      execSync(
+        `gh issue comment ${issueNumber} --repo ${shellEscape(repo)} --body ${shellEscape(comment)}`,
+        { encoding: "utf-8", timeout: 30000 },
+      );
+
+      log.info("Posted fallback action items derived from open issues", {
+        repo,
+        issueNumber,
+        itemCount: items.length,
+        repos,
+        attempt,
+      });
+
+      return true;
+    } catch (err) {
+      lastError = err;
+      log.warn("Fallback action item attempt failed, will retry if attempts remain", {
+        repo,
+        issueNumber,
+        attempt,
+        maxRetries,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  log.error("All fallback action item attempts exhausted", {
+    repo,
+    issueNumber,
+    maxRetries,
+    error: lastError instanceof Error ? lastError.message : String(lastError),
+  });
+
+  return false;
+}
+
+/**
  * Posts an acknowledgment comment on a standup issue and optionally closes it.
  *
  * @param repo - Repository in owner/repo format
  * @param issueNumber - GitHub issue number
  * @param issue - Issue metadata (for synthesis extraction)
  * @param autoClose - Whether to close the issue if all referenced PRs are merged
+ * @param fallbackRepos - Additional repos to query when synthesis fails (for fallback items)
  */
 export async function handleZeroActionStandup(
   repo: string,
   issueNumber: number,
   issue: GitHubIssue,
   autoClose = true,
+  fallbackRepos?: string[],
 ): Promise<void> {
   try {
     // Build and post acknowledgment comment
@@ -189,6 +364,17 @@ export async function handleZeroActionStandup(
       issueNumber,
       actionItems: extractActionItemCount(issue),
     });
+
+    // If synthesis failed, attempt to recover action items from open issues.
+    // This ensures standup reports never ship empty solely because of an LLM
+    // failure — the fallback retries up to 2x before giving up.
+    if (isSynthesisFailed(issue)) {
+      log.warn("Synthesis failure detected in standup — attempting fallback action item recovery", {
+        repo,
+        issueNumber,
+      });
+      await postFallbackActionItems(repo, issueNumber, fallbackRepos);
+    }
 
     // Optionally close if all referenced PRs are merged
     if (autoClose) {
