@@ -894,6 +894,117 @@ export class StateStore implements ITelegramStateStore {
     };
   }
 
+  /**
+   * Return a per-agent N-day quality score time series for dashboard sparklines.
+   *
+   * Each per_agent series contains one point per calendar day in the window.
+   * A point's avg_score is the mean quality_score for all scored tasks updated
+   * on that day, or null when no tasks had a score on that day.
+   *
+   * rolling_avg is the mean across all scored tasks in the full window (not a
+   * rolling window per se — it spans the full look-back period).
+   *
+   * Agents with no scored tasks in the window are excluded from per_agent.
+   *
+   * @param days - Look-back window (default: 7).
+   * @param warningThreshold - Agents whose rolling_avg falls below this value
+   *   have below_threshold: true (default: 0.75).
+   */
+  getAgentQualityTrend(
+    days = 7,
+    warningThreshold = 0.75,
+  ): import("./types.js").AgentQualityTrend {
+    const lookbackDays = Number.isFinite(days) && days >= 1 ? Math.floor(days) : 7;
+    const threshold =
+      Number.isFinite(warningThreshold) && warningThreshold >= 0 && warningThreshold <= 1
+        ? warningThreshold
+        : 0.75;
+    const offsetArg = `-${lookbackDays - 1} days`;
+
+    const dateCte = `
+      WITH RECURSIVE dates(d) AS (
+        SELECT DATE('now', ?)
+        UNION ALL
+        SELECT DATE(d, '+1 day') FROM dates WHERE d < DATE('now')
+      )
+    `;
+
+    // Agents that have at least one scored task in the window
+    const activeAgents = this.db
+      .prepare(
+        `SELECT DISTINCT agent_name
+         FROM tasks
+         WHERE quality_score IS NOT NULL
+           AND agent_name IS NOT NULL
+           AND DATE(updated_at) >= DATE('now', ?)
+         ORDER BY agent_name ASC`,
+      )
+      .all(offsetArg) as Array<{ agent_name: string }>;
+
+    const perAgent: import("./types.js").AgentQualityTrendSeries[] = activeAgents.map(
+      ({ agent_name }) => {
+        // Per-day avg_score for this agent
+        const dayRows = this.db
+          .prepare(
+            `${dateCte}
+             SELECT
+               d.d AS date,
+               COALESCE(s.avg_score, NULL)      AS avg_score,
+               COALESCE(s.scored_task_count, 0) AS scored_task_count
+             FROM dates d
+             LEFT JOIN (
+               SELECT
+                 DATE(updated_at)      AS day,
+                 AVG(quality_score)    AS avg_score,
+                 COUNT(*)              AS scored_task_count
+               FROM tasks
+               WHERE quality_score IS NOT NULL
+                 AND agent_name = ?
+                 AND DATE(updated_at) >= DATE('now', ?)
+               GROUP BY DATE(updated_at)
+             ) s ON s.day = d.d
+             ORDER BY d.d ASC`,
+          )
+          .all(offsetArg, agent_name, offsetArg) as Array<{
+          date: string;
+          avg_score: number | null;
+          scored_task_count: number;
+        }>;
+
+        // Rolling average across the whole window
+        const rollingRow = this.db
+          .prepare(
+            `SELECT AVG(quality_score) AS rolling_avg
+             FROM tasks
+             WHERE quality_score IS NOT NULL
+               AND agent_name = ?
+               AND DATE(updated_at) >= DATE('now', ?)`,
+          )
+          .get(agent_name, offsetArg) as { rolling_avg: number | null };
+
+        const rollingAvg = rollingRow?.rolling_avg ?? null;
+
+        return {
+          agent_name,
+          rolling_avg: rollingAvg,
+          below_threshold: rollingAvg !== null && rollingAvg < threshold,
+          days: dayRows.map((r) => ({
+            date: r.date,
+            avg_score: r.avg_score,
+            scored_task_count: r.scored_task_count,
+          })),
+        };
+      },
+    );
+
+    return {
+      days: lookbackDays,
+      warning_threshold: threshold,
+      per_agent: perAgent,
+      generated_at: new Date().toISOString(),
+    };
+  }
+
   // ── Agent health (reads from orchestrator's agent_health table) ───────────
 
   getAgentHealthBatch(agentNames: string[]): AgentHealth[] {

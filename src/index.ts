@@ -29,6 +29,15 @@ export {
 } from "./reviewer/schema-impact.js";
 export type { SchemaConsumerEntry, SchemaImpactHit } from "./reviewer/schema-impact.js";
 
+// Agent quality trend sparklines — `/agent-trends` API payload (issue #156).
+//
+// Mount in the orchestrator or dashboard server:
+//   app.get('/agent-trends', (_req, res) => res.json(getAgentTrendsApiPayload(store)));
+//
+// Per-agent series includes rolling_avg and below_threshold flag for warning colour.
+export { getAgentTrendsApiPayload } from "./reviewer/agent-trends.js";
+export type { AgentTrendsOptions } from "./reviewer/agent-trends.js";
+
 // Schema-consumer auto-discovery registry (issue #99).
 // Replaces the static SCHEMA_CONSUMER_MAP with a live map derived from
 // state.db PRAGMA queries and StateStore method instrumentation.
@@ -167,6 +176,9 @@ export type {
   EfficiencyTrendPoint,
   EfficiencyTrendSeries,
   EfficiencyTrend,
+  AgentQualityTrendPoint,
+  AgentQualityTrendSeries,
+  AgentQualityTrend,
   AgentHealth,
   SupervisorDecisionRecord,
   SupervisorDecisionQuery,

@@ -289,6 +289,63 @@ export interface DispatchRequest {
   created_at: string;
 }
 
+// ── Agent quality trend types ─────────────────────────────────────────────
+
+/**
+ * One calendar day's average quality score for a single agent.
+ * Used to build 7-day sparklines on the dashboard home page.
+ */
+export interface AgentQualityTrendPoint {
+  /** "YYYY-MM-DD" calendar date. */
+  date: string;
+  /**
+   * Mean quality_score across all scored tasks on this day,
+   * or null when there were no scored tasks.
+   */
+  avg_score: number | null;
+  /** Number of tasks with a quality_score recorded on this day. */
+  scored_task_count: number;
+}
+
+/**
+ * A 7-day (or N-day) quality score time series for one agent.
+ * Drives a single sparkline on the dashboard home panel.
+ */
+export interface AgentQualityTrendSeries {
+  agent_name: string;
+  /**
+   * Rolling average quality score across all scored tasks in the window.
+   * Null when the agent has no scored tasks in the window.
+   */
+  rolling_avg: number | null;
+  /**
+   * True when `rolling_avg` is not null and falls below the
+   * `warning_threshold` configured for the response. Operators should
+   * render this agent's sparkline in warning/red colour.
+   */
+  below_threshold: boolean;
+  /** Daily data points, one per calendar day in the window, oldest first. */
+  days: AgentQualityTrendPoint[];
+}
+
+/**
+ * Full response from `getAgentQualityTrend()`.
+ * Intended to be served directly as `GET /agent-trends`.
+ */
+export interface AgentQualityTrend {
+  /** Number of calendar days in the look-back window. */
+  days: number;
+  /**
+   * 0-1 rolling-average threshold below which an agent's sparkline is
+   * highlighted as a warning. Default: 0.75.
+   */
+  warning_threshold: number;
+  /** Per-agent series, one entry per agent that had any scored tasks in the window. */
+  per_agent: AgentQualityTrendSeries[];
+  /** ISO-8601 timestamp when the payload was generated. */
+  generated_at: string;
+}
+
 // ── Calibration drift types ───────────────────────────────────────────────
 
 /**
@@ -471,6 +528,16 @@ export interface IStateStore {
     warningThreshold?: number,
     criticalThreshold?: number,
   ): EfficiencyTrend;
+
+  /**
+   * Return a per-agent 7-day (or N-day) quality score time series.
+   * Each point is the mean `quality_score` of all scored tasks updated on
+   * that calendar day. Agents whose rolling average falls below
+   * `warningThreshold` (default 0.75) are flagged with `below_threshold: true`.
+   *
+   * Only agents that have at least one scored task in the window are included.
+   */
+  getAgentQualityTrend(days?: number, warningThreshold?: number): AgentQualityTrend;
 
   // Routing accuracy feedback
   getRoutingAccuracyStats(days?: number): RoutingAccuracyStats[];
