@@ -28,6 +28,7 @@ let mockPRStateResponse = "OPEN";
 let mockIssueListResponse = "[]";
 
 vi.mock("node:child_process", () => ({
+  execFile: vi.fn(),
   execSync: vi.fn().mockImplementation((cmd: string) => {
     if (cmd.includes("gh pr view") && cmd.includes("-q .state")) {
       return mockPRStateResponse;

@@ -49,6 +49,7 @@ const config: OrchestratorConfig = {
   proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 5000 },
   orchestrator_dir: "/tmp",
   base_dir: "/projects",
+  deploy: { health_check_delays_ms: [0], post_restart_warmup_ms: 0 },
   agents: {
     "agent-a": {
       dir: "agent-a",
