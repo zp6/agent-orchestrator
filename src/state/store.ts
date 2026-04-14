@@ -137,6 +137,27 @@ export interface SupervisorDecisionRecord {
   created_at: string;
 }
 
+/**
+ * A single routing timeline event — a supervisor decision projected onto a
+ * time axis.  Returned by `getRoutingTimelineData()` for the dashboard's
+ * per-agent swimlane chart.
+ */
+export interface RoutingTimelineEvent {
+  id: number;
+  /** ISO timestamp of the decision — used for X-axis positioning. */
+  created_at: string;
+  /** Agent targeted by this decision, or null when the supervisor acted globally. */
+  agent_name: string | null;
+  /** Outcome colour-code: dispatched=green, skipped=yellow, failed=red, other=grey. */
+  outcome: SupervisorOutcome;
+  /** Human-readable reason shown in the hover tooltip. */
+  reason: string;
+  /** High-level action label (e.g. "dispatch", "skip", "escalate"). */
+  action: string;
+  /** Task ID for click-through navigation to the detail modal. */
+  task_id: string | null;
+}
+
 export type DispatchValidationOutcome = "passed" | "blocked";
 export type DispatchValidationCheckStatus = "passed" | "failed" | "info";
 
@@ -2951,6 +2972,19 @@ export class StateStore {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_supervisor_decisions_created ON supervisor_decisions(created_at);
+      -- routing_decisions mirrors supervisor_decisions but is the canonical source
+      -- for the dashboard timeline (includes capability-enforcement route metadata).
+      CREATE TABLE IF NOT EXISTS routing_decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        action TEXT NOT NULL,
+        agent_name TEXT,
+        reason TEXT NOT NULL,
+        message TEXT,
+        outcome TEXT NOT NULL,
+        task_id TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_routing_decisions_created ON routing_decisions(created_at);
     `);
 
     // Migrations: add structured feed columns if they don't exist yet.
@@ -2966,11 +3000,30 @@ export class StateStore {
     if (!cols.some((c) => c.name === "hard_gates")) {
       this.db.exec("ALTER TABLE supervisor_decisions ADD COLUMN hard_gates TEXT");
     }
+
+    // Add capability-enforcement columns to routing_decisions if absent.
+    const routingCols = this.db
+      .prepare("PRAGMA table_info(routing_decisions)")
+      .all() as Array<{ name: string }>;
+    if (!routingCols.some((c) => c.name === "route_method")) {
+      this.db.exec("ALTER TABLE routing_decisions ADD COLUMN route_method TEXT");
+    }
+    if (!routingCols.some((c) => c.name === "redirect_reason")) {
+      this.db.exec("ALTER TABLE routing_decisions ADD COLUMN redirect_reason TEXT");
+    }
   }
 
   /**
    * Persist a supervisor decision with its execution outcome.
    * Called by the daemon after executing (or skipping) each supervisor decision.
+   *
+   * Writes to both `supervisor_decisions` (the rich audit log with rationale
+   * and structured gate info) and `routing_decisions` (the leaner mirror read
+   * by the dashboard timeline, #632).
+   *
+   * `route_method` and `redirect_reason` are optional fields for
+   * capability-enforcement reroutes; they are only written to
+   * `routing_decisions` since the supervisor table schema predates them.
    */
   addSupervisorDecision(params: {
     action: string;
@@ -2982,24 +3035,51 @@ export class StateStore {
     hard_gates?: string[];
     outcome: SupervisorOutcome;
     task_id?: string;
+    /** e.g. "capability-enforcement" */
+    route_method?: string;
+    /** Human-readable explanation of a capability-enforcement reroute. */
+    redirect_reason?: string;
   }): void {
-    this.db
-      .prepare(
-        `INSERT INTO supervisor_decisions (action, agent_name, reason, message, rationale, issue_refs, hard_gates, outcome, task_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        params.action,
-        params.agent_name ?? null,
-        params.reason,
-        params.message ?? null,
-        params.rationale ?? null,
-        JSON.stringify(params.issue_refs ?? []),
-        JSON.stringify(params.hard_gates ?? []),
-        params.outcome,
-        params.task_id ?? null,
-        new Date().toISOString(),
-      );
+    const createdAt = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO supervisor_decisions (action, agent_name, reason, message, rationale, issue_refs, hard_gates, outcome, task_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          params.action,
+          params.agent_name ?? null,
+          params.reason,
+          params.message ?? null,
+          params.rationale ?? null,
+          JSON.stringify(params.issue_refs ?? []),
+          JSON.stringify(params.hard_gates ?? []),
+          params.outcome,
+          params.task_id ?? null,
+          createdAt,
+        );
+
+      // Mirror into routing_decisions so the dashboard timeline always has
+      // a consistent, outcome-indexed view of every dispatch decision.
+      this.db
+        .prepare(
+          `INSERT INTO routing_decisions
+             (action, agent_name, reason, message, outcome, task_id, created_at, route_method, redirect_reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          params.action,
+          params.agent_name ?? null,
+          params.reason,
+          params.message ?? null,
+          params.outcome,
+          params.task_id ?? null,
+          createdAt,
+          params.route_method ?? null,
+          params.redirect_reason ?? null,
+        );
+    })();
   }
 
   /**
@@ -3020,6 +3100,35 @@ export class StateStore {
       issue_refs: parseJsonStringArray(row.issue_refs),
       hard_gates: parseJsonStringArray(row.hard_gates),
     }));
+  }
+
+  /**
+   * Return routing decisions from the last `hours` hours in ascending
+   * chronological order, suitable for rendering a per-agent swimlane timeline.
+   *
+   * Each event carries the fields needed for the chart:
+   *  - `created_at`  → X-axis position
+   *  - `agent_name`  → which swimlane row
+   *  - `outcome`     → dot colour (dispatched=green, skipped=yellow, failed=red)
+   *  - `reason`      → hover tooltip text
+   *  - `task_id`     → click-through to detail modal
+   *
+   * Reads from `routing_decisions` (the dashboard-friendly mirror of
+   * `supervisor_decisions`) so that both the orchestrator and dashboard
+   * writer paths are covered.
+   *
+   * @param hours - Look-back window in hours (default 24).
+   */
+  getRoutingTimelineData(hours = 24): RoutingTimelineEvent[] {
+    const cutoff = new Date(Date.now() - hours * 3600_000).toISOString();
+    return this.db
+      .prepare(
+        `SELECT id, created_at, agent_name, outcome, reason, action, task_id
+           FROM routing_decisions
+          WHERE created_at >= ?
+          ORDER BY created_at ASC`,
+      )
+      .all(cutoff) as RoutingTimelineEvent[];
   }
 
   addDispatchValidation(params: {
