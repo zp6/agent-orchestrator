@@ -89,6 +89,22 @@ const CYCLE_SLOW_ALERT_MS = 10 * 60 * 1000; // 10 minutes
 const CYCLE_HARD_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
 
 /**
+ * Watchdog pressure threshold: 75% of the hard timeout.  An alert fires at
+ * this point to give operators a heads-up *before* the soft-alert (10 min)
+ * and hard-timeout (20 min) kick in — matching the acceptance criteria from
+ * issue #811.  The alert deduplicates for PRESSURE_DEDUP_MS to prevent spam
+ * across back-to-back slow cycles.
+ */
+const CYCLE_PRESSURE_ALERT_MS = CYCLE_HARD_TIMEOUT_MS * 0.75; // 15 minutes
+
+/**
+ * How long to suppress repeated watchdog-pressure alerts.  Set to 10 minutes
+ * so that a sustained slow-cycle streak produces at most one alert per 10 min
+ * rather than one per cycle.
+ */
+const PRESSURE_ALERT_DEDUP_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
  * Default quality-score floor for reviewer-pool approvals.  Any completed
  * task from a reviewer-pool agent that is approved but scores below this
  * value triggers a Telegram alert and a supervisor follow-up dispatch.
@@ -225,6 +241,13 @@ export class Daemon {
   private pollInterval: number;
   private cycleCount = 0;
   private log = createLogger("daemon");
+
+  /**
+   * Timestamp (ms) of the last watchdog-pressure Telegram alert sent.
+   * Used to deduplicate alerts across consecutive slow cycles so operators
+   * receive at most one pressure warning per PRESSURE_ALERT_DEDUP_MS window.
+   */
+  private lastPressureAlertMs = 0;
 
   /**
    * Tracks how many consecutive poll cycles each agent has been idle
@@ -439,16 +462,58 @@ export class Daemon {
     startTelegramPolling({ config: this.config, store: this.store, dispatcher: this.dispatcher });
 
     while (this.running) {
-      // Two-tier cycle protection:
-      //   1. Soft alert at 10 min — notify operator but keep waiting
-      //   2. Hard timeout at 20 min — abandon the cycle (true deadlock)
+      // Three-tier cycle protection (issue #811):
+      //   1. Soft alert at 10 min   — first warning, keep waiting
+      //   2. Pressure alert at 15 min — 75% of hard timeout; escalating warning
+      //      with dedup so at most one alert fires per 10-minute window
+      //   3. Hard timeout at 20 min — abandon the cycle (true deadlock only)
       //
       // The old 5-min watchdog created zombie cycles that caused cascading
-      // slowdowns (366s → 695s → 984s). This two-tier approach lets normal
+      // slowdowns (366s → 695s → 984s). This three-tier approach lets normal
       // cycles (4-8 min) and deploy-heavy cycles (10-15 min) complete
-      // naturally, while still recovering from true infinite hangs.
+      // naturally, while still giving operators advance warning before the
+      // hard-timeout fires and recovering from true infinite hangs.
 
       const cyclePromise = this.pollCycle();
+      const cycleStartMs = Date.now();
+
+      // Pressure alert: fires at 75% of hard timeout (15 min) — gives operators
+      // a heads-up *before* the slow-cycle alert (10 min already passed) and
+      // well before the hard deadlock timeout (20 min).  Deduplicates across
+      // consecutive slow cycles via lastPressureAlertMs so only one alert fires
+      // per 10-minute window.  See issue #811.
+      const pressureAlert = setTimeout(() => {
+        const elapsedMs = Date.now() - cycleStartMs;
+        const elapsedS = Math.round(elapsedMs / 1000);
+        const pct = Math.round((elapsedMs / CYCLE_HARD_TIMEOUT_MS) * 100);
+        const now = Date.now();
+
+        if (now - this.lastPressureAlertMs < PRESSURE_ALERT_DEDUP_MS) return;
+        this.lastPressureAlertMs = now;
+
+        this.log.warn("Watchdog pressure: cycle at 75% of hard timeout", {
+          elapsedMs,
+          thresholdMs: CYCLE_PRESSURE_ALERT_MS,
+          hardTimeoutMs: CYCLE_HARD_TIMEOUT_MS,
+          cycle: this.cycleCount,
+        });
+        console.warn(
+          `[WATCHDOG PRESSURE] Cycle #${this.cycleCount} has been running for ${elapsedS}s ` +
+          `(${pct}% of ${CYCLE_HARD_TIMEOUT_MS / 1000}s hard limit) — investigate before next cycle`,
+        );
+        notifyOperator(
+          "Watchdog pressure — cycle near timeout",
+          `Daemon cycle #${this.cycleCount} has been running for ${elapsedS}s ` +
+          `(${pct}% of the ${CYCLE_HARD_TIMEOUT_MS / 1000}s hard limit).\n\n` +
+          `Timestamp: ${new Date().toISOString()}\n` +
+          `Soft-alert threshold: ${CYCLE_SLOW_ALERT_MS / 1000}s (already passed)\n` +
+          `Hard-timeout threshold: ${CYCLE_HARD_TIMEOUT_MS / 1000}s\n\n` +
+          `Investigate before the next cycle starts. Check daemon logs: ` +
+          `journalctl -u claude-orchestrator --since "15 minutes ago" | tail -100`,
+          "warning",
+          `watchdog-pressure:${Math.floor(now / PRESSURE_ALERT_DEDUP_MS)}`,
+        ).catch(() => {});
+      }, CYCLE_PRESSURE_ALERT_MS);
 
       // Soft alert: warn but don't interrupt
       const softAlert = setTimeout(() => {
@@ -472,6 +537,7 @@ export class Daemon {
       );
 
       const result = await Promise.race([cyclePromise.then(() => "done" as const), hardTimeout]);
+      clearTimeout(pressureAlert);
       clearTimeout(softAlert);
 
       if (result === "deadlock") {
