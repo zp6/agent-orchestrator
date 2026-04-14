@@ -370,6 +370,118 @@ describe("Marginal approval flagging (score 0.60–0.74)", () => {
   });
 });
 
+describe("Sub-0.50 hard-block guard", () => {
+  const HARD_BLOCK_THRESHOLD = 0.50;
+
+  /**
+   * Mirror the hard-block enforcement logic from parseResponse so we can unit-test
+   * boundary behaviour without calling the LLM.
+   */
+  function applyHardBlock(
+    approved: boolean,
+    score: number,
+  ): { approved: boolean; blockedReason?: "hard_block_sub50" } {
+    const isHardBlocked = score < HARD_BLOCK_THRESHOLD;
+    return {
+      approved: isHardBlocked ? false : approved,
+      ...(isHardBlocked && { blockedReason: "hard_block_sub50" as const }),
+    };
+  }
+
+  it("score below 0.50 is always rejected, even when LLM says approved", () => {
+    const result = applyHardBlock(true, 0.38);
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("hard_block_sub50");
+  });
+
+  it("score of 0 is hard-blocked", () => {
+    const result = applyHardBlock(true, 0);
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("hard_block_sub50");
+  });
+
+  it("score of 0.05 is hard-blocked", () => {
+    const result = applyHardBlock(true, 0.05);
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("hard_block_sub50");
+  });
+
+  it("score of 0.1 is hard-blocked", () => {
+    const result = applyHardBlock(true, 0.1);
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("hard_block_sub50");
+  });
+
+  it("score of 0.2 is hard-blocked", () => {
+    const result = applyHardBlock(true, 0.2);
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("hard_block_sub50");
+  });
+
+  it("score of 0.49 is hard-blocked (just below boundary)", () => {
+    const result = applyHardBlock(false, 0.49);
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("hard_block_sub50");
+  });
+
+  it("score of exactly 0.50 is NOT hard-blocked (boundary is exclusive)", () => {
+    const result = applyHardBlock(false, 0.50);
+    expect(result.approved).toBe(false);     // LLM said rejected — still rejected
+    expect(result.blockedReason).toBeUndefined();
+  });
+
+  it("score of exactly 0.50 approved by LLM passes through without hard-block", () => {
+    const result = applyHardBlock(true, 0.50);
+    expect(result.approved).toBe(true);
+    expect(result.blockedReason).toBeUndefined();
+  });
+
+  it("score of 0.51 is not hard-blocked", () => {
+    const result = applyHardBlock(false, 0.51);
+    expect(result.approved).toBe(false);     // LLM said rejected — still rejected
+    expect(result.blockedReason).toBeUndefined();
+  });
+
+  it("score of 0.80 is not hard-blocked", () => {
+    const result = applyHardBlock(true, 0.80);
+    expect(result.approved).toBe(true);
+    expect(result.blockedReason).toBeUndefined();
+  });
+
+  it("hard-block suppresses marginalApproval flag", () => {
+    // Score 0.48 is below the marginal range lower bound AND below HARD_BLOCK_THRESHOLD.
+    // The hard-block fires, so marginalApproval must not be set.
+    const score = 0.48;
+    const MARGINAL_LOW = 0.60;
+    const MARGINAL_HIGH = 0.74;
+    const isHardBlocked = score < HARD_BLOCK_THRESHOLD;
+    const isMarginalApproval = !isHardBlocked && true && score >= MARGINAL_LOW && score <= MARGINAL_HIGH;
+    expect(isMarginalApproval).toBe(false);
+    expect(isHardBlocked).toBe(true);
+  });
+
+  it("VerificationResult can express blockedReason field", () => {
+    const result: VerificationResult = {
+      approved: false,
+      score: 0.20,
+      notes: "Fundamentally incomplete work",
+      revision: "Start over — the implementation does not address the requirements.",
+      blockedReason: "hard_block_sub50",
+    };
+    expect(result.blockedReason).toBe("hard_block_sub50");
+    expect(result.approved).toBe(false);
+  });
+
+  it("blockedReason is absent for scores >= 0.50", () => {
+    const result: VerificationResult = {
+      approved: false,
+      score: 0.55,
+      notes: "Partially meets requirements",
+    };
+    expect(result.blockedReason).toBeUndefined();
+  });
+});
+
 describe("Quality dimensions breakdown", () => {
   it("VerificationResult includes optional dimensions field", () => {
     const result: VerificationResult = {

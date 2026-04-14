@@ -83,6 +83,16 @@ export interface VerificationResult {
    * Populated when marginalApproval is true; undefined otherwise.
    */
   marginalReason?: string;
+  /**
+   * Set to `'hard_block_sub50'` when the verifier's hard-block guard fires
+   * (score < 0.50). This indicates the task was unconditionally rejected by the
+   * quality gate, overriding any `approved: true` the LLM may have returned.
+   *
+   * Persisted to `verification_results.blocked_reason` so the dashboard rejection
+   * log can surface hard-block rejections distinctly from ordinary sub-threshold
+   * rejections.
+   */
+  blockedReason?: "hard_block_sub50";
 }
 
 /**
@@ -90,6 +100,22 @@ export interface VerificationResult {
  * Also recorded as the `threshold` field in `verification_results`.
  */
 const APPROVAL_THRESHOLD = 0.80;
+
+/**
+ * Hard-block threshold: any task scoring below this value is unconditionally
+ * rejected, regardless of the LLM's `approved` field.
+ *
+ * Scores below 0.50 represent fundamentally incomplete or incorrect work where
+ * the LLM has determined the task needs substantial revision. No amount of
+ * borderline leniency or marginal approval should override this gate — a
+ * `approved: true` with score 0.38 is a bug, not a valid outcome.
+ *
+ * When the guard fires, `blockedReason` is set to `'hard_block_sub50'` in the
+ * VerificationResult and persisted to `verification_results.blocked_reason` so
+ * operators can distinguish a hard-block rejection from a regular sub-threshold
+ * rejection in the dashboard rejection log.
+ */
+const HARD_BLOCK_THRESHOLD = 0.50;
 
 /**
  * Score range that triggers automatic second-pass review.
@@ -258,6 +284,7 @@ export class Verifier {
     score: number,
     approved: boolean,
     rejectionReason?: string,
+    blockedReason?: "hard_block_sub50",
   ): void {
     // Prefer the explicitly-wired store; fall back to a runtime check on the
     // main store (the reviewer's own StateStore implements IVerificationResultStore).
@@ -276,6 +303,7 @@ export class Verifier {
         score,
         first_pass: approved ? 1 : 0,
         rejection_reason: approved ? null : (rejectionReason ?? null),
+        blocked_reason: blockedReason ?? null,
         threshold: APPROVAL_THRESHOLD,
         agent_id: agentId,
         timestamp: new Date().toISOString(),
@@ -446,6 +474,7 @@ export class Verifier {
         firstPassResult.score,
         finalApproved,
         finalApproved ? undefined : (finalExplanation ?? finalResult.revision),
+        finalResult.blockedReason,
       );
 
       return finalResult;
@@ -495,6 +524,7 @@ export class Verifier {
       firstPassResult.score,
       firstPassResult.approved,
       firstPassResult.approved ? undefined : (firstPassResult.explanation ?? firstPassResult.revision),
+      firstPassResult.blockedReason,
     );
 
     return { ...firstPassResult, notes: enrichedNotes, revision: enrichedRevision };
@@ -804,15 +834,26 @@ export class Verifier {
         };
       }
 
+      // ── Hard-block guard ────────────────────────────────────────────────
+      // Any score below HARD_BLOCK_THRESHOLD (0.50) is unconditionally rejected.
+      // The LLM may return `approved: true` for very low scores in rare cases;
+      // this guard ensures those scores can never reach state.db as 'approved'.
+      const isHardBlocked = score < HARD_BLOCK_THRESHOLD;
+      const effectiveApproved = isHardBlocked ? false : approved;
+      const blockedReason: "hard_block_sub50" | undefined = isHardBlocked
+        ? "hard_block_sub50"
+        : undefined;
+
       return {
-        approved,
+        approved: effectiveApproved,
         score,
         notes: String(parsed.notes ?? ""),
         revision: parsed.revision ? String(parsed.revision) : undefined,
         explanation,
         dimensions,
-        ...(isMarginalApproval && { marginalApproval: true }),
-        ...(marginalReason && { marginalReason }),
+        ...(isMarginalApproval && !isHardBlocked && { marginalApproval: true }),
+        ...(marginalReason && !isHardBlocked && { marginalReason }),
+        ...(blockedReason && { blockedReason }),
       };
     } catch {
       return {

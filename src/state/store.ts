@@ -355,6 +355,14 @@ export class StateStore implements ITelegramStateStore {
         ON verification_results (task_id);
     `);
 
+    // Add blocked_reason column to verification_results (idempotent — issue #147).
+    // Records 'hard_block_sub50' when the sub-0.50 hard-block guard fires.
+    try {
+      this.db.exec("ALTER TABLE verification_results ADD COLUMN blocked_reason TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+
     // Secrets health checks table (idempotent — issue #125).
     // Records per-agent, per-secret mount status snapshots for fleet health monitoring.
     this.db.exec(`
@@ -1851,9 +1859,9 @@ export class StateStore implements ITelegramStateStore {
     this.db
       .prepare(
         `INSERT INTO verification_results
-           (task_id, score, first_pass, rejection_reason, threshold, agent_id, timestamp)
+           (task_id, score, first_pass, rejection_reason, blocked_reason, threshold, agent_id, timestamp)
          VALUES
-           (@task_id, @score, @first_pass, @rejection_reason, @threshold, @agent_id, @timestamp)`,
+           (@task_id, @score, @first_pass, @rejection_reason, @blocked_reason, @threshold, @agent_id, @timestamp)`,
       )
       .run(record);
   }

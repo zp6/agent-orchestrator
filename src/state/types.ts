@@ -895,6 +895,13 @@ export interface VerificationResultRecord {
   first_pass: number;
   /** LLM explanation when the task was rejected; null when approved. */
   rejection_reason: string | null;
+  /**
+   * Set to `'hard_block_sub50'` when the verifier's hard-block guard fires
+   * (score < 0.50). Null otherwise. Enables the dashboard rejection log to
+   * distinguish unconditional quality-gate blocks from ordinary sub-threshold
+   * rejections. Added in issue #147.
+   */
+  blocked_reason: string | null;
   /** The min_score threshold configured at the time of verification (e.g. 0.80). */
   threshold: number;
   /** The agent whose task was verified (agent_name from the task record). */
