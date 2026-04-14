@@ -31,6 +31,90 @@ verification:
   min_score: 0.7
   max_revisions: 1
 
+# ── Task type definitions ──────────────────────────────────────────────────────
+# Built-in types (implementation, research, facilitation) have hardcoded
+# defaults in the verifier and do not need entries here — but entries here
+# take precedence over the built-ins if you need to customise them.
+#
+# Add new non-coding agent task types here without touching reviewer-client.ts:
+#
+#   task_types:
+#     my-type:
+#       verification_prompt: |
+#         You are verifying ... Respond with ONLY a JSON object ...
+#       prompt_header: My Task Header    # default: "Task"
+#       result_header: Agent Output      # default: "Agent Response"
+#       dimensions: [dim1, dim2]         # documentation only
+#
+task_types:
+  planning:
+    verification_prompt: |
+      You are a quality reviewer for plans and roadmaps produced by an AI agent. Given a planning request and the agent's plan, assess the quality of the plan.
+
+      Respond with ONLY a JSON object (no markdown, no code fences):
+      {
+        "approved": true/false,
+        "score": 0.0-1.0,
+        "notes": "Brief assessment of plan quality",
+        "revision": "If not approved, specific guidance for improvement (omit if approved)",
+        "dimensions": {
+          "feasibility": 0.0-1.0 (can this plan realistically be executed given constraints?),
+          "completeness": 0.0-1.0 (does the plan cover all required steps and dependencies?),
+          "risk_assessment": 0.0-1.0 (are risks identified with mitigations?),
+          "clarity": 0.0-1.0 (are steps concrete and unambiguous enough to act on?)
+        }
+      }
+
+      Evaluate plan quality on:
+      - **Feasibility**: Is the plan realistic given time, resources, and technical constraints?
+      - **Completeness**: Are all required steps, dependencies, and success criteria included?
+      - **Risk assessment**: Are blockers and risks identified? Are mitigations proposed?
+      - **Clarity**: Are steps specific enough that an agent can act on them without further clarification?
+      - **Sequencing**: Are steps in a logical order with dependencies respected?
+
+      Scoring guide:
+      - 0.9-1.0: Excellent — comprehensive, feasible plan with clear steps, dependencies, and risk mitigations
+      - 0.7-0.89: Good — solid plan, minor gaps in risk coverage or step specificity
+      - 0.5-0.69: Acceptable — plan is understandable but lacks depth or has unclear steps
+      - Below 0.5: Needs revision — incomplete, infeasible, or too vague to execute
+    prompt_header: Planning Request
+    result_header: Agent Plan
+    dimensions: [feasibility, completeness, risk_assessment, clarity]
+
+  coordination:
+    verification_prompt: |
+      You are a quality reviewer for coordination and orchestration decisions produced by an AI agent. The agent evaluates cross-team dependencies, assigns work, and tracks progress across multiple parties.
+
+      Respond with ONLY a JSON object (no markdown, no code fences):
+      {
+        "approved": true/false,
+        "score": 0.0-1.0,
+        "notes": "Brief assessment of coordination quality",
+        "revision": "If not approved, specific guidance for improvement (omit if approved)",
+        "dimensions": {
+          "assignment_quality": 0.0-1.0 (were tasks assigned to the right agents/teams?),
+          "dependency_mapping": 0.0-1.0 (are cross-party dependencies identified and sequenced?),
+          "communication": 0.0-1.0 (are handoffs and status updates clearly defined?),
+          "completeness": 0.0-1.0 (does the coordination plan cover all parties and tasks?)
+        }
+      }
+
+      Evaluate coordination quality on:
+      - **Assignment quality**: Were tasks given to the right agents or teams based on capability?
+      - **Dependency mapping**: Are cross-party dependencies explicitly identified and ordered?
+      - **Communication**: Are handoff points, status updates, and escalation paths defined?
+      - **Completeness**: Does the plan account for all parties involved in the work?
+      - **Conflict avoidance**: Are parallel workstreams structured to avoid conflicts?
+
+      Scoring guide:
+      - 0.9-1.0: Excellent — clear assignments, full dependency graph, defined handoffs
+      - 0.7-0.89: Good — solid coordination with minor gaps in dependency or communication coverage
+      - 0.5-0.69: Acceptable — workable plan but some assignments are vague or dependencies implicit
+      - Below 0.5: Needs revision — key parties missing, dependencies unresolved, or assignments unclear
+    prompt_header: Coordination Request
+    result_header: Coordination Plan
+    dimensions: [assignment_quality, dependency_mapping, communication, completeness]
+
 agents:
   # ── Orchestrator ────────────────────────────────────────────────
   claude-agent-orchestrator:

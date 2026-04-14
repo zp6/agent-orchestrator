@@ -328,6 +328,53 @@ export class ReviewerClient {
   constructor(private config: OrchestratorConfig) {}
 
   /**
+   * Resolve the verification system prompt and user-prompt for a task type.
+   *
+   * Resolution order:
+   *   1. `task_types.<type>` entry in agents.yaml (fully configurable)
+   *   2. Built-in defaults for "implementation", "research", "facilitation"
+   *   3. Generic implementation prompt for unknown types
+   *
+   * This lets new non-coding task types (planning, coordination, etc.) be
+   * added via agents.yaml without any changes to this file.
+   */
+  private resolveVerificationPrompts(taskType: string, task: Task): {
+    systemPrompt: string;
+    userPrompt: string;
+  } {
+    // 1. Config-defined task type overrides built-ins
+    const customDef = this.config.task_types?.[taskType];
+    if (customDef) {
+      const descHeader = customDef.prompt_header ?? "Task";
+      const resultHeader = customDef.result_header ?? "Agent Response";
+      return {
+        systemPrompt: customDef.verification_prompt,
+        userPrompt: `## ${descHeader}\n${task.description ?? task.title}\n\n## ${resultHeader} (${task.agent_name})\n${task.result ?? "(no result)"}`,
+      };
+    }
+
+    // 2. Built-in defaults for known types
+    if (taskType === "research") {
+      return {
+        systemPrompt: VERIFY_RESEARCH_SYSTEM_PROMPT,
+        userPrompt: `## Research Question\n${task.description ?? task.title}\n\n## Agent Analysis (${task.agent_name})\n${task.result ?? "(no result)"}`,
+      };
+    }
+    if (taskType === "facilitation") {
+      return {
+        systemPrompt: VERIFY_FACILITATION_SYSTEM_PROMPT,
+        userPrompt: `## Meeting Request\n${task.description ?? task.title}\n\n## Facilitator Response (${task.agent_name})\n${task.result ?? "(no result)"}`,
+      };
+    }
+
+    // 3. Generic fallback (implementation + unknown types)
+    return {
+      systemPrompt: VERIFY_SYSTEM_PROMPT,
+      userPrompt: `## Task\n${task.description ?? task.title}\n\n## Agent Response (${task.agent_name})\n${task.result ?? "(no result)"}`,
+    };
+  }
+
+  /**
    * Verify a completed task's quality.
    * Sends the task description + result to the reviewer pool for assessment.
    */
@@ -335,17 +382,7 @@ export class ReviewerClient {
     const { client, model } = createLLMClient(this.config, "verifier");
 
     const taskType = task.task_type ?? "implementation";
-    const prompt = taskType === "research"
-      ? `## Research Question\n${task.description ?? task.title}\n\n## Agent Analysis (${task.agent_name})\n${task.result ?? "(no result)"}`
-      : taskType === "facilitation"
-        ? `## Meeting Request\n${task.description ?? task.title}\n\n## Facilitator Response (${task.agent_name})\n${task.result ?? "(no result)"}`
-        : `## Task\n${task.description ?? task.title}\n\n## Agent Response (${task.agent_name})\n${task.result ?? "(no result)"}`;
-
-    const systemPrompt = taskType === "research"
-      ? VERIFY_RESEARCH_SYSTEM_PROMPT
-      : taskType === "facilitation"
-        ? VERIFY_FACILITATION_SYSTEM_PROMPT
-        : VERIFY_SYSTEM_PROMPT;
+    const { systemPrompt, userPrompt: prompt } = this.resolveVerificationPrompts(taskType, task);
 
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), DEFAULT_LLM_TIMEOUT_MS);

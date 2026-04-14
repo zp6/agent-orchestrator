@@ -50,7 +50,13 @@ export interface ConfigReloadRecord {
 
 export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed" | "escalated" | "result_missing" | "superseded";
 export type TaskSource = "github" | "linear" | "slack" | "manual" | "pr-feedback";
-export type TaskType = "implementation" | "research" | "facilitation";
+/**
+ * Identifies the kind of work a task represents.
+ * Built-in types: "implementation" | "research" | "facilitation".
+ * Additional types can be introduced via the `task_types` map in agents.yaml
+ * without modifying source code — the verifier loads their prompts dynamically.
+ */
+export type TaskType = string;
 
 export type VerificationStatus = "pending" | "approved" | "rejected" | null;
 

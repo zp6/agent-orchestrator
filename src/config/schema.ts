@@ -526,6 +526,51 @@ export interface DispatchConfig {
   max_open_prs?: number;
 }
 
+/**
+ * Configuration for a single task type, defining how the verifier assesses
+ * work of that type.  Built-in types (implementation, research, facilitation)
+ * have hardcoded defaults and do not need to be listed here — but entries in
+ * `task_types` override the built-in prompts when present.
+ *
+ * Add new non-coding agent types here without touching reviewer-client.ts.
+ *
+ * Example (in agents.yaml):
+ *   task_types:
+ *     planning:
+ *       verification_prompt: |
+ *         You are verifying a plan produced by an AI agent...
+ *       prompt_header: Planning Request
+ *       result_header: Agent Plan
+ *       dimensions: [feasibility, completeness, risk_assessment, clarity]
+ */
+export interface TaskTypeDefinition {
+  /**
+   * Full system prompt sent to the verifier LLM for this task type.
+   * Must instruct the LLM to respond with a JSON object matching
+   * VerificationResult (approved, score, notes, revision?, dimensions?).
+   */
+  verification_prompt: string;
+  /**
+   * Label for the task description section in the user-facing prompt.
+   * Defaults to "Task" when omitted.
+   * Example: "Research Question", "Meeting Request", "Planning Request"
+   */
+  prompt_header?: string;
+  /**
+   * Label for the agent result section in the user-facing prompt.
+   * Defaults to "Agent Response" when omitted.
+   * Example: "Agent Analysis", "Facilitator Response", "Agent Plan"
+   */
+  result_header?: string;
+  /**
+   * Dimension names that appear in the `dimensions` map of the verification
+   * result.  Used for documentation and dashboard display only — the LLM
+   * chooses the actual keys; this field does not enforce them.
+   * Example: ["feasibility", "completeness", "risk_assessment", "clarity"]
+   */
+  dimensions?: string[];
+}
+
 export interface OrchestratorConfig {
   proxy: ProxyConfig;
   llm?: LLMConfig;
@@ -536,6 +581,14 @@ export interface OrchestratorConfig {
   template_dir?: string;
   providers?: Record<string, ProviderConfig>;
   verification?: VerificationConfig;
+  /**
+   * Configurable task type definitions.  Keyed by task type string.
+   * Built-in types (implementation, research, facilitation) have hardcoded
+   * defaults and do not need entries here, but entries here take precedence.
+   * Add new non-coding task types (planning, coordination, security-audit,
+   * etc.) without modifying reviewer-client.ts.
+   */
+  task_types?: Record<string, TaskTypeDefinition>;
   pr_review?: PRReviewConfig;
   conflict_risk?: ConflictRiskConfig;
   escalation?: EscalationConfig;
