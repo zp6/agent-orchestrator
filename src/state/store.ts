@@ -1111,6 +1111,23 @@ export interface SignalActivityEvent {
   context: string | null;
 }
 
+/**
+ * SQL WHERE clauses that exclude infrastructure/transient failures from
+ * retry-budget counts.  Centralised so all consumers stay in sync when
+ * new patterns are discovered.  Each clause is prefixed with AND and
+ * assumes `result` is in scope.
+ */
+const INFRA_ERROR_EXCLUSION_SQL = `
+           AND (result IS NULL
+             OR result NOT LIKE 'connection-error-exhausted%')
+           AND (result IS NULL OR result != 'Connection error.')
+           AND (result IS NULL OR result NOT LIKE 'Request timed out%')
+           AND (result IS NULL OR result NOT LIKE 'Request was aborted%')
+           AND (result IS NULL OR result NOT LIKE 'Timed out: dispatched%')
+           AND (result IS NULL OR result NOT LIKE 'Escalated after%Connection error%')
+           AND (result IS NULL OR result NOT LIKE 'Auto-cleaned:%')
+           AND (result IS NULL OR result NOT LIKE 'Cleared:%')`;
+
 const MIGRATIONS = `
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
@@ -1832,10 +1849,13 @@ export class StateStore {
    * attempts).  Pending / dispatched / in-progress / done tasks are excluded
    * because they haven't definitively failed yet.
    *
-   * Connection-error failures (result starts with "connection-error-exhausted")
-   * are excluded because they represent infrastructure problems (spawn failures,
-   * network timeouts), not genuine task failures.  Counting them toward the
-   * escalation limit caused premature escalation of otherwise viable tasks.
+   * Infrastructure failures are excluded because they represent proxy outages,
+   * spawn failures, or network timeouts — not genuine task failures.  Counting
+   * them toward the escalation limit caused premature blocking of viable tasks.
+   *
+   * Excluded patterns: connection-error-exhausted*, Connection error.,
+   * Request timed out*, Request was aborted*, Timed out: dispatched*,
+   * Escalated after*Connection error*, Auto-cleaned:*, Cleared:*
    */
   countFailuresForSourceRef(sourceRef: string): number {
     const clearedRowid = this.getFailureHistoryClearedRowid("github", sourceRef);
@@ -1847,7 +1867,7 @@ export class StateStore {
            AND parent_task_id IS NULL
            AND status IN ('failed', 'escalated')
            AND (? IS NULL OR rowid > ?)
-           AND (result IS NULL OR result NOT LIKE 'connection-error-exhausted%')`,
+           ${INFRA_ERROR_EXCLUSION_SQL}`,
       )
       .get(sourceRef, clearedRowid, clearedRowid) as { total: number };
     return row?.total ?? 0;
@@ -1856,7 +1876,7 @@ export class StateStore {
   /**
    * Count failed attempts for a specific source_ref by a specific agent.
    *
-   * Uses the same attempt semantics and connection-error exclusion as
+   * Uses the same attempt semantics and infrastructure-error exclusion as
    * countFailuresForSourceRef(), but narrows the history to one agent so the
    * dispatcher can detect repeated issue-specific failures and reroute.
    */
@@ -1869,7 +1889,7 @@ export class StateStore {
            AND agent_name = ?
            AND parent_task_id IS NULL
            AND status IN ('failed', 'escalated')
-           AND (result IS NULL OR result NOT LIKE 'connection-error-exhausted%')`,
+           ${INFRA_ERROR_EXCLUSION_SQL}`,
       )
       .get(sourceRef, agentName) as { total: number };
     return row?.total ?? 0;
@@ -3529,6 +3549,56 @@ export class StateStore {
       failure_history_cleared_at: clearedAt,
       failure_history_cleared_rowid: row.max_rowid,
     });
+  }
+
+  /**
+   * Return distinct source_refs whose ALL recent failures are infrastructure
+   * errors (connection errors, timeouts, aborted requests).  Source_refs that
+   * also have genuine (non-infrastructure) failures are excluded to avoid
+   * accidentally resetting their retry budget.
+   *
+   * Used by the daemon to clear failure history after proxy recovery.
+   */
+  getInfrastructureFailedSourceRefs(withinHours = 48): string[] {
+    // Find source_refs with at least one infra failure...
+    const withInfra = this.db
+      .prepare(
+        `SELECT DISTINCT source_ref FROM tasks
+         WHERE status = 'failed'
+           AND source_ref IS NOT NULL
+           AND created_at > datetime('now', '-' || ? || ' hours')
+           AND (result = 'Connection error.'
+             OR result LIKE 'Request timed out%'
+             OR result LIKE 'Request was aborted%'
+             OR result LIKE 'Timed out: dispatched%')`,
+      )
+      .all(withinHours) as { source_ref: string }[];
+
+    // ...then exclude any that ALSO have non-infrastructure failures in the same window
+    return withInfra
+      .filter(({ source_ref }) => {
+        const nonInfra = this.db
+          .prepare(
+            `SELECT 1 FROM tasks
+             WHERE status = 'failed'
+               AND source_ref = ?
+               AND created_at > datetime('now', '-' || ? || ' hours')
+               AND result IS NOT NULL
+               AND result != 'Connection error.'
+               AND result NOT LIKE 'Request timed out%'
+               AND result NOT LIKE 'Request was aborted%'
+               AND result NOT LIKE 'Timed out: dispatched%'
+               AND result NOT LIKE 'connection-error-exhausted%'
+               AND result NOT LIKE 'Escalated after%Connection error%'
+               AND result NOT LIKE 'Resolved externally:%'
+               AND result NOT LIKE 'Auto-cleaned:%'
+               AND result NOT LIKE 'Cleared:%'
+             LIMIT 1`,
+          )
+          .get(source_ref, withinHours);
+        return !nonInfra;
+      })
+      .map((r) => r.source_ref);
   }
 
   boostSourceRefPriority(source: string, sourceRef: string, boostedAt = new Date().toISOString()): void {

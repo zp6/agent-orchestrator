@@ -69,6 +69,8 @@ const STANDUP_MEETING_EVERY_N_CYCLES = 288;  // ~24h at 5min interval
 const BLUESKY_MEETING_EVERY_N_CYCLES = 2016; // ~7 days at 5min interval
 const ROADMAP_PROPOSAL_EVERY_N_CYCLES = 288; // ~24h at 5min interval
 const SKIP_PATTERN_CHECK_EVERY_N_CYCLES = 288; // ~24h at 5min interval
+const PROXY_HEALTH_CHECK_EVERY_N_CYCLES = 3;   // ~15min — check proxy server is reachable
+const CLOSED_ISSUE_FAILURE_CLEANUP_EVERY_N_CYCLES = 60; // ~5h — clear stale failures for closed issues
 
 /**
  * Maximum time a single poll cycle is allowed to run before the watchdog
@@ -541,10 +543,16 @@ export class Daemon {
         this.checkResultMissingTasks(time),
         this.processRetries(time),
       ];
+      if (this.cycleCount % PROXY_HEALTH_CHECK_EVERY_N_CYCLES === 0) {
+        batch1.push(this.checkProxyHealth(time));
+      }
       // Sync tasks are wrapped as resolved promises
       this.checkStaleTasks(time);
       if (this.cycleCount % CLOSED_ISSUE_CHECK_EVERY_N_CYCLES === 0) {
         this.cancelClosedIssueTasks(time);
+      }
+      if (this.cycleCount % CLOSED_ISSUE_FAILURE_CLEANUP_EVERY_N_CYCLES === 0) {
+        this.cleanupFailedTasksForClosedIssues(time);
       }
       await this.runBatch("housekeeping", batch1);
 
@@ -1046,6 +1054,136 @@ export class Daemon {
       }
     } catch (err) {
       this.log.error("Closed-issue task cancellation failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // ── Proxy health check ──────────────────────────────────────────────────
+  /** Track consecutive proxy failures for escalation. */
+  private proxyFailureCount = 0;
+
+  /**
+   * Ping the proxy server (not the management API) to confirm it can route
+   * LLM requests.  When the proxy is down, every dispatch/verify/review call
+   * silently fails with "Connection error" or "Request was aborted", burning
+   * retry budget and deadlocking the cycle.  This check detects that early.
+   */
+  private async checkProxyHealth(time: string): Promise<void> {
+    const proxyUrl = this.config.proxy.url;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10_000);
+      const res = await fetch(`${proxyUrl}/health`, { signal: controller.signal });
+      clearTimeout(timeout);
+
+      if (res.ok) {
+        if (this.proxyFailureCount > 0) {
+          this.log.info("Proxy recovered", { previousFailures: this.proxyFailureCount });
+          // Clear infrastructure-error failure history so affected issues can be
+          // re-dispatched now that the proxy is back.
+          this.clearInfrastructureFailures(time);
+          await notifyOperator(
+            `Proxy recovered`,
+            `Proxy server at ${proxyUrl} is back online after ${this.proxyFailureCount} failed check(s). Infrastructure failure history cleared.`,
+            "info",
+          );
+        }
+        this.proxyFailureCount = 0;
+        return;
+      }
+      this.proxyFailureCount++;
+    } catch {
+      this.proxyFailureCount++;
+    }
+
+    this.log.warn("Proxy health check failed", {
+      url: proxyUrl,
+      consecutiveFailures: this.proxyFailureCount,
+    });
+
+    if (this.proxyFailureCount === 2) {
+      // Alert exactly once at threshold — not every check while proxy is down.
+      await notifyOperator(
+        "Proxy server unreachable",
+        `Proxy at ${proxyUrl} has failed ${this.proxyFailureCount} consecutive health checks. All LLM routing is down — dispatches will fail with connection errors.`,
+        "critical",
+      );
+    }
+  }
+
+  // ── Closed-issue failure cleanup ───────────────────────────────────────
+
+  /**
+   * Sweep failed tasks whose source issue has been closed and clear their
+   * failure history.  Without this, closed issues accumulate failed records
+   * that permanently count toward retry_limit_exceeded, even though the
+   * source_ref will never be re-dispatched.  Clearing the history also
+   * unblocks the source_ref if the issue is ever reopened.
+   */
+  private cleanupFailedTasksForClosedIssues(time: string): void {
+    try {
+      const failedTasks = this.store.listTasks({ status: "failed", limit: 200 });
+      const githubTasks = failedTasks.filter(
+        (t) => t.source === "github" && t.source_ref,
+      );
+
+      if (githubTasks.length === 0) return;
+
+      // Deduplicate source_refs so we only clear once per issue
+      const closedRefs = new Set<string>();
+      for (const task of githubTasks) {
+        if (!task.source_ref || closedRefs.has(task.source_ref)) continue;
+        const repo = extractRepoFromSourceRef(task.source_ref);
+        const issueMatch = task.source_ref.match(/#(\d+)$/);
+        if (!repo || !issueMatch) continue;
+
+        const issueNumber = parseInt(issueMatch[1], 10);
+        const issueState = cachedGetIssueState(repo, issueNumber);
+        if (issueState.state === "closed") {
+          closedRefs.add(task.source_ref);
+        }
+      }
+
+      for (const ref of closedRefs) {
+        this.store.clearFailureHistoryForSourceRef("github", ref);
+      }
+
+      if (closedRefs.size > 0) {
+        this.log.info("Closed-issue failure cleanup", { cleared: closedRefs.size });
+        console.log(`[${time}] Closed-issue failure cleanup: cleared failure history for ${closedRefs.size} closed issue(s)`);
+      }
+    } catch (err) {
+      this.log.warn("Closed-issue failure cleanup failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // ── Infrastructure failure history clear ───────────────────────────────
+
+  /**
+   * After proxy recovery, clear failure history for source_refs whose only
+   * recent failures are infrastructure errors (connection error, timeout,
+   * aborted).  This allows those issues to be re-dispatched immediately
+   * rather than waiting for the 24h recency window to expire.
+   */
+  private clearInfrastructureFailures(time: string): void {
+    try {
+      const infraRefs = this.store.getInfrastructureFailedSourceRefs(48);
+
+      let cleared = 0;
+      for (const ref of infraRefs) {
+        this.store.clearFailureHistoryForSourceRef("github", ref);
+        cleared++;
+      }
+
+      if (cleared > 0) {
+        this.log.info("Infrastructure failure history cleared", { cleared });
+        console.log(`[${time}] Proxy recovery: cleared failure history for ${cleared} source ref(s)`);
+      }
+    } catch (err) {
+      this.log.warn("Infrastructure failure clear failed", {
         error: err instanceof Error ? err.message : String(err),
       });
     }
