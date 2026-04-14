@@ -37,6 +37,14 @@ export type { SupervisorDecision, ConflictStatsProvider, PRConfidenceProvider, R
 
 export { RoutingAccuracyTracker } from "./reviewer/routing-accuracy.js";
 
+export { RerouteQualityTracker } from "./reviewer/reroute-quality-tracker.js";
+export type {
+  RerouteDecision,
+  RerouteQualityStats,
+  RerouteQualityReport,
+  RerouteQualityProvider,
+} from "./reviewer/reroute-quality-tracker.js";
+
 export {
   ScoreCalibrator,
   detectOverApproval,

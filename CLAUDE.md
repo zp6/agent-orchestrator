@@ -51,6 +51,8 @@ When this container is used for LLM PR reviews:
 - Calibration drift monitor: alert when score distributions shift significantly
 - PR iteration metrics: surface multi-round review patterns and coaching directives
 - Routing accuracy tracker: per-agent quality metrics to inform routing decisions
+- Reroute quality tracker: flag auto-reroutes that degrade outcomes; identify problematic routing patterns
+- Shared security allowlist: example/template file patterns synchronized with security scanner in agent-proxy
 - Schema-consumer impact detection: flag cross-repo schema changes in PR reviews
 - Standup handler: process zero-action standups; retry failed synthesis
 - Health recovery: detect and report agent degraded/recovering transitions
@@ -75,6 +77,8 @@ src/
   supervisor-log.ts                 — queryable supervisor decision log
   client/
     llm-client.ts                   — Anthropic SDK wrapper; prompt-caching support
+  config/
+    security-allowlist.ts           — shared example/template file patterns (synced with agent-proxy)
   reviewer/
     pr-reviewer.ts                  — PR review: LLM eval, approve/request-changes/escalate
     verifier.ts                     — task verification: 0-1 score, dimension breakdown, second-pass
@@ -84,6 +88,7 @@ src/
     calibration-drift.ts            — score distribution drift alerts with dedup cooldown
     pr-iteration-metrics.ts         — multi-round PR review patterns and coaching directives
     routing-accuracy.ts             — per-agent quality stats to inform routing preferences
+    reroute-quality-tracker.ts      — reroute decision correlation with quality outcomes; degradation detection
     schema-impact.ts                — schema-consumer map; inject consumer notice into reviews
     issue-age.ts                    — issue age bucketing and severity (0-7d / 7-14d / 30d+)
     issue-creator.ts                — create GitHub issues for detected improvements

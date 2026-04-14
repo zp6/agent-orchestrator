@@ -21,6 +21,7 @@ import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
 import type { IStateStore, IStandupHealthStore, MergeQueueEntry, ReviewCategory } from "../state/types.js";
+import { isExampleOrTemplateFile as isExampleOrTemplateFileFromConfig } from "../config/security-allowlist.js";
 import {
   detectSchemaChanges,
   extractChangedFilesFromDiff,
@@ -1999,6 +2000,10 @@ function shellEscape(s: string): string {
  * Returns true if the file path is an example, template, or sample file that
  * is expected to contain placeholder credential values.
  *
+ * This function is re-exported from src/config/security-allowlist.ts to ensure
+ * consistency with the security scanner in agent-proxy. Both systems must use
+ * the same patterns to prevent false-positive security alerts on example files.
+ *
  * Matches:
  *   - Files whose basename contains `.example.`, `.template.`, or `.sample.`
  *     (e.g. `docker-compose.example.yml`, `config.template.json`)
@@ -2006,27 +2011,10 @@ function shellEscape(s: string): string {
  *     (e.g. `example.env`, `template.yaml`)
  *   - Files under an `examples/`, `templates/`, or `samples/` directory
  *     anywhere in their path
+ *   - Files whose first 5 lines contain example/template headers
  */
-export function isExampleOrTemplateFile(filePath: string): boolean {
-  const normalized = filePath.replace(/\\/g, "/");
-  const segments = normalized.split("/");
-  const basename = segments[segments.length - 1] ?? "";
-
-  // Directory check: any path segment is examples/, templates/, or samples/
-  const exampleDirs = new Set(["examples", "templates", "samples"]);
-  for (const seg of segments.slice(0, -1)) {
-    if (exampleDirs.has(seg.toLowerCase())) return true;
-  }
-
-  // Basename check: contains .example. / .template. / .sample. infix
-  const infixPattern = /\.(example|template|sample)\./i;
-  if (infixPattern.test(basename)) return true;
-
-  // Basename check: starts with example. / template. / sample.
-  const prefixPattern = /^(example|template|sample)\./i;
-  if (prefixPattern.test(basename)) return true;
-
-  return false;
+export function isExampleOrTemplateFile(filePath: string, content?: string): boolean {
+  return isExampleOrTemplateFileFromConfig(filePath, content);
 }
 
 /**
