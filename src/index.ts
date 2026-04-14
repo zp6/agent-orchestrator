@@ -106,6 +106,32 @@ export type { DetectedImprovement } from "./reviewer/improvement-detector.js";
 export { HealthIncidentRouter } from "./reviewer/health-incident-router.js";
 export type { HealthIncident, HealthIncidentProvider } from "./reviewer/health-incident-router.js";
 
+// Standup dispatch guard (issue #98) — skip dispatch for zero-action standups
+export {
+  shouldSkipStandupDispatch,
+  looksLikeStandupTask,
+  extractStandupIssueNumber,
+} from "./reviewer/standup-dispatch-guard.js";
+export type {
+  StandupDispatchDecision,
+  StandupDispatchGuardOptions,
+} from "./reviewer/standup-dispatch-guard.js";
+
+// Standup handler utilities (used by guard and PR reviewer)
+export {
+  isStandupIssue,
+  extractActionItemCount,
+  handleZeroActionStandup,
+  isSynthesisFailed,
+  detectSynthesisLabel,
+  buildStandupAcknowledgmentComment,
+  applyGitHubSynthesisLabel,
+  checkAndEscalateFallbackThreshold,
+  postFallbackActionItems,
+  generateFallbackActionItems,
+} from "./reviewer/standup-handler.js";
+export type { GitHubIssue } from "./reviewer/standup-handler.js";
+
 // PR iteration metrics (issue #110)
 export { PRIterationMetrics, categoriseReviewComment, formatIterationReport } from "./reviewer/pr-iteration-metrics.js";
 export type { PRIterationStorePort } from "./reviewer/pr-iteration-metrics.js";
