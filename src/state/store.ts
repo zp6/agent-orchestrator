@@ -6775,4 +6775,286 @@ export class StateStore {
       UPDATE skip_pattern_issues SET resolved_at = ? WHERE reason_key = ?
     `).run(new Date().toISOString(), reasonKey);
   }
+
+  // ── Multi-repo coordination groups ─────────────────────────────────────────
+
+  /**
+   * Lazily create the coordination_groups table (called on first use so
+   * existing deployments get the table without a manual migration step).
+   */
+  private ensureCoordinationGroupsTable(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS coordination_groups (
+        id                    TEXT PRIMARY KEY,
+        parent_task_id        TEXT NOT NULL,
+        parent_source_ref     TEXT,
+        change_sets_json      TEXT NOT NULL,
+        child_task_ids_json   TEXT NOT NULL DEFAULT '{}',
+        child_pr_numbers_json TEXT NOT NULL DEFAULT '{}',
+        child_pr_urls_json    TEXT NOT NULL DEFAULT '{}',
+        status                TEXT NOT NULL DEFAULT 'pending',
+        created_at            TEXT NOT NULL,
+        updated_at            TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_coordination_groups_parent_task
+        ON coordination_groups(parent_task_id);
+      CREATE INDEX IF NOT EXISTS idx_coordination_groups_status
+        ON coordination_groups(status);
+    `);
+  }
+
+  /**
+   * Persist a new CoordinationGroup record.
+   */
+  createCoordinationGroup(group: {
+    id: string;
+    parentTaskId: string;
+    parentSourceRef: string | null;
+    changeSets: unknown[];
+    childTaskIds: Record<string, string>;
+    childPRNumbers: Record<string, number>;
+    childPRUrls: Record<string, string>;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+  }): void {
+    this.ensureCoordinationGroupsTable();
+    this.db.prepare(`
+      INSERT INTO coordination_groups
+        (id, parent_task_id, parent_source_ref, change_sets_json,
+         child_task_ids_json, child_pr_numbers_json, child_pr_urls_json,
+         status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      group.id,
+      group.parentTaskId,
+      group.parentSourceRef,
+      JSON.stringify(group.changeSets),
+      JSON.stringify(group.childTaskIds),
+      JSON.stringify(group.childPRNumbers),
+      JSON.stringify(group.childPRUrls),
+      group.status,
+      group.createdAt,
+      group.updatedAt,
+    );
+  }
+
+  /**
+   * Retrieve a coordination group by its ID.
+   */
+  getCoordinationGroup(id: string): {
+    id: string;
+    parentTaskId: string;
+    parentSourceRef: string | null;
+    changeSets: unknown[];
+    childTaskIds: Record<string, string>;
+    childPRNumbers: Record<string, number>;
+    childPRUrls: Record<string, string>;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+  } | null {
+    this.ensureCoordinationGroupsTable();
+    const row = this.db.prepare(
+      "SELECT * FROM coordination_groups WHERE id = ?",
+    ).get(id) as {
+      id: string;
+      parent_task_id: string;
+      parent_source_ref: string | null;
+      change_sets_json: string;
+      child_task_ids_json: string;
+      child_pr_numbers_json: string;
+      child_pr_urls_json: string;
+      status: string;
+      created_at: string;
+      updated_at: string;
+    } | undefined;
+
+    if (!row) return null;
+    return this.deserializeCoordinationGroupRow(row);
+  }
+
+  /**
+   * Find the coordination group that contains the given child task ID.
+   * Returns null if this task is not part of any coordination group.
+   */
+  getCoordinationGroupByChildTaskId(childTaskId: string): {
+    id: string;
+    parentTaskId: string;
+    parentSourceRef: string | null;
+    changeSets: unknown[];
+    childTaskIds: Record<string, string>;
+    childPRNumbers: Record<string, number>;
+    childPRUrls: Record<string, string>;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+  } | null {
+    this.ensureCoordinationGroupsTable();
+    // child_task_ids_json is a JSON object; use LIKE for a cheap filter before
+    // parsing in application code (avoids a full-table scan with JSON_EACH).
+    const rows = this.db.prepare(`
+      SELECT * FROM coordination_groups
+      WHERE child_task_ids_json LIKE ?
+    `).all(`%${childTaskId}%`) as Array<{
+      id: string;
+      parent_task_id: string;
+      parent_source_ref: string | null;
+      change_sets_json: string;
+      child_task_ids_json: string;
+      child_pr_numbers_json: string;
+      child_pr_urls_json: string;
+      status: string;
+      created_at: string;
+      updated_at: string;
+    }>;
+
+    for (const row of rows) {
+      const group = this.deserializeCoordinationGroupRow(row);
+      if (Object.values(group.childTaskIds).includes(childTaskId)) {
+        return group;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Find the coordination group for a given parent task ID.
+   */
+  getCoordinationGroupByParentTaskId(parentTaskId: string): {
+    id: string;
+    parentTaskId: string;
+    parentSourceRef: string | null;
+    changeSets: unknown[];
+    childTaskIds: Record<string, string>;
+    childPRNumbers: Record<string, number>;
+    childPRUrls: Record<string, string>;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+  } | null {
+    this.ensureCoordinationGroupsTable();
+    const row = this.db.prepare(
+      "SELECT * FROM coordination_groups WHERE parent_task_id = ? ORDER BY created_at DESC LIMIT 1",
+    ).get(parentTaskId) as {
+      id: string;
+      parent_task_id: string;
+      parent_source_ref: string | null;
+      change_sets_json: string;
+      child_task_ids_json: string;
+      child_pr_numbers_json: string;
+      child_pr_urls_json: string;
+      status: string;
+      created_at: string;
+      updated_at: string;
+    } | undefined;
+
+    if (!row) return null;
+    return this.deserializeCoordinationGroupRow(row);
+  }
+
+  /**
+   * Update fields on an existing coordination group.
+   */
+  updateCoordinationGroup(
+    id: string,
+    updates: {
+      status?: string;
+      childPRNumbers?: Record<string, number>;
+      childPRUrls?: Record<string, string>;
+    },
+  ): void {
+    this.ensureCoordinationGroupsTable();
+    const now = new Date().toISOString();
+    const sets: string[] = ["updated_at = ?"];
+    const params: unknown[] = [now];
+
+    if (updates.status !== undefined) {
+      sets.push("status = ?");
+      params.push(updates.status);
+    }
+    if (updates.childPRNumbers !== undefined) {
+      sets.push("child_pr_numbers_json = ?");
+      params.push(JSON.stringify(updates.childPRNumbers));
+    }
+    if (updates.childPRUrls !== undefined) {
+      sets.push("child_pr_urls_json = ?");
+      params.push(JSON.stringify(updates.childPRUrls));
+    }
+
+    params.push(id);
+    this.db.prepare(
+      `UPDATE coordination_groups SET ${sets.join(", ")} WHERE id = ?`,
+    ).run(...params);
+  }
+
+  /**
+   * Return coordination groups in a given status (for daemon polling).
+   */
+  getCoordinationGroupsByStatus(status: string): Array<{
+    id: string;
+    parentTaskId: string;
+    parentSourceRef: string | null;
+    changeSets: unknown[];
+    childTaskIds: Record<string, string>;
+    childPRNumbers: Record<string, number>;
+    childPRUrls: Record<string, string>;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+  }> {
+    this.ensureCoordinationGroupsTable();
+    const rows = this.db.prepare(
+      "SELECT * FROM coordination_groups WHERE status = ? ORDER BY created_at ASC",
+    ).all(status) as Array<{
+      id: string;
+      parent_task_id: string;
+      parent_source_ref: string | null;
+      change_sets_json: string;
+      child_task_ids_json: string;
+      child_pr_numbers_json: string;
+      child_pr_urls_json: string;
+      status: string;
+      created_at: string;
+      updated_at: string;
+    }>;
+    return rows.map((r) => this.deserializeCoordinationGroupRow(r));
+  }
+
+  private deserializeCoordinationGroupRow(row: {
+    id: string;
+    parent_task_id: string;
+    parent_source_ref: string | null;
+    change_sets_json: string;
+    child_task_ids_json: string;
+    child_pr_numbers_json: string;
+    child_pr_urls_json: string;
+    status: string;
+    created_at: string;
+    updated_at: string;
+  }): {
+    id: string;
+    parentTaskId: string;
+    parentSourceRef: string | null;
+    changeSets: unknown[];
+    childTaskIds: Record<string, string>;
+    childPRNumbers: Record<string, number>;
+    childPRUrls: Record<string, string>;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+  } {
+    return {
+      id: row.id,
+      parentTaskId: row.parent_task_id,
+      parentSourceRef: row.parent_source_ref,
+      changeSets: JSON.parse(row.change_sets_json),
+      childTaskIds: JSON.parse(row.child_task_ids_json),
+      childPRNumbers: JSON.parse(row.child_pr_numbers_json),
+      childPRUrls: JSON.parse(row.child_pr_urls_json),
+      status: row.status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
 }

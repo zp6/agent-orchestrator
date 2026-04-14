@@ -30,6 +30,11 @@ import {
 import { routeModel } from "./model-router.js";
 import { detectAndCreateFollowUps, formatFollowUpNote } from "./cross-repo-tracker.js";
 import {
+  detectMultiRepoChangeSets,
+  createCoordinationGroup,
+  checkAndAdvanceCoordination,
+} from "./multi-repo-coordinator.js";
+import {
   runGitHubPreDispatchValidation,
   type PreDispatchValidationResult,
 } from "./pre-dispatch-validator.js";
@@ -1074,40 +1079,108 @@ export class Dispatcher {
       }
 
       // Detect cross-repo follow-ups: if the task description mentions work
-      // that belongs to a peer repo, create a child issue there so the
-      // downstream agent picks it up in the next supervisor cycle.
+      // that belongs to a peer repo, coordinate it as a linked set of tasks
+      // rather than creating orphan GitHub issues.
+      //
+      // Strategy:
+      //   1. If this task is a CHILD of a coordination group, advance the group
+      //      (link PRs, trigger ordered merge when all siblings are done).
+      //   2. If this is a TOP-LEVEL task with multi-repo requirements, create a
+      //      coordination group with child tasks per peer repo (replaces orphan
+      //      follow-up issues for implementation tasks).
+      //   3. Fall back to the legacy orphan-issue path for edge cases that the
+      //      coordinator doesn't handle (research tasks, depth-limited chains).
       const completedTask = this.store.getTask(task.id);
       let finalResult = response.content;
       if (completedTask) {
-        const followUps = detectAndCreateFollowUps(
-          completedTask,
-          agentName,
-          this.config,
-          // AC#3: increment the "follow_ups_avoided" counter whenever a
-          // cross-repo follow-up is skipped because an open PR already closes
-          // the parent issue.  The improvement detector surfaces this count as
-          // a positive efficiency signal in the supervisor context.
-          () => { this.store.incrementStat("follow_ups_avoided"); },
-        );
-        if (followUps.length > 0) {
-          finalResult += formatFollowUpNote(followUps);
-          // Record lineage mappings so that when trigger polling picks up the
-          // follow-up issues, the resulting tasks inherit this task's lineage group.
-          const lineageGroupId = completedTask.lineage_group_id ?? completedTask.id;
-          for (const followUp of followUps) {
-            const followUpSourceRef = `${followUp.repo}#${followUp.issueNumber}`;
-            this.store.recordLineageMapping(
-              followUpSourceRef,
-              lineageGroupId,
-              completedTask.source_ref ?? undefined,
-            );
-          }
-          this.log.info("Cross-repo follow-ups created with lineage tracking", {
+        // Step 1: if this task is part of a coordination group, advance it.
+        try {
+          await checkAndAdvanceCoordination(task.id, this.store, this.config);
+        } catch (err) {
+          this.log.error("checkAndAdvanceCoordination failed (non-fatal)", {
             taskId: task.id,
-            agentName,
-            lineageGroupId,
-            followUps: followUps.map((f) => `${f.repo}#${f.issueNumber}`),
+            error: err instanceof Error ? err.message : String(err),
           });
+        }
+
+        // Step 2: detect multi-repo requirements for implementation tasks.
+        // Only fire when this is NOT already a coordination child task, to
+        // prevent cascade creation (child tasks should not spawn more groups).
+        const isCoordinationChild = !!this.store.getCoordinationGroupByChildTaskId(task.id);
+        if (!isCoordinationChild && completedTask.task_type === "implementation") {
+          const changeSets = detectMultiRepoChangeSets(completedTask, agentName, this.config);
+          if (changeSets.length > 0) {
+            try {
+              const coordGroup = createCoordinationGroup(completedTask, changeSets, this.store);
+              finalResult +=
+                `\n\n---\n**Multi-repo coordination group created:** \`${coordGroup.id}\`\n` +
+                `Child tasks dispatched to:\n` +
+                changeSets.map((cs) => `- \`${cs.repo}\` → agent \`${cs.agentName}\` (merge order ${cs.mergeOrder})`).join("\n");
+
+              // Record lineage so all child tasks share the parent's lineage group
+              const lineageGroupId = completedTask.lineage_group_id ?? completedTask.id;
+              for (const cs of changeSets) {
+                const childTaskId = coordGroup.childTaskIds[cs.repo];
+                if (childTaskId && completedTask.source_ref) {
+                  this.store.recordLineageMapping(
+                    `${cs.repo}#coord-${coordGroup.id}`,
+                    lineageGroupId,
+                    completedTask.source_ref,
+                  );
+                }
+              }
+
+              this.log.info("Multi-repo coordination group created", {
+                taskId: task.id,
+                agentName,
+                groupId: coordGroup.id,
+                repos: changeSets.map((cs) => cs.repo),
+              });
+            } catch (err) {
+              this.log.error("Failed to create coordination group (falling back to legacy follow-ups)", {
+                taskId: task.id,
+                error: err instanceof Error ? err.message : String(err),
+              });
+              // Fall through to legacy path below
+            }
+          }
+        }
+
+        // Step 3: legacy orphan-issue fallback for tasks that don't qualify for
+        // coordination (research tasks, chain-depth limit, etc.).
+        // Skip if we already created a coordination group above.
+        const alreadyCoordinated = !!this.store.getCoordinationGroupByParentTaskId(task.id);
+        if (!alreadyCoordinated) {
+          const followUps = detectAndCreateFollowUps(
+            completedTask,
+            agentName,
+            this.config,
+            // AC#3: increment the "follow_ups_avoided" counter whenever a
+            // cross-repo follow-up is skipped because an open PR already closes
+            // the parent issue.  The improvement detector surfaces this count as
+            // a positive efficiency signal in the supervisor context.
+            () => { this.store.incrementStat("follow_ups_avoided"); },
+          );
+          if (followUps.length > 0) {
+            finalResult += formatFollowUpNote(followUps);
+            // Record lineage mappings so that when trigger polling picks up the
+            // follow-up issues, the resulting tasks inherit this task's lineage group.
+            const lineageGroupId = completedTask.lineage_group_id ?? completedTask.id;
+            for (const followUp of followUps) {
+              const followUpSourceRef = `${followUp.repo}#${followUp.issueNumber}`;
+              this.store.recordLineageMapping(
+                followUpSourceRef,
+                lineageGroupId,
+                completedTask.source_ref ?? undefined,
+              );
+            }
+            this.log.info("Cross-repo follow-ups created with lineage tracking", {
+              taskId: task.id,
+              agentName,
+              lineageGroupId,
+              followUps: followUps.map((f) => `${f.repo}#${f.issueNumber}`),
+            });
+          }
         }
       }
 

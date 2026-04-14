@@ -52,6 +52,7 @@ import {
   reviewSupervisorState,
   verifyAndReviseTask,
 } from "./reviewer-ops.js";
+import { executeCoordinatedMerge } from "../orchestrator/multi-repo-coordinator.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const QUALITY_SLA_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
@@ -2674,12 +2675,70 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
     }
   }
 
+  /**
+   * Drive coordinated merges for multi-repo coordination groups that have
+   * reached "ready_to_merge" status (i.e. all sibling PRs are open and
+   * cross-referenced).  Merges in dependency order (providers first) and
+   * rolls back already-merged PRs if a later one fails review.
+   *
+   * Called every time `reviewAndMerge` runs so groups are processed promptly
+   * after all child tasks complete.
+   */
+  private async driveCoordinatedMerges(time: string): Promise<void> {
+    let groups: Array<{ id: string; parentSourceRef: string | null }>;
+    try {
+      groups = this.store.getCoordinationGroupsByStatus("ready_to_merge");
+    } catch (err) {
+      // Table may not exist on older deployments — fail silently
+      this.log.debug("getCoordinationGroupsByStatus skipped (table may not exist)", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
+    if (groups.length === 0) return;
+
+    console.log(`[${time}] Coordinated merges: ${groups.length} group(s) ready to merge`);
+
+    for (const group of groups) {
+      try {
+        const result = await executeCoordinatedMerge(group.id, this.store, this.config);
+        if (result.success) {
+          console.log(
+            `[${time}] Coordinated merge complete: group ${group.id} — merged ${result.mergedRepos.join(", ")}`,
+          );
+          this.log.info("Coordinated merge succeeded", {
+            groupId: group.id,
+            mergedRepos: result.mergedRepos,
+            parentSourceRef: group.parentSourceRef,
+          });
+        } else {
+          console.error(
+            `[${time}] Coordinated merge failed: group ${group.id} — failed at ${result.failedRepo ?? "unknown"}, ` +
+            `merged so far: ${result.mergedRepos.join(", ") || "none"}`,
+          );
+          this.log.warn("Coordinated merge failed; group rolled back or failed", {
+            groupId: group.id,
+            failedRepo: result.failedRepo,
+            mergedRepos: result.mergedRepos,
+          });
+        }
+      } catch (err) {
+        this.log.error("driveCoordinatedMerges: unexpected error for group", {
+          groupId: group.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
   /** Combined review + merge step for parallel batch 3. Keeps the review→merge
    *  dependency while allowing the combined step to run parallel to supervisor and deploy. */
   private async reviewAndMerge(time: string): Promise<void> {
     await this.reviewPRs(time);
     await this.sweepAndMergeApprovedPRs(time);
     await this.processMergeQueue(time);
+    await this.driveCoordinatedMerges(time);
   }
 
   private async processMergeQueue(time: string): Promise<void> {
