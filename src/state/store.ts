@@ -374,11 +374,92 @@ export class StateStore implements ITelegramStateStore {
       CREATE INDEX IF NOT EXISTS idx_secrets_health_checks_checked_at
         ON secrets_health_checks (checked_at DESC);
     `);
+
+    // Schema table access instrumentation (issue #99).
+    // Records which StateStore call_types have touched which tables so the
+    // schema-consumer registry can build a live consumer map without manual
+    // maintenance of the static SCHEMA_CONSUMER_MAP.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_table_access (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        table_name    TEXT NOT NULL,
+        call_type     TEXT NOT NULL,
+        access_count  INTEGER NOT NULL DEFAULT 1,
+        last_seen_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(table_name, call_type)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_schema_table_access_table_name
+        ON schema_table_access (table_name);
+
+      CREATE INDEX IF NOT EXISTS idx_schema_table_access_last_seen_at
+        ON schema_table_access (last_seen_at DESC);
+    `);
+  }
+
+  // ── Schema access instrumentation ────────────────────────────────────────
+
+  /**
+   * Record that a given `callType` has accessed `tableName`.
+   *
+   * Uses an UPSERT so repeated calls are cheap: only `access_count` and
+   * `last_seen_at` are updated after the first insert.
+   *
+   * Call this at the top of any StateStore method that queries a specific table
+   * to build a live call_type → table_name map for schema-consumer discovery.
+   *
+   * Example:
+   *   this.recordTableAccess("tasks", "pr-review");
+   *
+   * @param tableName  SQLite table being accessed (e.g. "tasks", "pr_reviews")
+   * @param callType   StateStore method category (e.g. "pr-review", "verification")
+   */
+  recordTableAccess(tableName: string, callType: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO schema_table_access (table_name, call_type, access_count, last_seen_at)
+         VALUES (?, ?, 1, datetime('now'))
+         ON CONFLICT(table_name, call_type) DO UPDATE SET
+           access_count = access_count + 1,
+           last_seen_at = datetime('now')`,
+      )
+      .run(tableName, callType);
+  }
+
+  /**
+   * Return recent table-access records written by `recordTableAccess()`.
+   *
+   * Consumed by `SchemaConsumerRegistry.getAccessLog()` which is included in
+   * the `GET /api/schema-consumers` response so operators can see which
+   * StateStore methods touch which tables without reading source code.
+   *
+   * @param limit  Maximum rows to return (default: 500)
+   */
+  getTableAccessLog(limit = 500): Array<{
+    table_name: string;
+    call_type: string;
+    access_count: number;
+    last_seen_at: string;
+  }> {
+    return this.db
+      .prepare(
+        `SELECT table_name, call_type, access_count, last_seen_at
+         FROM schema_table_access
+         ORDER BY last_seen_at DESC
+         LIMIT ?`,
+      )
+      .all(limit) as Array<{
+      table_name: string;
+      call_type: string;
+      access_count: number;
+      last_seen_at: string;
+    }>;
   }
 
   // ── Task operations ──────────────────────────────────────────────────────
 
   getTask(id: string): Task | null {
+    this.recordTableAccess("tasks", "task-lookup");
     const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Task | undefined;
     return row ?? null;
   }
@@ -954,6 +1035,7 @@ export class StateStore implements ITelegramStateStore {
   }
 
   getMergeQueue(repo?: string): MergeQueueEntry[] {
+    this.recordTableAccess("merge_queue", "pr-review");
     if (repo) {
       return this.db
         .prepare("SELECT * FROM merge_queue WHERE repo = ? ORDER BY position ASC")
@@ -965,6 +1047,7 @@ export class StateStore implements ITelegramStateStore {
   }
 
   isPRInMergeQueue(repo: string, prNumber: number): boolean {
+    this.recordTableAccess("merge_queue", "pr-review");
     const row = this.db
       .prepare("SELECT 1 FROM merge_queue WHERE repo = ? AND pr_number = ? AND status IN ('queued', 'merging')")
       .get(repo, prNumber);
@@ -998,6 +1081,7 @@ export class StateStore implements ITelegramStateStore {
   // ── PR review history ─────────────────────────────────────────────────────
 
   recordPRReview(repo: string, prNumber: number, decision: string, confidence?: number | null): void {
+    this.recordTableAccess("pr_reviews", "pr-review");
     this.db
       .prepare(
         "INSERT INTO pr_reviews (id, repo, pr_number, decision, confidence) VALUES (?, ?, ?, ?, ?)",

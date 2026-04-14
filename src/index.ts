@@ -24,9 +24,30 @@ export {
   detectSchemaChanges,
   extractChangedFilesFromDiff,
   buildSchemaImpactNotice,
+  buildDownstreamImpactSection,
   SCHEMA_CONSUMER_MAP,
 } from "./reviewer/schema-impact.js";
 export type { SchemaConsumerEntry, SchemaImpactHit } from "./reviewer/schema-impact.js";
+
+// Schema-consumer auto-discovery registry (issue #99).
+// Replaces the static SCHEMA_CONSUMER_MAP with a live map derived from
+// state.db PRAGMA queries and StateStore method instrumentation.
+//
+// Mount in the orchestrator or dashboard server:
+//   app.get('/api/schema-consumers', (_req, res) => res.json(getSchemaConsumersApiPayload()));
+//
+// Use in the reviewer at PR-review time:
+//   const map = await fetchSchemaConsumerMap('http://localhost:3472');
+//   const hits = detectSchemaChanges(diff, files, map);
+export {
+  SchemaConsumerRegistry,
+  getSchemaConsumersApiPayload,
+  fetchSchemaConsumerMap,
+} from "./reviewer/schema-consumer-registry.js";
+export type {
+  TableAccessRecord,
+  SchemaConsumerApiPayload,
+} from "./reviewer/schema-consumer-registry.js";
 
 export { Verifier } from "./reviewer/verifier.js";
 export type { VerificationResult } from "./reviewer/verifier.js";

@@ -165,13 +165,22 @@ export interface SchemaImpactHit {
  *
  * @param diff          Full diff text from `gh pr diff`
  * @param changedFiles  List of file paths changed in the PR (from PR metadata)
+ * @param consumerMap   Consumer map to use for detection. Defaults to the static
+ *                      `SCHEMA_CONSUMER_MAP`. Pass a live map from
+ *                      `SchemaConsumerRegistry.getConsumerMap()` or
+ *                      `fetchSchemaConsumerMap()` to get auto-discovered entries
+ *                      instead of relying on the hardcoded constant.
  * @returns             Array of schema impact hits (empty if no schema changes detected)
  */
-export function detectSchemaChanges(diff: string, changedFiles: string[]): SchemaImpactHit[] {
+export function detectSchemaChanges(
+  diff: string,
+  changedFiles: string[],
+  consumerMap: SchemaConsumerEntry[] = SCHEMA_CONSUMER_MAP,
+): SchemaImpactHit[] {
   const hits: SchemaImpactHit[] = [];
   const diffUpper = diff.toUpperCase();
 
-  for (const entry of SCHEMA_CONSUMER_MAP) {
+  for (const entry of consumerMap) {
     const patternLower = entry.filePattern.toLowerCase();
 
     // Find which changed files match this entry's path pattern
