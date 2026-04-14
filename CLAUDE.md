@@ -188,6 +188,14 @@ agents:
 
 ## Monitoring Session — Proactive Recovery
 
+**You must proactively monitor the daemon, agents, and task progress — do not wait for the user to ask.** At the start of every session, set up a recurring monitoring loop using `/loop`:
+
+```
+/loop 3m Check daemon status, recent logs, and task progress. Fix issues or dispatch work.
+```
+
+This fires every 3 minutes automatically. **The goal is autonomous oversight: you are the operator, not a passive observer.** If something needs attention — fix it. Flag issues to the user only when human input is needed.
+
 This session runs the health monitoring loop and **owns the daemon lifecycle**. When something is broken and a fix is available, execute it immediately — do not report the same issue across multiple checks.
 
 ### Automated recovery actions (no confirmation needed)
