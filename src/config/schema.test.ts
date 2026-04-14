@@ -213,7 +213,7 @@ describe("ProviderConfig", () => {
   it("agent provider field is set for all agents", () => {
     const config = loadConfig(configPath);
     expect(config.agents["claude-agent-orchestrator"].provider).toBe("claude");
-    expect(config.agents["codex-agent-orchestrator"].provider).toBe("openai");
+    expect(config.agents["codex-orchestrator-reviewer"].provider).toBe("openai");
   });
 });
 
