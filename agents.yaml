@@ -67,6 +67,22 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
+  codex-orchestrator-reviewer:
+    dir: "claude-orchestrator-reviewer"
+    repo: "git@github.com:rapartlu/agent-reviewer.git"
+    provider: "openai"
+    model: "gpt-5.4-mini"
+    pool: "reviewer"
+    description: "PR reviewer, verifier, supervisor (Codex). Parallel throughput for reviewer pool."
+    capabilities: ["typescript", "llm", "review", "verification"]
+    github: "rapartlu/agent-reviewer"
+    owns_topics: []
+    docker:
+      port: 3481
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
   # ── Dashboard ───────────────────────────────────────────────────
   claude-orchestrator-dashboard:
     dir: "claude-orchestrator-dashboard"
