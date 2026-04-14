@@ -54,6 +54,10 @@ import type {
   SecretsHealthCheckRecord,
   AgentSecretsHealthSummary,
   SecretsFleetHealthSummary,
+  QualityAnomaly,
+  QualityAnomalySummary,
+  QualityAnomalyQuery,
+  QualityAnomalyType,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -2406,6 +2410,102 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
       healthy_count,
       degraded_count,
       agents,
+    };
+  }
+
+  // ── Quality anomaly feed (issue #153) ───────────────────────────────────
+
+  /**
+   * Return tasks where the verifier's quality_score contradicts its
+   * verification_status:
+   *   (a) score < 0.60 AND status = 'approved'  → low_score_approved
+   *   (b) score > 0.85 AND status = 'rejected'  → high_score_rejected
+   *
+   * These anomalies indicate verifier calibration failures that operators
+   * should investigate. Results are ordered newest-first.
+   */
+  getQualityAnomalies(opts: QualityAnomalyQuery = {}): QualityAnomaly[] {
+    const days = opts.days ?? 30;
+    const limit = opts.limit ?? 100;
+    const lookback = Number.isFinite(days) && days >= 1 ? Math.floor(days) : 30;
+
+    const conditions: string[] = [
+      "quality_score IS NOT NULL",
+      "verification_status IS NOT NULL",
+      `updated_at >= datetime('now', '-${lookback} days')`,
+    ];
+
+    // Anomaly detection: score contradicts decision
+    const anomalyCondition = `(
+      (quality_score < 0.60 AND verification_status = 'approved')
+      OR
+      (quality_score > 0.85 AND verification_status = 'rejected')
+    )`;
+    conditions.push(anomalyCondition);
+
+    if (opts.agent_name) {
+      conditions.push(`agent_name = '${opts.agent_name.replace(/'/g, "''")}'`);
+    }
+
+    if (opts.anomaly_type === "low_score_approved") {
+      conditions.push("quality_score < 0.60 AND verification_status = 'approved'");
+    } else if (opts.anomaly_type === "high_score_rejected") {
+      conditions.push("quality_score > 0.85 AND verification_status = 'rejected'");
+    }
+
+    const where = conditions.join(" AND ");
+    const sql = `
+      SELECT
+        id AS task_id,
+        title,
+        agent_name,
+        task_type,
+        quality_score,
+        verification_status,
+        quality_explanation,
+        CASE
+          WHEN quality_score < 0.60 AND verification_status = 'approved' THEN 'low_score_approved'
+          WHEN quality_score > 0.85 AND verification_status = 'rejected' THEN 'high_score_rejected'
+        END AS anomaly_type,
+        created_at,
+        updated_at
+      FROM tasks
+      WHERE ${where}
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `;
+
+    return this.db.prepare(sql).all(limit) as QualityAnomaly[];
+  }
+
+  /**
+   * Return a summary of quality anomalies: totals, per-type breakdown,
+   * per-agent counts, and the anomaly records themselves.
+   */
+  getQualityAnomalySummary(opts: QualityAnomalyQuery = {}): QualityAnomalySummary {
+    const anomalies = this.getQualityAnomalies(opts);
+
+    let low_score_approved = 0;
+    let high_score_rejected = 0;
+    const agentCounts = new Map<string, number>();
+
+    for (const a of anomalies) {
+      if (a.anomaly_type === "low_score_approved") low_score_approved++;
+      if (a.anomaly_type === "high_score_rejected") high_score_rejected++;
+      const name = a.agent_name ?? "unknown";
+      agentCounts.set(name, (agentCounts.get(name) ?? 0) + 1);
+    }
+
+    const per_agent = Array.from(agentCounts.entries())
+      .map(([agent_name, count]) => ({ agent_name, count }))
+      .sort((a, b) => b.count - a.count);
+
+    return {
+      total: anomalies.length,
+      low_score_approved,
+      high_score_rejected,
+      per_agent,
+      anomalies,
     };
   }
 }

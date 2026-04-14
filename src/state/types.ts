@@ -1317,6 +1317,66 @@ export interface ISecretsHealthStore {
   getSecretsFleetHealth(): SecretsFleetHealthSummary;
 }
 
+// ── Quality anomaly types (issue #153) ────────────────────────────────────
+
+/**
+ * The kind of anomaly detected between a task's quality_score and its
+ * verification_status.
+ *
+ * - `low_score_approved`:  score < 0.60 but verification_status = "approved"
+ *   → verifier approved a task it scored poorly.
+ * - `high_score_rejected`: score > 0.85 but verification_status = "rejected"
+ *   → verifier rejected a task it scored highly.
+ */
+export type QualityAnomalyType = "low_score_approved" | "high_score_rejected";
+
+/**
+ * A single quality anomaly record surfacing a contradiction between the
+ * verifier's numeric score and its approval/rejection decision.
+ */
+export interface QualityAnomaly {
+  task_id: string;
+  title: string;
+  agent_name: string | null;
+  task_type: string;
+  quality_score: number;
+  verification_status: string;
+  quality_explanation: string | null;
+  anomaly_type: QualityAnomalyType;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Summary statistics for quality anomalies over a given window.
+ */
+export interface QualityAnomalySummary {
+  /** Total anomalies in the window */
+  total: number;
+  /** Approved tasks with score < 0.60 */
+  low_score_approved: number;
+  /** Rejected tasks with score > 0.85 */
+  high_score_rejected: number;
+  /** Per-agent anomaly counts */
+  per_agent: Array<{ agent_name: string; count: number }>;
+  /** The anomaly records themselves */
+  anomalies: QualityAnomaly[];
+}
+
+/**
+ * Options for querying quality anomalies.
+ */
+export interface QualityAnomalyQuery {
+  /** Look-back window in days (default: 30) */
+  days?: number;
+  /** Filter by anomaly type */
+  anomaly_type?: QualityAnomalyType;
+  /** Filter by agent name */
+  agent_name?: string;
+  /** Max records to return (default: 100) */
+  limit?: number;
+}
+
 export interface ITelegramStateStore
   extends IStateStore,
     IScoreOutcomeStore,
