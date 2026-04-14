@@ -22,11 +22,13 @@ export type { PRInfo, PRReviewResult, RedispatchCategory, ConflictStats, CrossRe
 // Schema-consumer impact detection
 export {
   detectSchemaChanges,
+  detectSchemaContractDrift,
   extractChangedFilesFromDiff,
   buildSchemaImpactNotice,
   buildDownstreamImpactSection,
   SCHEMA_CONSUMER_MAP,
 } from "./reviewer/schema-impact.js";
+export { loadSchemaContractRegistry } from "./reviewer/schema-contract.js";
 export type { SchemaConsumerEntry, SchemaImpactHit } from "./reviewer/schema-impact.js";
 
 // Agent quality trend sparklines — `/agent-trends` API payload (issue #156).

@@ -4,8 +4,8 @@
   "description": "Quality and oversight layer for the Claude Agent Orchestrator — PR review, task verification, supervision, and improvement detection.",
   "type": "module",
   "scripts": {
-    "build": "tsc",
-    "prepare": "tsc",
+    "build": "tsc && node scripts/copy-schema-contract.mjs",
+    "prepare": "tsc && node scripts/copy-schema-contract.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

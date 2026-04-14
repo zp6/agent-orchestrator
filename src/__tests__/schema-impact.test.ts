@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   detectSchemaChanges,
+  detectSchemaContractDrift,
   extractChangedFilesFromDiff,
   buildSchemaImpactNotice,
   buildDownstreamImpactSection,
@@ -351,6 +352,40 @@ describe("buildDownstreamImpactSection", () => {
     ];
     const section = buildDownstreamImpactSection(hits);
     expect(section.startsWith("\n")).toBe(true);
+  });
+});
+
+// ── detectSchemaContractDrift ────────────────────────────────────────────────
+
+describe("detectSchemaContractDrift", () => {
+  it("detects column-name drift against the contract registry", () => {
+    const diff = makeDiff(
+      "src/state/store.ts",
+      "CREATE TABLE learned_patterns (id TEXT PRIMARY KEY, pattern TEXT NOT NULL, score REAL NOT NULL);",
+    );
+    const files = ["src/state/store.ts"];
+    const hits = detectSchemaContractDrift(diff, files);
+
+    expect(hits).toHaveLength(1);
+    expect(hits[0].schemaLabel).toContain("learned_patterns");
+    expect(hits[0].contractMismatch).toBe(true);
+    expect(hits[0].consumers).toContain("rapartlu/agent-dashboard");
+    expect(hits[0].missingColumns).toContain("pattern_name");
+    expect(hits[0].extraColumns).toContain("pattern");
+  });
+
+  it("formats a contract mismatch into the schema warning notice", () => {
+    const diff = makeDiff(
+      "src/state/store.ts",
+      "ALTER TABLE verification_results ADD COLUMN reviewed_by TEXT;",
+    );
+    const files = ["src/state/store.ts"];
+    const hits = detectSchemaContractDrift(diff, files);
+    const notice = buildSchemaImpactNotice(hits);
+
+    expect(notice).toContain("column-name drift detected");
+    expect(notice).toContain("verification_results");
+    expect(notice).toContain("rapartlu/agent-reviewer");
   });
 });
 

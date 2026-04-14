@@ -24,6 +24,7 @@ import type { IStateStore, IStandupHealthStore, MergeQueueEntry, ReviewCategory 
 import { isExampleOrTemplateFile as isExampleOrTemplateFileFromConfig } from "../config/security-allowlist.js";
 import {
   detectSchemaChanges,
+  detectSchemaContractDrift,
   extractChangedFilesFromDiff,
   buildSchemaImpactNotice,
   buildDownstreamImpactSection,
@@ -592,13 +593,15 @@ export class PRReviewer {
     // Detect schema-consumer impact and inject a notice when schema files changed
     const changedFiles = extractChangedFilesFromDiff(truncatedDiff);
     const schemaHits = detectSchemaChanges(truncatedDiff, changedFiles);
-    const schemaNotice = buildSchemaImpactNotice(schemaHits);
-    if (schemaHits.length > 0) {
+    const schemaContractHits = detectSchemaContractDrift(truncatedDiff, changedFiles);
+    const allSchemaHits = [...schemaHits, ...schemaContractHits];
+    const schemaNotice = buildSchemaImpactNotice(allSchemaHits);
+    if (allSchemaHits.length > 0) {
       this.log.info("Schema-consumer impact detected", {
         repo,
         prNumber,
-        schemas: schemaHits.map((h) => h.schemaLabel),
-        consumers: [...new Set(schemaHits.flatMap((h) => h.consumers))],
+        schemas: allSchemaHits.map((h) => h.schemaLabel),
+        consumers: [...new Set(allSchemaHits.flatMap((h) => h.consumers))],
       });
     }
 
@@ -668,7 +671,7 @@ export class PRReviewer {
         redispatchCategory: result.redispatchCategory,
       });
 
-      await this.executeDecision(repo, prNumber, result, pr.branch, schemaHits, pr.author);
+      await this.executeDecision(repo, prNumber, result, pr.branch, allSchemaHits, pr.author);
       return result;
     } catch (err) {
       this.log.error("PR review failed", {

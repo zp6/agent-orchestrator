@@ -157,7 +157,19 @@ export interface SchemaImpactHit {
   consumers: string[];
   /** File path(s) in the PR that triggered this hit. */
   matchedFiles: string[];
+  /** True when the PR changes column names away from the contract registry. */
+  contractMismatch?: boolean;
+  /** Canonical column list from the schema contract registry. */
+  canonicalColumns?: string[];
+  /** Column list observed in the PR diff. */
+  observedColumns?: string[];
+  /** Columns missing from the PR diff relative to the contract. */
+  missingColumns?: string[];
+  /** Extra columns introduced by the PR diff. */
+  extraColumns?: string[];
 }
+
+export { detectSchemaContractDrift, loadSchemaContractRegistry } from "./schema-contract.js";
 
 /**
  * Detects schema-level changes in a PR diff and returns the list of affected
@@ -254,6 +266,21 @@ export function buildSchemaImpactNotice(hits: SchemaImpactHit[]): string {
     lines.push(`**Schema:** ${hit.schemaLabel}`);
     lines.push(`**Changed files:** ${hit.matchedFiles.join(", ")}`);
     lines.push(`**Consumers to check:** ${hit.consumers.join(", ")}`);
+    if (hit.contractMismatch) {
+      lines.push(`**Contract check:** column-name drift detected`);
+      if (hit.canonicalColumns && hit.canonicalColumns.length > 0) {
+        lines.push(`**Canonical columns:** ${hit.canonicalColumns.join(", ")}`);
+      }
+      if (hit.observedColumns && hit.observedColumns.length > 0) {
+        lines.push(`**Observed columns:** ${hit.observedColumns.join(", ")}`);
+      }
+      if (hit.missingColumns && hit.missingColumns.length > 0) {
+        lines.push(`**Missing columns:** ${hit.missingColumns.join(", ")}`);
+      }
+      if (hit.extraColumns && hit.extraColumns.length > 0) {
+        lines.push(`**Extra columns:** ${hit.extraColumns.join(", ")}`);
+      }
+    }
     lines.push("");
   }
 
