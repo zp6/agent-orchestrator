@@ -20,10 +20,12 @@ import { Supervisor } from "../reviewer/supervisor.js";
 import type { PRConfidenceProvider } from "../reviewer/supervisor.js";
 import { ImprovementDetector } from "../reviewer/improvement-detector.js";
 import { IssueCreator } from "../reviewer/issue-creator.js";
+import { HealthIncidentRouter } from "../reviewer/health-incident-router.js";
 import { RoutingAccuracyTracker } from "../reviewer/routing-accuracy.js";
 import { CalibrationDriftMonitor } from "../reviewer/calibration-drift.js";
 import { ScoreCalibrator } from "../reviewer/score-calibrator.js";
 import type { ReviewerConfig } from "../config.js";
+import type { Notifier } from "../notify.js";
 import type { IStateStore, IScoreOutcomeStore, IVerificationResultStore } from "../state/types.js";
 
 export interface ReviewerInstances {
@@ -45,6 +47,12 @@ export interface ReviewerInstances {
    * outcome history.  Undefined when the store does not implement IScoreOutcomeStore.
    */
   scoreCalibrator: ScoreCalibrator | undefined;
+  /**
+   * Routes health check incident reports to Telegram instead of creating PRs.
+   * Detects pure-diagnostic health check tasks and prevents PR queue pollution.
+   * Undefined when no notifier is provided.
+   */
+  healthIncidentRouter: HealthIncidentRouter;
 }
 
 export interface CreateReviewerOptions {
@@ -54,6 +62,12 @@ export interface CreateReviewerOptions {
    * in the orchestrator daemon.
    */
   onAgentRestart?: (repo: string) => Promise<void>;
+  /**
+   * Telegram notifier instance for health incident routing.
+   * When provided, the HealthIncidentRouter will send structured incident
+   * messages to Telegram instead of creating diagnostic PRs.
+   */
+  notifier?: Notifier;
 }
 
 /**
@@ -119,5 +133,6 @@ export function createReviewerInstances(
     issueCreator: new IssueCreator(config),
     calibrationDriftMonitor,
     scoreCalibrator,
+    healthIncidentRouter: new HealthIncidentRouter(opts.notifier),
   };
 }

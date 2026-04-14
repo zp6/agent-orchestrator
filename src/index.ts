@@ -81,6 +81,10 @@ export type {
 export { ImprovementDetector } from "./reviewer/improvement-detector.js";
 export type { DetectedImprovement } from "./reviewer/improvement-detector.js";
 
+// Health incident routing (issue #104) — routes diagnostic incidents to Telegram
+export { HealthIncidentRouter } from "./reviewer/health-incident-router.js";
+export type { HealthIncident, HealthIncidentProvider } from "./reviewer/health-incident-router.js";
+
 // PR iteration metrics (issue #110)
 export { PRIterationMetrics, categoriseReviewComment, formatIterationReport } from "./reviewer/pr-iteration-metrics.js";
 export type { PRIterationStorePort } from "./reviewer/pr-iteration-metrics.js";
