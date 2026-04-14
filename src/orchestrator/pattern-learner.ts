@@ -315,6 +315,7 @@ function autoRetireIneffectivePatterns(
   for (const p of patterns) {
     if (p.active !== 1) continue;
     if (p.source === "blue_sky_seed" || p.source === "manual") continue;
+    if (p.promoted_at) continue; // operator promoted — exempt from auto-retirement
     if (p.hit_count < RETIRE_MIN_HITS) continue;
 
     const saveRate = p.first_pass_saves / p.hit_count;

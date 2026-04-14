@@ -988,6 +988,10 @@ export interface LearnedPattern {
   active: number;
   created_at: string;
   updated_at: string;
+  /** Set by dashboard when operator suppresses a pattern. */
+  suppressed_at: string | null;
+  /** Set by dashboard when operator promotes a pattern. */
+  promoted_at: string | null;
 }
 
 export interface WriteLearnedPatternParams {
@@ -6255,6 +6259,16 @@ export class StateStore {
       CREATE INDEX IF NOT EXISTS idx_learned_patterns_active ON learned_patterns(active);
       CREATE INDEX IF NOT EXISTS idx_learned_patterns_conf   ON learned_patterns(confidence DESC);
     `);
+
+    // Add suppressed_at / promoted_at if missing (dashboard uses these for suppress/promote actions)
+    const cols = this.db.prepare("PRAGMA table_info(learned_patterns)").all() as { name: string }[];
+    const colNames = new Set(cols.map((c) => c.name));
+    if (!colNames.has("suppressed_at")) {
+      this.db.exec("ALTER TABLE learned_patterns ADD COLUMN suppressed_at TEXT");
+    }
+    if (!colNames.has("promoted_at")) {
+      this.db.exec("ALTER TABLE learned_patterns ADD COLUMN promoted_at TEXT");
+    }
   }
 
   /**
@@ -6270,9 +6284,15 @@ export class StateStore {
       .get(params.title.trim()) as { id: number } | undefined;
 
     if (existing) {
+      // Don't bump confidence on suppressed/retired patterns — respect operator decisions.
       this.db
         .prepare(
-          "UPDATE learned_patterns SET confidence = MIN(0.99, confidence + 0.02), updated_at = ? WHERE id = ?",
+          `UPDATE learned_patterns
+           SET confidence = CASE WHEN suppressed_at IS NULL AND active = 1
+                                 THEN MIN(0.99, confidence + 0.02)
+                                 ELSE confidence END,
+               updated_at = ?
+           WHERE id = ?`,
         )
         .run(now, existing.id);
       return this.db
@@ -6313,14 +6333,18 @@ export class StateStore {
    * @param limit - Max rows to return (default 20).
    */
   getLearnedPatterns(repo?: string, limit = 20): LearnedPattern[] {
+    // Exclude suppressed patterns (suppressed_at IS NOT NULL) — the operator
+    // has explicitly disabled these via the dashboard.
+    // Promoted patterns sort first (promoted_at IS NOT NULL) so they always
+    // make it into the prompt even when the limit is tight.
     if (repo) {
-      // Return patterns that apply to all repos (repos IS NULL) or contain this repo
       return this.db
         .prepare(
           `SELECT * FROM learned_patterns
            WHERE active = 1
+             AND suppressed_at IS NULL
              AND (repos IS NULL OR repos LIKE ?)
-           ORDER BY confidence DESC, hit_count DESC
+           ORDER BY (promoted_at IS NOT NULL) DESC, confidence DESC, hit_count DESC
            LIMIT ?`,
         )
         .all(`%${repo}%`, limit) as LearnedPattern[];
@@ -6329,7 +6353,8 @@ export class StateStore {
       .prepare(
         `SELECT * FROM learned_patterns
          WHERE active = 1
-         ORDER BY confidence DESC, hit_count DESC
+           AND suppressed_at IS NULL
+         ORDER BY (promoted_at IS NOT NULL) DESC, confidence DESC, hit_count DESC
          LIMIT ?`,
       )
       .all(limit) as LearnedPattern[];
@@ -6373,12 +6398,12 @@ export class StateStore {
       .run(now, id);
   }
 
-  /** Retire a pattern (soft-delete). */
+  /** Retire a pattern (soft-delete). Sets suppressed_at for dashboard consistency. */
   retireLearnedPattern(id: number): void {
     const now = new Date().toISOString();
     this.db
-      .prepare("UPDATE learned_patterns SET active = 0, updated_at = ? WHERE id = ?")
-      .run(now, id);
+      .prepare("UPDATE learned_patterns SET active = 0, suppressed_at = COALESCE(suppressed_at, ?), updated_at = ? WHERE id = ?")
+      .run(now, now, id);
   }
 
   /** Get a single pattern by ID. */
