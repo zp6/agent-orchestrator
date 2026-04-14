@@ -54,6 +54,7 @@ describe("fetchOpenIssues", () => {
       title: "Bug fix",
       body: "Fix the bug",
       url: "https://github.com/owner/repo/issues/1",
+      created_at: expect.any(String),
       labels: ["bug"],
     });
     expect(issues[1].body).toBe("");
