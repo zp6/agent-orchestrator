@@ -18,6 +18,8 @@
  *   /verification-calibration [days] → score histograms, low-conf approvals, and drift alerts
  *   /calibration [days]  → alias for /verification-calibration
  *   /token-stats [hours] → per-call-type LLM token usage (default: 720h = 30 days)
+ *   /first-pass-rate [weeks] → first-pass rate widget: month-to-date rate, 30-day trend, and agent/task-type drill-down toward 80% goal
+ *   /fpr [weeks]  → alias for /first-pass-rate
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -27,7 +29,7 @@
  */
 
 import { createLogger } from "../service/logger.js";
-import type { ITelegramStateStore, Task, LlmTokenStats, VerificationStats } from "../state/types.js";
+import type { ITelegramStateStore, Task, LlmTokenStats, VerificationStats, FirstPassRateWidget } from "../state/types.js";
 import type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 import { buildIssueAgeHeatmap, formatIssueAgeHeatmap } from "../reviewer/issue-age.js";
 import type { CalibrationDriftProvider } from "../reviewer/calibration-drift.js";
@@ -74,7 +76,9 @@ type CommandName =
   | "sla"
   | "verification-calibration"
   | "calibration"
-  | "token-stats";
+  | "token-stats"
+  | "first-pass-rate"
+  | "fpr";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -97,6 +101,8 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "verification-calibration",
   "calibration",
   "token-stats",
+  "first-pass-rate",
+  "fpr",
 ]);
 
 interface ParsedCommand {
@@ -290,6 +296,13 @@ async function executeCommand(
       const hours = parseInt(cmd.args[0] ?? "720", 10);
       const windowHours = Number.isNaN(hours) || hours < 1 ? 720 : Math.min(hours, 8760);
       return handleTokenStats(store, windowHours);
+    }
+
+    case "first-pass-rate":
+    case "fpr": {
+      const weeks = parseInt(cmd.args[0] ?? "4", 10);
+      const weeksBack = Number.isNaN(weeks) || weeks < 1 ? 4 : Math.min(weeks, 12);
+      return handleFirstPassRate(store, weeksBack);
     }
   }
 }
@@ -920,6 +933,103 @@ function handleTokenStats(store: ITelegramStateStore, sinceHours: number): strin
   }
 
   return [...header, ...lines].join("\n");
+}
+
+// ── /first-pass-rate handler ──────────────────────────────────────────────
+
+/**
+ * Format the first-pass rate widget as a Telegram message.
+ *
+ * Sections:
+ *  1. Header with current-month rate and goal progress bar
+ *  2. 30-day (4-week) rolling trend — one line per week
+ *  3. Drill-down: per-(agent, task_type) laggard panel
+ *
+ * @param store     - State store that implements `getFirstPassRateWidget`.
+ * @param weeksBack - How many weeks of trend data to display.
+ */
+function handleFirstPassRate(store: ITelegramStateStore, weeksBack: number): string {
+  const widget: FirstPassRateWidget = store.getFirstPassRateWidget(weeksBack);
+
+  const lines: string[] = [];
+
+  // ── Header ─────────────────────────────────────────────────────────────
+  const goalPct = (widget.goal * 100).toFixed(0);
+  lines.push(`📈 *First-Pass Verification Rate*`);
+  lines.push(``);
+
+  const monthLabel = new Date(widget.month_start).toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+
+  if (widget.current_month_rate === null) {
+    lines.push(`📅 *${monthLabel}:* No data yet`);
+    lines.push(`🎯 Goal: ${goalPct}%`);
+  } else {
+    const ratePct = (widget.current_month_rate * 100).toFixed(1);
+    const goalMet = widget.goal_met === true;
+    const statusIcon = goalMet ? "✅" : "⚠️";
+
+    // ASCII progress bar (20 chars wide)
+    const filled = Math.round(widget.current_month_rate * 20);
+    const bar = "█".repeat(filled) + "░".repeat(20 - filled);
+    const goalPos = Math.round(widget.goal * 20);
+    // Mark goal position in bar label
+    const barWithGoal = bar.slice(0, goalPos) + "|" + bar.slice(goalPos + 1);
+
+    lines.push(`📅 *${monthLabel}* (${widget.current_month_total} verifications)`);
+    lines.push(`${statusIcon} Rate: *${ratePct}%* (goal: ${goalPct}%)`);
+    lines.push(`\`[${barWithGoal}]\``);
+    if (!goalMet) {
+      const gap = ((widget.goal - widget.current_month_rate) * 100).toFixed(1);
+      lines.push(`⬆️ ${gap}pp below goal`);
+    }
+  }
+
+  // ── Weekly trend ─────────────────────────────────────────────────────
+  lines.push(``);
+  lines.push(`*Rolling Trend (${weeksBack}w)*`);
+
+  if (widget.weekly_trend.every((p) => p.total === 0)) {
+    lines.push(`  No verification data in this window.`);
+  } else {
+    for (const point of widget.weekly_trend) {
+      const weekLabel = point.week_start; // YYYY-MM-DD
+      if (point.total === 0) {
+        lines.push(`  ${weekLabel}: — (no data)`);
+      } else {
+        const pct = ((point.rate ?? 0) * 100).toFixed(0);
+        const warn = (point.rate ?? 0) < widget.goal ? " ⚠️" : " ✅";
+        lines.push(`  ${weekLabel}: *${pct}%* (${point.first_pass_count}/${point.total})${warn}`);
+      }
+    }
+  }
+
+  // ── Drill-down ───────────────────────────────────────────────────────
+  if (widget.drill_down.length > 0) {
+    lines.push(``);
+    lines.push(`*Drill-down (this month)*`);
+
+    // Sort: lowest rate first (laggards at top)
+    const sorted = [...widget.drill_down].sort((a, b) => {
+      const ra = a.rate ?? 1;
+      const rb = b.rate ?? 1;
+      return ra - rb;
+    });
+
+    for (const row of sorted) {
+      if (row.total === 0) continue;
+      const pct = ((row.rate ?? 0) * 100).toFixed(0);
+      const warn = (row.rate ?? 0) < widget.goal ? " ⚠️" : "";
+      lines.push(
+        `  \`${row.agent_id}\` [${row.task_type}]: *${pct}%* (${row.first_pass_count}/${row.total})${warn}`,
+      );
+    }
+  }
+
+  return lines.join("\n");
 }
 
 // ── TelegramCommandHandler class ──────────────────────────────────────────

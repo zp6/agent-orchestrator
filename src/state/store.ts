@@ -1919,6 +1919,125 @@ export class StateStore implements ITelegramStateStore {
     };
   }
 
+  // ── First-pass rate widget (issue #88) ───────────────────────────────────
+
+  /**
+   * Build the complete first-pass rate widget payload.
+   *
+   * Returns:
+   * - Current calendar-month fleet-wide first-pass rate vs. 80% goal
+   * - A goal_met boolean for the progress-bar indicator
+   * - Weekly trend over the past `weeksBack` weeks (oldest first)
+   * - Per-(agent_id, task_type) drill-down identifying which agent + task
+   *   combination is pulling the fleet rate below the 80% goal
+   *
+   * The drill-down joins `verification_results` → `tasks` on task_id so
+   * that the task_type dimension is available.  Rows in `verification_results`
+   * with no matching task row default task_type to "unknown".
+   *
+   * @param weeksBack - How many weeks of trend history to return (default: 4).
+   */
+  getFirstPassRateWidget(weeksBack = 4): import("./types.js").FirstPassRateWidget {
+    const GOAL = 0.80;
+    const now = new Date();
+
+    // ── Current calendar month (UTC) ────────────────────────────────────
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const monthStartIso = monthStart.toISOString();
+
+    const monthRow = this.db
+      .prepare(
+        `SELECT
+           COUNT(*)        AS total,
+           SUM(first_pass) AS first_pass_count
+         FROM verification_results
+         WHERE timestamp >= ?`,
+      )
+      .get(monthStartIso) as { total: number; first_pass_count: number } | undefined;
+
+    const monthTotal = monthRow?.total ?? 0;
+    const monthFirstPass = monthRow?.first_pass_count ?? 0;
+    const currentMonthRate = monthTotal > 0 ? monthFirstPass / monthTotal : null;
+
+    // ── Weekly trend ─────────────────────────────────────────────────────
+    // Compute Monday-aligned week boundaries for the past `weeksBack` weeks.
+    const weeklyTrend: import("./types.js").FirstPassTrendPoint[] = [];
+
+    // Align to the Monday of the current week
+    const dayOfWeek = now.getUTCDay(); // 0=Sun, 1=Mon, ...6=Sat
+    const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+    const thisMonday = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysToMonday),
+    );
+
+    for (let w = weeksBack - 1; w >= 0; w--) {
+      const weekStart = new Date(thisMonday.getTime() - w * 7 * 24 * 60 * 60 * 1000);
+      const weekEnd = new Date(weekStart.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+      const row = this.db
+        .prepare(
+          `SELECT
+             COUNT(*)        AS total,
+             SUM(first_pass) AS first_pass_count
+           FROM verification_results
+           WHERE timestamp >= ? AND timestamp < ?`,
+        )
+        .get(weekStart.toISOString(), weekEnd.toISOString()) as
+        | { total: number; first_pass_count: number }
+        | undefined;
+
+      const total = row?.total ?? 0;
+      const fpCount = row?.first_pass_count ?? 0;
+      weeklyTrend.push({
+        week_start: weekStart.toISOString().slice(0, 10),
+        total,
+        first_pass_count: fpCount,
+        rate: total > 0 ? fpCount / total : null,
+      });
+    }
+
+    // ── Per-agent, per-task-type drill-down ──────────────────────────────
+    // Join verification_results → tasks to get task_type dimension.
+    // Tasks with no match default to "unknown".
+    const drillRows = this.db
+      .prepare(
+        `SELECT
+           vr.agent_id,
+           COALESCE(t.task_type, 'unknown') AS task_type,
+           COUNT(*)                         AS total,
+           SUM(vr.first_pass)               AS first_pass_count
+         FROM verification_results vr
+         LEFT JOIN tasks t ON t.id = vr.task_id
+         WHERE vr.timestamp >= ?
+         GROUP BY vr.agent_id, task_type
+         ORDER BY vr.agent_id, task_type`,
+      )
+      .all(monthStartIso) as Array<{
+      agent_id: string;
+      task_type: string;
+      total: number;
+      first_pass_count: number;
+    }>;
+
+    const drillDown: import("./types.js").FirstPassDrillDown[] = drillRows.map((r) => ({
+      agent_id: r.agent_id,
+      task_type: r.task_type,
+      total: r.total,
+      first_pass_count: r.first_pass_count,
+      rate: r.total > 0 ? r.first_pass_count / r.total : null,
+    }));
+
+    return {
+      month_start: monthStartIso,
+      current_month_rate: currentMonthRate,
+      current_month_total: monthTotal,
+      goal: GOAL,
+      goal_met: currentMonthRate !== null ? currentMonthRate >= GOAL : null,
+      weekly_trend: weeklyTrend,
+      drill_down: drillDown,
+    };
+  }
+
   // ── Secrets health checks ────────────────────────────────────────────────
 
   /**

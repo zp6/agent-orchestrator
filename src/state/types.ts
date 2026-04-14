@@ -949,6 +949,76 @@ export interface IVerificationResultStore {
   getVerificationStats(agentId: string, since?: string): VerificationStats | null;
 }
 
+// ── First-pass rate widget types (issue #88) ──────────────────────────────
+
+/**
+ * One data point in the 30-day rolling first-pass rate trend.
+ * Each point covers a 7-day window, aligned to Monday boundaries.
+ */
+export interface FirstPassTrendPoint {
+  /** ISO-8601 date of the week start (Monday). */
+  week_start: string;
+  /** Total verification events in this week window. */
+  total: number;
+  /** Count approved on first pass. */
+  first_pass_count: number;
+  /** First-pass rate (0–1), or null when total is 0. */
+  rate: number | null;
+}
+
+/**
+ * Per-agent, per-task-type first-pass breakdown for the drill-down panel.
+ * Identifies which agent + task type combination is pulling the fleet rate down.
+ */
+export interface FirstPassDrillDown {
+  agent_id: string;
+  /** "implementation" | "research" | unknown task_type values */
+  task_type: string;
+  total: number;
+  first_pass_count: number;
+  rate: number | null;
+}
+
+/**
+ * The complete first-pass rate widget payload.
+ * Returned by `IFirstPassRateStore.getFirstPassRateWidget()`.
+ *
+ * Surfaces: current-month rate vs. 80% goal, 30-day weekly trend,
+ * and a per-(agent, task_type) drill-down to identify laggards.
+ */
+export interface FirstPassRateWidget {
+  /** ISO-8601 start of the current calendar month (UTC). */
+  month_start: string;
+  /** Fleet-wide rate for the current calendar month (0–1), or null if no data. */
+  current_month_rate: number | null;
+  /** Total verifications this calendar month. */
+  current_month_total: number;
+  /** The goal threshold (0.80). */
+  goal: number;
+  /** Whether the current month rate meets or exceeds the 80% goal. */
+  goal_met: boolean | null;
+  /** Weekly trend over the past 4 weeks (oldest first). */
+  weekly_trend: FirstPassTrendPoint[];
+  /** Per-agent, per-task-type drill-down for the laggard panel. */
+  drill_down: FirstPassDrillDown[];
+}
+
+/**
+ * Store interface for the first-pass rate widget.
+ *
+ * Implemented by the reviewer's StateStore.  The orchestrator StateStore
+ * is not required to implement this — callers should check at runtime.
+ */
+export interface IFirstPassRateStore {
+  /**
+   * Return the complete first-pass rate widget payload.
+   *
+   * @param weeksBack - How many past weeks to include in the trend (default: 4).
+   * @returns Widget data, including month-to-date rate, weekly trend, and drill-down.
+   */
+  getFirstPassRateWidget(weeksBack?: number): FirstPassRateWidget;
+}
+
 // ── Secrets health types ─────────────────────────────────────────────────
 
 /**
@@ -1085,7 +1155,8 @@ export interface ITelegramStateStore
     IPRIterationStore,
     IStandupHealthStore,
     IVerificationResultStore,
-    ISecretsHealthStore {
+    ISecretsHealthStore,
+    IFirstPassRateStore {
   // System flags (pause/resume, operator overrides)
   getSystemFlag(key: string): string | null;
   setSystemFlag(key: string, value: string): void;
