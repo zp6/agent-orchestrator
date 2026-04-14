@@ -96,6 +96,47 @@ export interface VerificationResult {
 }
 
 /**
+ * Required output schema for research tasks.
+ *
+ * All research agent outputs MUST include these five sections (in any order).
+ * The verifier checks for schema compliance and penalises missing sections.
+ * Downstream implementation tasks rely on this structure to extract findings
+ * programmatically rather than parsing free-form prose.
+ *
+ * Exported so the orchestrator daemon can include it in research task dispatch
+ * prompts and revision guidance.
+ */
+export const RESEARCH_OUTPUT_SCHEMA = `## Problem Statement
+[What problem or question was investigated and why it matters]
+
+## Key Findings
+- [Finding 1 — concise, evidence-backed]
+- [Finding 2 — concise, evidence-backed]
+- [Additional findings as needed]
+
+## Implementation Recommendations
+[Concrete, actionable steps or architectural choices for the implementation team.
+Include trade-offs and preferred approach.]
+
+## Open Questions
+- [Unresolved question, risk, or assumption that needs further investigation]
+
+## References
+- [Source: code file, library, documentation link, PR, issue, or prior art]`;
+
+/**
+ * Section headers required in every research task output.
+ * Used by the verifier to check schema compliance.
+ */
+export const RESEARCH_REQUIRED_SECTIONS = [
+  "## Problem Statement",
+  "## Key Findings",
+  "## Implementation Recommendations",
+  "## Open Questions",
+  "## References",
+] as const;
+
+/**
  * Minimum score required to approve a task.
  * Also recorded as the `threshold` field in `verification_results`.
  */
@@ -168,13 +209,29 @@ Dimension guide:
 
 const RESEARCH_SYSTEM_PROMPT = `You are a quality reviewer for research and feasibility analysis produced by an AI agent. Given a research question and the agent's analysis, assess the quality of the research.
 
+## Required Output Schema
+
+All research outputs MUST contain these five sections (exact markdown headers):
+
+  ## Problem Statement
+  ## Key Findings
+  ## Implementation Recommendations
+  ## Open Questions
+  ## References
+
+**Schema compliance is mandatory.** Deduct 0.15 from the score for each missing section (up to −0.60 for four missing sections). If ALL five sections are absent, cap the score at 0.30 regardless of content quality — the output is not machine-parseable and downstream implementation tasks cannot consume it.
+
+When sections are missing, the revision guidance MUST include the full required schema template so the agent knows exactly what to produce.
+
+## Scoring
+
 Respond with ONLY a JSON object (no markdown, no code fences):
 {
   "approved": true/false,
   "score": 0.0-1.0,
-  "notes": "Brief assessment of research quality",
-  "revision": "If not approved, specific guidance for improvement (omit if approved)",
-  "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — e.g. which research dimensions were thin, what evidence was missing, or why the analysis was hard to act on. Omit entirely when score >= 0.80.",
+  "notes": "Brief assessment of research quality and schema compliance",
+  "revision": "If not approved, specific guidance for improvement including the full schema template if sections are missing (omit if approved)",
+  "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — e.g. which sections were missing, which research dimensions were thin, what evidence was missing, or why the analysis was hard to act on. Omit entirely when score >= 0.80.",
   "marginal_reason": "REQUIRED when approved is true AND score is between 0.60 and 0.74: one sentence explaining what prevented a higher score (e.g. 'Analysis lacked comparative alternatives, limiting its actionability despite sound core findings.'). Omit entirely otherwise.",
   "dimensions": {
     "correctness": 0.0-1.0,
@@ -184,26 +241,27 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   }
 }
 
+## Content Quality Criteria
+
 Evaluate research quality on:
 - **Thoroughness**: Did the agent investigate the question fully, or leave obvious gaps?
 - **Evidence**: Are claims backed by concrete examples, code references, or data?
 - **Alternatives**: Were multiple approaches considered and compared?
 - **Honesty**: Does the analysis acknowledge uncertainty, risks, and limitations?
-- **Structure**: Is the response well-organized and easy to act on?
 - **Actionability**: Could a decision-maker use this analysis to make an informed choice?
 
-Scoring guide:
+Scoring guide (before schema compliance deductions):
 - 0.9-1.0: Excellent — comprehensive analysis with evidence, alternatives, and clear recommendation
 - 0.75-0.89: Good — solid analysis with minor gaps in coverage or evidence
 - 0.60-0.74: Marginal — addresses the question but with meaningful depth or evidence gaps; use marginal_reason
 - 0.5-0.59: Acceptable — addresses the question but lacks depth or alternatives
 - Below 0.5: Needs revision — superficial, missing key considerations, or not actionable
 
-Dimension guide (for research tasks):
+Dimension guide (for research tasks, these map to content quality):
 - **correctness**: Are the claims technically sound and factually accurate?
 - **completeness**: Does the analysis address all relevant aspects of the question?
-- **test_coverage**: Were the findings validated or stress-tested? (Or "evidence coverage" — was evidence gathered comprehensively?)
-- **code_quality**: (Not applicable to research — rate as the analysis clarity/organization instead)`;
+- **test_coverage**: Was evidence gathered comprehensively? Were findings validated or stress-tested?
+- **code_quality**: Schema compliance — are all five required sections present and substantively filled?`;
 
 /**
  * System prompt for the second-pass reviewer.
@@ -258,18 +316,26 @@ export class Verifier {
   /**
    * Format quality dimensions as a human-readable breakdown for revision messages.
    * Returns a multi-line string showing per-dimension scores and status indicators.
+   *
+   * @param dimensions - Per-dimension scores to render.
+   * @param isResearch - When true, dimension labels are adapted for research tasks:
+   *   - "Test Coverage" → "Evidence Coverage" (comprehensiveness of evidence gathered)
+   *   - "Code Quality"  → "Schema Compliance" (all five required sections present)
    */
-  private formatDimensionsBreakdown(dimensions: QualityDimensions): string {
+  private formatDimensionsBreakdown(
+    dimensions: QualityDimensions,
+    isResearch = false,
+  ): string {
     const threshold = 0.8;
     const formatScore = (d: number) => `${(d * 100).toFixed(0)}/100`;
     const indicator = (d: number) => (d >= threshold ? "✓" : "✗");
 
     return [
       "## Quality Dimensions Breakdown",
-      `- **Correctness**: ${formatScore(dimensions.correctness)} ${indicator(dimensions.correctness)} (logic, no bugs)`,
-      `- **Completeness**: ${formatScore(dimensions.completeness)} ${indicator(dimensions.completeness)} (requirements met)`,
-      `- **Test Coverage**: ${formatScore(dimensions.test_coverage)} ${indicator(dimensions.test_coverage)} (edge cases covered)`,
-      `- **Code Quality**: ${formatScore(dimensions.code_quality)} ${indicator(dimensions.code_quality)} (clarity, documentation)`,
+      `- **Correctness**: ${formatScore(dimensions.correctness)} ${indicator(dimensions.correctness)} (${isResearch ? "claims technically sound" : "logic, no bugs"})`,
+      `- **Completeness**: ${formatScore(dimensions.completeness)} ${indicator(dimensions.completeness)} (${isResearch ? "all aspects of question addressed" : "requirements met"})`,
+      `- **${isResearch ? "Evidence Coverage" : "Test Coverage"}**: ${formatScore(dimensions.test_coverage)} ${indicator(dimensions.test_coverage)} (${isResearch ? "findings validated, evidence comprehensive" : "edge cases covered"})`,
+      `- **${isResearch ? "Schema Compliance" : "Code Quality"}**: ${formatScore(dimensions.code_quality)} ${indicator(dimensions.code_quality)} (${isResearch ? "all 5 required sections present and substantive" : "clarity, documentation"})`,
     ].join("\n");
   }
 
@@ -406,7 +472,7 @@ export class Verifier {
       const usedDimensions = secondPassResult.dimensions ?? firstPassResult.dimensions;
       const dimensionsBreakdown =
         !finalApproved && usedDimensions
-          ? `\n\n${this.formatDimensionsBreakdown(usedDimensions)}`
+          ? `\n\n${this.formatDimensionsBreakdown(usedDimensions, isResearch)}`
           : "";
       const enrichedRevision =
         !finalApproved && baseRevision && finalExplanation
@@ -493,7 +559,7 @@ export class Verifier {
     // Enrich revision with explanation and dimension breakdown so agents understand the low score.
     const dimensionsBreakdown =
       !firstPassResult.approved && firstPassResult.dimensions
-        ? `\n\n${this.formatDimensionsBreakdown(firstPassResult.dimensions)}`
+        ? `\n\n${this.formatDimensionsBreakdown(firstPassResult.dimensions, isResearch)}`
         : "";
     const enrichedRevision =
       !firstPassResult.approved &&

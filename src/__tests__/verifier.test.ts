@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { VerificationResult } from "../reviewer/verifier.js";
+import { RESEARCH_OUTPUT_SCHEMA, RESEARCH_REQUIRED_SECTIONS } from "../reviewer/verifier.js";
 import type { Notifier } from "../notify.js";
 
 /**
@@ -560,8 +561,8 @@ describe("Quality dimensions breakdown", () => {
     expect(result.secondPass?.dimensions?.test_coverage).toBe(0.75);
   });
 
-  it("revision message includes dimension breakdown when dimensions present", () => {
-    // Simulate the formatDimensionsBreakdown logic
+  it("revision message includes dimension breakdown when dimensions present (implementation task)", () => {
+    // Simulate the formatDimensionsBreakdown logic for implementation tasks (isResearch=false)
     const dimensions = {
       correctness: 0.6,
       completeness: 0.8,
@@ -585,5 +586,133 @@ describe("Quality dimensions breakdown", () => {
     expect(breakdown).toContain("**Correctness**: 60/100 ✗");
     expect(breakdown).toContain("**Test Coverage**: 50/100 ✗");
     expect(breakdown).toContain("**Completeness**: 80/100 ✓");
+    expect(breakdown).toContain("**Code Quality**");
+    expect(breakdown).not.toContain("Schema Compliance");
+  });
+
+  it("revision message uses research-specific dimension labels when isResearch=true", () => {
+    // Simulate the formatDimensionsBreakdown logic for research tasks (isResearch=true)
+    const dimensions = {
+      correctness: 0.9,
+      completeness: 0.8,
+      test_coverage: 0.6,
+      code_quality: 0.4, // schema compliance — missing sections
+    };
+
+    const threshold = 0.8;
+    const formatScore = (d: number) => `${(d * 100).toFixed(0)}/100`;
+    const indicator = (d: number) => (d >= threshold ? "✓" : "✗");
+    const isResearch = true;
+
+    const breakdown = [
+      "## Quality Dimensions Breakdown",
+      `- **Correctness**: ${formatScore(dimensions.correctness)} ${indicator(dimensions.correctness)} (${isResearch ? "claims technically sound" : "logic, no bugs"})`,
+      `- **Completeness**: ${formatScore(dimensions.completeness)} ${indicator(dimensions.completeness)} (${isResearch ? "all aspects of question addressed" : "requirements met"})`,
+      `- **${isResearch ? "Evidence Coverage" : "Test Coverage"}**: ${formatScore(dimensions.test_coverage)} ${indicator(dimensions.test_coverage)} (${isResearch ? "findings validated, evidence comprehensive" : "edge cases covered"})`,
+      `- **${isResearch ? "Schema Compliance" : "Code Quality"}**: ${formatScore(dimensions.code_quality)} ${indicator(dimensions.code_quality)} (${isResearch ? "all 5 required sections present and substantive" : "clarity, documentation"})`,
+    ].join("\n");
+
+    expect(breakdown).toContain("**Evidence Coverage**");
+    expect(breakdown).toContain("**Schema Compliance**: 40/100 ✗");
+    expect(breakdown).toContain("all 5 required sections present and substantive");
+    expect(breakdown).not.toContain("**Test Coverage**");
+    expect(breakdown).not.toContain("**Code Quality**");
+  });
+});
+
+describe("Research output schema constants", () => {
+  it("RESEARCH_REQUIRED_SECTIONS contains all five required section headers", () => {
+    expect(RESEARCH_REQUIRED_SECTIONS).toHaveLength(5);
+    expect(RESEARCH_REQUIRED_SECTIONS).toContain("## Problem Statement");
+    expect(RESEARCH_REQUIRED_SECTIONS).toContain("## Key Findings");
+    expect(RESEARCH_REQUIRED_SECTIONS).toContain("## Implementation Recommendations");
+    expect(RESEARCH_REQUIRED_SECTIONS).toContain("## Open Questions");
+    expect(RESEARCH_REQUIRED_SECTIONS).toContain("## References");
+  });
+
+  it("RESEARCH_OUTPUT_SCHEMA is a non-empty string containing all required headers", () => {
+    expect(typeof RESEARCH_OUTPUT_SCHEMA).toBe("string");
+    expect(RESEARCH_OUTPUT_SCHEMA.length).toBeGreaterThan(0);
+
+    for (const section of RESEARCH_REQUIRED_SECTIONS) {
+      expect(RESEARCH_OUTPUT_SCHEMA, `Schema must include "${section}"`).toContain(section);
+    }
+  });
+
+  it("RESEARCH_OUTPUT_SCHEMA is a valid markdown template with placeholder content", () => {
+    // Should include bracket-style placeholder text indicating where content goes
+    expect(RESEARCH_OUTPUT_SCHEMA).toContain("[");
+    expect(RESEARCH_OUTPUT_SCHEMA).toContain("]");
+  });
+
+  it("schema compliance scoring: missing sections reduce score by 0.15 each", () => {
+    // Mirror the scoring logic described in the research system prompt
+    const BASE_SCORE = 0.90; // hypothetical content quality score
+    const PENALTY_PER_MISSING_SECTION = 0.15;
+    const ALL_SECTIONS_CAP = 0.30; // cap when ALL sections are absent
+
+    const computeScore = (presentSections: number, totalRequired = 5): number => {
+      const missingSections = totalRequired - presentSections;
+      if (presentSections === 0) return ALL_SECTIONS_CAP;
+      return Math.max(BASE_SCORE - missingSections * PENALTY_PER_MISSING_SECTION, 0);
+    };
+
+    // All 5 sections present → no penalty
+    expect(computeScore(5)).toBe(BASE_SCORE);
+    // 4 of 5 present → -0.15
+    expect(computeScore(4)).toBeCloseTo(0.75, 5);
+    // 3 of 5 present → -0.30
+    expect(computeScore(3)).toBeCloseTo(0.60, 5);
+    // 1 of 5 present → -0.60
+    expect(computeScore(1)).toBeCloseTo(0.30, 5);
+    // 0 of 5 present → cap at 0.30
+    expect(computeScore(0)).toBe(ALL_SECTIONS_CAP);
+  });
+
+  it("RESEARCH_REQUIRED_SECTIONS can be used to check schema compliance in agent outputs", () => {
+    // Simulate the verifier checking a well-formed research output
+    const compliantOutput = `
+## Problem Statement
+Redis connection pooling is causing timeouts under high load.
+
+## Key Findings
+- Pool size defaults to 10 — insufficient for 50 concurrent workers
+- No idle connection eviction — connections accumulate and exhaust memory
+
+## Implementation Recommendations
+Increase pool size to 50 and enable idle eviction after 30s.
+
+## Open Questions
+- Should we use cluster mode or sentinel for HA?
+
+## References
+- redis/ioredis docs: PoolOptions
+`;
+
+    const missingSections = RESEARCH_REQUIRED_SECTIONS.filter(
+      (section) => !compliantOutput.includes(section),
+    );
+    expect(missingSections).toHaveLength(0);
+  });
+
+  it("RESEARCH_REQUIRED_SECTIONS correctly identifies missing sections in non-compliant output", () => {
+    // Output missing Open Questions and References
+    const partialOutput = `
+## Problem Statement
+Some problem.
+
+## Key Findings
+- Finding 1
+
+## Implementation Recommendations
+Do X.
+`;
+
+    const missingSections = RESEARCH_REQUIRED_SECTIONS.filter(
+      (section) => !partialOutput.includes(section),
+    );
+    expect(missingSections).toHaveLength(2);
+    expect(missingSections).toContain("## Open Questions");
+    expect(missingSections).toContain("## References");
   });
 });
