@@ -43,6 +43,7 @@ import { proposeAndFileRoadmapItems } from "../orchestrator/roadmap-proposer.js"
 import { detectHighIterationAgents } from "../orchestrator/iteration-cost-detector.js";
 import { runIterationBudgetAlerts } from "../orchestrator/iteration-budget-alert.js";
 import { runSkipPatternCheck } from "../orchestrator/skip-pattern-aggregator.js";
+import { learnPatterns } from "../orchestrator/pattern-learner.js";
 import { buildConflictRedispatchMessage } from "../orchestrator/conflict-redispatch.js";
 import {
   type GateResult,
@@ -598,6 +599,11 @@ export class Daemon {
         this.detectIterationCostImprovements(time);
         batch4.push(this.checkIterationBudgetAlerts(time));
         batch4.push(this.checkMeetingRequests(time));
+        batch4.push(
+          learnPatterns(this.config, this.store)
+            .then((learned) => { if (learned > 0) console.log(`[${time}] Pattern learner: discovered ${learned} new pattern(s)`); })
+            .catch((err) => { this.log.warn("Pattern learner failed", { error: err instanceof Error ? err.message : String(err) }); }),
+        );
       }
       if (this.cycleCount % STANDUP_MEETING_EVERY_N_CYCLES === 0) {
         batch4.push(this.runMeeting(time, "standup"));

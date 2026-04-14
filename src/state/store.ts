@@ -6389,6 +6389,46 @@ export class StateStore {
   }
 
   // ---------------------------------------------------------------------------
+  // Pattern learner — rejection signal queries
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Fetch tasks that were verification-rejected after the given cutoff.
+   * Used by the pattern learner to gather rejection signals.
+   */
+  getRecentRejectedTasks(cutoff: string): Pick<Task, "id" | "source_ref" | "agent_name" | "verification_notes">[] {
+    return this.db
+      .prepare(
+        `SELECT id, source_ref, agent_name, verification_notes
+         FROM tasks
+         WHERE verification_status = 'rejected'
+           AND verification_notes IS NOT NULL
+           AND updated_at > ?
+         ORDER BY updated_at DESC
+         LIMIT 50`,
+      )
+      .all(cutoff) as Pick<Task, "id" | "source_ref" | "agent_name" | "verification_notes">[];
+  }
+
+  /**
+   * Fetch PR review rejections from the antibody log after the given cutoff.
+   * Used by the pattern learner to gather rejection signals.
+   */
+  getRecentPRRejections(cutoff: string): { repo: string; reason: string; agent: string | null }[] {
+    return this.db
+      .prepare(
+        `SELECT repo, reason, agent
+         FROM antibody_log
+         WHERE decision = 'request-changes'
+           AND reason IS NOT NULL
+           AND timestamp > ?
+         ORDER BY timestamp DESC
+         LIMIT 50`,
+      )
+      .all(cutoff) as { repo: string; reason: string; agent: string | null }[];
+  }
+
+  // ---------------------------------------------------------------------------
   // Cross-repo task lineage
   // ---------------------------------------------------------------------------
 
