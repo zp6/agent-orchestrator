@@ -33,6 +33,10 @@ import {
   runGitHubPreDispatchValidation,
   type PreDispatchValidationResult,
 } from "./pre-dispatch-validator.js";
+import {
+  checkCapabilityEnforcement,
+  type CapabilityEnforcementReroute,
+} from "./capability-enforcer.js";
 
 /** Maximum number of retry attempts for a failed dispatch. */
 export const MAX_RETRIES = 3;
@@ -509,8 +513,9 @@ export class Dispatcher {
     // Resolve agent
     let agentName = options?.agentName;
     let routeReason = "Explicitly specified";
-    let routeMethod: "deterministic" | "llm" | "explicit" = "explicit";
+    let routeMethod: "deterministic" | "llm" | "explicit" | "capability-enforcement" = "explicit";
     let routeConfidence: number | null = null;
+    let capabilityReroute: CapabilityEnforcementReroute | null = null;
 
     if (!agentName) {
       // Run deterministic routing first to detect if LLM fallback was used
@@ -586,6 +591,40 @@ export class Dispatcher {
     if (!this.config.agents[agentName]) {
       throw new Error(
         `Unknown agent: ${agentName}. Available: ${Object.keys(this.config.agents).join(", ")}`,
+      );
+    }
+
+    // Capability tag enforcement (issue #817): block research-only agents from
+    // receiving implementation tasks and reroute to the correct agent instead.
+    // This runs before all other pre-flight checks so no budget/auth resources
+    // are consumed by a mis-routed task.
+    const taskTypeForCap = options?.taskType ?? "implementation";
+    capabilityReroute = checkCapabilityEnforcement({
+      config: this.config,
+      agentName,
+      taskType: taskTypeForCap,
+      title: options?.title,
+      sourceRef: options?.sourceRef,
+    });
+    if (capabilityReroute) {
+      this.log.warn("Capability enforcement: rerouting implementation task away from research-only agent", {
+        blockedAgent: capabilityReroute.blockedAgent,
+        toAgent: capabilityReroute.toAgent,
+        reason: capabilityReroute.redirectReason,
+        sourceRef: options?.sourceRef,
+      });
+      agentName = capabilityReroute.toAgent;
+      routeMethod = "capability-enforcement";
+      routeReason = capabilityReroute.redirectReason;
+      // Notify the operator so the misconfigured routing is surfaced in Telegram.
+      await notifyOperator(
+        "Capability enforcement: research-only agent received implementation task",
+        `Rerouted task from \`${capabilityReroute.blockedAgent}\` (research-only) ` +
+          `to \`${capabilityReroute.toAgent}\`.\n` +
+          (options?.title ? `Task: "${options.title}"\n` : "") +
+          (options?.sourceRef ? `Source: ${options.sourceRef}` : ""),
+        "warning",
+        `capability-enforcement:${capabilityReroute.blockedAgent}:${options?.sourceRef ?? ""}`,
       );
     }
 
@@ -868,6 +907,7 @@ export class Dispatcher {
       routeMethod,
       routeConfidence,
       sourceRef: options?.sourceRef,
+      redirectReason: capabilityReroute?.redirectReason,
     });
 
     // Prepend the target-repo header so the agent always knows which repo to

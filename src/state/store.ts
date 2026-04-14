@@ -777,12 +777,14 @@ export interface RoutingOutcome {
   task_id: string;
   agent_chosen: string;
   task_type: string;
-  route_method: "deterministic" | "llm" | "explicit";
+  route_method: "deterministic" | "llm" | "explicit" | "capability-enforcement";
   route_confidence: number | null;
   source_ref: string | null;
   routed_at: string;
   quality_score: number | null;
   outcome_updated_at: string | null;
+  /** Non-null when this routing decision involved a capability-enforcement reroute. */
+  redirect_reason: string | null;
 }
 
 /**
@@ -5645,6 +5647,14 @@ export class StateStore {
       CREATE INDEX IF NOT EXISTS idx_routing_outcomes_agent ON routing_outcomes(agent_chosen);
       CREATE INDEX IF NOT EXISTS idx_routing_outcomes_routed ON routing_outcomes(routed_at);
     `);
+    // Add redirect_reason column if it doesn't exist (capability-enforcement reroutes).
+    try {
+      this.db.exec(
+        "ALTER TABLE routing_outcomes ADD COLUMN redirect_reason TEXT",
+      );
+    } catch {
+      // Column already exists — safe to ignore
+    }
   }
 
   /**
@@ -5655,16 +5665,18 @@ export class StateStore {
     taskId: string;
     agentChosen: string;
     taskType: string;
-    routeMethod: "deterministic" | "llm" | "explicit";
+    routeMethod: "deterministic" | "llm" | "explicit" | "capability-enforcement";
     routeConfidence: number | null;
     sourceRef?: string;
+    /** Populated when a capability-enforcement reroute overrode the initial agent selection. */
+    redirectReason?: string;
   }): void {
     const now = new Date().toISOString();
     this.db
       .prepare(
         `INSERT INTO routing_outcomes
-           (task_id, agent_chosen, task_type, route_method, route_confidence, source_ref, routed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (task_id, agent_chosen, task_type, route_method, route_confidence, source_ref, routed_at, redirect_reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         params.taskId,
@@ -5674,6 +5686,7 @@ export class StateStore {
         params.routeConfidence ?? null,
         params.sourceRef ?? null,
         now,
+        params.redirectReason ?? null,
       );
   }
 

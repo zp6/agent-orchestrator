@@ -165,6 +165,23 @@ export interface AgentConfig {
    * (legacy behaviour).  Set `enabled: true` to enforce the guards below.
    */
   borrow?: BorrowConfig;
+  /**
+   * Optional capability tags that constrain which task types this agent may
+   * receive.  Tags are enforced by the dispatcher before each dispatch.
+   *
+   * Recognised tag values:
+   *   - `"research-only"` — agent may only receive tasks of type "research".
+   *     Implementation tasks (type "implementation" or titles matching
+   *     orchestrator-task patterns) are rejected and re-routed to the
+   *     best-fit implementation agent.  The redirect reason is recorded in
+   *     the routing decisions log so the dashboard can surface it.
+   *
+   * Example (in agents.yaml):
+   *   claude-research-agent:
+   *     capability_tags:
+   *       - research-only
+   */
+  capability_tags?: string[];
 }
 
 export interface VerificationConfig {
