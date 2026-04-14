@@ -2038,6 +2038,27 @@ export class StateStore implements ITelegramStateStore {
     };
   }
 
+  /**
+   * Return the most recent verification result record for a specific task.
+   * Used by the Telegram /score command to retrieve blocked_reason and
+   * per-verification metadata without agent-level aggregation.
+   */
+  getLatestVerificationRecord(
+    taskId: string,
+  ): import("./types.js").VerificationResultRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, task_id, score, first_pass, rejection_reason, blocked_reason,
+                threshold, agent_id, timestamp
+         FROM verification_results
+         WHERE task_id = ?
+         ORDER BY timestamp DESC, id DESC
+         LIMIT 1`,
+      )
+      .get(taskId) as import("./types.js").VerificationResultRecord | undefined;
+    return row ?? null;
+  }
+
   // ── First-pass rate widget (issue #88) ───────────────────────────────────
 
   /**

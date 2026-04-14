@@ -78,7 +78,8 @@ type CommandName =
   | "calibration"
   | "token-stats"
   | "first-pass-rate"
-  | "fpr";
+  | "fpr"
+  | "score";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -103,6 +104,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "token-stats",
   "first-pass-rate",
   "fpr",
+  "score",
 ]);
 
 interface ParsedCommand {
@@ -303,6 +305,14 @@ async function executeCommand(
       const weeks = parseInt(cmd.args[0] ?? "4", 10);
       const weeksBack = Number.isNaN(weeks) || weeks < 1 ? 4 : Math.min(weeks, 12);
       return handleFirstPassRate(store, weeksBack);
+    }
+
+    case "score": {
+      const taskId = cmd.args[0]?.trim();
+      if (!taskId) {
+        return "⚠️ Usage: `/score <task-id>`\nExample: `/score 01KP63B3` or `/score 01KP63B3XXXXXXXXXXXX`";
+      }
+      return handleScore(store, taskId);
     }
   }
 }
@@ -1030,6 +1040,137 @@ function handleFirstPassRate(store: ITelegramStateStore, weeksBack: number): str
   }
 
   return lines.join("\n");
+}
+
+/**
+ * Handle the `/score <task-id>` command.
+ *
+ * Looks up a task by its full ULID or by a short prefix (minimum 8 chars).
+ * Returns a formatted summary of:
+ *   - Overall quality score and verification status
+ *   - Agent name and task type
+ *   - Source reference (PR/issue link when available)
+ *   - Whether the hard-block threshold (< 0.50) was evaluated
+ *   - Natural-language quality explanation (when score < 0.80)
+ *   - Verification notes excerpt, which may include per-dimension breakdown
+ *
+ * Handles unknown IDs and tasks that have not yet been verified.
+ */
+function handleScore(store: ITelegramStateStore, rawId: string): string {
+  // Try exact lookup first; fall back to prefix scan for short IDs.
+  let task = store.getTask(rawId);
+
+  if (!task && rawId.length >= 8) {
+    // Prefix search: scan recent tasks and match by ID prefix.
+    const allTasks = store.listTasks({ limit: 500 });
+    task = allTasks.find((t) => t.id.startsWith(rawId)) ?? null;
+  }
+
+  if (!task) {
+    return [
+      `❓ *Task not found*`,
+      ``,
+      `No task with ID \`${rawId}\` found in state.db.`,
+      `Try a longer prefix or paste the full ULID.`,
+    ].join("\n");
+  }
+
+  // Fetch the latest verification record for hard-block metadata.
+  const verRecord = store.getLatestVerificationRecord(task.id);
+
+  // ── Header ──────────────────────────────────────────────────────────────
+  const lines: string[] = [
+    `🔍 *Task Score*`,
+    ``,
+    `*Title:* ${task.title.slice(0, 100)}`,
+    `*ID:* \`${task.id}\``,
+    `*Agent:* ${task.agent_name ? `\`${task.agent_name}\`` : "_unassigned_"}`,
+    `*Type:* ${task.task_type}`,
+  ];
+
+  if (task.source_ref) {
+    lines.push(`*Ref:* \`${task.source_ref}\``);
+  }
+
+  lines.push(``);
+
+  // ── Verification status ─────────────────────────────────────────────────
+  const vs = task.verification_status;
+  const qs = task.quality_score;
+
+  if (!vs && qs == null) {
+    lines.push(`📋 *Verification:* not yet verified`);
+  } else {
+    // "hard_rejected" is not a VerificationStatus in this repo's type — hard blocks
+    // are stored as verification_status = "rejected" with blocked_reason = "hard_block_sub50"
+    // in the verification_results table.  We detect hard blocks via verRecord below.
+    const isHardBlock = verRecord?.blocked_reason === "hard_block_sub50";
+
+    const statusIcon =
+      vs === "approved" ? "✅" :
+      vs === "rejected" && isHardBlock ? "⛔" :
+      vs === "rejected" ? "❌" :
+      vs === "pending" ? "⏳" :
+      "❓";
+
+    const statusLabel =
+      vs === "rejected" && isHardBlock ? "rejected (hard block)" : (vs ?? "unknown");
+
+    lines.push(`${statusIcon} *Verification:* ${statusLabel}`);
+
+    if (qs != null) {
+      const pct = (qs * 100).toFixed(0);
+      const scoreBar = buildScoreBar(qs);
+      lines.push(`📊 *Score:* ${qs.toFixed(2)} (${pct}%) ${scoreBar}`);
+    }
+
+    // Hard-block indicator (already captured in isHardBlock above).
+    if (isHardBlock) {
+      lines.push(`🚧 *Hard-block:* triggered — score below 0.50 unconditional rejection threshold`);
+    }
+  }
+
+  // ── Quality explanation (natural language, sub-0.80) ────────────────────
+  if (task.quality_explanation) {
+    lines.push(``, `*Quality explanation:*`);
+    lines.push(task.quality_explanation.slice(0, 400));
+  }
+
+  // ── Verification notes excerpt (may contain dimension breakdown) ─────────
+  if (task.verification_notes) {
+    const notes = task.verification_notes.trim();
+    const hasDimensions = notes.includes("Quality Dimensions") || notes.includes("Correctness");
+    if (hasDimensions) {
+      // Extract and display only the dimension breakdown section.
+      const dimStart = notes.indexOf("## Quality Dimensions");
+      const excerpt =
+        dimStart >= 0
+          ? notes.slice(dimStart, dimStart + 500).trim()
+          : notes.slice(0, 500).trim();
+      lines.push(``, `*Dimensions:*`);
+      lines.push(`\`\`\``);
+      // Strip markdown bold markers for cleaner Telegram display.
+      lines.push(excerpt.replace(/\*\*/g, "").slice(0, 450));
+      lines.push(`\`\`\``);
+    } else if (notes.length > 0) {
+      lines.push(``, `*Notes:* ${notes.slice(0, 300)}`);
+    }
+  }
+
+  // ── Footer ───────────────────────────────────────────────────────────────
+  lines.push(``, `_Use the dashboard for full detail: /tasks/${task.id}_`);
+
+  return lines.join("\n");
+}
+
+/**
+ * Build a compact ASCII progress bar for a score value (0–1).
+ * Returns something like: ▓▓▓▓▓▓░░░░ (10 chars)
+ */
+function buildScoreBar(score: number): string {
+  const filled = Math.round(score * 10);
+  const empty = 10 - filled;
+  return "▓".repeat(filled) + "░".repeat(empty);
 }
 
 // ── TelegramCommandHandler class ──────────────────────────────────────────

@@ -8,6 +8,7 @@ import type {
   SupervisorDecisionQuery,
   SupervisorDecisionRecord,
   Task,
+  VerificationResultRecord,
 } from "../state/types.js";
 
 function makeTask(overrides: Partial<Task>): Task {
@@ -31,7 +32,10 @@ function makeTask(overrides: Partial<Task>): Task {
   };
 }
 
-function makeStore(tasks: Task[]): IStateStore {
+function makeStore(
+  tasks: Task[],
+  opts: { verificationRecord?: VerificationResultRecord | null } = {},
+): IStateStore {
   const systemFlags = new Map<string, string>();
   const decisions: SupervisorDecisionRecord[] = [];
 
@@ -100,6 +104,10 @@ function makeStore(tasks: Task[]): IStateStore {
     }),
     getPendingDispatchRequests: () => [],
     prioritizeTask: () => false,
+    insertVerificationResult: () => undefined,
+    getVerificationStats: () => null,
+    getLatestVerificationRecord: (taskId: string) =>
+      opts.verificationRecord?.task_id === taskId ? (opts.verificationRecord ?? null) : null,
   };
 }
 
@@ -206,5 +214,184 @@ describe("TelegramCommandHandler de-escalation commands", () => {
     expect(reply).toContain("Escalated tasks: 1");
     expect(reply).toContain("Escalated status task");
     expect(reply).toContain("Issue age heatmap");
+  });
+});
+
+describe("/score command — task quality lookup", () => {
+  const TASK_ID = "01KP65ZE0000000000000000AA";
+
+  it("returns usage hint when no task ID is provided", async () => {
+    const store = makeStore([]);
+    const reply = await runTelegramCommand(store, "/score");
+    expect(reply).toContain("Usage");
+    expect(reply).toContain("/score");
+    expect(reply).toContain("task-id");
+  });
+
+  it("returns not-found message for an unknown task ID", async () => {
+    const store = makeStore([]);
+    const reply = await runTelegramCommand(store, "/score 01UNKNOWN0000000000000000");
+    expect(reply).toContain("not found");
+    expect(reply).toContain("01UNKNOWN0000000000000000");
+  });
+
+  it("returns score, status, and agent for a verified task (exact ID)", async () => {
+    const task = makeTask({
+      id: TASK_ID,
+      title: "Implement feature X",
+      agent_name: "claude-agent-orchestrator",
+      task_type: "implementation",
+      status: "done",
+      verification_status: "approved",
+      quality_score: 0.88,
+      verification_notes: "Good implementation.",
+    });
+    const store = makeStore([task]);
+
+    const reply = await runTelegramCommand(store, `/score ${TASK_ID}`);
+
+    expect(reply).toContain("Task Score");
+    expect(reply).toContain("Implement feature X");
+    expect(reply).toContain("claude-agent-orchestrator");
+    expect(reply).toContain("approved");
+    expect(reply).toContain("0.88");
+    expect(reply).toContain("88");
+  });
+
+  it("matches task by short ID prefix (at least 8 chars)", async () => {
+    const task = makeTask({
+      id: TASK_ID,
+      title: "Prefix match task",
+      agent_name: "claude-proxy",
+      status: "done",
+      verification_status: "rejected",
+      quality_score: 0.55,
+    });
+    const store = makeStore([task]);
+
+    // Only the first 8 chars of the ID
+    const reply = await runTelegramCommand(store, `/score 01KP65ZE`);
+
+    expect(reply).toContain("Prefix match task");
+    expect(reply).toContain("rejected");
+    expect(reply).toContain("0.55");
+  });
+
+  it("shows not-yet-verified message when task has no verification data", async () => {
+    const task = makeTask({
+      id: TASK_ID,
+      title: "Unverified task",
+      status: "done",
+      verification_status: null,
+      quality_score: null,
+    });
+    const store = makeStore([task]);
+
+    const reply = await runTelegramCommand(store, `/score ${TASK_ID}`);
+
+    expect(reply).toContain("not yet verified");
+  });
+
+  it("shows hard-block indicator when blocked_reason is hard_block_sub50", async () => {
+    const task = makeTask({
+      id: TASK_ID,
+      title: "Hard blocked task",
+      agent_name: "claude-research-agent",
+      status: "done",
+      verification_status: "rejected",
+      quality_score: 0.38,
+    });
+    const verRecord: VerificationResultRecord = {
+      id: 1,
+      task_id: TASK_ID,
+      score: 0.38,
+      first_pass: 0,
+      rejection_reason: "Critical implementation failure",
+      blocked_reason: "hard_block_sub50",
+      threshold: 0.80,
+      agent_id: "claude-research-agent",
+      timestamp: "2026-04-14T12:00:00.000Z",
+    };
+    const store = makeStore([task], { verificationRecord: verRecord });
+
+    const reply = await runTelegramCommand(store, `/score ${TASK_ID}`);
+
+    expect(reply).toContain("hard block");
+    expect(reply).toContain("0.38");
+  });
+
+  it("shows quality_explanation when present", async () => {
+    const task = makeTask({
+      id: TASK_ID,
+      title: "Task with explanation",
+      status: "done",
+      verification_status: "rejected",
+      quality_score: 0.65,
+      quality_explanation: "Scored 0.65: the test coverage dimension was weak, missing edge cases for the retry path.",
+    });
+    const store = makeStore([task]);
+
+    const reply = await runTelegramCommand(store, `/score ${TASK_ID}`);
+
+    expect(reply).toContain("Quality explanation");
+    expect(reply).toContain("test coverage dimension was weak");
+  });
+
+  it("shows dimension breakdown when verification_notes contains Quality Dimensions section", async () => {
+    const dimensionNotes = [
+      "## Quality Dimensions Breakdown",
+      "- Correctness: 90/100 ✓ (logic correct)",
+      "- Completeness: 70/100 ✗ (requirements partially met)",
+      "- Test Coverage: 60/100 ✗ (edge cases missing)",
+      "- Code Quality: 80/100 ✓ (readable)",
+    ].join("\n");
+
+    const task = makeTask({
+      id: TASK_ID,
+      title: "Dimension breakdown task",
+      status: "done",
+      verification_status: "rejected",
+      quality_score: 0.75,
+      verification_notes: dimensionNotes,
+    });
+    const store = makeStore([task]);
+
+    const reply = await runTelegramCommand(store, `/score ${TASK_ID}`);
+
+    expect(reply).toContain("Dimensions");
+    expect(reply).toContain("Correctness");
+    expect(reply).toContain("Completeness");
+  });
+
+  it("shows score bar in the reply", async () => {
+    const task = makeTask({
+      id: TASK_ID,
+      title: "Score bar test",
+      status: "done",
+      verification_status: "approved",
+      quality_score: 0.80,
+    });
+    const store = makeStore([task]);
+
+    const reply = await runTelegramCommand(store, `/score ${TASK_ID}`);
+
+    // Score bar uses ▓ (filled) and ░ (empty) chars
+    expect(reply).toMatch(/[▓░]/);
+  });
+
+  it("includes dashboard link footer", async () => {
+    const task = makeTask({
+      id: TASK_ID,
+      title: "Footer test",
+      status: "done",
+      verification_status: "approved",
+      quality_score: 0.90,
+    });
+    const store = makeStore([task]);
+
+    const reply = await runTelegramCommand(store, `/score ${TASK_ID}`);
+
+    expect(reply).toContain("/tasks/");
+    expect(reply).toContain(TASK_ID);
   });
 });

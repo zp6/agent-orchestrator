@@ -1021,6 +1021,15 @@ export interface IVerificationResultStore {
    * @returns Stats object, or null when no records exist for the agent.
    */
   getVerificationStats(agentId: string, since?: string): VerificationStats | null;
+  /**
+   * Return the most recent verification result record for a specific task.
+   * Used by the Telegram /score command to retrieve blocked_reason and
+   * per-verification metadata without going through agent-level aggregation.
+   *
+   * @param taskId - The task ID to look up.
+   * @returns The most recent VerificationResultRecord for the task, or null.
+   */
+  getLatestVerificationRecord(taskId: string): VerificationResultRecord | null;
 }
 
 // ── First-pass rate widget types (issue #88) ──────────────────────────────
