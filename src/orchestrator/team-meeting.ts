@@ -22,6 +22,7 @@ import { loadGoals, measureGoalProgress, buildGoalsContext } from "./goals.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore } from "../state/store.js";
 import { createLogger } from "../service/logger.js";
+import { StandupActionClient, type StandupActionItemInput } from "../client/standup-action-client.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -399,6 +400,10 @@ export async function runTeamMeeting(
     log.warn("Failed to save meeting to store", { error: err instanceof Error ? err.message : String(err) });
   }
 
+  // Record action-item dispositions to the dashboard (issue #798).
+  // Fire-and-forget: dashboard outages must not block standup processing.
+  void flushStandupDispositions(config, summary);
+
   // File as GitHub issue
   fileMeetingIssue(config, summary);
 
@@ -416,6 +421,58 @@ export async function runTeamMeeting(
   });
 
   return summary;
+}
+
+// ── Dashboard standup action disposition flush (issue #798) ───────────────
+
+/**
+ * POST the disposition of every action item from a standup summary to the
+ * agent-dashboard `/api/standup-items/batch` endpoint.
+ *
+ * Currently the orchestrator does not auto-dispatch standup action items as
+ * tasks, so every item is recorded as "deferred" with a reason that explains
+ * it is logged for operator review.  This establishes the plumbing so future
+ * work can upgrade individual dispositions to "dispatched" once auto-dispatch
+ * is implemented.
+ *
+ * The call is fire-and-forget — any error is logged at warn level and does
+ * not interrupt standup processing.
+ */
+async function flushStandupDispositions(
+  config: OrchestratorConfig,
+  summary: MeetingSummary,
+): Promise<void> {
+  const dashboardUrl = config.dashboard?.url;
+  if (!dashboardUrl || summary.actionItems.length === 0) return;
+
+  const client = new StandupActionClient(dashboardUrl);
+
+  const records: StandupActionItemInput[] = summary.actionItems.map((item) => ({
+    standup_date: summary.date,
+    action_item: item.description,
+    // Action items are not currently auto-dispatched from standup synthesis.
+    // Record them as "deferred" so operators see them in the dashboard view.
+    status: "deferred",
+    reason: `Logged from ${summary.type} synthesis — pending manual review or auto-dispatch`,
+    agent_name: item.owner,
+  }));
+
+  try {
+    const ids = await client.recordBatch(records);
+    if (ids !== null) {
+      log.info("Flushed standup action dispositions to dashboard", {
+        count: ids.length,
+        meeting_date: summary.date,
+        type: summary.type,
+      });
+    }
+  } catch (err) {
+    // Should never reach here — StandupActionClient swallows errors — but
+    // belt-and-suspenders: standup must not fail due to dashboard issues.
+    log.warn("Failed to flush standup dispositions to dashboard", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 // ── GitHub issue filing ─────────────────────────────────────────────────────

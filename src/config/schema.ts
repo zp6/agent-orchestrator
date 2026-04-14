@@ -444,6 +444,13 @@ export interface GlobalBudgetConfig {
 export interface DashboardConfig {
   digest?: DigestConfig;
   budget?: GlobalBudgetConfig;
+  /**
+   * Base URL of the agent-dashboard server, e.g. "http://localhost:3000".
+   * When set, the orchestrator will POST standup action-item dispositions
+   * to the dashboard after each standup cycle (issue #798).
+   * Leave unset to disable dashboard integration (safe no-op).
+   */
+  url?: string;
 }
 
 export interface DaemonConfig {
