@@ -32,6 +32,8 @@ import type {
   PROutcomeRecord,
   ScoreCalibrationRow,
   AdjustedThreshold,
+  QualityAnomaly,
+  QualityAnomalyQuery,
   ReviewCategory,
   PRIterationReport,
   PRIterationStat,
@@ -45,6 +47,8 @@ import type {
   StandupHealthSummary,
   VerificationResultRecord,
   VerificationStats,
+  QualityAnomalyType,
+  IQualityAnomalyStore,
   SecretMountStatus,
   SecretHealthEntry,
   SecretsHealthCheckRecord,
@@ -53,7 +57,7 @@ import type {
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
-export class StateStore implements ITelegramStateStore {
+export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
   private db: Database.Database;
 
   constructor(dbPath: string = process.env.STATE_DB_PATH ?? "state.db") {
@@ -2065,6 +2069,100 @@ export class StateStore implements ITelegramStateStore {
       )
       .get(taskId) as import("./types.js").VerificationResultRecord | undefined;
     return row ?? null;
+  }
+
+  /**
+   * Return tasks whose score contradicts their verification outcome.
+   *
+   * Low-score approvals (< 0.60) and high-score rejections (> 0.85) are
+   * surfaced as dashboard anomalies so operators can spot calibration issues
+   * without manually cross-referencing status and score columns.
+   */
+  getQualityAnomalies(
+    opts: QualityAnomalyQuery = {},
+  ): QualityAnomaly[] {
+    const lookbackDays = Number.isFinite(opts.days) && (opts.days ?? 0) >= 1 ? Math.floor(opts.days ?? 7) : 7;
+    const limit = Number.isFinite(opts.limit) && (opts.limit ?? 0) >= 1 ? Math.floor(opts.limit ?? 50) : 50;
+    const since = opts.since ?? null;
+    const until = opts.until ?? null;
+    const useExplicitRange = since !== null || until !== null;
+    const sinceBound = since ?? `-${lookbackDays - 1} days`;
+    const untilBound = until ?? "now";
+
+    const rows = useExplicitRange
+      ? this.db
+          .prepare(
+            `SELECT
+               id AS task_id,
+               COALESCE(agent_name, 'unassigned') AS agent_name,
+               quality_score,
+               verification_status,
+               updated_at,
+               CASE
+                 WHEN quality_score < 0.60 AND verification_status = 'approved' THEN 'low_score_approved'
+                 WHEN quality_score > 0.85 AND verification_status = 'rejected' THEN 'high_score_rejected'
+               END AS anomaly_type
+             FROM tasks
+             WHERE quality_score IS NOT NULL
+               AND verification_status IN ('approved', 'rejected')
+               AND (
+                 (quality_score < 0.60 AND verification_status = 'approved')
+                 OR (quality_score > 0.85 AND verification_status = 'rejected')
+               )
+               AND DATE(updated_at) >= DATE(?)
+               AND DATE(updated_at) <= DATE(?)
+             ORDER BY updated_at DESC, id DESC
+             LIMIT ?`,
+          )
+          .all(sinceBound, untilBound, limit) as Array<{
+          task_id: string;
+          agent_name: string;
+          quality_score: number;
+          verification_status: "approved" | "rejected";
+          updated_at: string;
+          anomaly_type: QualityAnomalyType;
+        }>
+      : this.db
+          .prepare(
+            `SELECT
+               id AS task_id,
+               COALESCE(agent_name, 'unassigned') AS agent_name,
+               quality_score,
+               verification_status,
+               updated_at,
+               CASE
+                 WHEN quality_score < 0.60 AND verification_status = 'approved' THEN 'low_score_approved'
+                 WHEN quality_score > 0.85 AND verification_status = 'rejected' THEN 'high_score_rejected'
+               END AS anomaly_type
+             FROM tasks
+             WHERE quality_score IS NOT NULL
+               AND verification_status IN ('approved', 'rejected')
+               AND (
+                 (quality_score < 0.60 AND verification_status = 'approved')
+                 OR (quality_score > 0.85 AND verification_status = 'rejected')
+               )
+               AND DATE(updated_at) >= DATE('now', ?)
+               AND DATE(updated_at) <= DATE('now')
+             ORDER BY updated_at DESC, id DESC
+             LIMIT ?`,
+          )
+          .all(sinceBound, limit) as Array<{
+          task_id: string;
+          agent_name: string;
+          quality_score: number;
+          verification_status: "approved" | "rejected";
+          updated_at: string;
+          anomaly_type: QualityAnomalyType;
+        }>;
+
+    return rows.map((row) => ({
+      task_id: row.task_id,
+      agent_name: row.agent_name,
+      quality_score: row.quality_score,
+      verification_status: row.verification_status,
+      anomaly_type: row.anomaly_type,
+      updated_at: row.updated_at,
+    }));
   }
 
   // ── First-pass rate widget (issue #88) ───────────────────────────────────

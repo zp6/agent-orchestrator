@@ -991,6 +991,68 @@ export interface VerificationResultRecord {
 }
 
 /**
+ * A task whose score contradicts its verification outcome.
+ *
+ * - `low_score_approved`: score < 0.60 but verification_status = "approved"
+ * - `high_score_rejected`: score > 0.85 but verification_status = "rejected"
+ */
+export type QualityAnomalyType = "low_score_approved" | "high_score_rejected";
+
+/**
+ * One quality anomaly row for the dashboard feed.
+ */
+export interface QualityAnomaly {
+  task_id: string;
+  agent_name: string;
+  quality_score: number;
+  verification_status: "approved" | "rejected";
+  anomaly_type: QualityAnomalyType;
+  updated_at: string;
+}
+
+/**
+ * Filter options for querying quality anomalies.
+ */
+export interface QualityAnomalyQuery {
+  /**
+   * Inclusive lower bound on `updated_at`.
+   * Accepts an ISO date or timestamp string.
+   */
+  since?: string;
+  /**
+   * Inclusive upper bound on `updated_at`.
+   * Accepts an ISO date or timestamp string.
+   */
+  until?: string;
+  /**
+   * Look-back window in days. Used when `since`/`until` are omitted.
+   * Default: 7.
+   */
+  days?: number;
+  /**
+   * Maximum number of rows to return. Default: 50.
+   */
+  limit?: number;
+}
+
+/**
+ * Full response for the /quality-anomalies dashboard feed.
+ */
+export interface QualityAnomalyFeed {
+  generated_at: string;
+  query: {
+    since: string | null;
+    until: string | null;
+    days: number;
+    limit: number;
+  };
+  anomalies: QualityAnomaly[];
+  total: number;
+  low_score_approved: number;
+  high_score_rejected: number;
+}
+
+/**
  * Aggregated verification statistics for one agent over an optional time window.
  * Returned by `IVerificationResultStore.getVerificationStats()`.
  *
@@ -1043,6 +1105,16 @@ export interface IVerificationResultStore {
    * @returns The most recent VerificationResultRecord for the task, or null.
    */
   getLatestVerificationRecord(taskId: string): VerificationResultRecord | null;
+}
+
+/**
+ * Store interface for dashboard-quality anomaly feeds.
+ *
+ * Implemented by the reviewer/orchestrator StateStore.  Consumers can use this
+ * without taking a dependency on the rest of the verification interfaces.
+ */
+export interface IQualityAnomalyStore {
+  getQualityAnomalies(opts?: QualityAnomalyQuery): QualityAnomaly[];
 }
 
 // ── First-pass rate widget types (issue #88) ──────────────────────────────

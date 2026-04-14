@@ -40,6 +40,13 @@ export type { SchemaConsumerEntry, SchemaImpactHit } from "./reviewer/schema-imp
 export { getAgentTrendsApiPayload } from "./reviewer/agent-trends.js";
 export type { AgentTrendsOptions } from "./reviewer/agent-trends.js";
 
+// Quality anomaly feed — `/quality-anomalies` API payload (issue #153).
+//
+// Mount in the orchestrator or dashboard server:
+//   app.get('/quality-anomalies', (_req, res) => res.json(getQualityAnomaliesApiPayload(store)));
+export { getQualityAnomaliesApiPayload } from "./reviewer/quality-anomalies.js";
+export type { QualityAnomaliesOptions } from "./reviewer/quality-anomalies.js";
+
 // Schema-consumer auto-discovery registry (issue #99).
 // Replaces the static SCHEMA_CONSUMER_MAP with a live map derived from
 // state.db PRAGMA queries and StateStore method instrumentation.
@@ -172,6 +179,7 @@ export type {
   IVerificationResultStore,
   ISecretsHealthStore,
   ITelegramStateStore,
+  IQualityAnomalyStore,
   Task,
   MergeQueueEntry,
   AgentStats,
@@ -181,6 +189,10 @@ export type {
   AgentQualityTrendPoint,
   AgentQualityTrendSeries,
   AgentQualityTrend,
+  QualityAnomalyType,
+  QualityAnomaly,
+  QualityAnomalyQuery,
+  QualityAnomalyFeed,
   AgentHealth,
   SupervisorDecisionRecord,
   SupervisorDecisionQuery,

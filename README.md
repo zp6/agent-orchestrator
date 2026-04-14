@@ -150,6 +150,15 @@ For proactive recovery alerts, use `HealthRecoveryTracker` together with `create
 
 ---
 
+## Dashboard API feeds
+
+The package also exports direct payload builders that the dashboard or orchestrator can mount as JSON endpoints:
+
+- `getAgentTrendsApiPayload(store)` → `GET /agent-trends`
+- `getQualityAnomaliesApiPayload(store, opts)` → `GET /quality-anomalies`
+
+---
+
 ## Related
 
 - [CHANGELOG.md](./CHANGELOG.md) — version history
