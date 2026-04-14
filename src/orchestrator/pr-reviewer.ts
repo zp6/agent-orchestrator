@@ -15,6 +15,7 @@ import {
   recordFirstPassSaves,
   seedDefaultPatterns,
 } from "./learned-patterns.js";
+import { fetchOpenPRFiles } from "./conflict-risk.js";
 
 export interface PRInfo {
   number: number;
@@ -70,6 +71,20 @@ export class PRReviewer {
     const localPath = this.findLocalRepoPath(repo);
 
     if (pr.mergeable === "CONFLICTING") {
+      // Record which files are involved in this conflict so the reviewer agent
+      // can surface per-file conflict frequency annotations (issue #629).
+      // Best-effort: failures are non-fatal and must not block the review flow.
+      try {
+        const prFileMap = fetchOpenPRFiles(repo);
+        const conflictingFiles = prFileMap.get(prNumber) ?? [];
+        if (conflictingFiles.length > 0) {
+          this.store.recordMergeConflictFiles(repo, prNumber, conflictingFiles);
+          this.log.debug("Recorded conflict file history", { repo, prNumber, fileCount: conflictingFiles.length });
+        }
+      } catch (err) {
+        this.log.warn("Failed to record conflict file history (non-fatal)", { repo, prNumber, error: String(err) });
+      }
+
       if (localPath) {
         this.log.info("PR has merge conflicts, attempting auto-rebase", {
           repo,

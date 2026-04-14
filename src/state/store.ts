@@ -1263,6 +1263,7 @@ export class StateStore {
     this.runIssueCacheMigration();
     this.runLearnedRulesMigration();
     this.runConflictHeatMapMigration();
+    this.runMergeConflictFileHistoryMigration();
     this.runRoutingOutcomesMigration();
     this.runStigmergySignalsMigration();
     this.runSignalReadsMigration();
@@ -5694,6 +5695,90 @@ export class StateStore {
       openPrCount: r.open_pr_count,
       prNumbers: JSON.parse(r.pr_numbers_json) as number[],
       assessedAt: r.assessed_at,
+    }));
+  }
+
+  // ── Merge conflict file history ───────────────────────────────────────────
+
+  private runMergeConflictFileHistoryMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS merge_conflict_file_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        pr_number INTEGER NOT NULL,
+        file_path TEXT NOT NULL,
+        conflicted_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcfh_repo_file ON merge_conflict_file_history(repo, file_path);
+      CREATE INDEX IF NOT EXISTS idx_mcfh_conflicted_at ON merge_conflict_file_history(repo, conflicted_at);
+    `);
+  }
+
+  /**
+   * Record that the given files caused (or were involved in) a merge conflict
+   * for a specific PR.  Called each time the PR reviewer detects CONFLICTING
+   * status so historical frequency can be queried by the reviewer agent.
+   *
+   * Deduplicates within the same (repo, pr_number, file_path) on the same
+   * calendar day to avoid inflating counts when a daemon cycle repeatedly sees
+   * the same un-resolved PR.
+   */
+  recordMergeConflictFiles(repo: string, prNumber: number, filePaths: string[]): void {
+    if (filePaths.length === 0) return;
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+    const check = this.db.prepare(`
+      SELECT 1 FROM merge_conflict_file_history
+      WHERE repo = ? AND pr_number = ? AND file_path = ? AND conflicted_at >= ?
+      LIMIT 1
+    `);
+    const insert = this.db.prepare(`
+      INSERT INTO merge_conflict_file_history (repo, pr_number, file_path, conflicted_at)
+      VALUES (?, ?, ?, ?)
+    `);
+
+    const tx = this.db.transaction(() => {
+      const ts = new Date().toISOString();
+      for (const filePath of filePaths) {
+        const exists = check.get(repo, prNumber, filePath, today);
+        if (!exists) {
+          insert.run(repo, prNumber, filePath, ts);
+        }
+      }
+    });
+    tx();
+  }
+
+  /**
+   * Return per-file conflict counts for a repo over the given window.
+   *
+   * Default window is 30 days.  Only files with at least `minCount` events
+   * (default: 1) are returned, sorted by count descending.
+   *
+   * This is consumed by the reviewer agent to annotate PR review comments
+   * with conflict-hot file warnings.
+   */
+  getConflictFrequency(
+    repo: string,
+    windowDays = 30,
+    minCount = 1,
+  ): Array<{ filePath: string; count: number; lastConflictAt: string }> {
+    const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+    const rows = this.db
+      .prepare(
+        `SELECT file_path, COUNT(*) AS cnt, MAX(conflicted_at) AS last_at
+         FROM merge_conflict_file_history
+         WHERE repo = ? AND conflicted_at >= ?
+         GROUP BY file_path
+         HAVING cnt >= ?
+         ORDER BY cnt DESC`,
+      )
+      .all(repo, cutoff, minCount) as Array<{ file_path: string; cnt: number; last_at: string }>;
+
+    return rows.map((r) => ({
+      filePath: r.file_path,
+      count: r.cnt,
+      lastConflictAt: r.last_at,
     }));
   }
 
