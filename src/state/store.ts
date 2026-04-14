@@ -363,6 +363,14 @@ export class StateStore implements ITelegramStateStore {
       // Column already exists — ignore
     }
 
+    // Add approval_rationale column to verification_results (idempotent — issue #148).
+    // Records why a low-scoring task was approved so operators can audit approvals.
+    try {
+      this.db.exec("ALTER TABLE verification_results ADD COLUMN approval_rationale TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+
     // Secrets health checks table (idempotent — issue #125).
     // Records per-agent, per-secret mount status snapshots for fleet health monitoring.
     this.db.exec(`
@@ -1970,9 +1978,9 @@ export class StateStore implements ITelegramStateStore {
     this.db
       .prepare(
         `INSERT INTO verification_results
-           (task_id, score, first_pass, rejection_reason, blocked_reason, threshold, agent_id, timestamp)
+           (task_id, score, first_pass, rejection_reason, blocked_reason, approval_rationale, threshold, agent_id, timestamp)
          VALUES
-           (@task_id, @score, @first_pass, @rejection_reason, @blocked_reason, @threshold, @agent_id, @timestamp)`,
+           (@task_id, @score, @first_pass, @rejection_reason, @blocked_reason, @approval_rationale, @threshold, @agent_id, @timestamp)`,
       )
       .run(record);
   }

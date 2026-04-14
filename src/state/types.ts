@@ -969,6 +969,19 @@ export interface VerificationResultRecord {
    * rejections. Added in issue #147.
    */
   blocked_reason: string | null;
+  /**
+   * Explains why a low-scoring task was approved, making the quality system
+   * legible to operators. Null when the task was rejected or scored ≥ 0.75.
+   *
+   * Well-known values (issue #148):
+   * - `'marginal_approval'`   — task scored 0.60–0.74 and was approved at the marginal bar
+   * - `'second_pass_passed'`  — borderline task (0.70–0.79) cleared the second-pass review
+   * - `'research_task_schema_pass'` — research task passed schema-compliance scoring
+   *
+   * Additional free-text detail (e.g. the LLM's marginal_reason) may be
+   * appended after a colon: `"marginal_approval: Missing error handling …"`.
+   */
+  approval_rationale: string | null;
   /** The min_score threshold configured at the time of verification (e.g. 0.80). */
   threshold: number;
   /** The agent whose task was verified (agent_name from the task record). */

@@ -93,6 +93,19 @@ export interface VerificationResult {
    * rejections.
    */
   blockedReason?: "hard_block_sub50";
+  /**
+   * Explains why a low-scoring task was approved, making the quality system
+   * legible to operators. Undefined when the task was rejected or scored ≥ 0.75.
+   *
+   * Well-known prefixes:
+   * - `'marginal_approval'`         — task scored 0.60–0.74 and was approved at the marginal bar
+   * - `'second_pass_passed'`        — borderline (0.70–0.79) task cleared second-pass review
+   * - `'research_task_schema_pass'` — research task passed schema-compliance scoring
+   *
+   * Additional free-text detail (e.g. the LLM's marginal_reason) may be
+   * appended after a colon: `"marginal_approval: Missing error handling …"`.
+   */
+  approvalRationale?: string;
 }
 
 /**
@@ -351,6 +364,7 @@ export class Verifier {
     approved: boolean,
     rejectionReason?: string,
     blockedReason?: "hard_block_sub50",
+    approvalRationale?: string,
   ): void {
     // Prefer the explicitly-wired store; fall back to a runtime check on the
     // main store (the reviewer's own StateStore implements IVerificationResultStore).
@@ -370,6 +384,7 @@ export class Verifier {
         first_pass: approved ? 1 : 0,
         rejection_reason: approved ? null : (rejectionReason ?? null),
         blocked_reason: blockedReason ?? null,
+        approval_rationale: approvalRationale ?? null,
         threshold: APPROVAL_THRESHOLD,
         agent_id: agentId,
         timestamp: new Date().toISOString(),
@@ -499,6 +514,16 @@ export class Verifier {
           : "";
       const enrichedNotes = `${marginalBadge}${combinedNotes}`;
 
+      // Derive approval_rationale for auditable low-score approvals.
+      // For borderline tasks that cleared the second pass, use 'second_pass_passed'
+      // as the base code; upgrade to 'marginal_approval' when the score also falls
+      // in the marginal range and both codes apply.
+      const secondPassApprovalRationale = finalApproved
+        ? finalMarginalApproval
+          ? `marginal_approval${finalMarginalReason ? `: ${finalMarginalReason}` : ""}`
+          : "second_pass_passed"
+        : undefined;
+
       const finalResult: VerificationResult = {
         approved: finalApproved,
         score: firstPassResult.score,
@@ -514,6 +539,7 @@ export class Verifier {
         },
         ...(finalMarginalApproval && { marginalApproval: true }),
         ...(finalMarginalReason && { marginalReason: finalMarginalReason }),
+        ...(secondPassApprovalRationale && { approvalRationale: secondPassApprovalRationale }),
       };
 
       this.log.info("Second-pass review complete", {
@@ -525,6 +551,7 @@ export class Verifier {
         agent: task.agent_name,
         ...(finalExplanation && { explanation: finalExplanation }),
         ...(finalMarginalApproval && { marginalApproval: true, marginalReason: finalMarginalReason }),
+        ...(secondPassApprovalRationale && { approvalRationale: secondPassApprovalRationale }),
       });
 
       this.store.updateTask(taskId, {
@@ -541,6 +568,7 @@ export class Verifier {
         finalApproved,
         finalApproved ? undefined : (finalExplanation ?? finalResult.revision),
         finalResult.blockedReason,
+        secondPassApprovalRationale,
       );
 
       return finalResult;
@@ -577,6 +605,15 @@ export class Verifier {
         : "";
     const enrichedNotes = `${marginalBadge}${firstPassResult.notes}`;
 
+    // Derive approval_rationale for auditable low-score approvals.
+    const singlePassApprovalRationale = firstPassResult.approved
+      ? firstPassResult.marginalApproval
+        ? `marginal_approval${firstPassResult.marginalReason ? `: ${firstPassResult.marginalReason}` : ""}`
+        : isResearch && firstPassResult.approved
+          ? "research_task_schema_pass"
+          : undefined
+      : undefined;
+
     this.store.updateTask(taskId, {
       verification_status: firstPassResult.approved ? "approved" : "rejected",
       quality_score: firstPassResult.score,
@@ -591,9 +628,15 @@ export class Verifier {
       firstPassResult.approved,
       firstPassResult.approved ? undefined : (firstPassResult.explanation ?? firstPassResult.revision),
       firstPassResult.blockedReason,
+      singlePassApprovalRationale,
     );
 
-    return { ...firstPassResult, notes: enrichedNotes, revision: enrichedRevision };
+    return {
+      ...firstPassResult,
+      notes: enrichedNotes,
+      revision: enrichedRevision,
+      ...(singlePassApprovalRationale && { approvalRationale: singlePassApprovalRationale }),
+    };
   }
 
   /**
