@@ -1972,6 +1972,8 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
 
   // ── Verification results ──────────────────────────────────────────────────
 
+  private static readonly HARD_BLOCK_THRESHOLD = 0.50;
+
   /**
    * Persist a verification result record after each LLM scoring decision.
    *
@@ -1979,6 +1981,14 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
    * the main verification flow.
    */
   insertVerificationResult(record: Omit<VerificationResultRecord, "id">): void {
+    const isHardBlocked = record.score < StateStore.HARD_BLOCK_THRESHOLD;
+    const normalizedRecord = {
+      ...record,
+      first_pass: isHardBlocked ? 0 : record.first_pass,
+      blocked_reason: isHardBlocked ? "hard_block_sub50" : record.blocked_reason,
+      approval_rationale: isHardBlocked ? null : record.approval_rationale,
+    };
+
     this.db
       .prepare(
         `INSERT INTO verification_results
@@ -1986,7 +1996,7 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
          VALUES
            (@task_id, @score, @first_pass, @rejection_reason, @blocked_reason, @approval_rationale, @threshold, @agent_id, @timestamp)`,
       )
-      .run(record);
+      .run(normalizedRecord);
   }
 
   /**
@@ -2061,7 +2071,7 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
     const row = this.db
       .prepare(
         `SELECT id, task_id, score, first_pass, rejection_reason, blocked_reason,
-                threshold, agent_id, timestamp
+                approval_rationale, threshold, agent_id, timestamp
          FROM verification_results
          WHERE task_id = ?
          ORDER BY timestamp DESC, id DESC

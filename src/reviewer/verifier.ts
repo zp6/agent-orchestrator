@@ -395,6 +395,30 @@ export class Verifier {
     }
   }
 
+  /**
+   * Enforce the sub-0.50 hard-block after a verification decision has been
+   * parsed. This protects the write path even if a future caller bypasses the
+   * parser's own guard.
+   */
+  private applyHardBlockGuard(result: VerificationResult): VerificationResult {
+    if (result.score >= HARD_BLOCK_THRESHOLD) return result;
+
+    const {
+      marginalApproval: _marginalApproval,
+      marginalReason: _marginalReason,
+      approvalRationale: _approvalRationale,
+      blockedReason: _blockedReason,
+      approved: _approved,
+      ...rest
+    } = result;
+
+    return {
+      ...rest,
+      approved: false,
+      blockedReason: "hard_block_sub50",
+    };
+  }
+
   async verify(taskId: string): Promise<VerificationResult> {
     const task = this.store.getTask(taskId);
     if (!task) {
@@ -424,15 +448,17 @@ export class Verifier {
       taskId,
       "first-pass",
     );
+    const enforcedFirstPassResult = this.applyHardBlockGuard(firstPassResult);
 
     // ── Borderline second-pass guard ────────────────────────────────────────
     const isBorderline =
-      firstPassResult.score >= BORDERLINE_LOW && firstPassResult.score <= BORDERLINE_HIGH;
+      enforcedFirstPassResult.score >= BORDERLINE_LOW &&
+      enforcedFirstPassResult.score <= BORDERLINE_HIGH;
 
     if (isBorderline) {
       this.log.info("Borderline score — triggering second-pass review", {
         taskId,
-        firstPassScore: firstPassResult.score,
+        firstPassScore: enforcedFirstPassResult.score,
         agent: task.agent_name,
       });
 
@@ -444,15 +470,16 @@ export class Verifier {
         taskId,
         "second-pass",
       );
+      const enforcedSecondPassResult = this.applyHardBlockGuard(secondPassResult);
 
-      const agreed = firstPassResult.approved === secondPassResult.approved;
+      const agreed = enforcedFirstPassResult.approved === enforcedSecondPassResult.approved;
 
       // Conservative final decision: if either pass rejects, reject overall.
-      const finalApproved = firstPassResult.approved && secondPassResult.approved;
+      const finalApproved = enforcedFirstPassResult.approved && enforcedSecondPassResult.approved;
 
       const combinedNotes = [
-        `[First pass — score ${(firstPassResult.score * 100).toFixed(0)}%] ${firstPassResult.notes}`,
-        `[Second pass — score ${(secondPassResult.score * 100).toFixed(0)}%] ${secondPassResult.notes}`,
+        `[First pass — score ${(enforcedFirstPassResult.score * 100).toFixed(0)}%] ${enforcedFirstPassResult.notes}`,
+        `[Second pass — score ${(enforcedSecondPassResult.score * 100).toFixed(0)}%] ${enforcedSecondPassResult.notes}`,
         agreed
           ? `[Agreement: both passes ${finalApproved ? "approved" : "rejected"}]`
           : `[Disagreement: passes diverged — conservative decision: ${finalApproved ? "approved" : "rejected"}]`,
@@ -461,10 +488,10 @@ export class Verifier {
       // Escalate to Telegram when passes disagree.
       if (!agreed && this.notifier) {
         const body = [
-          `Task \`${taskId.slice(0, 12)}\` scored *${(firstPassResult.score * 100).toFixed(0)}%* on first pass — borderline range triggered second review.`,
+          `Task \`${taskId.slice(0, 12)}\` scored *${(enforcedFirstPassResult.score * 100).toFixed(0)}%* on first pass — borderline range triggered second review.`,
           ``,
-          `*First pass:* ${firstPassResult.approved ? "✅ approved" : "❌ rejected"} (${(firstPassResult.score * 100).toFixed(0)}%)`,
-          `*Second pass:* ${secondPassResult.approved ? "✅ approved" : "❌ rejected"} (${(secondPassResult.score * 100).toFixed(0)}%)`,
+          `*First pass:* ${enforcedFirstPassResult.approved ? "✅ approved" : "❌ rejected"} (${(enforcedFirstPassResult.score * 100).toFixed(0)}%)`,
+          `*Second pass:* ${enforcedSecondPassResult.approved ? "✅ approved" : "❌ rejected"} (${(enforcedSecondPassResult.score * 100).toFixed(0)}%)`,
           `*Agent:* \`${task.agent_name ?? "unknown"}\``,
           `*Conservative outcome:* ${finalApproved ? "approved" : "rejected"}`,
         ].join("\n");
@@ -479,12 +506,12 @@ export class Verifier {
       // Prefer the second-pass explanation when available; fall back to first pass.
       // Borderline scores (0.70–0.79) are always sub-0.80, so we always expect one.
       const finalExplanation =
-        secondPassResult.explanation ?? firstPassResult.explanation;
+        enforcedSecondPassResult.explanation ?? enforcedFirstPassResult.explanation;
 
       // When not approved, enrich the revision guidance with the explanation so
       // agents know what specifically drove the low score.
-      const baseRevision = secondPassResult.revision ?? firstPassResult.revision;
-      const usedDimensions = secondPassResult.dimensions ?? firstPassResult.dimensions;
+      const baseRevision = enforcedSecondPassResult.revision ?? enforcedFirstPassResult.revision;
+      const usedDimensions = enforcedSecondPassResult.dimensions ?? enforcedFirstPassResult.dimensions;
       const dimensionsBreakdown =
         !finalApproved && usedDimensions
           ? `\n\n${this.formatDimensionsBreakdown(usedDimensions, isResearch)}`
@@ -498,17 +525,17 @@ export class Verifier {
       // Use second-pass marginal_reason if available; otherwise fall back to first pass.
       const finalMarginalApproval =
         finalApproved &&
-        firstPassResult.score >= MARGINAL_APPROVAL_LOW &&
-        firstPassResult.score <= MARGINAL_APPROVAL_HIGH;
+        enforcedFirstPassResult.score >= MARGINAL_APPROVAL_LOW &&
+        enforcedFirstPassResult.score <= MARGINAL_APPROVAL_HIGH;
       const finalMarginalReason =
         finalMarginalApproval
-          ? (secondPassResult.marginalReason ?? firstPassResult.marginalReason)
+          ? (enforcedSecondPassResult.marginalReason ?? enforcedFirstPassResult.marginalReason)
           : undefined;
 
       // Prefix combined notes with marginal badge when applicable.
       const marginalBadge =
         finalMarginalApproval
-          ? `⚠️ MARGINAL APPROVAL — score ${(firstPassResult.score * 100).toFixed(0)}%` +
+          ? `⚠️ MARGINAL APPROVAL — score ${(enforcedFirstPassResult.score * 100).toFixed(0)}%` +
             (finalMarginalReason ? ` — ${finalMarginalReason}` : "") +
             "\n\n"
           : "";
@@ -526,16 +553,16 @@ export class Verifier {
 
       const finalResult: VerificationResult = {
         approved: finalApproved,
-        score: firstPassResult.score,
+        score: enforcedFirstPassResult.score,
         notes: enrichedNotes,
         revision: finalApproved ? undefined : enrichedRevision,
         explanation: finalExplanation,
         dimensions: usedDimensions,
         secondPass: {
-          score: secondPassResult.score,
-          notes: secondPassResult.notes,
+          score: enforcedSecondPassResult.score,
+          notes: enforcedSecondPassResult.notes,
           agreed,
-          dimensions: secondPassResult.dimensions,
+          dimensions: enforcedSecondPassResult.dimensions,
         },
         ...(finalMarginalApproval && { marginalApproval: true }),
         ...(finalMarginalReason && { marginalReason: finalMarginalReason }),
@@ -544,8 +571,8 @@ export class Verifier {
 
       this.log.info("Second-pass review complete", {
         taskId,
-        firstPassApproved: firstPassResult.approved,
-        secondPassApproved: secondPassResult.approved,
+        firstPassApproved: enforcedFirstPassResult.approved,
+        secondPassApproved: enforcedSecondPassResult.approved,
         agreed,
         finalApproved,
         agent: task.agent_name,
@@ -556,7 +583,7 @@ export class Verifier {
 
       this.store.updateTask(taskId, {
         verification_status: finalApproved ? "approved" : "rejected",
-        quality_score: firstPassResult.score,
+        quality_score: enforcedFirstPassResult.score,
         verification_notes: enrichedNotes,
         quality_explanation: finalExplanation ?? null,
       });
@@ -564,7 +591,7 @@ export class Verifier {
       this.recordVerificationResult(
         taskId,
         task.agent_name ?? "unknown",
-        firstPassResult.score,
+        enforcedFirstPassResult.score,
         finalApproved,
         finalApproved ? undefined : (finalExplanation ?? finalResult.revision),
         finalResult.blockedReason,
@@ -577,62 +604,70 @@ export class Verifier {
     // ── Standard (non-borderline) result ────────────────────────────────────
     this.log.info("Verification complete", {
       taskId,
-      approved: firstPassResult.approved,
-      score: firstPassResult.score,
+      approved: enforcedFirstPassResult.approved,
+      score: enforcedFirstPassResult.score,
       agent: task.agent_name,
-      ...(firstPassResult.explanation && { explanation: firstPassResult.explanation }),
-      ...(firstPassResult.marginalApproval && { marginalApproval: true, marginalReason: firstPassResult.marginalReason }),
+      ...(enforcedFirstPassResult.explanation && { explanation: enforcedFirstPassResult.explanation }),
+      ...(enforcedFirstPassResult.marginalApproval && {
+        marginalApproval: true,
+        marginalReason: enforcedFirstPassResult.marginalReason,
+      }),
+      ...(enforcedFirstPassResult.blockedReason && { blockedReason: enforcedFirstPassResult.blockedReason }),
     });
 
     // Enrich revision with explanation and dimension breakdown so agents understand the low score.
     const dimensionsBreakdown =
-      !firstPassResult.approved && firstPassResult.dimensions
-        ? `\n\n${this.formatDimensionsBreakdown(firstPassResult.dimensions, isResearch)}`
+      !enforcedFirstPassResult.approved && enforcedFirstPassResult.dimensions
+        ? `\n\n${this.formatDimensionsBreakdown(enforcedFirstPassResult.dimensions, isResearch)}`
         : "";
     const enrichedRevision =
-      !firstPassResult.approved &&
-      firstPassResult.revision &&
-      firstPassResult.explanation
-        ? `${firstPassResult.explanation}${dimensionsBreakdown}\n\n${firstPassResult.revision}`
-        : firstPassResult.revision;
+      !enforcedFirstPassResult.approved &&
+      enforcedFirstPassResult.revision &&
+      enforcedFirstPassResult.explanation
+        ? `${enforcedFirstPassResult.explanation}${dimensionsBreakdown}\n\n${enforcedFirstPassResult.revision}`
+        : enforcedFirstPassResult.revision;
 
     // Prefix notes with marginal badge so the dashboard task list can surface it.
     const marginalBadge =
-      firstPassResult.marginalApproval
-        ? `⚠️ MARGINAL APPROVAL — score ${(firstPassResult.score * 100).toFixed(0)}%` +
-          (firstPassResult.marginalReason ? ` — ${firstPassResult.marginalReason}` : "") +
+      enforcedFirstPassResult.blockedReason
+        ? `🚧 HARD BLOCK — score ${(enforcedFirstPassResult.score * 100).toFixed(0)}% below 50% threshold\n\n`
+        : enforcedFirstPassResult.marginalApproval
+          ? `⚠️ MARGINAL APPROVAL — score ${(enforcedFirstPassResult.score * 100).toFixed(0)}%` +
+            (enforcedFirstPassResult.marginalReason ? ` — ${enforcedFirstPassResult.marginalReason}` : "") +
           "\n\n"
-        : "";
-    const enrichedNotes = `${marginalBadge}${firstPassResult.notes}`;
+          : "";
+    const enrichedNotes = `${marginalBadge}${enforcedFirstPassResult.notes}`;
 
     // Derive approval_rationale for auditable low-score approvals.
-    const singlePassApprovalRationale = firstPassResult.approved
-      ? firstPassResult.marginalApproval
-        ? `marginal_approval${firstPassResult.marginalReason ? `: ${firstPassResult.marginalReason}` : ""}`
-        : isResearch && firstPassResult.approved
+    const singlePassApprovalRationale = enforcedFirstPassResult.approved
+      ? enforcedFirstPassResult.marginalApproval
+        ? `marginal_approval${enforcedFirstPassResult.marginalReason ? `: ${enforcedFirstPassResult.marginalReason}` : ""}`
+        : isResearch && enforcedFirstPassResult.approved
           ? "research_task_schema_pass"
           : undefined
       : undefined;
 
     this.store.updateTask(taskId, {
-      verification_status: firstPassResult.approved ? "approved" : "rejected",
-      quality_score: firstPassResult.score,
+      verification_status: enforcedFirstPassResult.approved ? "approved" : "rejected",
+      quality_score: enforcedFirstPassResult.score,
       verification_notes: enrichedNotes,
-      quality_explanation: firstPassResult.explanation ?? null,
+      quality_explanation: enforcedFirstPassResult.explanation ?? null,
     });
 
     this.recordVerificationResult(
       taskId,
       task.agent_name ?? "unknown",
-      firstPassResult.score,
-      firstPassResult.approved,
-      firstPassResult.approved ? undefined : (firstPassResult.explanation ?? firstPassResult.revision),
-      firstPassResult.blockedReason,
+      enforcedFirstPassResult.score,
+      enforcedFirstPassResult.approved,
+      enforcedFirstPassResult.approved
+        ? undefined
+        : (enforcedFirstPassResult.explanation ?? enforcedFirstPassResult.revision),
+      enforcedFirstPassResult.blockedReason,
       singlePassApprovalRationale,
     );
 
     return {
-      ...firstPassResult,
+      ...enforcedFirstPassResult,
       notes: enrichedNotes,
       revision: enrichedRevision,
       ...(singlePassApprovalRationale && { approvalRationale: singlePassApprovalRationale }),
