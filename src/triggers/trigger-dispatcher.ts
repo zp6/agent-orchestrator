@@ -14,6 +14,95 @@ export const ISSUE_CLAIM_TTL_MS = 7_200_000;
 import { runGitHubPreDispatchValidation } from "../orchestrator/pre-dispatch-validator.js";
 import { looksLikeStandupTask, extractStandupIssueNumber, shouldSkipStandupDispatch } from "./standup-dispatch-guard.js";
 
+/**
+ * Dashboard URL for the dispatch-skip-log HTTP API.
+ * Used to record structured skip events for the skipped dispatches view.
+ */
+const DASHBOARD_URL = "http://localhost:3473";
+
+/**
+ * Fire-and-forget POST to the dashboard's dispatch-skip-log API.
+ * Never throws — dashboard outages must not block the daemon loop.
+ */
+function reportDashboardSkip(params: {
+  issue_id: string;
+  agent_name?: string;
+  skip_reason: string;
+  condition_value?: string;
+  context?: string;
+}): void {
+  fetch(`${DASHBOARD_URL}/api/dispatch-skip-log`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+    signal: AbortSignal.timeout(5_000),
+  }).catch(() => {
+    // Intentionally swallowed — dashboard skip reporting is best-effort
+  });
+}
+
+/**
+ * Create an "already-in-review" task record when a dispatch is blocked because
+ * an open PR already exists for the issue. This provides a visible audit trail
+ * in task history showing that the orchestrator detected the PR and skipped
+ * re-implementation, instead of silently incrementing a skip counter.
+ *
+ * The task is created as "done" with verification_status "approved" so it
+ * appears as a completed task that required zero agent-hours.
+ */
+function recordAlreadyInReviewTask(
+  store: StateStore,
+  params: {
+    sourceRef: string;
+    agentName: string;
+    issueNumber: number;
+    blockingPRNumber: number;
+    failureCode: string;
+    repo: string;
+  },
+): void {
+  const { sourceRef, agentName, issueNumber, blockingPRNumber, failureCode, repo } = params;
+  const resolution = failureCode === "approved_pr_waiting"
+    ? `Approved PR #${blockingPRNumber} is awaiting merge`
+    : `Open PR #${blockingPRNumber} is already in review`;
+
+  try {
+    const task = store.createTask({
+      title: `[${repo}#${issueNumber}] Already in review — PR #${blockingPRNumber}`,
+      description: `Pre-dispatch check detected that issue #${issueNumber} already has an ` +
+        `open PR (#${blockingPRNumber}) with a matching "Closes #${issueNumber}" reference. ` +
+        `Dispatch skipped to avoid re-implementation waste. ${resolution}.`,
+      source: "github",
+      source_ref: sourceRef,
+      agent_name: agentName,
+    });
+
+    store.updateTask(task.id, {
+      status: "done",
+      result: `already-in-review: ${resolution}. ` +
+        `See https://github.com/${repo}/pull/${blockingPRNumber}`,
+      verification_status: "approved",
+      quality_score: 1.0,
+      verification_notes: "Auto-approved: dispatch skipped because open PR already exists for this issue.",
+    });
+
+    store.markProcessed("github", sourceRef, `already-in-review-pr-${blockingPRNumber}`);
+
+    log.info("Recorded already-in-review task for issue with existing PR", {
+      taskId: task.id,
+      sourceRef,
+      blockingPRNumber,
+      failureCode,
+    });
+  } catch (err) {
+    log.warn("Failed to record already-in-review task", {
+      sourceRef,
+      blockingPRNumber,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 const log = createLogger("trigger-dispatcher");
 
 // In-memory registry of source refs currently being dispatched.
@@ -312,6 +401,31 @@ export async function dispatchGitHubIssues(
         if (validation.failureCode === "merged_pr_exists") {
           store.markProcessed("github", sourceRef, `merged-pr-${validation.blockingPRNumber ?? issue.number}`);
         }
+        // Pre-dispatch open-PR deduplication (issue #859): when an open or
+        // approved PR already exists for this issue, create an "already-in-review"
+        // task record and report a dashboard skip event. This eliminates
+        // re-implementation waste by providing a visible audit trail instead of
+        // silently skipping.
+        if (
+          (validation.failureCode === "open_pr_exists" || validation.failureCode === "approved_pr_waiting") &&
+          validation.blockingPRNumber
+        ) {
+          recordAlreadyInReviewTask(store, {
+            sourceRef,
+            agentName,
+            issueNumber: issue.number,
+            blockingPRNumber: validation.blockingPRNumber,
+            failureCode: validation.failureCode,
+            repo: issue.repo,
+          });
+          reportDashboardSkip({
+            issue_id: sourceRef,
+            agent_name: agentName,
+            skip_reason: "has_open_pr",
+            condition_value: `hasOpenPR=true,pr=#${validation.blockingPRNumber},repo=${issue.repo}`,
+            context: `Pre-dispatch check: ${validation.failureReason}`,
+          });
+        }
         result.skipped++;
         continue;
       }
@@ -554,6 +668,27 @@ export async function dispatchIdleAgentBacklog(
         }
         if (validation.failureCode === "merged_pr_exists") {
           store.markProcessed("github", sourceRef, `merged-pr-${validation.blockingPRNumber ?? issue.number}`);
+        }
+        // Pre-dispatch open-PR deduplication (issue #859) — idle pickup path
+        if (
+          (validation.failureCode === "open_pr_exists" || validation.failureCode === "approved_pr_waiting") &&
+          validation.blockingPRNumber
+        ) {
+          recordAlreadyInReviewTask(store, {
+            sourceRef,
+            agentName,
+            issueNumber: issue.number,
+            blockingPRNumber: validation.blockingPRNumber,
+            failureCode: validation.failureCode,
+            repo: issue.repo,
+          });
+          reportDashboardSkip({
+            issue_id: sourceRef,
+            agent_name: agentName,
+            skip_reason: "has_open_pr",
+            condition_value: `hasOpenPR=true,pr=#${validation.blockingPRNumber},repo=${issue.repo}`,
+            context: `Idle pickup: ${validation.failureReason}`,
+          });
         }
         result.skipped++;
         continue;

@@ -1689,3 +1689,157 @@ describe("approved PR skip logic", () => {
     expect(mockDispatcher.dispatch).toHaveBeenCalled();
   });
 });
+
+describe("pre-dispatch open-PR deduplication (issue #859)", () => {
+  let mockStore: StateStore;
+  let mockDispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStore = {
+      isProcessed: vi.fn().mockReturnValue(false),
+      markProcessed: vi.fn(),
+      getTask: vi.fn().mockReturnValue(null),
+      listTasks: vi.fn().mockReturnValue([]),
+      hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
+      findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
+      countFailuresForSourceRef: vi.fn().mockReturnValue(0),
+      addDispatchValidation: vi.fn(),
+      cleanExpiredClaims: vi.fn().mockReturnValue(0),
+      tryClaimIssue: vi.fn().mockReturnValue(true),
+      getActiveClaim: vi.fn().mockReturnValue(undefined),
+      releaseIssueClaim: vi.fn(),
+      updateClaimTaskId: vi.fn(),
+      cancelSupersededTasks: vi.fn().mockReturnValue(0),
+      findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
+      getSecretMountStatus: vi.fn().mockReturnValue([]),
+      createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
+      updateTask: vi.fn(),
+    } as unknown as StateStore;
+    mockDispatcher = {
+      dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
+    } as unknown as Dispatcher;
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
+  });
+
+  it("creates already-in-review task when open PR exists", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Feature", body: "Do it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 99, title: "Fix Feature", url: "https://github.com/owner/my-repo/pull/99", state: "open", isDraft: false },
+    ]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    expect(result.dispatched).toBe(0);
+    // Should create an "already-in-review" task record
+    expect(mockStore.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: expect.stringContaining("Already in review"),
+        source: "github",
+        source_ref: "owner/my-repo#42",
+      }),
+    );
+    // Should update the task to done with already-in-review result
+    expect(mockStore.updateTask).toHaveBeenCalledWith(
+      "task-already-in-review",
+      expect.objectContaining({
+        status: "done",
+        result: expect.stringContaining("already-in-review"),
+        verification_status: "approved",
+        quality_score: 1.0,
+      }),
+    );
+    // Should mark as processed
+    expect(mockStore.markProcessed).toHaveBeenCalledWith(
+      "github",
+      "owner/my-repo#42",
+      "already-in-review-pr-99",
+    );
+    // Should NOT dispatch to agent
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("creates already-in-review task when approved PR is waiting", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 55, title: "Bugfix", body: "Fix bug", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([]);
+    mockFindApprovedPR.mockReturnValue({ number: 77, title: "Fix bug", url: "https://github.com/owner/my-repo/pull/77" });
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    expect(mockStore.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: expect.stringContaining("PR #77"),
+        source_ref: "owner/my-repo#55",
+      }),
+    );
+    expect(mockStore.updateTask).toHaveBeenCalledWith(
+      "task-already-in-review",
+      expect.objectContaining({
+        result: expect.stringContaining("Approved PR #77"),
+      }),
+    );
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("dispatchIdleAgentBacklog: creates already-in-review task for open PR", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 33, title: "Task", body: "body", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 44, title: "Task PR", url: "https://github.com/owner/my-repo/pull/44", state: "open", isDraft: false },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    expect(mockStore.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: expect.stringContaining("Already in review"),
+        source_ref: "owner/my-repo#33",
+      }),
+    );
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("does NOT create already-in-review task for draft PRs (allowed to dispatch)", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 10, title: "Feature", body: "body", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 20, title: "Feature PR", url: "https://github.com/owner/my-repo/pull/20", state: "open", isDraft: true },
+    ]);
+    mockFindApprovedPR.mockReturnValue(null);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // Draft PRs are allowed through — agent dispatched to continue work
+    expect(result.dispatched).toBe(1);
+    expect(mockStore.createTask).not.toHaveBeenCalled();
+  });
+
+  it("gracefully handles store errors during already-in-review recording", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Feature", body: "Do it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 99, title: "Fix Feature", url: "https://github.com/owner/my-repo/pull/99", state: "open", isDraft: false },
+    ]);
+    // Simulate store error
+    (mockStore.createTask as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error("DB connection lost");
+    });
+
+    // Should NOT throw — error is caught and logged
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+  });
+});
