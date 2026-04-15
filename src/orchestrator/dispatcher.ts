@@ -583,6 +583,51 @@ export class Dispatcher {
       this.log.info("Routed task", { agentName, reason: routeReason, confidence: matches[0].confidence });
     }
 
+    // ── Unknown-agent guard (issue #864) ──────────────────────────────────────
+    // Reject dispatches to agents that are not present in the registered agent
+    // registry.  This must fire BEFORE pool resolution so we don't silently
+    // succeed when the target is an alias, a renamed agent, or a stale entry.
+    // We log the rejection to both the service logger and the supervisor
+    // decision log so it appears in the dashboard routing timeline.
+    if (!this.config.agents[agentName]) {
+      const knownAgents = Object.keys(this.config.agents).join(", ");
+      const reason =
+        `Dispatch rejected: agent "${agentName}" is not in the registered agent registry. ` +
+        `Known agents: [${knownAgents}]`;
+      this.log.warn("UNKNOWN_AGENT dispatch rejected", {
+        agentName,
+        sourceRef: options?.sourceRef,
+        knownAgents,
+      });
+      this.store.addSupervisorDecision({
+        action: "reject",
+        agent_name: agentName,
+        reason,
+        hard_gates: ["UNKNOWN_AGENT"],
+        outcome: "skipped",
+        task_id: undefined,
+        route_method: options?.agentName ? "explicit" : "deterministic",
+      });
+      await notifyOperator(
+        `UNKNOWN_AGENT: dispatch to unregistered agent blocked`,
+        `Attempted dispatch to agent \`${agentName}\` which is not registered.\n` +
+          (options?.sourceRef ? `Source: ${options.sourceRef}\n` : "") +
+          `Known agents: \`${knownAgents}\``,
+        "warning",
+        `unknown-agent:${agentName}:${options?.sourceRef ?? ""}`,
+      );
+      return {
+        taskId: "",
+        agentName,
+        response: {
+          content: reason,
+          model: "",
+          usage: { input_tokens: 0, output_tokens: 0 },
+          stop_reason: "unknown-agent",
+        },
+      };
+    }
+
     // Pool resolution: if the selected agent belongs to a pool, pick the
     // healthiest idle member instead of just the first idle one.  This prevents
     // routing to an instance that is 503-ing (issue #385).
@@ -631,13 +676,6 @@ export class Dispatcher {
         health: healthRecords.find((h) => h.agent_name === selected),
       });
       agentName = selected;
-    }
-
-    // Validate agent exists
-    if (!this.config.agents[agentName]) {
-      throw new Error(
-        `Unknown agent: ${agentName}. Available: ${Object.keys(this.config.agents).join(", ")}`,
-      );
     }
 
     // Capability tag enforcement (issue #817): block research-only agents from

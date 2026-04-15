@@ -105,8 +105,42 @@ export function runGitHubPreDispatchValidation(params: {
     existingBranch: null as string | null,
   };
 
+  // ── Agent registry check (issue #864) ────────────────────────────────────
+  // Reject any dispatch to an agent not present in the registry before
+  // touching any GitHub API or store state.  This is the earliest possible
+  // gate so unregistered agents never reach deeper validation logic.
   const agent = config.agents[agentName];
-  if (!agent?.github) {
+  if (!agent) {
+    const knownAgents = Object.keys(config.agents).join(", ");
+    const failed = makeFailedResult(
+      base,
+      "agent_registered",
+      "UNKNOWN_AGENT",
+      `agent "${agentName}" is not in the registered agent registry (known: [${knownAgents}])`,
+    );
+    store.addDispatchValidation({
+      source,
+      source_ref: sourceRef,
+      agent_name: agentName,
+      repo: issue.repo,
+      issue_number: issue.number,
+      outcome: failed.outcome,
+      failure_check: failed.failureCheck,
+      failure_code: failed.failureCode,
+      failure_reason: failed.failureReason,
+      checklist: failed.checks,
+    });
+    return failed;
+  }
+  checks.push(
+    makePassedCheck(
+      "agent_registered",
+      "agent_in_registry",
+      `agent "${agentName}" is registered`,
+    ),
+  );
+
+  if (!agent.github) {
     const failed = makeFailedResult(
       base,
       "issue_ownership",

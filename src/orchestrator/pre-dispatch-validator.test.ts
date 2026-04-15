@@ -113,3 +113,99 @@ describe("runGitHubPreDispatchValidation", () => {
     expect(mockCachedGetIssueState).toHaveBeenCalled();
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// Agent registry check — issue #864
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("runGitHubPreDispatchValidation — agent_registered check (issue #864)", () => {
+  it("blocks dispatch with UNKNOWN_AGENT when agent is not in registry", () => {
+    const config = makeConfig();
+    const store = new StateStore(":memory:");
+
+    const result = runGitHubPreDispatchValidation({
+      config,
+      store,
+      source: "github",
+      agentName: "codex-orchestrator-reviewer", // not in config
+      issue: { repo: "owner/repo", number: 1 },
+    });
+
+    expect(result.outcome).toBe("blocked");
+    expect(result.failureCode).toBe("UNKNOWN_AGENT");
+    expect(result.failureCheck).toBe("agent_registered");
+    expect(result.failureReason).toContain("codex-orchestrator-reviewer");
+    expect(result.failureReason).toContain("agent registry");
+  });
+
+  it("does not call GitHub APIs when agent is unregistered (early bail-out)", () => {
+    const config = makeConfig();
+    const store = new StateStore(":memory:");
+
+    runGitHubPreDispatchValidation({
+      config,
+      store,
+      source: "github",
+      agentName: "ghost-agent",
+      issue: { repo: "owner/repo", number: 2 },
+    });
+
+    // Should bail out before reaching any GitHub API calls
+    expect(mockCountOpenPRs).not.toHaveBeenCalled();
+    expect(mockCachedGetIssueState).not.toHaveBeenCalled();
+  });
+
+  it("persists the UNKNOWN_AGENT rejection to the dispatch_validations table", () => {
+    const config = makeConfig();
+    const store = new StateStore(":memory:");
+
+    runGitHubPreDispatchValidation({
+      config,
+      store,
+      source: "github",
+      agentName: "stale-renamed-agent",
+      issue: { repo: "owner/repo", number: 5 },
+    });
+
+    const rows = store.getDispatchValidationHistory("owner/repo#5", 10);
+    expect(rows.length).toBeGreaterThan(0);
+    const rejection = rows.find((r) => r.failure_code === "UNKNOWN_AGENT");
+    expect(rejection).toBeDefined();
+    expect(rejection?.outcome).toBe("blocked");
+    expect(rejection?.agent_name).toBe("stale-renamed-agent");
+  });
+
+  it("passes the agent_registered check for a known agent", () => {
+    const config = makeConfig();
+    const store = new StateStore(":memory:");
+    mockCountOpenPRs.mockReturnValue(0);
+
+    const result = runGitHubPreDispatchValidation({
+      config,
+      store,
+      source: "github",
+      agentName: "test-agent", // registered in config
+      issue: { repo: "owner/repo", number: 7 },
+    });
+
+    const registryCheck = result.checks.find((c) => c.name === "agent_registered");
+    expect(registryCheck).toBeDefined();
+    expect(registryCheck?.status).toBe("passed");
+    expect(registryCheck?.code).toBe("agent_in_registry");
+  });
+
+  it("includes the known agent names in the failure reason", () => {
+    const config = makeConfig();
+    const store = new StateStore(":memory:");
+
+    const result = runGitHubPreDispatchValidation({
+      config,
+      store,
+      source: "github",
+      agentName: "mystery-agent",
+      issue: { repo: "owner/repo", number: 9 },
+    });
+
+    expect(result.failureReason).toContain("test-agent"); // the known agent in makeConfig()
+  });
+});

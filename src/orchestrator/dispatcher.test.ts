@@ -2682,3 +2682,101 @@ describe("StateStore — agent health tracking", () => {
     expect(health.last_error_message).toBe("second error");
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// Dispatcher — unknown-agent guard (issue #864)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("Dispatcher — UNKNOWN_AGENT dispatch guard (issue #864)", () => {
+  let store: StateStore;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+  });
+
+  it("returns stop_reason 'unknown-agent' when an explicit unknown agent is dispatched", async () => {
+    const dispatcher = new Dispatcher(makeConfig(), store);
+    const result = await dispatcher.dispatch("do the thing", {
+      agentName: "codex-orchestrator-reviewer", // not in registry
+      source: "manual",
+    });
+
+    expect(result.response.stop_reason).toBe("unknown-agent");
+    expect(result.taskId).toBe("");
+  });
+
+  it("does NOT create a task in the store for an unknown-agent dispatch", async () => {
+    const dispatcher = new Dispatcher(makeConfig(), store);
+    await dispatcher.dispatch("do the thing", {
+      agentName: "ghost-agent",
+      source: "github",
+      sourceRef: "owner/repo#42",
+    });
+
+    const tasks = store.listTasks({ limit: 100 });
+    // No task should have been created for the unregistered agent
+    expect(tasks.filter((t) => t.agent_name === "ghost-agent")).toHaveLength(0);
+  });
+
+  it("logs a supervisor decision with hard_gate UNKNOWN_AGENT", async () => {
+    const dispatcher = new Dispatcher(makeConfig(), store);
+    await dispatcher.dispatch("do the thing", {
+      agentName: "stale-renamed-agent",
+      source: "github",
+      sourceRef: "owner/repo#99",
+    });
+
+    const decisions = store.getRecentSupervisorDecisions(5);
+    const unknownAgentDecision = decisions.find(
+      (d) => d.hard_gates.includes("UNKNOWN_AGENT"),
+    );
+    expect(unknownAgentDecision).toBeDefined();
+    expect(unknownAgentDecision?.outcome).toBe("skipped");
+    expect(unknownAgentDecision?.agent_name).toBe("stale-renamed-agent");
+  });
+
+  it("notifies the operator when an unknown agent is dispatched to", async () => {
+    const dispatcher = new Dispatcher(makeConfig(), store);
+    await dispatcher.dispatch("do the thing", {
+      agentName: "codex-orchestrator-reviewer",
+      source: "github",
+      sourceRef: "owner/repo#1",
+    });
+
+    expect(mockNotifyOperator).toHaveBeenCalledWith(
+      expect.stringContaining("UNKNOWN_AGENT"),
+      expect.stringContaining("codex-orchestrator-reviewer"),
+      "warning",
+      expect.any(String),
+    );
+  });
+
+  it("proceeds normally when dispatching to a registered agent", async () => {
+    // Construct dispatcher first so mockSend captures the fresh vi.fn() from the
+    // MockAgentClient constructor; then configure the return value.
+    const dispatcher = new Dispatcher(makeConfig(), store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+    const result = await dispatcher.dispatch("do the thing", {
+      agentName: "test-agent", // registered in makeConfig()
+      source: "manual",
+    });
+
+    expect(result.response.stop_reason).not.toBe("unknown-agent");
+    expect(result.taskId).not.toBe("");
+  });
+
+  it("response content mentions the rejected agent name", async () => {
+    const dispatcher = new Dispatcher(makeConfig(), store);
+    const result = await dispatcher.dispatch("do the thing", {
+      agentName: "codex-orchestrator-reviewer",
+      source: "manual",
+    });
+
+    expect(result.response.content).toContain("codex-orchestrator-reviewer");
+    expect(result.response.content).toContain("agent registry");
+  });
+});
