@@ -84,15 +84,18 @@ export interface VerificationResult {
    */
   marginalReason?: string;
   /**
-   * Set to `'hard_block_sub50'` when the verifier's hard-block guard fires
-   * (score < 0.50). This indicates the task was unconditionally rejected by the
-   * quality gate, overriding any `approved: true` the LLM may have returned.
+   * Set when the verifier's quality-gate enforcement overrides the LLM's decision:
    *
-   * Persisted to `verification_results.blocked_reason` so the dashboard rejection
-   * log can surface hard-block rejections distinctly from ordinary sub-threshold
-   * rejections.
+   * - `'hard_block_sub50'`  — score < 0.50: fundamentally incomplete work;
+   *   unconditional rejection (hardest gate).
+   * - `'low_score_sub60'`   — score in [0.50, 0.60): partial work that still falls
+   *   well below the acceptance floor; rejected with dimension-level feedback so
+   *   the agent can target specific gaps.
+   *
+   * Both values persist to `verification_results.blocked_reason` so the dashboard
+   * rejection log can distinguish enforced-gate rejections from ordinary LLM rejections.
    */
-  blockedReason?: "hard_block_sub50";
+  blockedReason?: "hard_block_sub50" | "low_score_sub60";
   /**
    * Explains why a low-scoring task was approved, making the quality system
    * legible to operators. Undefined when the task was rejected or scored ≥ 0.75.
@@ -307,11 +310,27 @@ const APPROVAL_THRESHOLD = 0.80;
 const HARD_BLOCK_THRESHOLD = 0.50;
 
 /**
+ * Sub-0.60 rejection floor: any task scoring in the half-open interval
+ * [HARD_BLOCK_THRESHOLD, SUB_THRESHOLD_REJECTION_LIMIT) is unconditionally
+ * rejected with dimension-level feedback, regardless of the LLM's `approved`
+ * field. Unlike the hard-block (< 0.50), these tasks have produced some
+ * partial work but still fall well below the acceptable quality bar; targeted
+ * dimension-level feedback is included so the agent can improve specific gaps.
+ *
+ * When this guard fires, `blockedReason` is set to `'low_score_sub60'`.
+ */
+const SUB_THRESHOLD_REJECTION_LIMIT = 0.60;
+
+/**
  * Score range that triggers automatic second-pass review.
  * Tasks with a first-pass score in [BORDERLINE_LOW, BORDERLINE_HIGH] are
  * independently evaluated a second time before approval is finalised.
+ *
+ * Extended from [0.70, 0.79] to [0.60, 0.79] (issue #187) so that any
+ * task that could plausibly be approved at the marginal bar gets a second
+ * independent check before we commit to approval.
  */
-const BORDERLINE_LOW = 0.70;
+const BORDERLINE_LOW = 0.60;
 const BORDERLINE_HIGH = 0.79;
 
 /**
@@ -320,9 +339,13 @@ const BORDERLINE_HIGH = 0.79;
  * receive a distinct ⚠️ MARGINAL badge in the dashboard and a one-sentence
  * summary of what prevented a higher score, enabling operators to spot-audit
  * the weakest approved PRs before they accumulate technical debt.
+ *
+ * Upper bound raised from 0.74 to 0.79 (issue #187) to align with the
+ * extended borderline range — any score that required a second pass to approve
+ * is inherently marginal.
  */
 const MARGINAL_APPROVAL_LOW = 0.60;
-const MARGINAL_APPROVAL_HIGH = 0.74;
+const MARGINAL_APPROVAL_HIGH = 0.79;
 
 /**
  * Minimum `issue_priority` score that activates the priority quality gate.
@@ -352,7 +375,7 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   "notes": "Brief assessment of quality, completeness, correctness",
   "revision": "If not approved, specific guidance for improvement (omit if approved)",
   "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — e.g. which acceptance criteria were unmet, what gaps were found, or why the work was hard to verify. Omit entirely when score >= 0.80.",
-  "marginal_reason": "REQUIRED when approved is true AND score is between 0.60 and 0.74: one sentence explaining what prevented a higher score (e.g. 'Missing error handling in the retry path reduced confidence despite correct core logic.'). Omit entirely otherwise.",
+  "marginal_reason": "REQUIRED when approved is true AND score is between 0.60 and 0.79: one sentence explaining what prevented a higher score (e.g. 'Missing error handling in the retry path reduced confidence despite correct core logic.'). Omit entirely otherwise.",
   "dimensions": {
     "correctness": 0.0-1.0,
     "completeness": 0.0-1.0,
@@ -449,7 +472,7 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   "notes": "Independent assessment — be specific about what is missing or wrong",
   "revision": "If not approved, concrete guidance for what needs to change (omit if approved)",
   "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score — which criteria were unmet, what gaps were found, or what made the work hard to verify. Omit entirely when score >= 0.80.",
-  "marginal_reason": "REQUIRED when approved is true AND score is between 0.60 and 0.74: one sentence explaining what prevented a higher score (e.g. 'Missing error handling in the retry path reduced confidence despite correct core logic.'). Omit entirely otherwise.",
+  "marginal_reason": "REQUIRED when approved is true AND score is between 0.60 and 0.79: one sentence explaining what prevented a higher score (e.g. 'Missing error handling in the retry path reduced confidence despite correct core logic.'). Omit entirely otherwise.",
   "dimensions": {
     "correctness": 0.0-1.0,
     "completeness": 0.0-1.0,
@@ -656,7 +679,7 @@ export class Verifier {
     score: number,
     approved: boolean,
     rejectionReason?: string,
-    blockedReason?: "hard_block_sub50",
+    blockedReason?: "hard_block_sub50" | "low_score_sub60",
     approvalRationale?: string,
   ): void {
     // Prefer the explicitly-wired store; fall back to a runtime check on the
@@ -709,6 +732,49 @@ export class Verifier {
       ...rest,
       approved: false,
       blockedReason: "hard_block_sub50",
+    };
+  }
+
+  /**
+   * Enforce the sub-0.60 rejection floor after a verification decision has been
+   * parsed (issue #187).
+   *
+   * Handles scores in the half-open interval [HARD_BLOCK_THRESHOLD, SUB_THRESHOLD_REJECTION_LIMIT)
+   * i.e. [0.50, 0.60). Scores below 0.50 are already handled by applyHardBlockGuard.
+   * Scores at or above 0.60 are unaffected.
+   *
+   * When the guard fires:
+   *   - `approved` is forced to `false`
+   *   - `blockedReason` is set to `'low_score_sub60'`
+   *   - All marginal/approval flags are stripped
+   *
+   * The score itself is preserved so dimension-level feedback can target
+   * the specific quality gaps.
+   */
+  private applySubThresholdRejectionGuard(result: VerificationResult): VerificationResult {
+    if (result.score < HARD_BLOCK_THRESHOLD || result.score >= SUB_THRESHOLD_REJECTION_LIMIT) {
+      // Outside this guard's range — already handled by hard-block (< 0.50)
+      // or acceptable for borderline/standard path (>= 0.60).
+      return result;
+    }
+    if (!result.approved) {
+      // Already rejected by the LLM — no override needed; preserve existing result.
+      return result;
+    }
+
+    // The LLM returned approved:true but score < 0.60 — override.
+    const {
+      marginalApproval: _marginalApproval,
+      marginalReason: _marginalReason,
+      approvalRationale: _approvalRationale,
+      approved: _approved,
+      ...rest
+    } = result;
+
+    return {
+      ...rest,
+      approved: false,
+      blockedReason: "low_score_sub60",
     };
   }
 
@@ -905,7 +971,9 @@ export class Verifier {
       taskId,
       "first-pass",
     );
-    const enforcedFirstPassResult = this.applyHardBlockGuard(firstPassResult);
+    const enforcedFirstPassResult = this.applySubThresholdRejectionGuard(
+      this.applyHardBlockGuard(firstPassResult),
+    );
 
     // ── Borderline second-pass guard ────────────────────────────────────────
     const isBorderline =
@@ -927,7 +995,9 @@ export class Verifier {
         taskId,
         "second-pass",
       );
-      const enforcedSecondPassResult = this.applyHardBlockGuard(secondPassResult);
+      const enforcedSecondPassResult = this.applySubThresholdRejectionGuard(
+        this.applyHardBlockGuard(secondPassResult),
+      );
 
       const agreed = enforcedFirstPassResult.approved === enforcedSecondPassResult.approved;
 
@@ -1092,11 +1162,13 @@ export class Verifier {
 
     // Prefix notes with marginal badge so the dashboard task list can surface it.
     const marginalBadge =
-      enforcedFirstPassResult.blockedReason
+      enforcedFirstPassResult.blockedReason === "hard_block_sub50"
         ? `🚧 HARD BLOCK — score ${(enforcedFirstPassResult.score * 100).toFixed(0)}% below 50% threshold\n\n`
-        : enforcedFirstPassResult.marginalApproval
-          ? `⚠️ MARGINAL APPROVAL — score ${(enforcedFirstPassResult.score * 100).toFixed(0)}%` +
-            (enforcedFirstPassResult.marginalReason ? ` — ${enforcedFirstPassResult.marginalReason}` : "") +
+        : enforcedFirstPassResult.blockedReason === "low_score_sub60"
+          ? `🔴 QUALITY GATE REJECT — score ${(enforcedFirstPassResult.score * 100).toFixed(0)}% below the 60% minimum floor\n\n`
+          : enforcedFirstPassResult.marginalApproval
+            ? `⚠️ MARGINAL APPROVAL — score ${(enforcedFirstPassResult.score * 100).toFixed(0)}%` +
+              (enforcedFirstPassResult.marginalReason ? ` — ${enforcedFirstPassResult.marginalReason}` : "") +
           "\n\n"
           : "";
     const enrichedNotes = `${marginalBadge}${enforcedFirstPassResult.notes}`;

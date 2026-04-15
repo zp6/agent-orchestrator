@@ -85,14 +85,17 @@ describe("Verifier parseResponse (via enforced shape)", () => {
 });
 
 describe("Borderline score range constants", () => {
-  it("borderline range is [0.70, 0.79]", () => {
-    const BORDERLINE_LOW = 0.70;
+  // Extended from [0.70, 0.79] to [0.60, 0.79] (issue #187): any score that
+  // could plausibly be approved at the marginal bar now receives an independent
+  // second-pass review before approval is finalised.
+  it("borderline range is [0.60, 0.79]", () => {
+    const BORDERLINE_LOW = 0.60;
     const BORDERLINE_HIGH = 0.79;
 
     // scores that should trigger second pass
-    const borderlineScores = [0.70, 0.74, 0.75, 0.79];
+    const borderlineScores = [0.60, 0.65, 0.70, 0.74, 0.75, 0.79];
     // scores that should NOT trigger second pass
-    const nonBorderlineScores = [0.69, 0.80, 0.90, 0.50, 0.00, 1.00];
+    const nonBorderlineScores = [0.59, 0.80, 0.90, 0.50, 0.00, 1.00];
 
     for (const score of borderlineScores) {
       const isBorderline = score >= BORDERLINE_LOW && score <= BORDERLINE_HIGH;
@@ -293,7 +296,7 @@ describe("VerificationResult combined notes format", () => {
   });
 });
 
-describe("Marginal approval flagging (score 0.60–0.74)", () => {
+describe("Marginal approval flagging (score 0.60–0.79)", () => {
   it("VerificationResult includes optional marginalApproval and marginalReason fields", () => {
     const result: VerificationResult = {
       approved: true,
@@ -317,12 +320,14 @@ describe("Marginal approval flagging (score 0.60–0.74)", () => {
     expect(result.marginalReason).toBeUndefined();
   });
 
-  it("marginalApproval range is [0.60, 0.74]", () => {
+  // Extended from [0.60, 0.74] to [0.60, 0.79] (issue #187): marginal approval
+  // range is now aligned with the borderline second-pass range.
+  it("marginalApproval range is [0.60, 0.79]", () => {
     const MARGINAL_LOW = 0.60;
-    const MARGINAL_HIGH = 0.74;
+    const MARGINAL_HIGH = 0.79;
 
-    const marginalScores = [0.60, 0.65, 0.70, 0.74];
-    const nonMarginalApprovalScores = [0.59, 0.75, 0.80, 0.90];
+    const marginalScores = [0.60, 0.65, 0.70, 0.74, 0.75, 0.79];
+    const nonMarginalApprovalScores = [0.59, 0.80, 0.90];
 
     for (const score of marginalScores) {
       const isMarginal = score >= MARGINAL_LOW && score <= MARGINAL_HIGH;
@@ -337,10 +342,12 @@ describe("Marginal approval flagging (score 0.60–0.74)", () => {
 
   it("marginalReason is only populated for approved tasks in the marginal range", () => {
     const isMarginalApproval = (approved: boolean, score: number) =>
-      approved && score >= 0.60 && score <= 0.74;
+      approved && score >= 0.60 && score <= 0.79;
 
     // Approved, marginal score → marginalApproval
     expect(isMarginalApproval(true, 0.68)).toBe(true);
+    expect(isMarginalApproval(true, 0.75)).toBe(true);   // now in marginal range (extended to 0.79)
+    expect(isMarginalApproval(true, 0.79)).toBe(true);   // upper boundary (inclusive)
     // Rejected, marginal score → no marginalApproval (rejected tasks get explanation instead)
     expect(isMarginalApproval(false, 0.68)).toBe(false);
     // Approved, score above marginal threshold → no marginalApproval
@@ -1124,5 +1131,124 @@ describe("Verifier.checkTriageSchemaCompliance", () => {
     expect(result.passes).toBe(false);
     expect(result.score).toBeCloseTo(0.75, 10);
     expect(result.missingFields).toContain("duplicates_checked");
+  });
+});
+
+describe("Sub-0.60 rejection guard (issue #187)", () => {
+  /**
+   * Mirrors the `applySubThresholdRejectionGuard` logic from verifier.ts.
+   * Scores in [0.50, 0.60) must be rejected even when the LLM returns approved=true.
+   * The hard-block guard already covers scores < 0.50.
+   */
+  const HARD_BLOCK_THRESHOLD = 0.50;
+  const SUB_THRESHOLD_REJECTION_LIMIT = 0.60;
+
+  function applySubThresholdRejectionGuard(result: {
+    approved: boolean;
+    score: number;
+    blockedReason?: string;
+  }): { approved: boolean; blockedReason?: string } {
+    // Only fires for scores in [HARD_BLOCK_THRESHOLD, SUB_THRESHOLD_REJECTION_LIMIT)
+    if (result.score < HARD_BLOCK_THRESHOLD) return result; // hard-block already handles it
+    if (result.score >= SUB_THRESHOLD_REJECTION_LIMIT) return result; // above floor, pass through
+    if (!result.approved) return result; // already rejected — nothing to enforce
+    const { approved: _, blockedReason: __, ...rest } = result;
+    return { ...rest, approved: false, blockedReason: "low_score_sub60" };
+  }
+
+  it("score of 0.50 approved by LLM is rejected with blockedReason=low_score_sub60", () => {
+    const result = applySubThresholdRejectionGuard({ approved: true, score: 0.50 });
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("low_score_sub60");
+  });
+
+  it("score of 0.55 approved by LLM is rejected", () => {
+    const result = applySubThresholdRejectionGuard({ approved: true, score: 0.55 });
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("low_score_sub60");
+  });
+
+  it("score of 0.59 approved by LLM is rejected (just below floor)", () => {
+    const result = applySubThresholdRejectionGuard({ approved: true, score: 0.59 });
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("low_score_sub60");
+  });
+
+  it("score of 0.60 is NOT affected — exactly at floor, passes through", () => {
+    const result = applySubThresholdRejectionGuard({ approved: true, score: 0.60 });
+    expect(result.approved).toBe(true);
+    expect(result.blockedReason).toBeUndefined();
+  });
+
+  it("score of 0.65 is NOT affected — above floor", () => {
+    const result = applySubThresholdRejectionGuard({ approved: true, score: 0.65 });
+    expect(result.approved).toBe(true);
+    expect(result.blockedReason).toBeUndefined();
+  });
+
+  it("score of 0.80 is NOT affected — well above floor", () => {
+    const result = applySubThresholdRejectionGuard({ approved: true, score: 0.80 });
+    expect(result.approved).toBe(true);
+    expect(result.blockedReason).toBeUndefined();
+  });
+
+  it("score below 0.50 is passed through unchanged (hard-block guard handles it)", () => {
+    // Guard must not double-apply: hard-block range is < 0.50
+    const alreadyBlocked = { approved: false, score: 0.38, blockedReason: "hard_block_sub50" };
+    const result = applySubThresholdRejectionGuard(alreadyBlocked);
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("hard_block_sub50"); // unchanged
+  });
+
+  it("already-rejected result in sub-60 range is not modified", () => {
+    // LLM correctly rejected a 0.55 score — guard must not overwrite
+    const result = applySubThresholdRejectionGuard({ approved: false, score: 0.55 });
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBeUndefined(); // no blocker added when already rejected
+  });
+
+  it("VerificationResult can express blockedReason=low_score_sub60", () => {
+    const result: VerificationResult = {
+      approved: false,
+      score: 0.55,
+      notes: "Implementation meets some requirements but quality is below the 60% minimum floor.",
+      revision: "Please address the missing test coverage and edge-case handling noted above.",
+      blockedReason: "low_score_sub60",
+    };
+    expect(result.blockedReason).toBe("low_score_sub60");
+    expect(result.approved).toBe(false);
+  });
+
+  it("marginal badge uses QUALITY GATE REJECT prefix for low_score_sub60", () => {
+    const score = 0.55;
+    const blockedReason = "low_score_sub60";
+
+    const badge =
+      blockedReason === "hard_block_sub50"
+        ? `🚧 HARD BLOCK — score ${(score * 100).toFixed(0)}% below 50% threshold\n\n`
+        : blockedReason === "low_score_sub60"
+          ? `🔴 QUALITY GATE REJECT — score ${(score * 100).toFixed(0)}% below the 60% minimum floor\n\n`
+          : "";
+
+    expect(badge).toContain("🔴 QUALITY GATE REJECT");
+    expect(badge).toContain("55%");
+    expect(badge).toContain("60% minimum floor");
+    expect(badge).not.toContain("🚧 HARD BLOCK");
+  });
+
+  it("hard-block badge uses HARD BLOCK prefix for hard_block_sub50", () => {
+    const score = 0.38;
+    const blockedReason = "hard_block_sub50";
+
+    const badge =
+      blockedReason === "hard_block_sub50"
+        ? `🚧 HARD BLOCK — score ${(score * 100).toFixed(0)}% below 50% threshold\n\n`
+        : blockedReason === "low_score_sub60"
+          ? `🔴 QUALITY GATE REJECT — score ${(score * 100).toFixed(0)}% below the 60% minimum floor\n\n`
+          : "";
+
+    expect(badge).toContain("🚧 HARD BLOCK");
+    expect(badge).toContain("38%");
+    expect(badge).not.toContain("🔴 QUALITY GATE REJECT");
   });
 });
