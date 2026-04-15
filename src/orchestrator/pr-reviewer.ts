@@ -16,6 +16,7 @@ import {
   seedDefaultPatterns,
 } from "./learned-patterns.js";
 import { fetchOpenPRFiles } from "./conflict-risk.js";
+import { checkSchemaContractDrift, extractChangedFiles } from "./schema-impact.js";
 
 export interface PRInfo {
   number: number;
@@ -251,6 +252,14 @@ export class PRReviewer {
     const patternsBlock = buildPatternsBlock(patterns);
     const patternIds = patterns.map((p) => p.id);
 
+    // ── Schema contract: detect column-name drift against the registry ────────
+    // Non-fatal: if the registry is unavailable, review continues without the notice.
+    const changedFiles = extractChangedFiles(truncatedDiff);
+    const schemaContractNotice = checkSchemaContractDrift(truncatedDiff, changedFiles);
+    if (schemaContractNotice) {
+      this.log.info("Schema contract drift detected — injecting notice into review prompt", { repo, prNumber });
+    }
+
     const prompt =
       `## PR #${pr.number}: ${pr.title}\n` +
       `**Repo:** ${pr.repo}\n` +
@@ -259,6 +268,7 @@ export class PRReviewer {
       `**Files changed:** ${pr.files_changed}` +
       diffWarning +
       patternsBlock +
+      schemaContractNotice +
       `\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${truncatedDiff}\n\`\`\``;
 
     if (patterns.length > 0) {

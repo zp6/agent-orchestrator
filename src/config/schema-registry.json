@@ -1,0 +1,185 @@
+{
+  "version": 1,
+  "description": "Cross-repo schema contract registry. Declares the canonical column names for each shared SQLite table so the PR reviewer can detect column-name drift between writer and consumer repos at review time rather than at runtime.",
+  "tables": [
+    {
+      "table": "tasks",
+      "writer_repo": "rapartlu/agent-orchestrator",
+      "consumer_repos": [
+        "rapartlu/agent-orchestrator",
+        "rapartlu/agent-dashboard",
+        "rapartlu/agent-reviewer"
+      ],
+      "canonical_columns": [
+        "id",
+        "title",
+        "description",
+        "source",
+        "source_ref",
+        "status",
+        "agent_name",
+        "conversation_id",
+        "result",
+        "task_type",
+        "verification_status",
+        "quality_score",
+        "verification_notes",
+        "retry_count",
+        "revision_count",
+        "lineage_group_id",
+        "parent_task_id",
+        "step_id",
+        "plan",
+        "next_retry_at",
+        "created_at",
+        "updated_at"
+      ],
+      "notes": "Primary task tracking table. verification_status/quality_score are written by the reviewer and read by the dashboard."
+    },
+    {
+      "table": "learned_patterns",
+      "writer_repo": "rapartlu/agent-orchestrator",
+      "consumer_repos": [
+        "rapartlu/agent-orchestrator",
+        "rapartlu/agent-dashboard"
+      ],
+      "canonical_columns": [
+        "id",
+        "pattern_type",
+        "title",
+        "description",
+        "source",
+        "source_ref",
+        "agent",
+        "repos",
+        "confidence",
+        "hit_count",
+        "first_pass_saves",
+        "active",
+        "suppressed_at",
+        "promoted_at",
+        "created_at",
+        "updated_at"
+      ],
+      "notes": "Immune-system anti-pattern registry. Dashboard reads for the immune-system panel — column drift caused the 'No patterns found' bug (task 01KP654X)."
+    },
+    {
+      "table": "routing_decisions",
+      "writer_repo": "rapartlu/agent-orchestrator",
+      "consumer_repos": [
+        "rapartlu/agent-orchestrator",
+        "rapartlu/agent-dashboard"
+      ],
+      "canonical_columns": [
+        "id",
+        "action",
+        "agent_name",
+        "reason",
+        "message",
+        "outcome",
+        "task_id",
+        "route_method",
+        "redirect_reason",
+        "created_at"
+      ],
+      "notes": "Dashboard-friendly mirror of supervisor_decisions. Includes capability-enforcement routing metadata."
+    },
+    {
+      "table": "supervisor_decisions",
+      "writer_repo": "rapartlu/agent-orchestrator",
+      "consumer_repos": [
+        "rapartlu/agent-orchestrator",
+        "rapartlu/agent-dashboard"
+      ],
+      "canonical_columns": [
+        "id",
+        "action",
+        "agent_name",
+        "reason",
+        "message",
+        "rationale",
+        "issue_refs",
+        "hard_gates",
+        "outcome",
+        "task_id",
+        "created_at"
+      ],
+      "notes": "Rich audit log with LLM rationale and structured gate info. Dashboard reads for supervisor decision history."
+    },
+    {
+      "table": "routing_outcomes",
+      "writer_repo": "rapartlu/agent-orchestrator",
+      "consumer_repos": [
+        "rapartlu/agent-orchestrator",
+        "rapartlu/agent-dashboard"
+      ],
+      "canonical_columns": [
+        "id",
+        "task_id",
+        "agent_chosen",
+        "task_type",
+        "route_method",
+        "route_confidence",
+        "source_ref",
+        "routed_at",
+        "quality_score",
+        "outcome_updated_at",
+        "redirect_reason"
+      ],
+      "notes": "Per-task routing decision log. Dashboard reads for routing accuracy metrics."
+    },
+    {
+      "table": "pr_reviews",
+      "writer_repo": "rapartlu/agent-orchestrator",
+      "consumer_repos": [
+        "rapartlu/agent-orchestrator",
+        "rapartlu/agent-dashboard"
+      ],
+      "canonical_columns": [
+        "id",
+        "repo",
+        "pr_number",
+        "decision",
+        "created_at"
+      ],
+      "notes": "PR review decision history. Dashboard reads for PR metrics panel."
+    },
+    {
+      "table": "antibody_log",
+      "writer_repo": "rapartlu/agent-orchestrator",
+      "consumer_repos": [
+        "rapartlu/agent-orchestrator",
+        "rapartlu/agent-dashboard"
+      ],
+      "canonical_columns": [
+        "id",
+        "repo",
+        "pr_number",
+        "diff_shape",
+        "decision",
+        "outcome",
+        "reason",
+        "agent",
+        "timestamp"
+      ],
+      "notes": "Structured failure genome — tracks PR decisions and post-merge outcomes."
+    },
+    {
+      "table": "agent_health",
+      "writer_repo": "rapartlu/agent-orchestrator",
+      "consumer_repos": [
+        "rapartlu/agent-orchestrator",
+        "rapartlu/agent-dashboard"
+      ],
+      "canonical_columns": [
+        "id",
+        "agent_name",
+        "status",
+        "last_seen",
+        "details",
+        "created_at"
+      ],
+      "notes": "Agent health status. Dashboard reads for the health panel."
+    }
+  ]
+}
