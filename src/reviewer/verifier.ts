@@ -870,21 +870,40 @@ export class Verifier {
       });
 
       const inferredResult = await this.inferMissingScore(task);
+
+      // Issue #203: inferMissingScore now applies hard-block and sub-threshold
+      // guards.  If the inferred score is below threshold, the result will have
+      // approved=false.  We must update verification_status accordingly —
+      // never leave a task as "approved" with a below-threshold score.
+      const effectiveStatus = inferredResult.approved ? "approved" : "rejected";
+
       this.store.updateTask(taskId, {
+        verification_status: effectiveStatus,
         quality_score: inferredResult.score,
         verification_notes: inferredResult.notes,
-        quality_explanation: inferredResult.approvalRationale ?? null,
+        quality_explanation: inferredResult.approved
+          ? (inferredResult.approvalRationale ?? null)
+          : (inferredResult.explanation ?? `Score ${inferredResult.score.toFixed(2)} below threshold — inferred score triggered rejection`),
       });
 
       this.recordVerificationResult(
         taskId,
         task.agent_name ?? "unknown",
         inferredResult.score,
-        true,
-        undefined,
-        undefined,
+        inferredResult.approved,
+        inferredResult.approved ? undefined : (inferredResult.explanation ?? "Inferred score below threshold"),
+        inferredResult.blockedReason,
         inferredResult.approvalRationale,
       );
+
+      if (!inferredResult.approved) {
+        this.log.warn("Pre-approved task rejected after score inference — score below threshold", {
+          taskId,
+          inferredScore: inferredResult.score,
+          blockedReason: inferredResult.blockedReason,
+          agentName: task.agent_name,
+        });
+      }
 
       return inferredResult;
     }
@@ -1579,19 +1598,28 @@ export class Verifier {
     for (const task of nullScoreTasks) {
       try {
         const inferredResult = await this.inferMissingScore(task);
+
+        // Issue #203: inferMissingScore now applies score-threshold guards.
+        // If the inferred score is below threshold, update verification_status
+        // to "rejected" to maintain the score-approval invariant.
+        const effectiveStatus = inferredResult.approved ? "approved" : "rejected";
+
         this.store.updateTask(task.id, {
+          verification_status: effectiveStatus,
           quality_score: inferredResult.score,
           verification_notes: inferredResult.notes,
-          quality_explanation: inferredResult.approvalRationale ?? null,
+          quality_explanation: inferredResult.approved
+            ? (inferredResult.approvalRationale ?? null)
+            : (inferredResult.explanation ?? `Score ${inferredResult.score.toFixed(2)} below threshold — inferred score triggered rejection`),
         });
 
         this.recordVerificationResult(
           task.id,
           task.agent_name ?? "unknown",
           inferredResult.score,
-          true,
-          undefined,
-          undefined,
+          inferredResult.approved,
+          inferredResult.approved ? undefined : (inferredResult.explanation ?? "Inferred score below threshold"),
+          inferredResult.blockedReason,
           inferredResult.approvalRationale,
         );
 
@@ -1599,7 +1627,9 @@ export class Verifier {
         this.log.info("Repaired null score for approved task", {
           taskId: task.id,
           inferredScore: inferredResult.score,
+          effectiveStatus,
           approvalRationale: inferredResult.approvalRationale,
+          blockedReason: inferredResult.blockedReason,
         });
       } catch (err) {
         this.log.error("Failed to repair null score for approved task", {
@@ -1618,8 +1648,13 @@ export class Verifier {
    * Flags the score as inferred via approvalRationale.
    *
    * Called when an approved task is detected with quality_score = null.
-   * Returns a VerificationResult with an inferred score (0.80+) and a special
+   * Returns a VerificationResult with an inferred score and a special
    * approvalRationale prefix indicating inference was needed.
+   *
+   * IMPORTANT (issue #203): The inferred score is subject to the same
+   * hard-block (< 0.50) and sub-threshold (< 0.60) guards as first-pass
+   * scores. If the LLM inference returns a very low score, the task will
+   * be rejected — not silently approved with a low score.
    */
   private async inferMissingScore(task: {
     id: string;
@@ -1697,12 +1732,21 @@ Return valid JSON with "score" (0.0-1.0) and "confidence" ("low", "medium", "hig
         confidence: parsed.confidence,
       });
 
-      return {
+      // ── Score threshold enforcement for inferred scores (issue #203) ──────
+      // Apply the same hard-block and sub-threshold guards as first-pass scores.
+      // A pre-approved task whose inferred score is very low indicates the
+      // original approval was wrong — reject it rather than silently recording
+      // an approved task with a trust-breaking score.
+      const inferredResult: VerificationResult = {
         approved: true,
         score: inferredScore,
         notes: `[Fallback score inferred via lightweight LLM pass — task was approved but lacked quality_score in DB]`,
         approvalRationale: `inferred_fallback_llm_secondary`,
       };
+
+      return this.applySubThresholdRejectionGuard(
+        this.applyHardBlockGuard(inferredResult),
+      );
     } catch (err) {
       // If inference fails, use a safe default for an approved task
       this.log.warn("Inference fallback failed, using default score", {

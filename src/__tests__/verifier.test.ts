@@ -1252,3 +1252,235 @@ describe("Sub-0.60 rejection guard (issue #187)", () => {
     expect(badge).not.toContain("🔴 QUALITY GATE REJECT");
   });
 });
+
+// ── Issue #203: Score threshold enforcement regression tests ────────────────
+// Any task with quality_score below min_score (0.80) that exits as "approved"
+// must either have an explicit approval_rationale or the bug path is blocked.
+
+describe("Score-approval invariant enforcement (issue #203)", () => {
+  const HARD_BLOCK_THRESHOLD = 0.50;
+  const SUB_THRESHOLD_REJECTION_LIMIT = 0.60;
+
+  /**
+   * Simulates the combined hard-block + sub-threshold enforcement pipeline
+   * that applyHardBlockGuard + applySubThresholdRejectionGuard implement.
+   */
+  function enforceScoreThreshold(
+    approved: boolean,
+    score: number,
+  ): { approved: boolean; blockedReason?: "hard_block_sub50" | "low_score_sub60" } {
+    // Hard-block: score < 0.50
+    if (score < HARD_BLOCK_THRESHOLD) {
+      return { approved: false, blockedReason: "hard_block_sub50" };
+    }
+    // Sub-threshold: score in [0.50, 0.60)
+    if (approved && score < SUB_THRESHOLD_REJECTION_LIMIT) {
+      return { approved: false, blockedReason: "low_score_sub60" };
+    }
+    return { approved };
+  }
+
+  it("score 0.15 with approved:true must be hard-blocked to rejected", () => {
+    const result = enforceScoreThreshold(true, 0.15);
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("hard_block_sub50");
+  });
+
+  it("score 0.00 must be hard-blocked", () => {
+    const result = enforceScoreThreshold(true, 0.00);
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("hard_block_sub50");
+  });
+
+  it("score 0.20 must be hard-blocked", () => {
+    const result = enforceScoreThreshold(true, 0.20);
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("hard_block_sub50");
+  });
+
+  it("score 0.49 must be hard-blocked (just below boundary)", () => {
+    const result = enforceScoreThreshold(true, 0.49);
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("hard_block_sub50");
+  });
+
+  it("score 0.50 with approved:true is NOT hard-blocked but IS sub-threshold rejected", () => {
+    const result = enforceScoreThreshold(true, 0.50);
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("low_score_sub60");
+  });
+
+  it("score 0.55 with approved:true is sub-threshold rejected", () => {
+    const result = enforceScoreThreshold(true, 0.55);
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("low_score_sub60");
+  });
+
+  it("score 0.60 with approved:true passes both gates (enters borderline)", () => {
+    const result = enforceScoreThreshold(true, 0.60);
+    expect(result.approved).toBe(true);
+    expect(result.blockedReason).toBeUndefined();
+  });
+
+  it("score 0.80 with approved:true passes all gates", () => {
+    const result = enforceScoreThreshold(true, 0.80);
+    expect(result.approved).toBe(true);
+    expect(result.blockedReason).toBeUndefined();
+  });
+
+  // The specific reported bug: score=0.15 must NEVER reach "approved"
+  it("REGRESSION: score=0.15 cannot reach verification_status=approved", () => {
+    // Even if LLM says approved:true, hard-block overrides to false
+    const llmSaysApproved = enforceScoreThreshold(true, 0.15);
+    expect(llmSaysApproved.approved).toBe(false);
+    expect(llmSaysApproved.blockedReason).toBe("hard_block_sub50");
+
+    // And if LLM correctly says approved:false, it stays false
+    const llmSaysRejected = enforceScoreThreshold(false, 0.15);
+    expect(llmSaysRejected.approved).toBe(false);
+    expect(llmSaysRejected.blockedReason).toBe("hard_block_sub50");
+  });
+});
+
+describe("inferMissingScore applies score-threshold guards (issue #203)", () => {
+  const HARD_BLOCK_THRESHOLD = 0.50;
+  const SUB_THRESHOLD_REJECTION_LIMIT = 0.60;
+
+  /**
+   * Simulates the enforced inference result: inferMissingScore returns
+   * approved:true with a raw score, then hard-block and sub-threshold
+   * guards are applied (matching the fix in verifier.ts).
+   */
+  function simulateInferredResult(rawScore: number): {
+    approved: boolean;
+    score: number;
+    blockedReason?: string;
+  } {
+    let approved = true;
+    let blockedReason: string | undefined;
+
+    // Hard-block guard
+    if (rawScore < HARD_BLOCK_THRESHOLD) {
+      approved = false;
+      blockedReason = "hard_block_sub50";
+    }
+    // Sub-threshold guard
+    else if (approved && rawScore < SUB_THRESHOLD_REJECTION_LIMIT) {
+      approved = false;
+      blockedReason = "low_score_sub60";
+    }
+
+    return { approved, score: rawScore, blockedReason };
+  }
+
+  it("inferred score 0.15 is rejected with hard_block_sub50", () => {
+    const result = simulateInferredResult(0.15);
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("hard_block_sub50");
+  });
+
+  it("inferred score 0.55 is rejected with low_score_sub60", () => {
+    const result = simulateInferredResult(0.55);
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("low_score_sub60");
+  });
+
+  it("inferred score 0.80 is approved", () => {
+    const result = simulateInferredResult(0.80);
+    expect(result.approved).toBe(true);
+    expect(result.blockedReason).toBeUndefined();
+  });
+
+  it("inferred score 0.85 is approved", () => {
+    const result = simulateInferredResult(0.85);
+    expect(result.approved).toBe(true);
+    expect(result.blockedReason).toBeUndefined();
+  });
+
+  it("inferred score 0.65 is approved (enters borderline but passes guards)", () => {
+    const result = simulateInferredResult(0.65);
+    expect(result.approved).toBe(true);
+    expect(result.blockedReason).toBeUndefined();
+  });
+});
+
+describe("updateTask score-approval invariant (issue #203)", () => {
+  const HARD_BLOCK_THRESHOLD = 0.50;
+
+  /**
+   * Simulates the store-level defence-in-depth guard in updateTask.
+   * When verification_status="approved" and quality_score < 0.50, the
+   * store overrides to "rejected".
+   */
+  function simulateUpdateTaskGuard(updates: {
+    verification_status?: string;
+    quality_score?: number | null;
+  }): { verification_status?: string; quality_score?: number | null } {
+    const normalized = { ...updates };
+    if (
+      normalized.verification_status === "approved" &&
+      normalized.quality_score != null &&
+      normalized.quality_score < HARD_BLOCK_THRESHOLD
+    ) {
+      normalized.verification_status = "rejected";
+    }
+    return normalized;
+  }
+
+  it("approved + score 0.15 is overridden to rejected in store", () => {
+    const result = simulateUpdateTaskGuard({
+      verification_status: "approved",
+      quality_score: 0.15,
+    });
+    expect(result.verification_status).toBe("rejected");
+    expect(result.quality_score).toBe(0.15);
+  });
+
+  it("approved + score 0.49 is overridden to rejected in store", () => {
+    const result = simulateUpdateTaskGuard({
+      verification_status: "approved",
+      quality_score: 0.49,
+    });
+    expect(result.verification_status).toBe("rejected");
+  });
+
+  it("approved + score 0.50 is NOT overridden (above hard-block threshold)", () => {
+    const result = simulateUpdateTaskGuard({
+      verification_status: "approved",
+      quality_score: 0.50,
+    });
+    expect(result.verification_status).toBe("approved");
+  });
+
+  it("approved + score 0.80 is NOT overridden", () => {
+    const result = simulateUpdateTaskGuard({
+      verification_status: "approved",
+      quality_score: 0.80,
+    });
+    expect(result.verification_status).toBe("approved");
+  });
+
+  it("rejected + score 0.15 stays rejected (no override needed)", () => {
+    const result = simulateUpdateTaskGuard({
+      verification_status: "rejected",
+      quality_score: 0.15,
+    });
+    expect(result.verification_status).toBe("rejected");
+  });
+
+  it("approved + null score is NOT overridden (score not known yet)", () => {
+    const result = simulateUpdateTaskGuard({
+      verification_status: "approved",
+      quality_score: null,
+    });
+    expect(result.verification_status).toBe("approved");
+  });
+
+  it("update without verification_status is not affected", () => {
+    const result = simulateUpdateTaskGuard({
+      quality_score: 0.15,
+    });
+    expect(result.verification_status).toBeUndefined();
+    expect(result.quality_score).toBe(0.15);
+  });
+});

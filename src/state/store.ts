@@ -493,14 +493,44 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
   }
 
   updateTask(id: string, updates: Partial<Task>): void {
-    const fields = Object.keys(updates)
+    // ── Score-approval invariant enforcement (issue #203) ────────────────
+    // Defence-in-depth: prevent any caller from writing an approved task
+    // with a quality_score below the hard-block threshold (0.50).
+    // This catches bugs, race conditions, and external callers that bypass
+    // the verifier's own guards.
+    const normalizedUpdates = { ...updates };
+    if (
+      normalizedUpdates.verification_status === "approved" &&
+      normalizedUpdates.quality_score != null &&
+      normalizedUpdates.quality_score < StateStore.HARD_BLOCK_THRESHOLD
+    ) {
+      normalizedUpdates.verification_status = "rejected";
+    }
+
+    // Also handle the case where only quality_score is being updated:
+    // if the new score is below the hard-block threshold, check the current
+    // verification_status in the DB and reject if currently approved.
+    if (
+      normalizedUpdates.verification_status === undefined &&
+      normalizedUpdates.quality_score != null &&
+      normalizedUpdates.quality_score < StateStore.HARD_BLOCK_THRESHOLD
+    ) {
+      const existing = this.db
+        .prepare("SELECT verification_status FROM tasks WHERE id = ?")
+        .get(id) as { verification_status: string | null } | undefined;
+      if (existing?.verification_status === "approved") {
+        normalizedUpdates.verification_status = "rejected";
+      }
+    }
+
+    const fields = Object.keys(normalizedUpdates)
       .filter((k) => k !== "id")
       .map((k) => `${k} = @${k}`)
       .join(", ");
     if (!fields) return;
     this.db
       .prepare(`UPDATE tasks SET ${fields}, updated_at = datetime('now') WHERE id = @id`)
-      .run({ ...updates, id });
+      .run({ ...normalizedUpdates, id });
   }
 
   hasActiveTask(agentName: string): boolean {
