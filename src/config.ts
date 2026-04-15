@@ -39,4 +39,11 @@ export interface ReviewerConfig {
   };
   /** Optional SSH key path for git push operations */
   ssh_key?: string;
+  /**
+   * Optional base URL for the agent dashboard.
+   * When set, the calibration drift Telegram alert includes a clickable link
+   * to the dashboard calibration view (e.g. "https://dashboard.example.com").
+   * The calibration path `/calibration` is appended automatically.
+   */
+  dashboard_url?: string;
 }

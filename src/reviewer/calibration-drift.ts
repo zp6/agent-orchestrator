@@ -14,6 +14,10 @@
  * Issue #79: per-agent deduplication cooldown to prevent alert flooding.
  *   ✔ Tracks last-alerted timestamp per agent in memory
  *   ✔ Suppresses repeat alerts within the cooldown window (default: 1 hour)
+ *
+ * Issue #198: Telegram alert includes sample window and dashboard link.
+ *   ✔ Alert message includes recent/baseline window sizes in days and task counts
+ *   ✔ Optional dashboardUrl adds a clickable calibration view link to every alert
  */
 
 import type {
@@ -57,9 +61,58 @@ export class CalibrationDriftMonitor implements CalibrationDriftProvider {
    * Defaults to 1 hour so a persistent drift condition does not flood Telegram
    * across every 30-second daemon cycle.
    */
-  private readonly ALERT_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+  private readonly ALERT_COOLDOWN_MS: number;
 
-  constructor(private store: IStateStore) {}
+  /**
+   * Number of recent days used when checkAndAlert queries for drift.
+   * Shown in alert messages so operators know the sample window.
+   */
+  private readonly recentDays: number;
+
+  /**
+   * Number of baseline days used when checkAndAlert queries for drift.
+   * Shown in alert messages so operators know the comparison window.
+   */
+  private readonly baselineDays: number;
+
+  /**
+   * Optional URL of the dashboard calibration view.
+   * When set, every Telegram drift alert includes a clickable link.
+   *
+   * Example: "https://dashboard.example.com/calibration"
+   */
+  private readonly dashboardUrl: string | undefined;
+
+  constructor(
+    private store: IStateStore,
+    opts: {
+      /**
+       * URL of the dashboard calibration view included in Telegram alerts.
+       * Omit to suppress the link (default: none).
+       */
+      dashboardUrl?: string;
+      /**
+       * Override the per-agent alert cooldown.  Useful for tests.
+       * Default: 1 hour (3 600 000 ms).
+       */
+      alertCooldownMs?: number;
+      /**
+       * Recent window size for drift comparison, in days (default: 30).
+       * Shown in alert messages.
+       */
+      recentDays?: number;
+      /**
+       * Baseline window size for drift comparison, in days (default: 60).
+       * Shown in alert messages.
+       */
+      baselineDays?: number;
+    } = {},
+  ) {
+    this.ALERT_COOLDOWN_MS = opts.alertCooldownMs ?? 60 * 60 * 1000; // 1 hour
+    this.recentDays = opts.recentDays ?? 30;
+    this.baselineDays = opts.baselineDays ?? 60;
+    this.dashboardUrl = opts.dashboardUrl;
+  }
 
   /**
    * Build a full calibration drift report.
@@ -159,7 +212,7 @@ export class CalibrationDriftMonitor implements CalibrationDriftProvider {
    */
   async checkAndAlert(notify: (text: string) => Promise<void>): Promise<void> {
     try {
-      const alerts = this.store.getCalibrationDriftAlerts();
+      const alerts = this.store.getCalibrationDriftAlerts(this.recentDays, this.baselineDays);
       const active = alerts.filter((a) => a.alerted);
       if (active.length === 0) return;
 
@@ -175,16 +228,21 @@ export class CalibrationDriftMonitor implements CalibrationDriftProvider {
         `⚠️ *Calibration Drift Detected*`,
         ``,
         `${due.length} agent${due.length === 1 ? "" : "s"} drifted > ${DRIFT_THRESHOLD} from baseline:`,
+        `_Sample window: ${this.recentDays}d recent · ${this.baselineDays}d baseline_`,
         ``,
       ];
       for (const a of due) {
         const direction = a.drift > 0 ? "▲" : "▼";
         lines.push(
           `${direction} *${a.agent_name}*: ${a.baseline_mean.toFixed(2)} → ${a.recent_mean.toFixed(2)} ` +
-          `(drift ${a.drift > 0 ? "+" : ""}${a.drift.toFixed(2)})`,
+          `(drift ${a.drift > 0 ? "+" : ""}${a.drift.toFixed(2)}, ` +
+          `${a.recent_task_count} recent · ${a.baseline_task_count} baseline tasks)`,
         );
       }
       lines.push(``, `Run \`/verification-calibration\` for score histograms.`);
+      if (this.dashboardUrl) {
+        lines.push(`[📊 Calibration View](${this.dashboardUrl})`);
+      }
 
       await notify(lines.join("\n"));
 
@@ -195,6 +253,9 @@ export class CalibrationDriftMonitor implements CalibrationDriftProvider {
 
       this.log.info("Calibration drift alert sent", {
         agents: due.map((a) => a.agent_name),
+        recentDays: this.recentDays,
+        baselineDays: this.baselineDays,
+        dashboardUrl: this.dashboardUrl,
       });
     } catch (err) {
       this.log.error("checkAndAlert failed", {

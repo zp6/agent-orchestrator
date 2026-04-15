@@ -503,4 +503,71 @@ describe("CalibrationDriftMonitor.checkAndAlert", () => {
     await monitor.checkAndAlert(notify2);
     expect(notify2).toHaveBeenCalledOnce();
   });
+
+  it("includes sample window in alert message", async () => {
+    const store = new StateStore(":memory:");
+    seedTask(store, "BL1", "window-agent", 0.9, "approved", 40);
+    seedTask(store, "R1", "window-agent", 0.6, "approved", 5);
+
+    const monitor = new CalibrationDriftMonitor(store, { recentDays: 14, baselineDays: 45 });
+    const notify = vi.fn().mockResolvedValue(undefined);
+    await monitor.checkAndAlert(notify);
+
+    expect(notify).toHaveBeenCalledOnce();
+    const [msg] = notify.mock.calls[0] as [string];
+    expect(msg).toContain("14d recent");
+    expect(msg).toContain("45d baseline");
+  });
+
+  it("includes task counts per agent in alert message", async () => {
+    const store = new StateStore(":memory:");
+    // 2 baseline tasks, 2 recent tasks for clear count verification
+    seedTask(store, "BL1", "count-agent", 0.9, "approved", 40);
+    seedTask(store, "BL2", "count-agent", 0.9, "approved", 50);
+    seedTask(store, "R1", "count-agent", 0.6, "approved", 5);
+    seedTask(store, "R2", "count-agent", 0.6, "approved", 10);
+
+    const monitor = new CalibrationDriftMonitor(store);
+    const notify = vi.fn().mockResolvedValue(undefined);
+    await monitor.checkAndAlert(notify);
+
+    expect(notify).toHaveBeenCalledOnce();
+    const [msg] = notify.mock.calls[0] as [string];
+    // Should include task counts in the per-agent line
+    expect(msg).toContain("recent");
+    expect(msg).toContain("baseline tasks");
+  });
+
+  it("includes dashboard link when dashboardUrl is configured", async () => {
+    const store = new StateStore(":memory:");
+    seedTask(store, "BL1", "link-agent", 0.9, "approved", 40);
+    seedTask(store, "R1", "link-agent", 0.6, "approved", 5);
+
+    const monitor = new CalibrationDriftMonitor(store, {
+      dashboardUrl: "https://dashboard.example.com/calibration",
+    });
+    const notify = vi.fn().mockResolvedValue(undefined);
+    await monitor.checkAndAlert(notify);
+
+    expect(notify).toHaveBeenCalledOnce();
+    const [msg] = notify.mock.calls[0] as [string];
+    expect(msg).toContain("https://dashboard.example.com/calibration");
+    expect(msg).toContain("Calibration View");
+  });
+
+  it("omits dashboard link when dashboardUrl is not configured", async () => {
+    const store = new StateStore(":memory:");
+    seedTask(store, "BL1", "nolink-agent", 0.9, "approved", 40);
+    seedTask(store, "R1", "nolink-agent", 0.6, "approved", 5);
+
+    // No dashboardUrl
+    const monitor = new CalibrationDriftMonitor(store);
+    const notify = vi.fn().mockResolvedValue(undefined);
+    await monitor.checkAndAlert(notify);
+
+    expect(notify).toHaveBeenCalledOnce();
+    const [msg] = notify.mock.calls[0] as [string];
+    expect(msg).not.toContain("http");
+    expect(msg).not.toContain("Calibration View");
+  });
 });

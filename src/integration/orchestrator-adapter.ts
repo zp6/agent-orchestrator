@@ -101,7 +101,12 @@ export function createReviewerInstances(
       : undefined;
 
   // Always constructed — getScoreDistributions / getCalibrationDriftAlerts are on IStateStore.
-  const calibrationDriftMonitor = new CalibrationDriftMonitor(store);
+  // Pass dashboardUrl when configured so Telegram alerts include a calibration view link.
+  const calibrationDriftMonitor = new CalibrationDriftMonitor(store, {
+    dashboardUrl: config.dashboard_url
+      ? `${config.dashboard_url.replace(/\/$/, "")}/calibration`
+      : undefined,
+  });
 
   // Wire ScoreCalibrator if the store implements IScoreOutcomeStore.
   // The reviewer's own StateStore does; the orchestrator's StateStore may not (yet).
