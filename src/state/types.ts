@@ -13,7 +13,7 @@ export type TaskStatus =
   | "failed"
   | "escalated";
 export type VerificationStatus = "pending" | "approved" | "rejected" | null;
-export type TaskType = "implementation" | "research";
+export type TaskType = "implementation" | "research" | "housekeeping";
 
 /**
  * Determines how a parent task's quality score is derived from its children's

@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { VerificationResult } from "../reviewer/verifier.js";
-import { RESEARCH_OUTPUT_SCHEMA, RESEARCH_REQUIRED_SECTIONS } from "../reviewer/verifier.js";
+import {
+  RESEARCH_OUTPUT_SCHEMA,
+  RESEARCH_REQUIRED_SECTIONS,
+  TRIAGE_OUTPUT_SCHEMA,
+  TRIAGE_REQUIRED_FIELDS,
+  Verifier,
+} from "../reviewer/verifier.js";
 import type { Notifier } from "../notify.js";
 
 /**
@@ -714,5 +720,209 @@ Do X.
     expect(missingSections).toHaveLength(2);
     expect(missingSections).toContain("## Open Questions");
     expect(missingSections).toContain("## References");
+  });
+});
+
+describe("Triage output schema constants", () => {
+  it("TRIAGE_REQUIRED_FIELDS contains all four required field names", () => {
+    expect(TRIAGE_REQUIRED_FIELDS).toHaveLength(4);
+    expect(TRIAGE_REQUIRED_FIELDS).toContain("duplicates_checked");
+    expect(TRIAGE_REQUIRED_FIELDS).toContain("stale_issues");
+    expect(TRIAGE_REQUIRED_FIELDS).toContain("priority_reordering");
+    expect(TRIAGE_REQUIRED_FIELDS).toContain("outcome_summary");
+  });
+
+  it("TRIAGE_OUTPUT_SCHEMA is a non-empty string containing all required field names", () => {
+    expect(typeof TRIAGE_OUTPUT_SCHEMA).toBe("string");
+    expect(TRIAGE_OUTPUT_SCHEMA.length).toBeGreaterThan(0);
+
+    for (const field of TRIAGE_REQUIRED_FIELDS) {
+      expect(TRIAGE_OUTPUT_SCHEMA, `Schema must include "${field}"`).toContain(field);
+    }
+  });
+
+  it("TRIAGE_OUTPUT_SCHEMA is a valid JSON code block template", () => {
+    expect(TRIAGE_OUTPUT_SCHEMA).toContain("```json");
+    expect(TRIAGE_OUTPUT_SCHEMA).toContain("```");
+    // Should reference all four key fields as JSON keys
+    expect(TRIAGE_OUTPUT_SCHEMA).toContain('"duplicates_checked"');
+    expect(TRIAGE_OUTPUT_SCHEMA).toContain('"stale_issues"');
+    expect(TRIAGE_OUTPUT_SCHEMA).toContain('"priority_reordering"');
+    expect(TRIAGE_OUTPUT_SCHEMA).toContain('"outcome_summary"');
+  });
+});
+
+describe("Verifier.checkTriageSchemaCompliance", () => {
+  // Instantiate Verifier with a minimal mock store — we only test the pure
+  // schema compliance method, which does not touch the store or LLM.
+  const mockStore = {
+    getTask: vi.fn(),
+    updateTask: vi.fn(),
+    getChildTasks: vi.fn().mockReturnValue([]),
+    insertVerificationResult: vi.fn(),
+  } as unknown as Parameters<typeof Verifier>[0];
+
+  const verifier = new Verifier(mockStore);
+
+  const compliantBlock = `
+\`\`\`json
+{
+  "duplicates_checked": true,
+  "stale_issues": [
+    { "number": 21, "title": "Old feature request", "action": "closed", "reason": "superseded by #30" }
+  ],
+  "priority_reordering": [],
+  "outcome_summary": "Closed 1 stale issue. No duplicates found. ROADMAP.md is up to date."
+}
+\`\`\`
+`;
+
+  it("passes for a fully compliant JSON block", () => {
+    const result = verifier.checkTriageSchemaCompliance(compliantBlock);
+    expect(result.passes).toBe(true);
+    expect(result.score).toBeGreaterThanOrEqual(0.80);
+    expect(result.missingFields).toHaveLength(0);
+  });
+
+  it("passes for a fully compliant block with empty arrays", () => {
+    const emptyArraysBlock = `
+\`\`\`json
+{
+  "duplicates_checked": true,
+  "stale_issues": [],
+  "priority_reordering": [],
+  "outcome_summary": "No changes needed. All issues are current and prioritised correctly."
+}
+\`\`\`
+`;
+    const result = verifier.checkTriageSchemaCompliance(emptyArraysBlock);
+    expect(result.passes).toBe(true);
+    expect(result.score).toBeGreaterThanOrEqual(0.80);
+    expect(result.missingFields).toHaveLength(0);
+  });
+
+  it("fails and returns score 0 when no JSON block is present", () => {
+    const noBlock = "I reviewed the issues. Everything looks fine. No changes needed.";
+    const result = verifier.checkTriageSchemaCompliance(noBlock);
+    expect(result.passes).toBe(false);
+    expect(result.score).toBe(0);
+    expect(result.missingFields).toEqual(expect.arrayContaining([...TRIAGE_REQUIRED_FIELDS]));
+  });
+
+  it("fails when duplicates_checked is missing from the JSON block", () => {
+    const block = `
+\`\`\`json
+{
+  "stale_issues": [],
+  "priority_reordering": [],
+  "outcome_summary": "No changes needed."
+}
+\`\`\`
+`;
+    const result = verifier.checkTriageSchemaCompliance(block);
+    expect(result.passes).toBe(false);
+    expect(result.missingFields).toContain("duplicates_checked");
+  });
+
+  it("fails when duplicates_checked is false instead of true", () => {
+    const block = `
+\`\`\`json
+{
+  "duplicates_checked": false,
+  "stale_issues": [],
+  "priority_reordering": [],
+  "outcome_summary": "No changes needed."
+}
+\`\`\`
+`;
+    const result = verifier.checkTriageSchemaCompliance(block);
+    expect(result.missingFields).toContain("duplicates_checked");
+  });
+
+  it("fails when stale_issues is not an array", () => {
+    const block = `
+\`\`\`json
+{
+  "duplicates_checked": true,
+  "stale_issues": "none",
+  "priority_reordering": [],
+  "outcome_summary": "All good."
+}
+\`\`\`
+`;
+    const result = verifier.checkTriageSchemaCompliance(block);
+    expect(result.missingFields).toContain("stale_issues");
+  });
+
+  it("fails when stale_issues entries are missing required sub-fields", () => {
+    const block = `
+\`\`\`json
+{
+  "duplicates_checked": true,
+  "stale_issues": [
+    { "number": 5, "title": "Old issue" }
+  ],
+  "priority_reordering": [],
+  "outcome_summary": "Closed one issue."
+}
+\`\`\`
+`;
+    const result = verifier.checkTriageSchemaCompliance(block);
+    // Entry is missing "action" and "reason"
+    expect(result.missingFields.some((f) => f.startsWith("stale_issues"))).toBe(true);
+  });
+
+  it("fails when outcome_summary is an empty string", () => {
+    const block = `
+\`\`\`json
+{
+  "duplicates_checked": true,
+  "stale_issues": [],
+  "priority_reordering": [],
+  "outcome_summary": ""
+}
+\`\`\`
+`;
+    const result = verifier.checkTriageSchemaCompliance(block);
+    expect(result.missingFields).toContain("outcome_summary");
+  });
+
+  it("scores below 0.80 when two fields are missing", () => {
+    const block = `
+\`\`\`json
+{
+  "duplicates_checked": true,
+  "stale_issues": []
+}
+\`\`\`
+`;
+    const result = verifier.checkTriageSchemaCompliance(block);
+    expect(result.passes).toBe(false);
+    expect(result.score).toBeLessThan(0.80);
+    expect(result.missingFields).toContain("priority_reordering");
+    expect(result.missingFields).toContain("outcome_summary");
+  });
+
+  it("returns a score that sums to exactly 1.00 when fully compliant", () => {
+    const result = verifier.checkTriageSchemaCompliance(compliantBlock);
+    // Full compliance means all weights sum: 0.25 + 0.25 + 0.25 + 0.25 = 1.00
+    expect(result.score).toBeCloseTo(1.00, 10);
+  });
+
+  it("scores 0.75 when exactly one field is missing (below 0.80 threshold)", () => {
+    // Verifies the equal-weight design: any single missing field drops to 0.75
+    const block = `
+\`\`\`json
+{
+  "stale_issues": [],
+  "priority_reordering": [],
+  "outcome_summary": "No changes needed."
+}
+\`\`\`
+`;
+    const result = verifier.checkTriageSchemaCompliance(block);
+    expect(result.passes).toBe(false);
+    expect(result.score).toBeCloseTo(0.75, 10);
+    expect(result.missingFields).toContain("duplicates_checked");
   });
 });

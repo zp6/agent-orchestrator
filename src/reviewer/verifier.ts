@@ -98,9 +98,10 @@ export interface VerificationResult {
    * legible to operators. Undefined when the task was rejected or scored ≥ 0.75.
    *
    * Well-known prefixes:
-   * - `'marginal_approval'`         — task scored 0.60–0.74 and was approved at the marginal bar
-   * - `'second_pass_passed'`        — borderline (0.70–0.79) task cleared second-pass review
-   * - `'research_task_schema_pass'` — research task passed schema-compliance scoring
+   * - `'marginal_approval'`            — task scored 0.60–0.74 and was approved at the marginal bar
+   * - `'second_pass_passed'`           — borderline (0.70–0.79) task cleared second-pass review
+   * - `'research_task_schema_pass'`    — research task passed schema-compliance scoring
+   * - `'triage_schema_compliance'`     — housekeeping task passed deterministic JSON schema check (score ≥ 0.80)
    *
    * Additional free-text detail (e.g. the LLM's marginal_reason) may be
    * appended after a colon: `"marginal_approval: Missing error handling …"`.
@@ -148,6 +149,126 @@ export const RESEARCH_REQUIRED_SECTIONS = [
   "## Open Questions",
   "## References",
 ] as const;
+
+/**
+ * Required output schema for housekeeping/triage tasks.
+ *
+ * Every triage task result MUST include a JSON block with these four fields.
+ * The verifier extracts and validates this block deterministically — no LLM
+ * scoring can override a missing schema block. If any field is absent the
+ * schema_compliance score falls below 0.80 and the task is sent for revision
+ * with an explicit list of missing fields, eliminating ambiguous revision cycles.
+ *
+ * Exported so the orchestrator daemon can embed this template in housekeeping
+ * dispatch prompts and revision guidance.
+ */
+export const TRIAGE_OUTPUT_SCHEMA = `\`\`\`json
+{
+  "duplicates_checked": true,
+  "stale_issues": [
+    { "number": <N>, "title": "<title>", "action": "closed|updated|kept", "reason": "<one line>" }
+  ],
+  "priority_reordering": [
+    { "issue": <N>, "old_rank": <N>, "new_rank": <N>, "reason": "<one line>" }
+  ],
+  "outcome_summary": "<1-3 sentence summary of what was done>"
+}
+\`\`\``;
+
+/**
+ * Field names required in every triage task output's JSON schema block.
+ * Used by checkTriageSchemaCompliance() and exported for dispatch prompt injection.
+ */
+export const TRIAGE_REQUIRED_FIELDS = [
+  "duplicates_checked",
+  "stale_issues",
+  "priority_reordering",
+  "outcome_summary",
+] as const;
+
+/**
+ * Minimum schema_compliance score for a triage/housekeeping task to pass.
+ * A task with schema_compliance below this threshold is rejected with a
+ * specific missing-fields message regardless of LLM content quality score.
+ */
+const TRIAGE_SCHEMA_COMPLIANCE_THRESHOLD = 0.80;
+
+/**
+ * Per-field weights for triage schema compliance scoring.
+ * Weights are equal (0.25 each, sum = 1.00) so that missing ANY single field
+ * drops the score to 0.75 — below the TRIAGE_SCHEMA_COMPLIANCE_THRESHOLD of 0.80
+ * — and a revision is dispatched. All four fields must be present to pass.
+ * Changing these values requires updating tests and schema documentation in CLAUDE.md.
+ */
+const TRIAGE_FIELD_WEIGHTS: Record<string, number> = {
+  duplicates_checked: 0.25,
+  stale_issues: 0.25,
+  priority_reordering: 0.25,
+  outcome_summary: 0.25,
+};
+
+const TRIAGE_SYSTEM_PROMPT = `You are a quality reviewer for housekeeping and backlog triage tasks produced by an AI agent. Given a triage task description and the agent's output, assess the quality of the triage work.
+
+## Required Output Schema
+
+All triage/housekeeping task outputs MUST include a JSON block with these four fields:
+
+\`\`\`json
+{
+  "duplicates_checked": true,
+  "stale_issues": [
+    { "number": <N>, "title": "<title>", "action": "closed|updated|kept", "reason": "<one line>" }
+  ],
+  "priority_reordering": [
+    { "issue": <N>, "old_rank": <N>, "new_rank": <N>, "reason": "<one line>" }
+  ],
+  "outcome_summary": "<1-3 sentence summary of what was done>"
+}
+\`\`\`
+
+**Schema compliance is mandatory.** The verifier runs a separate deterministic schema check — your score reflects content quality. Missing the schema block causes a hard revision regardless of your score.
+
+Note: \`stale_issues\` and \`priority_reordering\` may be empty arrays (\`[]\`) if no changes were needed.
+
+## Scoring
+
+Respond with ONLY a JSON object (no markdown, no code fences):
+{
+  "approved": true/false,
+  "score": 0.0-1.0,
+  "notes": "Brief assessment of triage quality and completeness",
+  "revision": "If not approved, specific guidance for what was missed (omit if approved)",
+  "explanation": "REQUIRED when score < 0.80: 1-3 sentences explaining what drove the low score. Omit entirely when score >= 0.80.",
+  "marginal_reason": "REQUIRED when approved is true AND score is between 0.60 and 0.74: one sentence explaining what prevented a higher score. Omit entirely otherwise.",
+  "dimensions": {
+    "correctness": 0.0-1.0,
+    "completeness": 0.0-1.0,
+    "test_coverage": 0.0-1.0,
+    "code_quality": 0.0-1.0
+  }
+}
+
+## Content Quality Criteria
+
+Evaluate triage quality on:
+- **Thoroughness**: Were all open issues reviewed? Were duplicates actively scanned?
+- **Accuracy**: Are closed/updated issues correctly classified? Are reasons specific?
+- **Prioritization**: Are roadmap/priority changes well-reasoned and outcome-focused?
+- **Outcome clarity**: Is the outcome_summary actionable and complete?
+- **Scope discipline**: Did the agent avoid doing out-of-scope work (feature implementation, etc.)?
+
+Scoring guide:
+- 0.9-1.0: Excellent — complete scan, well-reasoned changes, specific outcome summary
+- 0.75-0.89: Good — covers most issues with minor gaps in reasoning or coverage
+- 0.60-0.74: Marginal — triage performed but with shallow reasoning or coverage gaps; use marginal_reason
+- 0.5-0.59: Acceptable — some triage performed but significant issues not covered
+- Below 0.5: Needs revision — superficial or missing key parts of the triage
+
+Dimension guide (for triage tasks):
+- **correctness**: Were issues correctly classified? Are action/reason pairs accurate?
+- **completeness**: Were all open issues reviewed? Was nothing skipped without reason?
+- **test_coverage**: Was evidence gathered? Were duplicates verified against each other?
+- **code_quality**: Schema compliance — is the required JSON block present and well-formed?`;
 
 /**
  * Minimum score required to approve a task.
@@ -334,22 +455,161 @@ export class Verifier {
    * @param isResearch - When true, dimension labels are adapted for research tasks:
    *   - "Test Coverage" → "Evidence Coverage" (comprehensiveness of evidence gathered)
    *   - "Code Quality"  → "Schema Compliance" (all five required sections present)
+   * @param isHousekeeping - When true, dimension labels are adapted for triage tasks:
+   *   - "Test Coverage" → "Evidence Coverage" (duplicates verified against each other)
+   *   - "Code Quality"  → "Schema Compliance" (JSON block present and well-formed)
    */
   private formatDimensionsBreakdown(
     dimensions: QualityDimensions,
     isResearch = false,
+    isHousekeeping = false,
   ): string {
     const threshold = 0.8;
     const formatScore = (d: number) => `${(d * 100).toFixed(0)}/100`;
     const indicator = (d: number) => (d >= threshold ? "✓" : "✗");
 
+    const taskMode = isHousekeeping ? "housekeeping" : isResearch ? "research" : "standard";
+
+    const labels = {
+      correctness:
+        taskMode === "housekeeping"
+          ? "issues correctly classified, action/reason accurate"
+          : taskMode === "research"
+            ? "claims technically sound"
+            : "logic, no bugs",
+      completeness:
+        taskMode === "housekeeping"
+          ? "all open issues reviewed, nothing skipped"
+          : taskMode === "research"
+            ? "all aspects of question addressed"
+            : "requirements met",
+      test_coverage:
+        taskMode === "housekeeping"
+          ? "duplicates verified, evidence gathered"
+          : taskMode === "research"
+            ? "findings validated, evidence comprehensive"
+            : "edge cases covered",
+      code_quality:
+        taskMode === "housekeeping"
+          ? "JSON schema block present and well-formed"
+          : taskMode === "research"
+            ? "all 5 required sections present and substantive"
+            : "clarity, documentation",
+    };
+
+    const test_coverage_label =
+      taskMode === "standard" ? "Test Coverage" : "Evidence Coverage";
+    const code_quality_label =
+      taskMode === "standard" ? "Code Quality" : "Schema Compliance";
+
     return [
       "## Quality Dimensions Breakdown",
-      `- **Correctness**: ${formatScore(dimensions.correctness)} ${indicator(dimensions.correctness)} (${isResearch ? "claims technically sound" : "logic, no bugs"})`,
-      `- **Completeness**: ${formatScore(dimensions.completeness)} ${indicator(dimensions.completeness)} (${isResearch ? "all aspects of question addressed" : "requirements met"})`,
-      `- **${isResearch ? "Evidence Coverage" : "Test Coverage"}**: ${formatScore(dimensions.test_coverage)} ${indicator(dimensions.test_coverage)} (${isResearch ? "findings validated, evidence comprehensive" : "edge cases covered"})`,
-      `- **${isResearch ? "Schema Compliance" : "Code Quality"}**: ${formatScore(dimensions.code_quality)} ${indicator(dimensions.code_quality)} (${isResearch ? "all 5 required sections present and substantive" : "clarity, documentation"})`,
+      `- **Correctness**: ${formatScore(dimensions.correctness)} ${indicator(dimensions.correctness)} (${labels.correctness})`,
+      `- **Completeness**: ${formatScore(dimensions.completeness)} ${indicator(dimensions.completeness)} (${labels.completeness})`,
+      `- **${test_coverage_label}**: ${formatScore(dimensions.test_coverage)} ${indicator(dimensions.test_coverage)} (${labels.test_coverage})`,
+      `- **${code_quality_label}**: ${formatScore(dimensions.code_quality)} ${indicator(dimensions.code_quality)} (${labels.code_quality})`,
     ].join("\n");
+  }
+
+  /**
+   * Deterministically check whether a triage task result contains the required
+   * JSON schema block with all four mandatory fields.
+   *
+   * This method is public so the orchestrator and tests can run schema checks
+   * independently, e.g. to gate revision dispatch or validate dispatch templates.
+   *
+   * This check is independent of the LLM quality score — a task that fails schema
+   * compliance is sent for revision with an explicit list of missing fields,
+   * regardless of how highly the LLM rates the prose content.
+   *
+   * @param result - The raw task result string to check.
+   * @returns An object containing:
+   *   - `score` — composite compliance score (0–1); must be ≥ 0.80 to pass
+   *   - `missingFields` — fields that are absent or structurally invalid
+   *   - `passes` — true when score ≥ TRIAGE_SCHEMA_COMPLIANCE_THRESHOLD
+   */
+  checkTriageSchemaCompliance(result: string): {
+    score: number;
+    missingFields: string[];
+    passes: boolean;
+  } {
+    const missingFields: string[] = [];
+    let score = 0;
+
+    // Extract the first JSON object from the result string.
+    // We look for a ```json ... ``` block first, then fall back to a bare { ... }.
+    let parsed: Record<string, unknown> | null = null;
+
+    const jsonBlockMatch = result.match(/```json\s*([\s\S]*?)```/);
+    const candidateJson = jsonBlockMatch ? jsonBlockMatch[1] : null;
+
+    if (candidateJson) {
+      try {
+        const raw = JSON.parse(candidateJson);
+        if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+          parsed = raw as Record<string, unknown>;
+        }
+      } catch {
+        // JSON parse failed — all fields missing
+      }
+    }
+
+    if (!parsed) {
+      // No valid JSON block found — all fields are missing
+      return {
+        score: 0,
+        missingFields: [...TRIAGE_REQUIRED_FIELDS],
+        passes: false,
+      };
+    }
+
+    // Check duplicates_checked: must be boolean true
+    if (parsed["duplicates_checked"] === true) {
+      score += TRIAGE_FIELD_WEIGHTS["duplicates_checked"]!;
+    } else {
+      missingFields.push("duplicates_checked");
+    }
+
+    // Check stale_issues: must be an array (empty OK)
+    if (Array.isArray(parsed["stale_issues"])) {
+      const entries = parsed["stale_issues"] as unknown[];
+      const allValid = entries.every(
+        (e) =>
+          typeof e === "object" &&
+          e !== null &&
+          "number" in e &&
+          "title" in e &&
+          "action" in e &&
+          "reason" in e,
+      );
+      if (entries.length === 0 || allValid) {
+        score += TRIAGE_FIELD_WEIGHTS["stale_issues"]!;
+      } else {
+        missingFields.push("stale_issues[*].{number,title,action,reason}");
+      }
+    } else {
+      missingFields.push("stale_issues");
+    }
+
+    // Check priority_reordering: must be an array (empty OK)
+    if (Array.isArray(parsed["priority_reordering"])) {
+      score += TRIAGE_FIELD_WEIGHTS["priority_reordering"]!;
+    } else {
+      missingFields.push("priority_reordering");
+    }
+
+    // Check outcome_summary: must be a non-empty string
+    if (typeof parsed["outcome_summary"] === "string" && parsed["outcome_summary"].trim().length > 0) {
+      score += TRIAGE_FIELD_WEIGHTS["outcome_summary"]!;
+    } else {
+      missingFields.push("outcome_summary");
+    }
+
+    return {
+      score,
+      missingFields,
+      passes: score >= TRIAGE_SCHEMA_COMPLIANCE_THRESHOLD,
+    };
   }
 
   /**
@@ -433,16 +693,78 @@ export class Verifier {
     const client = createLLMClient();
 
     const isResearch = task.task_type === "research";
+    const isHousekeeping =
+      task.task_type === "housekeeping" || task.title.includes("[housekeeping]");
     const prompt = isResearch
       ? `## Research Question\n${task.description ?? task.title}\n\n## Agent Analysis (${task.agent_name})\n${task.result ?? "(no result)"}`
-      : `## Task\n${task.description ?? task.title}\n\n## Agent Response (${task.agent_name})\n${task.result ?? "(no result)"}`;
+      : isHousekeeping
+        ? `## Triage Task\n${task.description ?? task.title}\n\n## Agent Output (${task.agent_name})\n${task.result ?? "(no result)"}`
+        : `## Task\n${task.description ?? task.title}\n\n## Agent Response (${task.agent_name})\n${task.result ?? "(no result)"}`;
+
+    // ── Triage schema compliance pre-check ──────────────────────────────────
+    // For housekeeping tasks, run a deterministic JSON schema check BEFORE the
+    // LLM pass. A compliance score < 0.80 immediately triggers revision with a
+    // specific missing-fields message — no LLM scoring can override this gate.
+    if (isHousekeeping) {
+      const schemaResult = this.checkTriageSchemaCompliance(task.result ?? "");
+      if (!schemaResult.passes) {
+        const missingList = schemaResult.missingFields
+          .map((f) => `  - \`${f}\``)
+          .join("\n");
+        const revision = [
+          `Triage schema compliance check failed (score ${(schemaResult.score * 100).toFixed(0)}% — required ≥ 80%).`,
+          ``,
+          `Missing or invalid fields:`,
+          missingList,
+          ``,
+          `Include the following JSON block verbatim in your PR body or triage comment:`,
+          ``,
+          TRIAGE_OUTPUT_SCHEMA,
+          ``,
+          `Fields may be empty arrays (\`[]\`) if no changes were made, but all four fields must be present.`,
+        ].join("\n");
+
+        const failResult: VerificationResult = {
+          approved: false,
+          score: schemaResult.score,
+          notes: `Triage schema compliance failed — ${schemaResult.missingFields.length} field(s) missing: ${schemaResult.missingFields.join(", ")}`,
+          revision,
+          explanation: `The required JSON schema block was ${schemaResult.score === 0 ? "entirely absent" : "present but incomplete"}. Missing fields: ${schemaResult.missingFields.join(", ")}.`,
+        };
+
+        this.store.updateTask(taskId, {
+          verification_status: "rejected",
+          quality_score: schemaResult.score,
+          verification_notes: failResult.notes,
+          quality_explanation: failResult.explanation ?? null,
+        });
+
+        this.recordVerificationResult(
+          taskId,
+          task.agent_name ?? "unknown",
+          schemaResult.score,
+          false,
+          failResult.explanation,
+          undefined,
+          undefined,
+        );
+
+        return failResult;
+      }
+    }
 
     const LLM_TIMEOUT_MS = 5 * 60 * 1000;
 
     // ── First pass ──────────────────────────────────────────────────────────
+    const systemPrompt = isHousekeeping
+      ? TRIAGE_SYSTEM_PROMPT
+      : isResearch
+        ? RESEARCH_SYSTEM_PROMPT
+        : SYSTEM_PROMPT;
+
     const firstPassResult = await this.runLLMPass(
       client,
-      isResearch ? RESEARCH_SYSTEM_PROMPT : SYSTEM_PROMPT,
+      systemPrompt,
       prompt,
       LLM_TIMEOUT_MS,
       taskId,
@@ -514,7 +836,7 @@ export class Verifier {
       const usedDimensions = enforcedSecondPassResult.dimensions ?? enforcedFirstPassResult.dimensions;
       const dimensionsBreakdown =
         !finalApproved && usedDimensions
-          ? `\n\n${this.formatDimensionsBreakdown(usedDimensions, isResearch)}`
+          ? `\n\n${this.formatDimensionsBreakdown(usedDimensions, isResearch, isHousekeeping)}`
           : "";
       const enrichedRevision =
         !finalApproved && baseRevision && finalExplanation
@@ -618,7 +940,7 @@ export class Verifier {
     // Enrich revision with explanation and dimension breakdown so agents understand the low score.
     const dimensionsBreakdown =
       !enforcedFirstPassResult.approved && enforcedFirstPassResult.dimensions
-        ? `\n\n${this.formatDimensionsBreakdown(enforcedFirstPassResult.dimensions, isResearch)}`
+        ? `\n\n${this.formatDimensionsBreakdown(enforcedFirstPassResult.dimensions, isResearch, isHousekeeping)}`
         : "";
     const enrichedRevision =
       !enforcedFirstPassResult.approved &&
@@ -642,9 +964,11 @@ export class Verifier {
     const singlePassApprovalRationale = enforcedFirstPassResult.approved
       ? enforcedFirstPassResult.marginalApproval
         ? `marginal_approval${enforcedFirstPassResult.marginalReason ? `: ${enforcedFirstPassResult.marginalReason}` : ""}`
-        : isResearch && enforcedFirstPassResult.approved
-          ? "research_task_schema_pass"
-          : undefined
+        : isHousekeeping
+          ? "triage_schema_compliance"
+          : isResearch
+            ? "research_task_schema_pass"
+            : undefined
       : undefined;
 
     this.store.updateTask(taskId, {

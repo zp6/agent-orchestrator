@@ -21,7 +21,15 @@ The orchestrator manages a fleet of Claude Code agents, each in a Docker contain
 
 **PR review flow**: reviewer reads diff → LLM evaluates → approve (merge via squash) / request-changes (dispatch feedback to agent) / escalate (notify human via Telegram).
 
-**Task verification**: completed tasks are scored 0–1 by an LLM across four quality dimensions (correctness, completeness, test_coverage, code_quality). Below min_score (0.80) → revision feedback with dimension breakdown dispatched back to agent. Scores in 0.70–0.79 trigger an automatic second-pass review before final rejection. Results persisted to `verification_results` in state.db. Research tasks use a separate prompt with schema compliance scoring and research-specific dimension labels.
+**Task verification**: completed tasks are scored 0–1 by an LLM across four quality dimensions (correctness, completeness, test_coverage, code_quality). Below min_score (0.80) → revision feedback with dimension breakdown dispatched back to agent. Scores in 0.70–0.79 trigger an automatic second-pass review before final rejection. Results persisted to `verification_results` in state.db. Research tasks use a separate prompt with schema compliance scoring and research-specific dimension labels. Housekeeping/triage tasks use a deterministic JSON schema pre-check before the LLM pass (see below).
+
+**Housekeeping/triage schema compliance**: Tasks with `task_type === "housekeeping"` or a title containing `[housekeeping]` must include a JSON block with four required fields before reaching LLM scoring. Missing any field triggers immediate revision with an explicit list of missing fields — no LLM score can override this gate. Required fields (each weighted 0.25; all four must be present for score ≥ 0.80):
+- `duplicates_checked` — boolean `true` (confirms a duplicate scan was performed)
+- `stale_issues` — array of `{ number, title, action, reason }` (empty `[]` is valid)
+- `priority_reordering` — array of `{ issue, old_rank, new_rank, reason }` (empty `[]` is valid)
+- `outcome_summary` — non-empty string (1–3 sentence summary)
+
+The `TRIAGE_OUTPUT_SCHEMA` and `TRIAGE_REQUIRED_FIELDS` constants exported from `verifier.ts` (and re-exported from `index.ts`) allow the orchestrator dispatcher to embed the schema template in housekeeping dispatch prompts. `Verifier.checkTriageSchemaCompliance(result)` is a public method for standalone schema checks.
 
 **Marginal approval**: Tasks scoring 0.60–0.74 that are approved include a `marginal_reason` badge surfaced to operators so quality gaps are visible without blocking the task.
 

@@ -1,6 +1,10 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-14_
+_Last updated: 2026-04-15_
+
+## Completed
+
+- **#181 — Triage acceptance criteria schema**: Added `TRIAGE_OUTPUT_SCHEMA`, `TRIAGE_REQUIRED_FIELDS`, `TRIAGE_SYSTEM_PROMPT`, and `Verifier.checkTriageSchemaCompliance()` to `verifier.ts`. Housekeeping/triage tasks now pass through a deterministic JSON schema pre-check (four required fields at 0.25 weight each) before LLM scoring. Missing any single field triggers immediate revision with explicit field names. Adds `"housekeeping"` to `TaskType` and `triage_schema_compliance` to `approvalRationale` known prefixes.
 
 ## Next up
 
