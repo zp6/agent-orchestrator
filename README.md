@@ -144,6 +144,7 @@ Supported commands (sent to your Telegram bot):
 |---|---|
 | `/status` | Current system state and active tasks |
 | `/tasks` | List pending and in-progress tasks |
+| `/quality [tasks]` | Live per-agent quality health snapshot over the most recent tasks |
 | `/approve <task-id>` | Manually approve a task |
 
 For proactive recovery alerts, use `HealthRecoveryTracker` together with `createNotifier().healthRecovery(...)`. The tracker waits for the configured confirmation window before sending a single recovery message per incident, which prevents oscillating health checks from spamming Telegram.

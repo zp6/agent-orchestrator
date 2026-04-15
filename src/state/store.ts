@@ -26,6 +26,8 @@ import type {
   AgentScoreDistribution,
   ScoreDistributionBucket,
   CalibrationDriftAlert,
+  AgentQualityHealthRow,
+  QualityHealthReport,
   AgentSLAThreshold,
   LlmCallEvent,
   LlmTokenStats,
@@ -814,6 +816,131 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
 
     // Sort by |drift| descending so the most significant appear first
     return alerts.sort((a, b) => Math.abs(b.drift) - Math.abs(a.drift));
+  }
+
+  /**
+   * Return a live per-agent quality health snapshot over the most recent
+   * `windowTasks` tasks for each agent.
+   *
+   * This powers the Telegram /quality command, which gives operators a quick
+   * view of current scoring health without needing the dashboard.
+   */
+  getQualityHealthReport(
+    windowTasks: number = 20,
+    threshold: number = 0.75,
+  ): QualityHealthReport {
+    const lookbackTasks = Number.isFinite(windowTasks) && windowTasks >= 1 ? Math.floor(windowTasks) : 20;
+    const qualityThreshold =
+      Number.isFinite(threshold) && threshold >= 0 && threshold <= 1 ? threshold : 0.75;
+
+    type QualityTaskRow = {
+      agent_name: string;
+      quality_score: number | null;
+    };
+
+    const rows = this.db
+      .prepare(
+        `SELECT agent_name, quality_score
+         FROM tasks
+         WHERE agent_name IS NOT NULL
+         ORDER BY agent_name ASC, updated_at DESC, id DESC`,
+      )
+      .all() as QualityTaskRow[];
+
+    const byAgent = new Map<string, QualityTaskRow[]>();
+    for (const row of rows) {
+      const list = byAgent.get(row.agent_name) ?? [];
+      if (list.length < lookbackTasks) list.push(row);
+      byAgent.set(row.agent_name, list);
+    }
+
+    const perAgent: AgentQualityHealthRow[] = [];
+    let totalTaskCount = 0;
+    let totalScoredTaskCount = 0;
+    let totalNullScoreCount = 0;
+    let totalBelowThresholdCount = 0;
+    const allScores: number[] = [];
+
+    for (const [agentName, agentRows] of byAgent) {
+      const taskCount = agentRows.length;
+      const scoredScores = agentRows
+        .map((row) => row.quality_score)
+        .filter((score): score is number => typeof score === "number");
+      const nullScoreCount = taskCount - scoredScores.length;
+      const belowThresholdCount = scoredScores.filter((score) => score < qualityThreshold).length;
+      const rollingAvgScore =
+        scoredScores.length > 0
+          ? scoredScores.reduce((sum, score) => sum + score, 0) / scoredScores.length
+          : null;
+      const nullScoreRate = taskCount > 0 ? nullScoreCount / taskCount : 0;
+      const belowThresholdRate =
+        scoredScores.length > 0 ? belowThresholdCount / scoredScores.length : null;
+
+      const halfWindow = Math.max(1, Math.ceil(lookbackTasks / 2));
+      const recentScores = agentRows
+        .slice(0, halfWindow)
+        .map((row) => row.quality_score)
+        .filter((score): score is number => typeof score === "number");
+      const previousScores = agentRows
+        .slice(halfWindow, lookbackTasks)
+        .map((row) => row.quality_score)
+        .filter((score): score is number => typeof score === "number");
+      const recentAvgScore =
+        recentScores.length > 0
+          ? recentScores.reduce((sum, score) => sum + score, 0) / recentScores.length
+          : null;
+      const previousAvgScore =
+        previousScores.length > 0
+          ? previousScores.reduce((sum, score) => sum + score, 0) / previousScores.length
+          : null;
+      const trendDelta =
+        recentAvgScore !== null && previousAvgScore !== null
+          ? recentAvgScore - previousAvgScore
+          : null;
+
+      perAgent.push({
+        agent_name: agentName,
+        task_count: taskCount,
+        scored_task_count: scoredScores.length,
+        null_score_count: nullScoreCount,
+        null_score_rate: nullScoreRate,
+        below_threshold_count: belowThresholdCount,
+        below_threshold_rate: belowThresholdRate,
+        rolling_avg_score: rollingAvgScore,
+        recent_avg_score: recentAvgScore,
+        previous_avg_score: previousAvgScore,
+        trend_delta: trendDelta,
+        trending_downward: trendDelta !== null && trendDelta <= -0.05,
+      });
+
+      totalTaskCount += taskCount;
+      totalScoredTaskCount += scoredScores.length;
+      totalNullScoreCount += nullScoreCount;
+      totalBelowThresholdCount += belowThresholdCount;
+      allScores.push(...scoredScores);
+    }
+
+    perAgent.sort((a, b) => {
+      const aScore = a.rolling_avg_score ?? -Infinity;
+      const bScore = b.rolling_avg_score ?? -Infinity;
+      if (bScore !== aScore) return bScore - aScore;
+      return a.agent_name.localeCompare(b.agent_name);
+    });
+
+    return {
+      generated_at: new Date().toISOString(),
+      window_tasks: lookbackTasks,
+      threshold: qualityThreshold,
+      total_task_count: totalTaskCount,
+      scored_task_count: totalScoredTaskCount,
+      null_score_count: totalNullScoreCount,
+      below_threshold_count: totalBelowThresholdCount,
+      system_avg_score:
+        allScores.length > 0
+          ? allScores.reduce((sum, score) => sum + score, 0) / allScores.length
+          : null,
+      per_agent: perAgent,
+    };
   }
 
   /**

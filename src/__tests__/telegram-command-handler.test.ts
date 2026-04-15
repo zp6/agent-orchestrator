@@ -5,6 +5,7 @@ import type {
   DispatchRequest,
   IStateStore,
   MergeQueueEntry,
+  QualityHealthReport,
   SupervisorDecisionQuery,
   SupervisorDecisionRecord,
   Task,
@@ -34,7 +35,10 @@ function makeTask(overrides: Partial<Task>): Task {
 
 function makeStore(
   tasks: Task[],
-  opts: { verificationRecord?: VerificationResultRecord | null } = {},
+  opts: {
+    verificationRecord?: VerificationResultRecord | null;
+    qualityReport?: QualityHealthReport;
+  } = {},
 ): IStateStore {
   const systemFlags = new Map<string, string>();
   const decisions: SupervisorDecisionRecord[] = [];
@@ -108,6 +112,18 @@ function makeStore(
     getVerificationStats: () => null,
     getLatestVerificationRecord: (taskId: string) =>
       opts.verificationRecord?.task_id === taskId ? (opts.verificationRecord ?? null) : null,
+    getQualityHealthReport: () =>
+      opts.qualityReport ?? {
+        generated_at: "2026-04-07T12:00:00.000Z",
+        window_tasks: 20,
+        threshold: 0.75,
+        total_task_count: 0,
+        scored_task_count: 0,
+        null_score_count: 0,
+        below_threshold_count: 0,
+        system_avg_score: null,
+        per_agent: [],
+      },
   };
 }
 
@@ -393,5 +409,83 @@ describe("/score command — task quality lookup", () => {
 
     expect(reply).toContain("/tasks/");
     expect(reply).toContain(TASK_ID);
+  });
+});
+
+describe("/quality command — live quality health snapshot", () => {
+  it("renders a summary table with null-rate, below-threshold rate, and downward trend flags", async () => {
+    const qualityReport: QualityHealthReport = {
+      generated_at: "2026-04-07T12:00:00.000Z",
+      window_tasks: 20,
+      threshold: 0.75,
+      total_task_count: 40,
+      scored_task_count: 29,
+      null_score_count: 11,
+      below_threshold_count: 6,
+      system_avg_score: 0.812,
+      per_agent: [
+        {
+          agent_name: "agent-a",
+          task_count: 20,
+          scored_task_count: 17,
+          null_score_count: 3,
+          null_score_rate: 0.15,
+          below_threshold_count: 2,
+          below_threshold_rate: 2 / 17,
+          rolling_avg_score: 0.88,
+          recent_avg_score: 0.82,
+          previous_avg_score: 0.91,
+          trend_delta: -0.09,
+          trending_downward: true,
+        },
+        {
+          agent_name: "agent-b",
+          task_count: 20,
+          scored_task_count: 12,
+          null_score_count: 8,
+          null_score_rate: 0.4,
+          below_threshold_count: 4,
+          below_threshold_rate: 4 / 12,
+          rolling_avg_score: 0.74,
+          recent_avg_score: 0.75,
+          previous_avg_score: 0.73,
+          trend_delta: 0.02,
+          trending_downward: false,
+        },
+      ],
+    };
+    const store = makeStore([], { qualityReport });
+
+    const reply = await runTelegramCommand(store, "/quality");
+
+    expect(reply).toContain("Quality Health");
+    expect(reply).toContain("System avg");
+    expect(reply).toContain("agent-a");
+    expect(reply).toContain("agent-b");
+    expect(reply).toContain("Null scores");
+    expect(reply).toContain("Below threshold");
+    expect(reply).toContain("Trending downward");
+    expect(reply).toContain("↘");
+  });
+
+  it("defaults to 20 tasks per agent when no window is provided", async () => {
+    const store = makeStore([], {
+      qualityReport: {
+        generated_at: "2026-04-07T12:00:00.000Z",
+        window_tasks: 20,
+        threshold: 0.75,
+        total_task_count: 0,
+        scored_task_count: 0,
+        null_score_count: 0,
+        below_threshold_count: 0,
+        system_avg_score: null,
+        per_agent: [],
+      },
+    });
+
+    const reply = await runTelegramCommand(store, "/quality");
+
+    expect(reply).toContain("last 20 tasks per agent");
+    expect(reply).toContain("No quality scores recorded yet");
   });
 });

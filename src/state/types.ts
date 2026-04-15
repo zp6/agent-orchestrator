@@ -389,6 +389,63 @@ export interface AgentScoreDistribution {
 }
 
 /**
+ * Per-agent live quality health summary over the most recent task window.
+ * Used by the Telegram /quality command to show operators a fast snapshot of
+ * current scoring health without opening the dashboard.
+ */
+export interface AgentQualityHealthRow {
+  agent_name: string;
+  /** Total tasks included in the window for this agent. */
+  task_count: number;
+  /** Tasks in the window that already have a quality_score. */
+  scored_task_count: number;
+  /** Tasks in the window that still have quality_score = null. */
+  null_score_count: number;
+  /** Fraction of window tasks with null quality_score (0-1). */
+  null_score_rate: number;
+  /** Tasks in the window with quality_score below the configured threshold. */
+  below_threshold_count: number;
+  /**
+   * Fraction of scored tasks below the configured threshold (0-1), or null
+   * when no scored tasks exist in the window.
+   */
+  below_threshold_rate: number | null;
+  /** Mean quality score across scored tasks in the window, or null when none exist. */
+  rolling_avg_score: number | null;
+  /** Mean score across the newest half of the task window, or null when unavailable. */
+  recent_avg_score: number | null;
+  /** Mean score across the older half of the task window, or null when unavailable. */
+  previous_avg_score: number | null;
+  /** Signed delta: recent_avg_score - previous_avg_score, or null when unavailable. */
+  trend_delta: number | null;
+  /** True when the recent half is materially lower than the older half. */
+  trending_downward: boolean;
+}
+
+/**
+ * Full live quality health snapshot returned by `getQualityHealthReport()`.
+ */
+export interface QualityHealthReport {
+  generated_at: string;
+  /** Number of recent tasks included per agent. */
+  window_tasks: number;
+  /** Quality threshold used for the below-threshold percentage. */
+  threshold: number;
+  /** Total task count across all agents in the window. */
+  total_task_count: number;
+  /** Total scored task count across all agents in the window. */
+  scored_task_count: number;
+  /** Total null-score task count across all agents in the window. */
+  null_score_count: number;
+  /** Total scored tasks below the threshold across all agents in the window. */
+  below_threshold_count: number;
+  /** Mean quality score across all scored tasks in the window, or null when none exist. */
+  system_avg_score: number | null;
+  /** Per-agent rows, sorted by rolling average descending. */
+  per_agent: AgentQualityHealthRow[];
+}
+
+/**
  * Drift alert for a single agent.
  * Compares the recent window mean score to a baseline window mean.
  */
@@ -567,6 +624,9 @@ export interface IStateStore {
   // Calibration drift monitoring
   getScoreDistributions(days?: number): AgentScoreDistribution[];
   getCalibrationDriftAlerts(recentDays?: number, baselineDays?: number): CalibrationDriftAlert[];
+
+  // Live quality health snapshot for operator Telegram commands
+  getQualityHealthReport(windowTasks?: number, threshold?: number): QualityHealthReport;
 
   // Agent health (reads from orchestrator's agent_health table)
   getAgentHealthBatch(agentNames: string[]): AgentHealth[];

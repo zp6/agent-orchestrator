@@ -15,6 +15,7 @@
  *   /supervisor [n]  → last N supervisor decisions with full detail (default 10)
  *   /agents      → per-agent stats: total/done/failed/avg quality score
  *   /sla [status|set|clear] → configure and monitor quality SLA thresholds
+ *   /quality [tasks] → live per-agent quality health snapshot over the most recent tasks (default 20)
  *   /verification-calibration [days] → score histograms, low-conf approvals, and drift alerts
  *   /calibration [days]  → alias for /verification-calibration
  *   /token-stats [hours] → per-call-type LLM token usage (default: 720h = 30 days)
@@ -31,7 +32,14 @@
  */
 
 import { createLogger } from "../service/logger.js";
-import type { ITelegramStateStore, Task, LlmTokenStats, VerificationStats, FirstPassRateWidget } from "../state/types.js";
+import type {
+  ITelegramStateStore,
+  Task,
+  LlmTokenStats,
+  VerificationStats,
+  FirstPassRateWidget,
+  QualityHealthReport,
+} from "../state/types.js";
 import type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 import { buildIssueAgeHeatmap, formatIssueAgeHeatmap } from "../reviewer/issue-age.js";
 import type { CalibrationDriftProvider } from "../reviewer/calibration-drift.js";
@@ -77,6 +85,7 @@ type CommandName =
   | "agents"
   | "s"
   | "sla"
+  | "quality"
   | "verification-calibration"
   | "calibration"
   | "token-stats"
@@ -103,6 +112,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "agents",
   "s",
   "sla",
+  "quality",
   "verification-calibration",
   "calibration",
   "token-stats",
@@ -299,6 +309,12 @@ async function executeCommand(
 
     case "sla":
       return handleSLA(store, cmd.args);
+
+    case "quality": {
+      const tasks = parseInt(cmd.args[0] ?? "20", 10);
+      const windowTasks = Number.isNaN(tasks) || tasks < 1 ? 20 : Math.min(tasks, 100);
+      return handleQuality(store, windowTasks);
+    }
 
     case "token-stats": {
       const hours = parseInt(cmd.args[0] ?? "720", 10);
@@ -909,6 +925,60 @@ function handleSLA(store: ITelegramStateStore, args: string[]): string {
   }
 
   return `❌ Unknown SLA subcommand. Use \`/sla\`, \`/sla set <agent> <score> <window>\`, or \`/sla clear <agent>\`.`;
+}
+
+function handleQuality(store: ITelegramStateStore, windowTasks: number): string {
+  const report: QualityHealthReport = store.getQualityHealthReport(windowTasks);
+
+  const lines: string[] = [
+    `📈 *Quality Health* (last ${report.window_tasks} tasks per agent)`,
+    ``,
+    report.system_avg_score !== null
+      ? `System avg: ${(report.system_avg_score * 100).toFixed(0)}% · ${report.scored_task_count} scored / ${report.total_task_count} total`
+      : `System avg: n/a · ${report.total_task_count} total tasks`,
+    `Null scores: ${report.null_score_count} (${report.total_task_count > 0 ? ((report.null_score_count / report.total_task_count) * 100).toFixed(0) : "0"}%)`,
+    `Below threshold (< ${(report.threshold * 100).toFixed(0)}%): ${report.below_threshold_count}${report.scored_task_count > 0 ? ` (${((report.below_threshold_count / report.scored_task_count) * 100).toFixed(0)}% of scored)` : ""}`,
+    ``,
+  ];
+
+  if (report.per_agent.length === 0) {
+    lines.push("No quality scores recorded yet.");
+    return lines.join("\n");
+  }
+
+  const agentCol = Math.max(10, ...report.per_agent.map((row) => row.agent_name.length));
+  const tasksCol = Math.max(5, ...report.per_agent.map((row) => String(row.task_count).length));
+  const avgCol = 5;
+  const nullCol = 5;
+  const belowCol = 5;
+
+  const pad = (value: string, width: number): string => value.padEnd(width, " ");
+  const pct = (value: number | null): string => (value === null ? "n/a" : `${(value * 100).toFixed(0)}%`);
+  const trend = (row: QualityHealthReport["per_agent"][number]): string => {
+    if (!row.trending_downward || row.trend_delta === null) return "•";
+    return `↘ ${(row.trend_delta * 100).toFixed(0)}%`;
+  };
+
+  lines.push(`\`${pad("Agent", agentCol)}  ${pad("Tasks", tasksCol)}  ${pad("Avg", avgCol)}  ${pad("Null", nullCol)}  ${pad("Below", belowCol)}  Trend\``);
+  for (const row of report.per_agent) {
+    lines.push(
+      `\`${pad(row.agent_name, agentCol)}  ${pad(String(row.task_count), tasksCol)}  ${pad(pct(row.rolling_avg_score), avgCol)}  ${pad(`${(row.null_score_rate * 100).toFixed(0)}%`, nullCol)}  ${pad(row.below_threshold_rate === null ? "n/a" : `${(row.below_threshold_rate * 100).toFixed(0)}%`, belowCol)}  ${trend(row)}\``,
+    );
+  }
+
+  const downward = report.per_agent.filter((row) => row.trending_downward);
+  if (downward.length > 0) {
+    lines.push(``);
+    lines.push(`*Trending downward:*`);
+    for (const row of downward) {
+      const delta = row.trend_delta ?? 0;
+      const recent = row.recent_avg_score !== null ? `${(row.recent_avg_score * 100).toFixed(0)}%` : "n/a";
+      const previous = row.previous_avg_score !== null ? `${(row.previous_avg_score * 100).toFixed(0)}%` : "n/a";
+      lines.push(`  • \`${row.agent_name}\`: ${previous} → ${recent} (${delta > 0 ? "+" : ""}${(delta * 100).toFixed(0)}%)`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 // ── /token-stats handler ──────────────────────────────────────────────────
