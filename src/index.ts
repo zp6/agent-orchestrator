@@ -28,8 +28,19 @@ export {
   buildDownstreamImpactSection,
   SCHEMA_CONSUMER_MAP,
 } from "./reviewer/schema-impact.js";
-export { loadSchemaContractRegistry } from "./reviewer/schema-contract.js";
-export type { SchemaConsumerEntry, SchemaImpactHit } from "./reviewer/schema-impact.js";
+export {
+  loadSchemaContractRegistry,
+  validateStoreSchemaAgainstContract,
+  extractStoreColumnsFromSource,
+} from "./reviewer/schema-contract.js";
+export type {
+  SchemaConsumerEntry,
+  SchemaImpactHit,
+} from "./reviewer/schema-impact.js";
+export type {
+  SchemaContractValidationWarning,
+  SchemaContractValidationResult,
+} from "./reviewer/schema-contract.js";
 
 // Agent quality trend sparklines — `/agent-trends` API payload (issue #156).
 //

@@ -169,7 +169,16 @@ export interface SchemaImpactHit {
   extraColumns?: string[];
 }
 
-export { detectSchemaContractDrift, loadSchemaContractRegistry } from "./schema-contract.js";
+export {
+  detectSchemaContractDrift,
+  loadSchemaContractRegistry,
+  validateStoreSchemaAgainstContract,
+  extractStoreColumnsFromSource,
+} from "./schema-contract.js";
+export type {
+  SchemaContractValidationWarning,
+  SchemaContractValidationResult,
+} from "./schema-contract.js";
 
 /**
  * Detects schema-level changes in a PR diff and returns the list of affected

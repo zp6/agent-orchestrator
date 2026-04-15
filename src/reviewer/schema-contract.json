@@ -22,7 +22,13 @@
         "quality_score",
         "verification_notes",
         "created_at",
-        "updated_at"
+        "updated_at",
+        "priority",
+        "quality_explanation",
+        "parent_task_id",
+        "rollup_policy",
+        "subtask_complexity_hint",
+        "issue_priority"
       ]
     },
     {

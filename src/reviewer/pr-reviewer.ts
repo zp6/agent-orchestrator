@@ -16,6 +16,7 @@
 
 import { execSync, spawnSync } from "node:child_process";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { unlinkSync, readFileSync, writeFileSync } from "node:fs";
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
@@ -28,6 +29,8 @@ import {
   extractChangedFilesFromDiff,
   buildSchemaImpactNotice,
   buildDownstreamImpactSection,
+  validateStoreSchemaAgainstContract,
+  loadSchemaContractRegistry,
   type SchemaImpactHit,
 } from "./schema-impact.js";
 import {
@@ -594,7 +597,13 @@ export class PRReviewer {
     const changedFiles = extractChangedFilesFromDiff(truncatedDiff);
     const schemaHits = detectSchemaChanges(truncatedDiff, changedFiles);
     const schemaContractHits = detectSchemaContractDrift(truncatedDiff, changedFiles);
-    const allSchemaHits = [...schemaHits, ...schemaContractHits];
+
+    // Static contract validator (issue #168): when store.ts or schema-contract.json
+    // is touched in this repo's own PRs, validate the *full* current store.ts against
+    // the contract to catch accumulated drift, not just the current PR's diff.
+    const staticContractHits = this.runStaticContractValidation(repo, changedFiles);
+
+    const allSchemaHits = [...schemaHits, ...schemaContractHits, ...staticContractHits];
     const schemaNotice = buildSchemaImpactNotice(allSchemaHits);
     if (allSchemaHits.length > 0) {
       this.log.info("Schema-consumer impact detected", {
@@ -1796,6 +1805,72 @@ export class PRReviewer {
       reason: "Parse failure",
       confidence: null,
     };
+  }
+
+  /**
+   * Run the static schema-contract validator against the local store.ts when a
+   * PR in this repo touches `src/state/store.ts` or `schema-contract.json`.
+   *
+   * Unlike `detectSchemaContractDrift()` (diff-based), this reads the **full**
+   * store.ts to catch accumulated drift from previous PRs that were never
+   * reflected in the contract.
+   *
+   * Gated to `rapartlu/agent-reviewer` PRs only — other repos have their own
+   * store.ts files and their own validation gate.
+   *
+   * @returns SchemaImpactHit array (empty when clean or when the file cannot be read).
+   */
+  private runStaticContractValidation(repo: string, changedFiles: string[]): SchemaImpactHit[] {
+    const REVIEWER_REPO = "rapartlu/agent-reviewer";
+    if (repo !== REVIEWER_REPO) return [];
+
+    const schemaFilesChanged = changedFiles.some(
+      (f) => f.includes("state/store.ts") || f.includes("schema-contract.json"),
+    );
+    if (!schemaFilesChanged) return [];
+
+    try {
+      const storeUrl = new URL("../state/store.ts", import.meta.url);
+      const storeSource = readFileSync(fileURLToPath(storeUrl), "utf-8");
+      const validation = validateStoreSchemaAgainstContract(storeSource);
+
+      if (validation.clean) return [];
+
+      const registry = loadSchemaContractRegistry();
+      const hits: SchemaImpactHit[] = [];
+
+      for (const w of validation.warnings) {
+        const entry = registry.tables.find(
+          (t) => t.table.toLowerCase() === w.table.toLowerCase(),
+        );
+        const consumers = entry ? [...entry.consumer_repos] : [];
+
+        hits.push({
+          schemaLabel: `schema contract stale: ${w.table}`,
+          consumers,
+          matchedFiles: ["src/state/store.ts", "src/reviewer/schema-contract.json"],
+          contractMismatch: true,
+          missingColumns: w.missingFromStore,
+          extraColumns: w.extraInStore,
+        });
+      }
+
+      this.log.warn("Static contract validator found schema drift", {
+        repo,
+        warnings: validation.warnings.map((w) => ({
+          table: w.table,
+          missingFromStore: w.missingFromStore,
+          extraInStore: w.extraInStore,
+        })),
+      });
+
+      return hits;
+    } catch (err) {
+      this.log.warn("Static contract validator could not read store.ts", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
   }
 }
 
