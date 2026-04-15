@@ -43,6 +43,7 @@ import { registerHealthChecksCommand } from "./commands/health-checks.js";
 import { registerCostCommand } from "./commands/cost.js";
 import { registerSkipBlockersCommand } from "./commands/skip-blockers.js";
 import { registerFollowupChainsCommand } from "./commands/followup-chains.js";
+import { registerRoutingMismatchesCommand } from "./commands/routing-mismatches.js";
 
 const program = new Command();
 
@@ -85,6 +86,7 @@ registerFleetCommand(program);
 registerLearnedRulesCommand(program);
 registerAuditInfraCommand(program);
 registerRoutingAccuracyCommand(program);
+registerRoutingMismatchesCommand(program);
 registerSignalsCommand(program);
 registerLearnedPatternsCommand(program);
 registerLineageCommand(program);

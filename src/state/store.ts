@@ -3,6 +3,8 @@ import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { ulid } from "ulid";
+import { extractIntendedAgent } from "../orchestrator/routing-mismatch-detector.js";
+import type { OrchestratorConfig } from "../config/schema.js";
 
 // ── Daemon lifecycle audit types ──────────────────────────────────────────────
 
@@ -2222,6 +2224,172 @@ export class StateStore {
       ORDER BY created_at ASC
       LIMIT ?
     `).all(cutoff, limit) as Task[];
+  }
+
+  /**
+   * Get routing mismatches: tasks where the executed agent doesn't match
+   * the intended agent (extracted from task title [agent-name] prefix).
+   *
+   * Used by issue #861 to identify systematic routing errors.
+   *
+   * @param config OrchestratorConfig for agent validation
+   * @param options Query options: days (default 30), intendedAgent, actualAgent, limit (default 100)
+   * @returns Array of task data for mismatched tasks
+   */
+  getRoutingMismatches(
+    config: OrchestratorConfig,
+    options?: {
+      days?: number;
+      intendedAgent?: string;
+      actualAgent?: string;
+      limit?: number;
+    },
+  ): Array<{
+    taskId: string;
+    taskTitle: string;
+    intendedAgent: string | null;
+    actualAgent: string | null;
+    qualityScore: number | null;
+    taskStatus: string;
+    createdAt: string;
+    verificationStatus: string | null;
+  }> {
+    const { days = 30, limit = 100 } = options ?? {};
+
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+    const tasks = this.db.prepare(`
+      SELECT id, title, agent_name, quality_score, status, created_at, verification_status
+      FROM tasks
+      WHERE parent_task_id IS NULL
+        AND created_at >= ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(cutoff, limit) as Task[];
+
+    const mismatches = [];
+
+    for (const task of tasks) {
+      const intendedAgent = extractIntendedAgent(task.title, config);
+
+      if (!intendedAgent || !task.agent_name || intendedAgent === task.agent_name) {
+        continue;
+      }
+
+      // Apply optional filters
+      if (
+        options?.intendedAgent &&
+        intendedAgent !== options.intendedAgent
+      ) {
+        continue;
+      }
+      if (
+        options?.actualAgent &&
+        task.agent_name !== options.actualAgent
+      ) {
+        continue;
+      }
+
+      mismatches.push({
+        taskId: task.id,
+        taskTitle: task.title,
+        intendedAgent,
+        actualAgent: task.agent_name,
+        qualityScore: task.quality_score ?? null,
+        taskStatus: task.status,
+        createdAt: task.created_at,
+        verificationStatus: task.verification_status ?? null,
+      });
+    }
+
+    return mismatches;
+  }
+
+  /**
+   * Get routing mismatch statistics grouped by agent pair.
+   *
+   * @param config OrchestratorConfig for agent validation
+   * @param days Time window in days (default 30)
+   * @returns Summary statistics with per-pair breakdown
+   */
+  getRoutingMismatchStats(
+    config: OrchestratorConfig,
+    days = 30,
+  ): {
+    totalTasksAnalyzed: number;
+    mismatchCount: number;
+    mismatchRate: number;
+    byAgentPair: Array<{
+      intendedAgent: string;
+      actualAgent: string;
+      count: number;
+      avgQualityScore: number | null;
+      mostRecentAt: string;
+    }>;
+  } {
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+    // Count total tasks in window
+    const totalRow = this.db.prepare(`
+      SELECT COUNT(*) as count FROM tasks
+      WHERE parent_task_id IS NULL AND created_at >= ?
+    `).get(cutoff) as { count: number };
+    const totalTasksAnalyzed = totalRow.count;
+
+    // Get all mismatches
+    const mismatches = this.getRoutingMismatches(config, { days, limit: 10000 });
+
+    // Group by agent pair
+    const byPair = new Map<
+      string,
+      {
+        count: number;
+        qualityScores: (number | null)[];
+        mostRecentAt: string;
+      }
+    >();
+
+    for (const m of mismatches) {
+      const key = `${m.intendedAgent}|${m.actualAgent}`;
+      const existing = byPair.get(key) ?? {
+        count: 0,
+        qualityScores: [],
+        mostRecentAt: m.createdAt,
+      };
+
+      existing.count++;
+      existing.qualityScores.push(m.qualityScore);
+      if (m.createdAt > existing.mostRecentAt) {
+        existing.mostRecentAt = m.createdAt;
+      }
+
+      byPair.set(key, existing);
+    }
+
+    const byAgentPair = Array.from(byPair.entries())
+      .map(([key, data]) => {
+        const [intendedAgent, actualAgent] = key.split("|");
+        const validScores = data.qualityScores.filter((s) => s !== null) as number[];
+        const avgQualityScore = validScores.length > 0
+          ? validScores.reduce((a, b) => a + b, 0) / validScores.length
+          : null;
+
+        return {
+          intendedAgent,
+          actualAgent,
+          count: data.count,
+          avgQualityScore,
+          mostRecentAt: data.mostRecentAt,
+        };
+      })
+      .sort((a, b) => b.count - a.count);
+
+    return {
+      totalTasksAnalyzed,
+      mismatchCount: mismatches.length,
+      mismatchRate: totalTasksAnalyzed > 0 ? mismatches.length / totalTasksAnalyzed : 0,
+      byAgentPair,
+    };
   }
 
   /**
