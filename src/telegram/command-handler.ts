@@ -311,6 +311,12 @@ async function executeCommand(
       return handleSLA(store, cmd.args);
 
     case "quality": {
+      // /quality tasks [limit] → per-task quality score listing
+      if (cmd.args[0] === "tasks") {
+        const n = parseInt(cmd.args[1] ?? "20", 10);
+        const limit = Number.isNaN(n) || n < 1 ? 20 : Math.min(n, 50);
+        return handleQualityTasks(store, limit);
+      }
       const tasks = parseInt(cmd.args[0] ?? "20", 10);
       const windowTasks = Number.isNaN(tasks) || tasks < 1 ? 20 : Math.min(tasks, 100);
       return handleQuality(store, windowTasks);
@@ -976,6 +982,61 @@ function handleQuality(store: ITelegramStateStore, windowTasks: number): string 
       const previous = row.previous_avg_score !== null ? `${(row.previous_avg_score * 100).toFixed(0)}%` : "n/a";
       lines.push(`  • \`${row.agent_name}\`: ${previous} → ${recent} (${delta > 0 ? "+" : ""}${(delta * 100).toFixed(0)}%)`);
     }
+  }
+
+  return lines.join("\n");
+}
+
+// ── /quality tasks handler ────────────────────────────────────────────────
+
+/**
+ * Per-task quality score listing.
+ * Shows individual tasks with their quality_score, verification_status,
+ * agent, and a truncated title — giving operators visibility into
+ * quality trends at the task level (issue #212).
+ */
+function handleQualityTasks(store: ITelegramStateStore, limit: number): string {
+  const tasks = store.getRecentVerifiedTasks(limit);
+
+  const nullCount = store.getApprovedTasksWithNullScoresCount();
+
+  const lines: string[] = [
+    `📋 *Per-Task Quality Scores* (latest ${limit})`,
+    ``,
+  ];
+
+  if (nullCount > 0) {
+    lines.push(`⚠️ ${nullCount} approved task(s) still missing quality\_score — will be backfilled next cycle.`);
+    lines.push(``);
+  }
+
+  if (tasks.length === 0) {
+    lines.push("No verified tasks with quality scores yet.");
+    return lines.join("\n");
+  }
+
+  for (const task of tasks) {
+    const score = task.quality_score !== null && task.quality_score !== undefined
+      ? `${(task.quality_score * 100).toFixed(0)}%`
+      : "n/a";
+    const status = task.verification_status === "approved" ? "✅" : "❌";
+    const agent = task.agent_name ?? "unknown";
+    const shortId = task.id.slice(0, 8);
+    const title = task.title.length > 50 ? task.title.slice(0, 47) + "..." : task.title;
+
+    lines.push(`${status} \`${shortId}\` ${score} · \`${agent}\` · ${title}`);
+  }
+
+  // Summary stats
+  const scores = tasks
+    .map((t) => t.quality_score)
+    .filter((s): s is number => typeof s === "number");
+  if (scores.length > 0) {
+    const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+    const min = Math.min(...scores);
+    const max = Math.max(...scores);
+    lines.push(``);
+    lines.push(`*Summary:* avg ${(avg * 100).toFixed(0)}% · min ${(min * 100).toFixed(0)}% · max ${(max * 100).toFixed(0)}% · ${scores.length} scored`);
   }
 
   return lines.join("\n");

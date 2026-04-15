@@ -1643,6 +1643,92 @@ export class Verifier {
   }
 
   /**
+   * Proactive score backfill — called from the supervisor cycle.
+   *
+   * Finds ALL approved tasks with null quality_score and infers scores for
+   * them, just like `repairNullScoresForApprovedTasks()`.  Also picks up
+   * "done" tasks whose verification_status is still null (missed by the
+   * normal verify cycle) and runs full verification on them.
+   *
+   * Returns the total number of tasks that were scored.
+   *
+   * Issue #212: ensures quality_score is always populated on verified tasks
+   * so that quality trend analysis, calibration drift detection, and routing
+   * accuracy tracking are never blind.
+   */
+  async ensureScoresPopulated(batchLimit: number = 10): Promise<number> {
+    let scored = 0;
+
+    // Phase 1: approved tasks with null quality_score → infer score
+    const nullScoreTasks = this.store.getApprovedTasksWithNullScores(batchLimit);
+    if (nullScoreTasks.length > 0) {
+      this.log.info("ensureScoresPopulated: backfilling approved tasks with null scores", {
+        count: nullScoreTasks.length,
+      });
+      for (const task of nullScoreTasks) {
+        try {
+          const inferredResult = await this.inferMissingScore(task);
+          const effectiveStatus = inferredResult.approved ? "approved" : "rejected";
+
+          this.store.updateTask(task.id, {
+            verification_status: effectiveStatus,
+            quality_score: inferredResult.score,
+            verification_notes: inferredResult.notes,
+            quality_explanation: inferredResult.approved
+              ? (inferredResult.approvalRationale ?? null)
+              : (inferredResult.explanation ?? `Score ${inferredResult.score.toFixed(2)} below threshold — inferred score triggered rejection`),
+          });
+
+          this.recordVerificationResult(
+            task.id,
+            task.agent_name ?? "unknown",
+            inferredResult.score,
+            inferredResult.approved,
+            inferredResult.approved ? undefined : (inferredResult.explanation ?? "Inferred score below threshold"),
+            inferredResult.blockedReason,
+            inferredResult.approvalRationale,
+          );
+
+          scored++;
+        } catch (err) {
+          this.log.error("ensureScoresPopulated: failed to infer score", {
+            taskId: task.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
+    // Phase 2: done tasks with verification_status IS NULL → full verify
+    const remaining = batchLimit - scored;
+    if (remaining > 0) {
+      const unverified = this.store.getUnverified(remaining);
+      if (unverified.length > 0) {
+        this.log.info("ensureScoresPopulated: verifying unscored done tasks", {
+          count: unverified.length,
+        });
+        for (const task of unverified) {
+          try {
+            await this.verify(task.id);
+            scored++;
+          } catch (err) {
+            this.log.error("ensureScoresPopulated: verification failed", {
+              taskId: task.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      }
+    }
+
+    if (scored > 0) {
+      this.log.info("ensureScoresPopulated: completed", { scored });
+    }
+
+    return scored;
+  }
+
+  /**
    * Infer a quality score for approved tasks that lack a score.
    * Uses task-type-specific heuristics and a lightweight LLM pass as fallback.
    * Flags the score as inferred via approvalRationale.

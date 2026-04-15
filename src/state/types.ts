@@ -628,6 +628,13 @@ export interface IStateStore {
   // Live quality health snapshot for operator Telegram commands
   getQualityHealthReport(windowTasks?: number, threshold?: number): QualityHealthReport;
 
+  /**
+   * Return recent verified tasks with their quality_score for the per-task
+   * quality view.  Includes both approved and rejected tasks that have been
+   * through verification.  Ordered by updated_at DESC.
+   */
+  getRecentVerifiedTasks(limit?: number): Task[];
+
   // Agent health (reads from orchestrator's agent_health table)
   getAgentHealthBatch(agentNames: string[]): AgentHealth[];
 

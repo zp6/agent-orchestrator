@@ -597,6 +597,18 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
     return row?.count ?? 0;
   }
 
+  getRecentVerifiedTasks(limit: number = 20): Task[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE verification_status IN ('approved', 'rejected')
+           AND quality_score IS NOT NULL
+         ORDER BY updated_at DESC
+         LIMIT ?`,
+      )
+      .all(limit) as Task[];
+  }
+
   getAgentStats(): AgentStats[] {
     return this.db
       .prepare(`
