@@ -41,6 +41,7 @@ import { runProactiveScan } from "../orchestrator/proactive-scanner.js";
 import { validateMergedPR } from "../orchestrator/staging-validator.js";
 import { proposeAndFileRoadmapItems } from "../orchestrator/roadmap-proposer.js";
 import { detectHighIterationAgents } from "../orchestrator/iteration-cost-detector.js";
+import { detectHealthIncidentIssues } from "../orchestrator/health-incident-detector.js";
 import { runIterationBudgetAlerts } from "../orchestrator/iteration-budget-alert.js";
 import { runSkipPatternCheck } from "../orchestrator/skip-pattern-aggregator.js";
 import { learnPatterns } from "../orchestrator/pattern-learner.js";
@@ -663,6 +664,7 @@ export class Daemon {
       if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
         batch4.push(this.detectImprovements(time));
         this.detectIterationCostImprovements(time);
+        this.detectHealthIncidentIssues(time);
         batch4.push(this.checkIterationBudgetAlerts(time));
         batch4.push(this.checkMeetingRequests(time));
         batch4.push(
@@ -1875,6 +1877,33 @@ export class Daemon {
     } catch (err) {
       console.error(
         `[${time}] Iteration-cost improvement detection failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  /**
+   * Check recent health incident tasks (escalated research tasks from failed
+   * health checks) and extract root cause patterns. Files improvement issues
+   * for critical or recurring root causes.
+   *
+   * Patterns detected: OOM, port-conflict, secret-missing, dependency,
+   * crash, startup-timeout, unknown.
+   */
+  private detectHealthIncidentIssues(time: string): void {
+    try {
+      const improvements = detectHealthIncidentIssues(this.store, this.config);
+      if (improvements.length === 0) return;
+
+      console.log(`[${time}] Health incident detector: ${improvements.length} issue(s) detected`);
+      for (const imp of improvements) {
+        const created = this.issueCreator.createAcrossRepos(imp, ["health-incident-triggered"]);
+        for (const issue of created) {
+          console.log(`  [health-incident] Created: ${issue.url}`);
+        }
+      }
+    } catch (err) {
+      console.error(
+        `[${time}] Health incident detection failed: ${err instanceof Error ? err.message : err}`,
       );
     }
   }

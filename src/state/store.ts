@@ -2152,6 +2152,29 @@ export class StateStore {
   }
 
   /**
+   * Return recent health incident tasks (escalated research tasks from failed health checks).
+   * Used by the health incident detector to extract root cause patterns and file improvement issues.
+   *
+   * Queries for tasks where:
+   *   - status = 'done' (completed incidents)
+   *   - task_type = 'research' (escalated for investigation)
+   *   - source_ref LIKE 'health-check-fail:%' (from health check failure)
+   *   - updated_at within the last N hours
+   */
+  getRecentHealthIncidents(hours = 24, limit = 50): Task[] {
+    return this.db.prepare(`
+      SELECT * FROM tasks
+      WHERE status IN ('done', 'escalated')
+        AND task_type = 'research'
+        AND source = 'manual'
+        AND source_ref LIKE 'health-check-fail:%'
+        AND updated_at >= datetime('now', ? || ' hours')
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `).all(`-${hours}`, limit) as Task[];
+  }
+
+  /**
    * Check whether a research task has been analyzed by the research linker and
    * had implementation issues filed from it.
    *
