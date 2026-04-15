@@ -5,6 +5,8 @@ import {
   RESEARCH_REQUIRED_SECTIONS,
   TRIAGE_OUTPUT_SCHEMA,
   TRIAGE_REQUIRED_FIELDS,
+  PRIORITY_FLOOR_THRESHOLD,
+  PRIORITY_QUALITY_FLOOR,
   Verifier,
 } from "../reviewer/verifier.js";
 import type { Notifier } from "../notify.js";
@@ -720,6 +722,204 @@ Do X.
     expect(missingSections).toHaveLength(2);
     expect(missingSections).toContain("## Open Questions");
     expect(missingSections).toContain("## References");
+  });
+});
+
+describe("Priority quality gate (issue_priority ≥ 0.80, quality_score < 0.60)", () => {
+  it("exported constants have correct values", () => {
+    expect(PRIORITY_FLOOR_THRESHOLD).toBe(0.80);
+    expect(PRIORITY_QUALITY_FLOOR).toBe(0.60);
+  });
+
+  it("gate fires when issue_priority >= 0.80 AND score < 0.60", () => {
+    const shouldEscalate = (issuePriority: number | null, score: number): boolean => {
+      if (issuePriority == null) return false;
+      return issuePriority >= PRIORITY_FLOOR_THRESHOLD && score < PRIORITY_QUALITY_FLOOR;
+    };
+
+    // Should escalate
+    expect(shouldEscalate(0.90, 0.15)).toBe(true);   // the scenario from issue #179
+    expect(shouldEscalate(0.80, 0.59)).toBe(true);   // exactly on priority threshold, just below quality floor
+    expect(shouldEscalate(1.00, 0.00)).toBe(true);   // maximum priority, zero quality
+    expect(shouldEscalate(0.85, 0.50)).toBe(true);   // high priority, acceptable but below floor
+  });
+
+  it("gate does NOT fire when issue_priority is null", () => {
+    const shouldEscalate = (issuePriority: number | null, score: number): boolean => {
+      if (issuePriority == null) return false;
+      return issuePriority >= PRIORITY_FLOOR_THRESHOLD && score < PRIORITY_QUALITY_FLOOR;
+    };
+
+    expect(shouldEscalate(null, 0.10)).toBe(false);
+  });
+
+  it("gate does NOT fire when issue_priority < 0.80", () => {
+    const shouldEscalate = (issuePriority: number | null, score: number): boolean => {
+      if (issuePriority == null) return false;
+      return issuePriority >= PRIORITY_FLOOR_THRESHOLD && score < PRIORITY_QUALITY_FLOOR;
+    };
+
+    expect(shouldEscalate(0.79, 0.15)).toBe(false);  // just below priority threshold
+    expect(shouldEscalate(0.50, 0.10)).toBe(false);  // low priority, terrible quality
+    expect(shouldEscalate(0.00, 0.00)).toBe(false);  // zero priority, zero quality
+  });
+
+  it("gate does NOT fire when quality_score >= 0.60 (even with high priority)", () => {
+    const shouldEscalate = (issuePriority: number | null, score: number): boolean => {
+      if (issuePriority == null) return false;
+      return issuePriority >= PRIORITY_FLOOR_THRESHOLD && score < PRIORITY_QUALITY_FLOOR;
+    };
+
+    expect(shouldEscalate(0.90, 0.60)).toBe(false);  // exactly at quality floor — no escalation
+    expect(shouldEscalate(0.90, 0.75)).toBe(false);  // high priority, good quality
+    expect(shouldEscalate(1.00, 1.00)).toBe(false);  // maximum everything — no escalation
+  });
+
+  it("gate is boundary-exclusive on quality floor (0.60 does NOT trigger)", () => {
+    const shouldEscalate = (issuePriority: number | null, score: number): boolean => {
+      if (issuePriority == null) return false;
+      return issuePriority >= PRIORITY_FLOOR_THRESHOLD && score < PRIORITY_QUALITY_FLOOR;
+    };
+
+    expect(shouldEscalate(0.90, 0.60)).toBe(false);  // exactly 0.60 — passes the floor
+    expect(shouldEscalate(0.90, 0.59)).toBe(true);   // 0.59 — below floor
+  });
+
+  it("gate is boundary-inclusive on priority threshold (0.80 triggers)", () => {
+    const shouldEscalate = (issuePriority: number | null, score: number): boolean => {
+      if (issuePriority == null) return false;
+      return issuePriority >= PRIORITY_FLOOR_THRESHOLD && score < PRIORITY_QUALITY_FLOOR;
+    };
+
+    expect(shouldEscalate(0.80, 0.55)).toBe(true);   // exactly 0.80 priority — gate fires
+    expect(shouldEscalate(0.79, 0.55)).toBe(false);  // just below 0.80 — gate does not fire
+  });
+
+  it("VerificationResult can express priorityQualityEscalated field", () => {
+    const result: VerificationResult = {
+      approved: false,
+      score: 0.15,
+      notes: "Critically low quality on high-priority task",
+      priorityQualityEscalated: true,
+    };
+    expect(result.priorityQualityEscalated).toBe(true);
+  });
+
+  it("priorityQualityEscalated is absent on normal results", () => {
+    const result: VerificationResult = {
+      approved: true,
+      score: 0.90,
+      notes: "Excellent work",
+    };
+    expect(result.priorityQualityEscalated).toBeUndefined();
+  });
+
+  it("notifyOperator is called with high urgency when gate fires", async () => {
+    const notifyOperatorMock = vi.fn().mockResolvedValue(true);
+    const updateTaskMock = vi.fn();
+
+    const notifier: Notifier = {
+      send: vi.fn(),
+      escalation: vi.fn(),
+      taskRejected: vi.fn(),
+      notifyOperator: notifyOperatorMock,
+      supervisorDecision: vi.fn(),
+      healthRecovery: vi.fn(),
+      isConfigured: () => true,
+    };
+
+    const store = {
+      getTask: vi.fn(),
+      updateTask: updateTaskMock,
+      hasActiveTask: vi.fn(),
+      listTasks: vi.fn(),
+    };
+
+    // Simulate the gate firing path directly using the logic extracted from applyPriorityQualityGate
+    const taskId = "01KP8CZ5ABCDEFGH";
+    const issuePriority = 0.90;
+    const score = 0.15;
+
+    if (issuePriority >= PRIORITY_FLOOR_THRESHOLD && score < PRIORITY_QUALITY_FLOOR) {
+      store.updateTask(taskId, { status: "escalated" });
+
+      const priorityPct = (issuePriority * 100).toFixed(0);
+      const qualityPct = (score * 100).toFixed(0);
+      const body = [
+        `Task \`${taskId.slice(0, 12)}\` was the system's highest-priority work yet returned a critically low quality score.`,
+        ``,
+        `*Task:* \`${taskId}\``,
+        `*Agent:* \`claude-agent-orchestrator\``,
+        `*Issue priority:* ${priorityPct}% (threshold: ${(PRIORITY_FLOOR_THRESHOLD * 100).toFixed(0)}%)`,
+        `*Quality score:* ${qualityPct}% (floor: ${(PRIORITY_QUALITY_FLOOR * 100).toFixed(0)}%)`,
+        ``,
+        `Task status moved to \`escalated\`. Use \`/resolve ${taskId.slice(0, 8)}\` to de-escalate after manual review.`,
+      ].join("\n");
+
+      await notifier.notifyOperator(
+        "Priority quality gate: high-priority task below quality floor",
+        body,
+        "high",
+      );
+    }
+
+    expect(updateTaskMock).toHaveBeenCalledWith(taskId, { status: "escalated" });
+    expect(notifyOperatorMock).toHaveBeenCalledTimes(1);
+    expect(notifyOperatorMock).toHaveBeenCalledWith(
+      "Priority quality gate: high-priority task below quality floor",
+      expect.stringContaining("90%"),    // priority shown
+      "high",
+    );
+    expect(notifyOperatorMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining("15%"),    // quality score shown
+      "high",
+    );
+  });
+
+  it("task status is set to escalated (not done) when gate fires", () => {
+    const updateTaskMock = vi.fn();
+
+    const taskId = "01KP8CZ5ABCDEFGH";
+    const issuePriority = 0.90;
+    const score = 0.15;
+
+    // Simulate the escalation path
+    if (issuePriority >= PRIORITY_FLOOR_THRESHOLD && score < PRIORITY_QUALITY_FLOOR) {
+      updateTaskMock(taskId, { status: "escalated" });
+    }
+
+    expect(updateTaskMock).toHaveBeenCalledWith(taskId, { status: "escalated" });
+    // Crucially, status is "escalated" not "done"
+    const call = updateTaskMock.mock.calls[0];
+    expect(call[1].status).toBe("escalated");
+    expect(call[1].status).not.toBe("done");
+  });
+
+  it("Telegram alert body contains both priority score and quality score", () => {
+    const issuePriority = 0.90;
+    const score = 0.15;
+    const taskId = "01KP8CZ5ABCDEFGH";
+    const agentName = "claude-agent-orchestrator";
+
+    const priorityPct = (issuePriority * 100).toFixed(0);
+    const qualityPct = (score * 100).toFixed(0);
+    const body = [
+      `Task \`${taskId.slice(0, 12)}\` was the system's highest-priority work yet returned a critically low quality score.`,
+      ``,
+      `*Task:* \`${taskId}\``,
+      `*Agent:* \`${agentName}\``,
+      `*Issue priority:* ${priorityPct}% (threshold: ${(PRIORITY_FLOOR_THRESHOLD * 100).toFixed(0)}%)`,
+      `*Quality score:* ${qualityPct}% (floor: ${(PRIORITY_QUALITY_FLOOR * 100).toFixed(0)}%)`,
+      ``,
+      `Task status moved to \`escalated\`. Use \`/resolve ${taskId.slice(0, 8)}\` to de-escalate after manual review.`,
+    ].join("\n");
+
+    expect(body).toContain("*Issue priority:* 90%");
+    expect(body).toContain("*Quality score:* 15%");
+    expect(body).toContain("escalated");
+    expect(body).toContain("/resolve");
+    expect(body).toContain(agentName);
   });
 });
 

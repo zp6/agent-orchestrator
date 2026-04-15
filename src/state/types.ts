@@ -102,6 +102,17 @@ export interface Task {
    * Null when not provided; treated as equal weight (1.0) during rollup.
    */
   subtask_complexity_hint?: number | null;
+  /**
+   * Issue priority score (0.0–1.0), computed by the orchestrator dispatcher
+   * from GitHub issue labels and signals at dispatch time.
+   *
+   * Used by the verifier's priority quality gate: when `issue_priority ≥ 0.80`
+   * and `quality_score < 0.60`, the task is escalated to a human via Telegram
+   * instead of auto-approved, and its status moves to "escalated".
+   *
+   * Null when priority was not set at dispatch time (gate does not fire).
+   */
+  issue_priority?: number | null;
   created_at: string;
   updated_at: string;
 }

@@ -107,6 +107,20 @@ export interface VerificationResult {
    * appended after a colon: `"marginal_approval: Missing error handling …"`.
    */
   approvalRationale?: string;
+  /**
+   * Set to `true` when the priority quality gate fired: the task had
+   * `issue_priority ≥ PRIORITY_FLOOR_THRESHOLD` (0.80) and a `quality_score`
+   * below `PRIORITY_QUALITY_FLOOR` (0.60).
+   *
+   * When this flag is set the task `status` has been moved to `"escalated"` so
+   * it will not be auto-merged or silently approved. A Telegram alert was sent
+   * to the operator showing both the priority and the quality score.
+   *
+   * The orchestrator daemon should check this flag before routing the result —
+   * if `priorityQualityEscalated` is true, skip auto-approval and wait for
+   * human resolution via `/resolve` in the Telegram bot.
+   */
+  priorityQualityEscalated?: true;
 }
 
 /**
@@ -309,6 +323,25 @@ const BORDERLINE_HIGH = 0.79;
  */
 const MARGINAL_APPROVAL_LOW = 0.60;
 const MARGINAL_APPROVAL_HIGH = 0.74;
+
+/**
+ * Minimum `issue_priority` score that activates the priority quality gate.
+ * Tasks with an issue priority at or above this threshold are considered
+ * critical-path work and subject to a stricter quality floor.
+ */
+export const PRIORITY_FLOOR_THRESHOLD = 0.80;
+
+/**
+ * Minimum `quality_score` required for high-priority tasks.
+ * When a task's `issue_priority ≥ PRIORITY_FLOOR_THRESHOLD` and its
+ * `quality_score` falls below this value, the verifier escalates the task
+ * to a human operator via Telegram rather than allowing auto-approval.
+ *
+ * Rationale: a 0.15 quality score on a 0.90-priority issue (CI blocked on
+ * main, for example) means the most important work in the system may be
+ * unresolved, yet it would otherwise pass through silently.
+ */
+export const PRIORITY_QUALITY_FLOOR = 0.60;
 
 const SYSTEM_PROMPT = `You are a quality reviewer for an AI agent orchestrator. Given a task description and the agent's response, assess the quality of the work.
 
@@ -679,6 +712,75 @@ export class Verifier {
     };
   }
 
+  /**
+   * Apply the priority quality gate after a verification decision has been made.
+   *
+   * Fires when **both** conditions hold:
+   *   1. `task.issue_priority ≥ PRIORITY_FLOOR_THRESHOLD` (0.80) — the issue is
+   *      considered critical-path work.
+   *   2. `score < PRIORITY_QUALITY_FLOOR` (0.60) — the quality is too low to
+   *      auto-approve work this important.
+   *
+   * When the gate fires:
+   *   - The task `status` is moved to `"escalated"` in the state store so the
+   *     orchestrator daemon does not route it as a normal done/rejected task.
+   *   - A Telegram operator alert (urgency=high) is sent showing the task ID,
+   *     priority score, quality score, and agent name.
+   *   - The result gains `priorityQualityEscalated: true` so callers can detect
+   *     that the task has been routed to a human.
+   *
+   * Returns the (possibly mutated) result. When the gate does NOT fire the
+   * result is returned unchanged.
+   */
+  private async applyPriorityQualityGate(
+    taskId: string,
+    agentName: string | null | undefined,
+    issuePriority: number | null | undefined,
+    result: VerificationResult,
+  ): Promise<VerificationResult> {
+    if (
+      issuePriority == null ||
+      issuePriority < PRIORITY_FLOOR_THRESHOLD ||
+      result.score >= PRIORITY_QUALITY_FLOOR
+    ) {
+      return result;
+    }
+
+    this.log.warn("Priority quality gate fired — escalating task to human", {
+      taskId,
+      issuePriority,
+      qualityScore: result.score,
+      agent: agentName ?? "unknown",
+    });
+
+    // Move task status to escalated so the daemon does not auto-approve/retry.
+    this.store.updateTask(taskId, { status: "escalated" });
+
+    // Alert the operator via Telegram.
+    if (this.notifier) {
+      const priorityPct = (issuePriority * 100).toFixed(0);
+      const qualityPct = (result.score * 100).toFixed(0);
+      const body = [
+        `Task \`${taskId.slice(0, 12)}\` was the system's highest-priority work yet returned a critically low quality score.`,
+        ``,
+        `*Task:* \`${taskId}\``,
+        `*Agent:* \`${agentName ?? "unknown"}\``,
+        `*Issue priority:* ${priorityPct}% (threshold: ${(PRIORITY_FLOOR_THRESHOLD * 100).toFixed(0)}%)`,
+        `*Quality score:* ${qualityPct}% (floor: ${(PRIORITY_QUALITY_FLOOR * 100).toFixed(0)}%)`,
+        ``,
+        `Task status moved to \`escalated\`. Use \`/resolve ${taskId.slice(0, 8)}\` to de-escalate after manual review.`,
+      ].join("\n");
+
+      await this.notifier.notifyOperator(
+        "Priority quality gate: high-priority task below quality floor",
+        body,
+        "high",
+      );
+    }
+
+    return { ...result, priorityQualityEscalated: true };
+  }
+
   async verify(taskId: string): Promise<VerificationResult> {
     const task = this.store.getTask(taskId);
     if (!task) {
@@ -953,7 +1055,13 @@ export class Verifier {
         secondPassApprovalRationale,
       );
 
-      return finalResult;
+      // ── Priority quality gate (borderline path) ──────────────────────────
+      return this.applyPriorityQualityGate(
+        taskId,
+        task.agent_name,
+        task.issue_priority,
+        finalResult,
+      );
     }
 
     // ── Standard (non-borderline) result ────────────────────────────────────
@@ -1023,12 +1131,20 @@ export class Verifier {
       singlePassApprovalRationale,
     );
 
-    return {
+    const standardResult: VerificationResult = {
       ...enforcedFirstPassResult,
       notes: enrichedNotes,
       revision: enrichedRevision,
       ...(singlePassApprovalRationale && { approvalRationale: singlePassApprovalRationale }),
     };
+
+    // ── Priority quality gate (standard path) ────────────────────────────────
+    return this.applyPriorityQualityGate(
+      taskId,
+      task.agent_name,
+      task.issue_priority,
+      standardResult,
+    );
   }
 
   /**

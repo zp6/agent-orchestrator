@@ -288,6 +288,11 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
     } catch {
       // Column already exists — ignore
     }
+    try {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN issue_priority REAL");
+    } catch {
+      // Column already exists — ignore
+    }
 
     // Index for parent → children lookups (idempotent)
     this.db.exec(`
