@@ -6584,6 +6584,75 @@ export class StateStore {
       .get(id) as LearnedPattern | undefined;
   }
 
+  /**
+   * Suppress a pattern — marks it as a false positive so it is excluded from
+   * injection (suppressed_at IS NOT NULL) but remains in the DB for audit.
+   * Unlike `retireLearnedPattern`, active stays 1 so the pattern can be
+   * unsuppressed later without losing its hit/save counters.
+   */
+  suppressLearnedPattern(id: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "UPDATE learned_patterns SET suppressed_at = COALESCE(suppressed_at, ?), updated_at = ? WHERE id = ?",
+      )
+      .run(now, now, id);
+  }
+
+  /**
+   * Remove the operator suppression — re-enables injection for a previously
+   * suppressed pattern.  Does not change `active` (if the pattern was also
+   * retired, it stays retired).
+   */
+  unsuppressLearnedPattern(id: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "UPDATE learned_patterns SET suppressed_at = NULL, updated_at = ? WHERE id = ?",
+      )
+      .run(now, id);
+  }
+
+  /**
+   * Promote a pattern — sorts it to the top of the injection list and
+   * increases its retrieval priority so it is always included when patterns
+   * are injected into review prompts.
+   */
+  promoteLearnedPattern(id: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "UPDATE learned_patterns SET promoted_at = COALESCE(promoted_at, ?), updated_at = ? WHERE id = ?",
+      )
+      .run(now, now, id);
+  }
+
+  /**
+   * Remove the operator promotion — returns the pattern to normal priority
+   * ordering (confidence / hit_count).
+   */
+  demoteLearnedPattern(id: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "UPDATE learned_patterns SET promoted_at = NULL, updated_at = ? WHERE id = ?",
+      )
+      .run(now, id);
+  }
+
+  /**
+   * Reactivate a retired pattern — sets active = 1 and clears suppressed_at
+   * so it is eligible for injection again.  Counterpart to `retireLearnedPattern`.
+   */
+  reactivateLearnedPattern(id: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "UPDATE learned_patterns SET active = 1, suppressed_at = NULL, updated_at = ? WHERE id = ?",
+      )
+      .run(now, id);
+  }
+
   // ---------------------------------------------------------------------------
   // Pattern learner — rejection signal queries
   // ---------------------------------------------------------------------------
