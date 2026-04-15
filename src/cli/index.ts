@@ -41,6 +41,7 @@ import { registerAntibodiesCommand } from "./commands/antibodies.js";
 import { registerHealthCheckEfficiencyCommand } from "./commands/health-check-efficiency.js";
 import { registerCostCommand } from "./commands/cost.js";
 import { registerSkipBlockersCommand } from "./commands/skip-blockers.js";
+import { registerFollowupChainsCommand } from "./commands/followup-chains.js";
 
 const program = new Command();
 
@@ -91,5 +92,6 @@ registerHealthCheckEfficiencyCommand(program);
 registerCostCommand(program);
 registerAgentGapsCommand(program);
 registerSkipBlockersCommand(program);
+registerFollowupChainsCommand(program);
 
 program.parse();

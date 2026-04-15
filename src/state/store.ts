@@ -7322,4 +7322,109 @@ export class StateStore {
       updatedAt: row.updated_at,
     };
   }
+
+  // ── Follow-up Chain Tracker ───────────────────────────────────────────────
+
+  /**
+   * Return all `lineage_mappings` entries whose `parent_source_ref` matches
+   * the given source ref.  These are direct follow-up issues spawned by
+   * `parentSourceRef`.
+   */
+  getLineageChildren(parentSourceRef: string): Array<{
+    source_ref: string;
+    lineage_group_id: string;
+    parent_source_ref: string | null;
+    created_at: string;
+  }> {
+    return this.db
+      .prepare(
+        "SELECT source_ref, lineage_group_id, parent_source_ref, created_at FROM lineage_mappings WHERE parent_source_ref = ? ORDER BY created_at ASC",
+      )
+      .all(parentSourceRef) as Array<{
+        source_ref: string;
+        lineage_group_id: string;
+        parent_source_ref: string | null;
+        created_at: string;
+      }>;
+  }
+
+  /**
+   * Return aggregated token and quality stats for all tasks associated with
+   * the given source refs (one or more).  Combines task_logs token columns
+   * with verification quality scores.
+   */
+  getChainStats(sourceRefs: string[]): {
+    task_count: number;
+    agent_names: string[];
+    avg_quality_score: number | null;
+    total_tokens_in: number;
+    total_tokens_out: number;
+    pr_count: number;
+  } {
+    if (sourceRefs.length === 0) {
+      return {
+        task_count: 0,
+        agent_names: [],
+        avg_quality_score: null,
+        total_tokens_in: 0,
+        total_tokens_out: 0,
+        pr_count: 0,
+      };
+    }
+
+    const placeholders = sourceRefs.map(() => "?").join(", ");
+
+    const taskRow = this.db
+      .prepare(
+        `SELECT
+           COUNT(*)                                            AS task_count,
+           GROUP_CONCAT(DISTINCT agent_name)                  AS agent_names,
+           AVG(CASE WHEN quality_score IS NOT NULL THEN quality_score END) AS avg_quality_score
+         FROM tasks
+         WHERE source_ref IN (${placeholders})
+           AND parent_task_id IS NULL`,
+      )
+      .get(...sourceRefs) as {
+        task_count: number;
+        agent_names: string | null;
+        avg_quality_score: number | null;
+      };
+
+    // Sum tokens from task_logs for all tasks under these source_refs
+    const tokenRow = this.db
+      .prepare(
+        `SELECT
+           COALESCE(SUM(tl.tokens_in),  0) AS total_in,
+           COALESCE(SUM(tl.tokens_out), 0) AS total_out
+         FROM task_logs tl
+         JOIN tasks t ON t.id = tl.task_id
+         WHERE t.source_ref IN (${placeholders})
+           AND t.parent_task_id IS NULL`,
+      )
+      .get(...sourceRefs) as { total_in: number; total_out: number };
+
+    // Count distinct PRs created from pr-feedback tasks or verifiable task results
+    const prRow = this.db
+      .prepare(
+        `SELECT COUNT(DISTINCT t.source_ref) AS pr_count
+         FROM tasks t
+         WHERE t.source_ref IN (${placeholders})
+           AND t.parent_task_id IS NULL
+           AND t.verification_status = 'approved'`,
+      )
+      .get(...sourceRefs) as { pr_count: number };
+
+    const agentNames = taskRow.agent_names
+      ? taskRow.agent_names.split(",").filter(Boolean)
+      : [];
+
+    return {
+      task_count: taskRow.task_count,
+      agent_names: [...new Set(agentNames)],
+      avg_quality_score: taskRow.avg_quality_score,
+      total_tokens_in: tokenRow.total_in,
+      total_tokens_out: tokenRow.total_out,
+      pr_count: prRow.pr_count,
+    };
+  }
 }
