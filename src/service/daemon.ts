@@ -2036,6 +2036,13 @@ export class Daemon {
     console.log(
       `  ${agentName}: ✅ self-recovered in ${duration} (within ${formatHealthDuration(HEALTH_GRACE_PERIOD_MS)} grace period — no incident created)`,
     );
+    // Record the suppression so the /health-checks panel can prove the grace
+    // period fix (#730) is reducing unnecessary dispatches (issue #743).
+    this.store.recordHealthCheckEvent({
+      kind: "grace_period_suppressed",
+      agent_name: agentName,
+      detail: `self-recovered in ${duration}`,
+    });
   }
 
   /**
@@ -2192,7 +2199,14 @@ export class Daemon {
     clearNotifyRateLimit(`health-recovery:${agentName}`);
 
     // Guard against re-escalating on every subsequent cycle.
+    // Record this as a dedup-gate suppression so the /health-checks panel
+    // can prove the one-active-incident gate (#731) is working (issue #743).
     if (this.healthEscalatedAgents.has(agentName)) {
+      this.store.recordHealthCheckEvent({
+        kind: "dedup_gate_suppressed",
+        agent_name: agentName,
+        detail,
+      });
       return;
     }
     this.healthEscalatedAgents.add(agentName);
@@ -2298,6 +2312,13 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
         result: `Health check failed: ${detail}`,
       });
       this.log.info("Created health-check escalation task with diagnostic playbook", { agentName, port, taskId: task.id });
+      // Record the dispatch so the /health-checks panel can track the current
+      // dispatch rate vs. the pre-fix baseline of 45% (issue #743).
+      this.store.recordHealthCheckEvent({
+        kind: "dispatched",
+        agent_name: agentName,
+        detail,
+      });
       // Recovery history consumed — clear it to avoid stale data on next incident.
       this.healthAutoRecoveryHistory.delete(agentName);
     }

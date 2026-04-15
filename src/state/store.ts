@@ -396,6 +396,47 @@ export interface HealthCheckEfficiencyMetrics {
   avg_false_positive_rate_pct: number | null;
 }
 
+// ── Health Check Storm Panel (issue #743) ──────────────────────────────────
+
+/** Event kind recorded in health_check_events table. */
+export type HealthCheckEventKind =
+  | "dispatched"             // Escalation task created (grace period expired, gate open)
+  | "grace_period_suppressed" // Agent self-recovered before grace period expired
+  | "dedup_gate_suppressed";  // Escalation call was no-op (active incident already exists)
+
+/** A single health check event recorded in the DB. */
+export interface HealthCheckEvent {
+  kind: HealthCheckEventKind;
+  agent_name: string;
+  detail?: string;
+  recorded_at: string; // ISO timestamp
+}
+
+/** Per-hour bucket in the 24h rolling window view. */
+export interface HealthCheckStormHour {
+  /** ISO hour string: 'YYYY-MM-DD HH:00' */
+  hour: string;
+  dispatched: number;
+  grace_period_suppressed: number;
+  dedup_gate_suppressed: number;
+  total_evaluated: number;
+}
+
+/** Aggregated health check storm metrics over a rolling 24h window. */
+export interface HealthCheckStormMetrics {
+  /** Window size in hours (always 24 in normal use, configurable for testing). */
+  window_hours: number;
+  hourly: HealthCheckStormHour[];
+  total_dispatched: number;
+  total_grace_period_suppressed: number;
+  total_dedup_gate_suppressed: number;
+  total_evaluated: number;
+  /** Dispatch rate as % of total evaluated events; null when no events. */
+  dispatch_rate_pct: number | null;
+  /** Before-fix baseline: 45% of task capacity consumed by health check storms. */
+  baseline_dispatch_rate_pct: number;
+}
+
 /**
  * Per-provider aggregated metrics for the Claude vs Codex fleet comparison panel.
  * Provider is inferred from agent_name prefix: "claude-" → "claude", "codex-" → "openai".
@@ -1304,6 +1345,7 @@ export class StateStore {
     this.runDaemonLifecycleMigration();
     this.runSecretMountStatusMigration();
     this.runSkipPatternMigration();
+    this.runHealthCheckEventsMigration();
   }
 
   private runPhase2Migration(): void {
@@ -7439,6 +7481,101 @@ export class StateStore {
       total_tokens_in: tokenRow.total_in,
       total_tokens_out: tokenRow.total_out,
       pr_count: prRow.pr_count,
+    };
+  }
+
+  // ── Health Check Storm Panel (issue #743) ──────────────────────────────────
+
+  /**
+   * Create the health_check_events table.  Idempotent — safe to call on
+   * databases that were created before this migration shipped.
+   */
+  private runHealthCheckEventsMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS health_check_events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind        TEXT NOT NULL,
+        agent_name  TEXT NOT NULL,
+        detail      TEXT,
+        recorded_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_hce_recorded_at ON health_check_events(recorded_at);
+      CREATE INDEX IF NOT EXISTS idx_hce_kind        ON health_check_events(kind);
+    `);
+  }
+
+  /**
+   * Record a health check event (dispatched, grace_period_suppressed, or
+   * dedup_gate_suppressed) so the /health-checks panel can show the
+   * before/after impact of the three storm fixes.
+   */
+  recordHealthCheckEvent(params: {
+    kind: HealthCheckEventKind;
+    agent_name: string;
+    detail?: string;
+  }): void {
+    this.db.prepare(`
+      INSERT INTO health_check_events (kind, agent_name, detail, recorded_at)
+      VALUES (?, ?, ?, ?)
+    `).run(params.kind, params.agent_name, params.detail ?? null, new Date().toISOString());
+  }
+
+  /**
+   * Return per-hour health check storm metrics over a rolling window.
+   *
+   * Each row counts three mutually exclusive outcomes for health check
+   * evaluations in that hour:
+   *   - dispatched             — an escalation task was created
+   *   - grace_period_suppressed — agent recovered before grace period expired
+   *   - dedup_gate_suppressed  — already had an active incident (no-op)
+   *
+   * The baseline_dispatch_rate_pct field encodes the pre-fix rate (45%) so
+   * operators can compare current behaviour against the historical baseline.
+   */
+  getHealthCheckStormMetrics(windowHours = 24): HealthCheckStormMetrics {
+    const since = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
+
+    const rows = this.db.prepare(`
+      SELECT
+        strftime('%Y-%m-%d %H:00', recorded_at) AS hour,
+        SUM(CASE WHEN kind = 'dispatched'              THEN 1 ELSE 0 END) AS dispatched,
+        SUM(CASE WHEN kind = 'grace_period_suppressed' THEN 1 ELSE 0 END) AS grace_period_suppressed,
+        SUM(CASE WHEN kind = 'dedup_gate_suppressed'   THEN 1 ELSE 0 END) AS dedup_gate_suppressed,
+        COUNT(*)                                                           AS total_evaluated
+      FROM health_check_events
+      WHERE recorded_at >= ?
+      GROUP BY hour
+      ORDER BY hour ASC
+    `).all(since) as Array<{
+      hour: string;
+      dispatched: number;
+      grace_period_suppressed: number;
+      dedup_gate_suppressed: number;
+      total_evaluated: number;
+    }>;
+
+    const hourly: HealthCheckStormHour[] = rows.map((r) => ({
+      hour: r.hour,
+      dispatched: r.dispatched,
+      grace_period_suppressed: r.grace_period_suppressed,
+      dedup_gate_suppressed: r.dedup_gate_suppressed,
+      total_evaluated: r.total_evaluated,
+    }));
+
+    const totalDispatched = hourly.reduce((s, r) => s + r.dispatched, 0);
+    const totalGrace = hourly.reduce((s, r) => s + r.grace_period_suppressed, 0);
+    const totalDedup = hourly.reduce((s, r) => s + r.dedup_gate_suppressed, 0);
+    const totalEvaluated = hourly.reduce((s, r) => s + r.total_evaluated, 0);
+
+    return {
+      window_hours: windowHours,
+      hourly,
+      total_dispatched: totalDispatched,
+      total_grace_period_suppressed: totalGrace,
+      total_dedup_gate_suppressed: totalDedup,
+      total_evaluated: totalEvaluated,
+      dispatch_rate_pct: totalEvaluated > 0 ? (totalDispatched / totalEvaluated) * 100 : null,
+      baseline_dispatch_rate_pct: 45,
     };
   }
 }
