@@ -39,15 +39,6 @@ export class PRReviewer {
   private store: StateStore;
   private reviewerClient: ReviewerClient;
 
-  /**
-   * In-memory counter tracking how many times each PR has been escalated due
-   * to unresolvable merge conflicts (auto-rebase failed or no local repo).
-   * Key: "repo#prNumber", value: consecutive conflict escalation count.
-   * Resets on daemon restart — acceptable since a few extra cycles before
-   * re-hitting the threshold is harmless.
-   */
-  private conflictEscalationCount = new Map<string, number>();
-
   constructor(private config: OrchestratorConfig, store?: StateStore, reviewerClient?: ReviewerClient) {
     this.deployer = new Deployer(config);
     this.store = store ?? new StateStore();
@@ -102,10 +93,9 @@ export class PRReviewer {
           });
           // Fall through to normal review — the branch is now rebased onto main
         } else {
-          // Rebase failed — escalate instead of dispatching a rebase task to the agent
-          const conflictKey = `${repo}#${prNumber}`;
-          const conflictCount = (this.conflictEscalationCount.get(conflictKey) ?? 0) + 1;
-          this.conflictEscalationCount.set(conflictKey, conflictCount);
+          // Rebase failed — escalate instead of dispatching a rebase task to the agent.
+          // Count is persisted in pr_reviews table (survives daemon restarts + config reloads).
+          const conflictCount = this.getConflictEscalationCount(repo, prNumber) + 1;
           const result: PRReviewResult = {
             decision: "escalate",
             comment: `This PR has merge conflicts and auto-rebase onto \`origin/main\` failed (real conflicts need manual resolution).\n\n\`\`\`\ngit fetch origin\ngit rebase origin/main\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``,
@@ -123,9 +113,7 @@ export class PRReviewer {
         }
       } else {
         // No local repo path found — escalate rather than dispatch a rebase task
-        const conflictKey = `${repo}#${prNumber}`;
-        const conflictCount = (this.conflictEscalationCount.get(conflictKey) ?? 0) + 1;
-        this.conflictEscalationCount.set(conflictKey, conflictCount);
+        const conflictCount = this.getConflictEscalationCount(repo, prNumber) + 1;
         const result: PRReviewResult = {
           decision: "escalate",
           comment: `This PR has merge conflicts. No local repository found for auto-rebase. Please rebase manually:\n\n\`\`\`\ngit fetch origin\ngit rebase origin/main\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``,
@@ -566,11 +554,11 @@ export class PRReviewer {
   }
 
   /**
-   * Returns the number of consecutive conflict escalations recorded for a PR
-   * (in-memory — resets on daemon restart).
+   * Returns the number of conflict escalations recorded for a PR.
+   * Persisted in the pr_reviews table — survives daemon restarts and config reloads.
    */
   getConflictEscalationCount(repo: string, prNumber: number): number {
-    return this.conflictEscalationCount.get(`${repo}#${prNumber}`) ?? 0;
+    return this.store.countPRReviewsByDecision(repo, prNumber, "escalate");
   }
 
   /**
@@ -578,7 +566,7 @@ export class PRReviewer {
    * so the same branch/issue pair doesn't immediately re-trigger).
    */
   resetConflictEscalation(repo: string, prNumber: number): void {
-    this.conflictEscalationCount.delete(`${repo}#${prNumber}`);
+    this.store.clearPRReviewsByDecision(repo, prNumber, "escalate");
   }
 
   /**
@@ -613,7 +601,6 @@ export class PRReviewer {
         { encoding: "utf-8", timeout: 30000 },
       );
       this.log.info("Auto-closed persistently conflicting PR and deleted branch", { repo, prNumber, branch, conflictCount });
-      this.store.recordPRReview(repo, prNumber, "escalate"); // Record close as escalate for metrics
       return true;
     } catch (err) {
       this.log.error("Failed to auto-close conflicting PR", { repo, prNumber, branch, error: String(err) });

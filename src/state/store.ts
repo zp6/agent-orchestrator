@@ -3282,6 +3282,20 @@ export class StateStore {
       .run(repo, prNumber, decision, new Date().toISOString());
   }
 
+  countPRReviewsByDecision(repo: string, prNumber: number, decision: string): number {
+    const row = this.db
+      .prepare("SELECT count(*) as c FROM pr_reviews WHERE repo = ? AND pr_number = ? AND decision = ?")
+      .get(repo, prNumber, decision) as { c: number };
+    return row.c;
+  }
+
+  clearPRReviewsByDecision(repo: string, prNumber: number, decision: string): number {
+    const result = this.db
+      .prepare("DELETE FROM pr_reviews WHERE repo = ? AND pr_number = ? AND decision = ?")
+      .run(repo, prNumber, decision);
+    return result.changes;
+  }
+
   clearPRReviewEscalation(repo: string, prNumber: number): number {
     const result = this.db
       .prepare("DELETE FROM pr_reviews WHERE repo = ? AND pr_number = ? AND decision = 'escalate'")
