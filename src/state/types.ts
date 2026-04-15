@@ -533,6 +533,16 @@ export interface IStateStore {
   // Query helpers
   getRecentCompleted(limit: number): Task[];
   getUnverified(limit: number): Task[];
+  /**
+   * Get approved tasks that have null quality_score.
+   * Used by the /backfill-scores command to retroactively score approved tasks.
+   */
+  getApprovedTasksWithNullScores(limit?: number): Task[];
+  /**
+   * Get count of approved tasks with null quality_score.
+   * Used to check if backfill is needed.
+   */
+  getApprovedTasksWithNullScoresCount(): number;
   getAgentStats(): AgentStats[];
   getEfficiencyTrend(
     days?: number,

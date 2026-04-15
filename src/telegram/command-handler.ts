@@ -20,6 +20,8 @@
  *   /token-stats [hours] → per-call-type LLM token usage (default: 720h = 30 days)
  *   /first-pass-rate [weeks] → first-pass rate widget: month-to-date rate, 30-day trend, and agent/task-type drill-down toward 80% goal
  *   /fpr [weeks]  → alias for /first-pass-rate
+ *   /score <task-id> → display quality score and verification details for a task
+ *   /backfill-scores [limit] → backfill quality_score for approved tasks with null scores (limit 1-20, default 5)
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -34,6 +36,7 @@ import type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 import { buildIssueAgeHeatmap, formatIssueAgeHeatmap } from "../reviewer/issue-age.js";
 import type { CalibrationDriftProvider } from "../reviewer/calibration-drift.js";
 import { CalibrationDriftMonitor } from "../reviewer/calibration-drift.js";
+import { Verifier } from "../reviewer/verifier.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
 const log = createLogger("telegram-commands");
@@ -79,7 +82,8 @@ type CommandName =
   | "token-stats"
   | "first-pass-rate"
   | "fpr"
-  | "score";
+  | "score"
+  | "backfill-scores";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -105,6 +109,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "first-pass-rate",
   "fpr",
   "score",
+  "backfill-scores",
 ]);
 
 interface ParsedCommand {
@@ -200,6 +205,7 @@ async function executeCommand(
   botToken: string,
   conflictStatsProvider?: ConflictStatsProvider,
   calibrationDriftProvider?: CalibrationDriftProvider,
+  verifier?: Verifier,
 ): Promise<string> {
   switch (cmd.command) {
     case "status":
@@ -313,6 +319,12 @@ async function executeCommand(
         return "⚠️ Usage: `/score <task-id>`\nExample: `/score 01KP63B3` or `/score 01KP63B3XXXXXXXXXXXX`";
       }
       return handleScore(store, taskId);
+    }
+
+    case "backfill-scores": {
+      const limitStr = cmd.args[0]?.trim();
+      const limit = limitStr ? Math.min(Math.max(parseInt(limitStr, 10) || 5, 1), 20) : 5;
+      return handleBackfillScores(store, verifier, limit);
     }
   }
 }
@@ -1173,6 +1185,145 @@ function buildScoreBar(score: number): string {
   return "▓".repeat(filled) + "░".repeat(empty);
 }
 
+/**
+ * Handle the /backfill-scores command.
+ * Queries for approved tasks with null quality_score and retroactively scores them.
+ *
+ * This command is useful for backfilling scores on approved tasks that never got
+ * quality_score populated (typically due to historical bugs or missing integration points).
+ *
+ * If a Verifier is provided, runs verification immediately. Otherwise, informs operator
+ * that verification will be picked up by the next daemon cycle.
+ *
+ * Usage: `/backfill-scores [limit]`
+ * - limit: optional batch size (1-20, default 5)
+ */
+async function handleBackfillScores(
+  store: ITelegramStateStore,
+  verifier: Verifier | undefined,
+  limit: number,
+): Promise<string> {
+  const unscorredCount = store.getApprovedTasksWithNullScoresCount();
+
+  if (unscorredCount === 0) {
+    return [
+      `✅ *No backfill needed*`,
+      ``,
+      `All approved tasks have quality scores. Dashboard quality trend charts are current.`,
+    ].join("\n");
+  }
+
+  const tasksToBackfill = store.getApprovedTasksWithNullScores(limit);
+
+  if (tasksToBackfill.length === 0) {
+    return [
+      `ℹ️ *No tasks in this batch*`,
+      ``,
+      `Found ${unscorredCount} approved tasks needing scores, but none were returned in query.`,
+    ].join("\n");
+  }
+
+  // If no verifier is available, just identify tasks and let daemon handle it
+  if (!verifier) {
+    const lines: string[] = [
+      `🔄 *Backfill Scores — Queued for Verification*`,
+      ``,
+      `*Found: ${unscorredCount} tasks total | Showing: ${tasksToBackfill.length} in this batch*`,
+      ``,
+      `**Tasks identified for backfill:**`,
+    ];
+
+    for (const task of tasksToBackfill) {
+      const ref = task.source_ref ? ` (\`${task.source_ref}\`)` : "";
+      lines.push(`  • \`${task.id.slice(0, 8)}\` — ${task.title.slice(0, 60)}${ref}`);
+    }
+
+    lines.push(
+      ``,
+      `**Status:** Orchestrator daemon will score these tasks on its next verification cycle.`,
+      `Once scored, dashboard quality trends will reflect the backfilled data.`,
+    );
+
+    return lines.join("\n");
+  }
+
+  // Verifier is available — run verification immediately
+  const results = {
+    successful: 0,
+    failed: 0,
+    errors: [] as string[],
+  };
+
+  for (const task of tasksToBackfill) {
+    try {
+      const verResult = await verifier.verify(task.id);
+
+      // Update task with verification results
+      store.updateTask(task.id, {
+        verification_status: verResult.approved ? "approved" : "rejected",
+        quality_score: verResult.score,
+        verification_notes: verResult.notes,
+        quality_explanation: verResult.explanation ?? null,
+      });
+
+      // Insert to verification_results audit log
+      store.insertVerificationResult({
+        task_id: task.id,
+        score: verResult.score,
+        first_pass: 1, // Backfill is always first (and only) pass
+        rejection_reason: verResult.approved ? null : (verResult.revision ?? null),
+        blocked_reason:
+          verResult.blockedReason === "hard_block_sub50"
+            ? "hard_block_sub50"
+            : verResult.blockedReason === "low_score_sub60"
+              ? "low_score_sub60"
+              : null,
+        approval_rationale: verResult.approvalRationale ?? null,
+        threshold: 0.80, // Standard threshold
+        agent_id: task.agent_name ?? "unknown",
+        timestamp: new Date().toISOString(),
+      });
+
+      results.successful++;
+    } catch (err) {
+      results.failed++;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      results.errors.push(`${task.id.slice(0, 8)}: ${errMsg}`);
+      log.error("Backfill verification failed", { taskId: task.id, error: errMsg });
+    }
+  }
+
+  const lines: string[] = [
+    `✅ *Backfill Scores — Complete*`,
+    ``,
+    `*Batch: ${tasksToBackfill.length} | Total remaining: ${unscorredCount - results.successful}*`,
+    ``,
+    `**Results:**`,
+    `  ✓ Scored: ${results.successful}`,
+  ];
+
+  if (results.failed > 0) {
+    lines.push(`  ✗ Failed: ${results.failed}`);
+    if (results.errors.length > 0) {
+      lines.push(``, `**Errors:**`);
+      for (const err of results.errors.slice(0, 5)) {
+        lines.push(`  • ${err}`);
+      }
+      if (results.errors.length > 5) {
+        lines.push(`  • ... and ${results.errors.length - 5} more`);
+      }
+    }
+  }
+
+  lines.push(
+    ``,
+    `**Persistence:** Scores saved to \`verification_results\` audit log.`,
+    `Dashboard quality trends will now reflect backfilled data.`,
+  );
+
+  return lines.join("\n");
+}
+
 // ── TelegramCommandHandler class ──────────────────────────────────────────
 
 /**
@@ -1184,6 +1335,7 @@ export class TelegramCommandHandler {
   private pollIntervalMs: number;
   private conflictStatsProvider?: ConflictStatsProvider;
   private calibrationDriftProvider?: CalibrationDriftProvider;
+  private verifier?: Verifier;
 
   constructor(
     store: ITelegramStateStore,
@@ -1191,12 +1343,14 @@ export class TelegramCommandHandler {
       pollIntervalMs?: number;
       conflictStatsProvider?: ConflictStatsProvider;
       calibrationDriftProvider?: CalibrationDriftProvider;
+      verifier?: Verifier;
     } = {},
   ) {
     this.store = store;
     this.pollIntervalMs = opts.pollIntervalMs ?? 1_000;
     this.conflictStatsProvider = opts.conflictStatsProvider;
     this.calibrationDriftProvider = opts.calibrationDriftProvider;
+    this.verifier = opts.verifier;
   }
 
   /**
@@ -1230,7 +1384,7 @@ export class TelegramCommandHandler {
             log.info("Received Telegram command", { command: cmd.command, args: cmd.args });
 
             try {
-              const reply = await executeCommand(cmd, this.store, config.botToken, this.conflictStatsProvider, this.calibrationDriftProvider);
+              const reply = await executeCommand(cmd, this.store, config.botToken, this.conflictStatsProvider, this.calibrationDriftProvider, this.verifier);
               await sendMessage(config.botToken, cmd.chatId, reply);
             } catch (err) {
               log.error("Error executing command", {

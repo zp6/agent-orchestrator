@@ -540,6 +540,31 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
       .all(limit) as Task[];
   }
 
+  /**
+   * Get approved tasks that have null quality_score (need backfill).
+   * Used by the /backfill-scores command to retroactively score approved tasks.
+   */
+  getApprovedTasksWithNullScores(limit: number = 100): Task[] {
+    return this.db
+      .prepare(
+        "SELECT * FROM tasks WHERE verification_status = 'approved' AND quality_score IS NULL ORDER BY updated_at DESC LIMIT ?",
+      )
+      .all(limit) as Task[];
+  }
+
+  /**
+   * Get count of approved tasks with null quality_score.
+   * Used to check if backfill is needed.
+   */
+  getApprovedTasksWithNullScoresCount(): number {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) as count FROM tasks WHERE verification_status = 'approved' AND quality_score IS NULL",
+      )
+      .get() as { count: number } | undefined;
+    return row?.count ?? 0;
+  }
+
   getAgentStats(): AgentStats[] {
     return this.db
       .prepare(`
