@@ -57,6 +57,9 @@ import type {
   AgentSecretsHealthSummary,
   SecretsFleetHealthSummary,
   QualityAnomalySummary,
+  ReconciliationStatus,
+  ReconciliationEventRecord,
+  ReconciliationLastPerRepo,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -422,6 +425,29 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
 
       CREATE INDEX IF NOT EXISTS idx_schema_table_access_last_seen_at
         ON schema_table_access (last_seen_at DESC);
+    `);
+
+    // Reconciliation events table (issue #214).
+    // Mirrors the dashboard agent's reconciliation_events schema so the reviewer
+    // can query the last run per repo for the /reconcile Telegram command.
+    // If the table was already created by the dashboard, this is a no-op.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS reconciliation_events (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        status        TEXT NOT NULL DEFAULT 'success',
+        repos_patched TEXT NOT NULL DEFAULT '[]',
+        columns_fixed TEXT NOT NULL DEFAULT '[]',
+        error_message TEXT,
+        triggered_by  TEXT,
+        details       TEXT,
+        created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_reconciliation_events_created
+        ON reconciliation_events(created_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_reconciliation_events_status
+        ON reconciliation_events(status);
     `);
   }
 
@@ -2655,5 +2681,127 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
       per_agent,
       anomalies,
     };
+  }
+
+  // ── Reconciliation event queries ──────────────────────────────────────────
+
+  /**
+   * Return the most recent reconciliation event per repo.
+   *
+   * Queries the `reconciliation_events` table (created on migrate or by the
+   * dashboard agent). For each repo that appears in `repos_patched`, picks the
+   * event with the latest `created_at`. Returns [] when no events exist.
+   */
+  getLastReconciliationPerRepo(): ReconciliationLastPerRepo[] {
+    // Fetch recent events and fan-out by repos_patched in JS to avoid
+    // JSON_EACH (not available in all SQLite builds shipped with Node.js).
+    const rows = this.db
+      .prepare(
+        `SELECT id, status, repos_patched, columns_fixed, triggered_by, created_at
+         FROM reconciliation_events
+         ORDER BY created_at DESC
+         LIMIT 500`,
+      )
+      .all() as Array<{
+      id: number;
+      status: string;
+      repos_patched: string;
+      columns_fixed: string;
+      triggered_by: string | null;
+      created_at: string;
+    }>;
+
+    // Build a map of repo → latest event
+    const latestByRepo = new Map<string, ReconciliationLastPerRepo>();
+
+    for (const row of rows) {
+      let repos: string[] = [];
+      let cols: string[] = [];
+      try {
+        repos = JSON.parse(row.repos_patched) as string[];
+      } catch {
+        // unparseable — treat as empty
+      }
+      try {
+        cols = JSON.parse(row.columns_fixed) as string[];
+      } catch {
+        // unparseable — treat as empty
+      }
+
+      // If repos_patched is empty, record the event under a synthetic key
+      const repoList = repos.length > 0 ? repos : ["(unknown)"];
+      for (const repo of repoList) {
+        if (!latestByRepo.has(repo)) {
+          latestByRepo.set(repo, {
+            repo,
+            event_id: row.id,
+            status: row.status as ReconciliationStatus,
+            created_at: row.created_at,
+            columns_fixed: cols,
+            triggered_by: row.triggered_by,
+          });
+        }
+      }
+    }
+
+    // Sort: failed/escalated first, then by recency
+    return Array.from(latestByRepo.values()).sort((a, b) => {
+      const statusOrder: Record<ReconciliationStatus, number> = {
+        failed: 0,
+        escalated: 1,
+        partial: 2,
+        success: 3,
+      };
+      const ao = statusOrder[a.status] ?? 99;
+      const bo = statusOrder[b.status] ?? 99;
+      if (ao !== bo) return ao - bo;
+      return b.created_at.localeCompare(a.created_at);
+    });
+  }
+
+  /**
+   * Return recent reconciliation events in reverse chronological order.
+   */
+  getRecentReconciliationEvents(limit = 20, sinceHours?: number): ReconciliationEventRecord[] {
+    let sql = `SELECT id, status, repos_patched, columns_fixed, error_message, triggered_by, details, created_at
+               FROM reconciliation_events`;
+    const params: (number | string)[] = [];
+
+    if (sinceHours != null) {
+      const cutoff = new Date(Date.now() - sinceHours * 3600_000).toISOString();
+      sql += ` WHERE created_at >= ?`;
+      params.push(cutoff);
+    }
+
+    sql += ` ORDER BY created_at DESC LIMIT ?`;
+    params.push(limit);
+
+    const rows = this.db.prepare(sql).all(...params) as Array<{
+      id: number;
+      status: string;
+      repos_patched: string;
+      columns_fixed: string;
+      error_message: string | null;
+      triggered_by: string | null;
+      details: string | null;
+      created_at: string;
+    }>;
+
+    return rows.map((r) => {
+      let repos: string[] = [];
+      let cols: string[] = [];
+      try { repos = JSON.parse(r.repos_patched) as string[]; } catch { /* empty */ }
+      try { cols = JSON.parse(r.columns_fixed) as string[]; } catch { /* empty */ }
+      return {
+        id: r.id,
+        status: r.status as ReconciliationStatus,
+        repos_patched: repos,
+        columns_fixed: cols,
+        error_message: r.error_message,
+        triggered_by: r.triggered_by,
+        details: r.details,
+        created_at: r.created_at,
+      };
+    });
   }
 }

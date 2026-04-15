@@ -240,6 +240,9 @@ export type {
   AgentSecretsHealthSummary,
   SecretsFleetHealthSummary,
   QualityAnomalySummary,
+  ReconciliationStatus,
+  ReconciliationEventRecord,
+  ReconciliationLastPerRepo,
 } from "./state/types.js";
 
 // Supervisor decision log — queryable log for orch CLI and dashboard consumers

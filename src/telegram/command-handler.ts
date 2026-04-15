@@ -23,6 +23,7 @@
  *   /fpr [weeks]  → alias for /first-pass-rate
  *   /score <task-id> → display quality score and verification details for a task
  *   /backfill-scores [limit] → backfill quality_score for approved tasks with null scores (limit 1-20, default 5)
+ *   /reconcile [hours] → cross-repo reconciliation status: last result per repo with outcome and timestamp (default: all time)
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -39,6 +40,7 @@ import type {
   VerificationStats,
   FirstPassRateWidget,
   QualityHealthReport,
+  ReconciliationLastPerRepo,
 } from "../state/types.js";
 import type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 import { buildIssueAgeHeatmap, formatIssueAgeHeatmap } from "../reviewer/issue-age.js";
@@ -92,7 +94,8 @@ type CommandName =
   | "first-pass-rate"
   | "fpr"
   | "score"
-  | "backfill-scores";
+  | "backfill-scores"
+  | "reconcile";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -120,6 +123,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "fpr",
   "score",
   "backfill-scores",
+  "reconcile",
 ]);
 
 interface ParsedCommand {
@@ -347,6 +351,12 @@ async function executeCommand(
       const limitStr = cmd.args[0]?.trim();
       const limit = limitStr ? Math.min(Math.max(parseInt(limitStr, 10) || 5, 1), 20) : 5;
       return handleBackfillScores(store, verifier, limit);
+    }
+
+    case "reconcile": {
+      const hoursStr = cmd.args[0]?.trim();
+      const sinceHours = hoursStr ? Math.min(Math.max(parseInt(hoursStr, 10) || 0, 0), 720) : undefined;
+      return handleReconcile(store, sinceHours || undefined);
     }
   }
 }
@@ -1453,6 +1463,96 @@ async function handleBackfillScores(
   );
 
   return lines.join("\n");
+}
+
+// ── Reconciliation feed handler ───────────────────────────────────────────
+
+function statusEmoji(status: string): string {
+  if (status === "success") return "✅";
+  if (status === "partial") return "🟡";
+  if (status === "failed") return "❌";
+  if (status === "escalated") return "🚨";
+  return "❓";
+}
+
+async function handleReconcile(
+  store: ITelegramStateStore,
+  sinceHours?: number,
+): Promise<string> {
+  const rows: ReconciliationLastPerRepo[] = store.getLastReconciliationPerRepo();
+
+  const headerParts = ["🔄 *Cross-Repo Reconciliation Status*"];
+  if (sinceHours != null) {
+    headerParts.push(`_(last ${sinceHours}h)_`);
+  }
+  const lines: string[] = [headerParts.join(" "), ``];
+
+  if (rows.length === 0) {
+    lines.push(`_No reconciliation events recorded yet._`);
+    lines.push(``, `The reconciliation events table exists but is empty.`);
+    lines.push(`Events are written by the dashboard agent when it runs a reconciliation cycle.`);
+    return lines.join("\n");
+  }
+
+  // Filter by sinceHours if requested
+  const filtered =
+    sinceHours != null
+      ? rows.filter((r) => {
+          const cutoff = new Date(Date.now() - sinceHours * 3600_000).toISOString();
+          return r.created_at >= cutoff;
+        })
+      : rows;
+
+  if (filtered.length === 0) {
+    lines.push(`_No reconciliation events in the last ${sinceHours}h._`);
+    const lastRow = rows[0];
+    if (lastRow) {
+      const ago = formatAgo(lastRow.created_at);
+      lines.push(``, `Last event: ${statusEmoji(lastRow.status)} \`${lastRow.repo}\` — ${ago}`);
+    }
+    return lines.join("\n");
+  }
+
+  for (const row of filtered) {
+    const emoji = statusEmoji(row.status);
+    const ago = formatAgo(row.created_at);
+    const repoShort = row.repo.length > 30 ? `...${row.repo.slice(-28)}` : row.repo;
+    lines.push(`${emoji} \`${repoShort}\``);
+    lines.push(`   Status: *${row.status.toUpperCase()}* · ${ago}`);
+    if (row.triggered_by) {
+      lines.push(`   Triggered by: ${row.triggered_by}`);
+    }
+    if (row.columns_fixed.length > 0) {
+      const colList = row.columns_fixed.slice(0, 4).join(", ");
+      const extra = row.columns_fixed.length > 4 ? ` +${row.columns_fixed.length - 4} more` : "";
+      lines.push(`   Cols fixed: \`${colList}${extra}\``);
+    }
+    lines.push(``);
+  }
+
+  const degraded = filtered.filter((r) => r.status === "failed" || r.status === "escalated");
+  if (degraded.length > 0) {
+    lines.push(`⚠️ *${degraded.length} repo(s) have failed/escalated reconciliation.*`);
+    lines.push(`Check the dashboard reconciliation view for details.`);
+  } else {
+    lines.push(`✅ All repos reconciled successfully.`);
+  }
+
+  lines.push(``, `_Use \`/reconcile <hours>\` to filter by time window (e.g. \`/reconcile 1\` for last hour)._`);
+
+  return lines.join("\n");
+}
+
+/** Format a ISO-8601 timestamp as a human-readable "Xm ago" or "Xh ago" string. */
+function formatAgo(isoTimestamp: string): string {
+  const diffMs = Date.now() - new Date(isoTimestamp).getTime();
+  if (diffMs < 0) return "just now";
+  const mins = Math.floor(diffMs / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 
 // ── TelegramCommandHandler class ──────────────────────────────────────────

@@ -685,6 +685,21 @@ export interface IStateStore {
    * @param sinceHours - Look-back window in hours (default: 720 = 30 days).
    */
   getTokenStats(sinceHours?: number): LlmTokenStats[];
+
+  // Reconciliation event queries (reads from shared reconciliation_events table)
+  /**
+   * Return the most recent reconciliation event per repo.
+   * Used by the /reconcile Telegram command to give a fleet-wide snapshot.
+   * If the reconciliation_events table does not exist (pre-migration), returns [].
+   */
+  getLastReconciliationPerRepo(): ReconciliationLastPerRepo[];
+
+  /**
+   * Return recent reconciliation events in reverse chronological order.
+   * @param limit - Max events to return (default 20)
+   * @param sinceHours - Optional look-back window in hours
+   */
+  getRecentReconciliationEvents(limit?: number, sinceHours?: number): ReconciliationEventRecord[];
 }
 
 // ── Score calibration types ───────────────────────────────────────────────
@@ -1431,6 +1446,42 @@ export interface QualityAnomalySummary {
   per_agent: Array<{ agent_name: string; count: number }>;
   /** The anomaly records themselves */
   anomalies: QualityAnomaly[];
+}
+
+// ── Reconciliation event types ────────────────────────────────────────────
+
+/**
+ * Reconciliation outcome status — mirrors the dashboard's reconciliation_events table.
+ * Read-only from the reviewer; written by the dashboard agent.
+ */
+export type ReconciliationStatus = "success" | "partial" | "failed" | "escalated";
+
+/**
+ * A single reconciliation event record from the shared reconciliation_events table.
+ */
+export interface ReconciliationEventRecord {
+  id: number;
+  status: ReconciliationStatus;
+  /** JSON-encoded string[] of repo slugs patched in this run */
+  repos_patched: string[];
+  /** JSON-encoded string[] of column names fixed */
+  columns_fixed: string[];
+  error_message: string | null;
+  triggered_by: string | null;
+  details: string | null;
+  created_at: string;
+}
+
+/**
+ * The last reconciliation event per repo, used by the /reconcile Telegram command.
+ */
+export interface ReconciliationLastPerRepo {
+  repo: string;
+  event_id: number;
+  status: ReconciliationStatus;
+  created_at: string;
+  columns_fixed: string[];
+  triggered_by: string | null;
 }
 
 export interface ITelegramStateStore
