@@ -1,23 +1,25 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-13_
+_Last updated: 2026-04-14_
 
 ## Next up
 
-- **#129 — Structured output schema for research tasks** (PR #130 open): Add a typed output schema so research agent results are validated at review time, catching malformed or incomplete research output before it reaches the supervisor.
-- **#89 — Second-pass outcome tracking**: The borderline second-pass review trigger (0.70–0.79) shipped in PR #83, but there is no tracking of whether second passes improve outcomes. Add a metric: tasks entering second-pass, upgrade vs. reject rate, and final merged quality scores.
-- **#99 — SCHEMA_CONSUMER_MAP auto-discovery**: Replace the hardcoded static registry in `schema-impact.ts` with a live discovery query against state.db access logs. Keeps schema-consumer impact detection accurate as the fleet evolves without manual file updates.
+- **#164 — Telegram alert for quality anomaly spikes**: Proactive notification when `getQualityAnomalySummary({ days: 7 }).total` exceeds a threshold (default: 3). One alert per day, deduped. Closes the monitoring gap between the anomaly feed and operator awareness.
+- **#149 — Telegram alert when low-quality task is approved**: Per-task alert when `verification_score < 0.65 AND status = 'approved'`. Fires within one daemon cycle; deduped per task. Lets operators intervene before a low-quality PR merges.
+- **#168 — Schema contract CI validator**: Validates that `schema-contract.json` stays in sync with `src/state/store.ts` DDL within the same repo. Complements the cross-repo drift check already in `schema-impact.ts`.
+- **#155 — Supervisor decision log CLI/Telegram exposure**: Expose the existing `supervisor-log.ts` module via a `/decisions [N]` Telegram command. Lets operators audit why the supervisor skipped or prioritised specific issues without reading raw task titles.
+- **#171 — Backfill hard-block rejections for sub-0.50 historical tasks**: One-time idempotent migration setting `verification_status = 'rejected'` for historically approved tasks with `quality_score < 0.50`. Complements the hard-block enforcement added in PR #172.
 
 ## Planned
 
-- **#107 — Reroute quality tracking**: Flag agents where rerouting degrades outcomes. Per-agent quality metrics already exist in `routing-accuracy.ts`; needs outcome comparison logic for rerouted vs. original-agent tasks.
-- **#51 — Conflict-risk annotations in PR review comments**: Surface conflict-risk signals inline in PR review comments (e.g. when a diff touches a file also modified by another open PR), giving reviewers more context before approving.
-- **#103 — Security scanner allowlist sync**: Keep the PR review rubric's credential false-positive allowlist (example/template files) in sync with the security scanner allowlist to prevent independent drift.
+- **#89 — Second-pass outcome tracking**: The borderline second-pass trigger (0.70–0.79) shipped in PR #83, but there is no tracking of whether second passes improve outcomes. Add metric: tasks entering second-pass, upgrade vs. reject rate, and final merged quality scores.
+- **#71 — Verification calibration drift — score distribution page**: `calibration-drift.ts` covers alerts; the score distribution histogram (per agent, last 30 days) and false-positive rate view are the remaining UI surface, coordinated with agent-dashboard.
+- **#51 — Conflict-risk annotations in PR review comments**: Surface conflict-risk signals inline when a diff touches a file also modified by another open PR. Non-blocking; configurable threshold.
 
 ## Ideas
 
-- **Second-pass effectiveness Telegram card**: Surface second-pass upgrade/reject rates in `/status` summary so operators can tune the 0.70 threshold based on data.
-- **Supervisor dry-run mode**: A `--dry-run` flag on `supervisor.ts` that logs dispatch decisions to stdout without writing to state.db — useful for debugging the supervision loop in staging.
-- **Configurable escalation thresholds**: Allow per-agent `feedback_ceiling` and `min_score` overrides in `ReviewerConfig` rather than a single global setting.
-- **Improvement detector cron**: Run `ImprovementDetector.analyze()` on a scheduled cadence (every 6h) and auto-file GitHub issues for detected patterns.
-- **Review score history**: Persist `VerificationResult` scores in state.db so the improvement detector can spot regression trends across deploys.
+- **Configurable escalation thresholds per agent**: Allow per-agent `feedback_ceiling` and `min_score` overrides in `ReviewerConfig` rather than a single global setting.
+- **Improvement detector cron**: Run `ImprovementDetector.analyze()` on a scheduled cadence (every 6 h) and auto-file GitHub issues for detected patterns.
+- **Supervisor dry-run mode**: A `--dry-run` flag on `supervisor.ts` that logs dispatch decisions to stdout — useful for debugging the supervision loop in staging.
+- **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
+- **Schema-consumer auto-sync**: After a `schema-contract.json` change ships, auto-open issues in consumer repos listing which columns changed and what queries need updating.

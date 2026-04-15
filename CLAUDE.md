@@ -90,6 +90,13 @@ src/
     routing-accuracy.ts             — per-agent quality stats to inform routing preferences
     reroute-quality-tracker.ts      — reroute decision correlation with quality outcomes; degradation detection
     schema-impact.ts                — schema-consumer map; inject consumer notice into reviews
+    schema-contract.ts              — schema contract drift detection (CREATE/ALTER/INSERT column checks)
+    schema-contract.json            — checked-in registry of canonical column names per shared table
+    schema-consumer-registry.ts     — dynamic schema-consumer map auto-discovered from state.db access logs
+    quality-anomalies.ts            — quality anomaly feed: approvals where score contradicts PR outcome
+    agent-trends.ts                 — agent performance trend analysis (rolling quality averages)
+    health-incident-router.ts       — health incident routing and severity classification
+    standup-dispatch-guard.ts       — blocks standup dispatch when zero action items remain
     issue-age.ts                    — issue age bucketing and severity (0-7d / 7-14d / 30d+)
     issue-creator.ts                — create GitHub issues for detected improvements
     standup-handler.ts              — zero-action standup handling; synthesis retry (up to 2x)
