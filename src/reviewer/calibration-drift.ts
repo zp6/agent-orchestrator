@@ -35,6 +35,12 @@ const DRIFT_THRESHOLD = 0.1;
 export interface CalibrationDriftProvider {
   buildReport(opts?: { windowDays?: number; recentDays?: number; baselineDays?: number }): CalibrationDriftReport;
   formatDistributionPage(report: CalibrationDriftReport): string;
+  /**
+   * Optionally emit active drift alerts to a caller-provided notifier.
+   * Implementations can use this during daemon cycles to surface alerts
+   * immediately instead of waiting for an operator to open the dashboard page.
+   */
+  checkAndAlert?(notify: (text: string) => Promise<void>): Promise<void>;
 }
 
 export class CalibrationDriftMonitor implements CalibrationDriftProvider {

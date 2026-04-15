@@ -17,6 +17,7 @@ import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
 import type { IStateStore, Task, AgentHealth, SupervisorDecisionRecord, PRConfidenceRecord, RoutingAccuracyStats, AgentQualityByTaskType } from "../state/types.js";
 import type { ConflictStats } from "./pr-reviewer.js";
+import type { Notifier } from "../notify.js";
 import {
   buildIssueAgeHeatmap,
   collectIssueAgeEscalations,
@@ -482,7 +483,7 @@ export class Supervisor {
   private routingAccuracyProvider?: RoutingAccuracyProvider;
   private calibrationDriftProvider?: CalibrationDriftProvider;
   private qualitySLAProvider?: QualitySLAProvider;
-  private notifier = createNotifier();
+  private notifier: Notifier;
 
   constructor(
     private config: ReviewerConfig,
@@ -493,6 +494,7 @@ export class Supervisor {
       routingAccuracyProvider?: RoutingAccuracyProvider;
       calibrationDriftProvider?: CalibrationDriftProvider;
       qualitySLAProvider?: QualitySLAProvider;
+      notifier?: Notifier;
     } = {},
   ) {
     this.conflictStatsProvider = opts.conflictStatsProvider;
@@ -500,10 +502,12 @@ export class Supervisor {
     this.routingAccuracyProvider = opts.routingAccuracyProvider;
     this.calibrationDriftProvider = opts.calibrationDriftProvider;
     this.qualitySLAProvider = opts.qualitySLAProvider;
+    this.notifier = opts.notifier ?? createNotifier();
   }
 
   async review(): Promise<SupervisorDecision[]> {
     const ageEscalations = await this.applyAgeEscalations();
+    await this.checkCalibrationDriftAlerts();
     const context = this.buildContext();
     const client = createLLMClient();
 
@@ -613,6 +617,84 @@ export class Supervisor {
         issueRef: issueRef ? `#${issueRef}` : undefined,
       });
     }
+  }
+
+  private async persistBlockedDecisions(decisions: SupervisorDecision[]): Promise<void> {
+    for (const decision of decisions) {
+      const agentName = decision.agentName ?? "unknown";
+      const reason = `UNKNOWN_AGENT: ${decision.action} target ${agentName} is not in the registered agent registry`;
+      const rationale = JSON.stringify({
+        pre_dispatch_validation: {
+          outcome: "blocked",
+          failure_check: "agent_registry",
+          failure_code: "UNKNOWN_AGENT",
+          failure_reason: `Agent ${agentName} is not registered`,
+        },
+      });
+
+      this.store.recordSupervisorDecision(decision.action, reason, {
+        agentName: decision.agentName,
+        taskId: decision.taskId,
+        outcome: "blocked",
+        message: decision.message,
+        rationale,
+      });
+
+      if (this.notifier.isConfigured()) {
+        await this.notifier.notifyOperator(
+          "Unknown agent dispatch blocked",
+          `Rejected ${decision.action} to \`${agentName}\`: the agent is not present in the registered agent registry.`,
+          "high",
+        );
+      }
+
+      this.log.warn("Supervisor rejected decision for unknown agent", {
+        action: decision.action,
+        agentName: decision.agentName,
+        taskId: decision.taskId,
+      });
+    }
+  }
+
+  /**
+   * Emit calibration drift alerts during the supervisor cycle when the
+   * provider supports active alerting. This ensures the rolling approval
+   * mismatch check runs even if nobody opens the calibration dashboard page.
+   */
+  private async checkCalibrationDriftAlerts(): Promise<void> {
+    if (!this.calibrationDriftProvider?.checkAndAlert || !this.notifier.isConfigured()) return;
+
+    await this.calibrationDriftProvider.checkAndAlert(this.notifier.send.bind(this.notifier));
+  }
+
+  private filterUnknownAgentTargets(
+    decisions: SupervisorDecision[],
+  ): { accepted: SupervisorDecision[]; blocked: SupervisorDecision[] } {
+    const accepted: SupervisorDecision[] = [];
+    const blocked: SupervisorDecision[] = [];
+    const registry = new Set(Object.keys(this.config.agents));
+
+    for (const decision of decisions) {
+      if (!decision.agentName) {
+        accepted.push(decision);
+        continue;
+      }
+
+      const requiresRegisteredAgent =
+        decision.action === "dispatch" ||
+        decision.action === "follow-up" ||
+        decision.action === "redeploy" ||
+        decision.action === "create-issue";
+
+      if (!requiresRegisteredAgent || registry.has(decision.agentName)) {
+        accepted.push(decision);
+        continue;
+      }
+
+      blocked.push(decision);
+    }
+
+    return { accepted, blocked };
   }
 
   private async applyAgeEscalations(): Promise<SupervisorDecision[]> {
