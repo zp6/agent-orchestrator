@@ -54,10 +54,7 @@ import type {
   SecretsHealthCheckRecord,
   AgentSecretsHealthSummary,
   SecretsFleetHealthSummary,
-  QualityAnomaly,
   QualityAnomalySummary,
-  QualityAnomalyQuery,
-  QualityAnomalyType,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -2085,100 +2082,6 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
     return row ?? null;
   }
 
-  /**
-   * Return tasks whose score contradicts their verification outcome.
-   *
-   * Low-score approvals (< 0.60) and high-score rejections (> 0.85) are
-   * surfaced as dashboard anomalies so operators can spot calibration issues
-   * without manually cross-referencing status and score columns.
-   */
-  getQualityAnomalies(
-    opts: QualityAnomalyQuery = {},
-  ): QualityAnomaly[] {
-    const lookbackDays = Number.isFinite(opts.days) && (opts.days ?? 0) >= 1 ? Math.floor(opts.days ?? 7) : 7;
-    const limit = Number.isFinite(opts.limit) && (opts.limit ?? 0) >= 1 ? Math.floor(opts.limit ?? 50) : 50;
-    const since = opts.since ?? null;
-    const until = opts.until ?? null;
-    const useExplicitRange = since !== null || until !== null;
-    const sinceBound = since ?? `-${lookbackDays - 1} days`;
-    const untilBound = until ?? "now";
-
-    const rows = useExplicitRange
-      ? this.db
-          .prepare(
-            `SELECT
-               id AS task_id,
-               COALESCE(agent_name, 'unassigned') AS agent_name,
-               quality_score,
-               verification_status,
-               updated_at,
-               CASE
-                 WHEN quality_score < 0.60 AND verification_status = 'approved' THEN 'low_score_approved'
-                 WHEN quality_score > 0.85 AND verification_status = 'rejected' THEN 'high_score_rejected'
-               END AS anomaly_type
-             FROM tasks
-             WHERE quality_score IS NOT NULL
-               AND verification_status IN ('approved', 'rejected')
-               AND (
-                 (quality_score < 0.60 AND verification_status = 'approved')
-                 OR (quality_score > 0.85 AND verification_status = 'rejected')
-               )
-               AND DATE(updated_at) >= DATE(?)
-               AND DATE(updated_at) <= DATE(?)
-             ORDER BY updated_at DESC, id DESC
-             LIMIT ?`,
-          )
-          .all(sinceBound, untilBound, limit) as Array<{
-          task_id: string;
-          agent_name: string;
-          quality_score: number;
-          verification_status: "approved" | "rejected";
-          updated_at: string;
-          anomaly_type: QualityAnomalyType;
-        }>
-      : this.db
-          .prepare(
-            `SELECT
-               id AS task_id,
-               COALESCE(agent_name, 'unassigned') AS agent_name,
-               quality_score,
-               verification_status,
-               updated_at,
-               CASE
-                 WHEN quality_score < 0.60 AND verification_status = 'approved' THEN 'low_score_approved'
-                 WHEN quality_score > 0.85 AND verification_status = 'rejected' THEN 'high_score_rejected'
-               END AS anomaly_type
-             FROM tasks
-             WHERE quality_score IS NOT NULL
-               AND verification_status IN ('approved', 'rejected')
-               AND (
-                 (quality_score < 0.60 AND verification_status = 'approved')
-                 OR (quality_score > 0.85 AND verification_status = 'rejected')
-               )
-               AND DATE(updated_at) >= DATE('now', ?)
-               AND DATE(updated_at) <= DATE('now')
-             ORDER BY updated_at DESC, id DESC
-             LIMIT ?`,
-          )
-          .all(sinceBound, limit) as Array<{
-          task_id: string;
-          agent_name: string;
-          quality_score: number;
-          verification_status: "approved" | "rejected";
-          updated_at: string;
-          anomaly_type: QualityAnomalyType;
-        }>;
-
-    return rows.map((row) => ({
-      task_id: row.task_id,
-      agent_name: row.agent_name,
-      quality_score: row.quality_score,
-      verification_status: row.verification_status,
-      anomaly_type: row.anomaly_type,
-      updated_at: row.updated_at,
-    }));
-  }
-
   // ── First-pass rate widget (issue #88) ───────────────────────────────────
 
   /**
@@ -2421,27 +2324,28 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
    *   (a) score < 0.60 AND status = 'approved'  → low_score_approved
    *   (b) score > 0.85 AND status = 'rejected'  → high_score_rejected
    *
-   * These anomalies indicate verifier calibration failures that operators
-   * should investigate. Results are ordered newest-first.
+   * Supports either an explicit date range (`since` / `until`) or a rolling
+   * look-back window (`days`), plus optional `agent_name`, `anomaly_type`, and
+   * `limit` filters.
    */
   getQualityAnomalies(opts: QualityAnomalyQuery = {}): QualityAnomaly[] {
-    const days = opts.days ?? 30;
-    const limit = opts.limit ?? 100;
-    const lookback = Number.isFinite(days) && days >= 1 ? Math.floor(days) : 30;
+    const days = Number.isFinite(opts.days) && (opts.days ?? 0) >= 1 ? Math.floor(opts.days ?? 7) : 7;
+    const limit = Number.isFinite(opts.limit) && (opts.limit ?? 0) >= 1 ? Math.floor(opts.limit ?? 50) : 50;
+    const since = opts.since ?? null;
+    const until = opts.until ?? null;
+    const useExplicitRange = since !== null || until !== null;
+    const sinceBound = since ?? `-${days - 1} days`;
+    const untilBound = until ?? "now";
 
     const conditions: string[] = [
       "quality_score IS NOT NULL",
-      "verification_status IS NOT NULL",
-      `updated_at >= datetime('now', '-${lookback} days')`,
+      "verification_status IN ('approved', 'rejected')",
+      `(
+        (quality_score < 0.60 AND verification_status = 'approved')
+        OR
+        (quality_score > 0.85 AND verification_status = 'rejected')
+      )`,
     ];
-
-    // Anomaly detection: score contradicts decision
-    const anomalyCondition = `(
-      (quality_score < 0.60 AND verification_status = 'approved')
-      OR
-      (quality_score > 0.85 AND verification_status = 'rejected')
-    )`;
-    conditions.push(anomalyCondition);
 
     if (opts.agent_name) {
       conditions.push(`agent_name = '${opts.agent_name.replace(/'/g, "''")}'`);
@@ -2453,12 +2357,20 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
       conditions.push("quality_score > 0.85 AND verification_status = 'rejected'");
     }
 
+    if (useExplicitRange) {
+      conditions.push("DATE(updated_at) >= DATE(?)");
+      conditions.push("DATE(updated_at) <= DATE(?)");
+    } else {
+      conditions.push("DATE(updated_at) >= DATE('now', ?)");
+      conditions.push("DATE(updated_at) <= DATE('now')");
+    }
+
     const where = conditions.join(" AND ");
     const sql = `
       SELECT
         id AS task_id,
         title,
-        agent_name,
+        COALESCE(agent_name, 'unassigned') AS agent_name,
         task_type,
         quality_score,
         verification_status,
@@ -2471,11 +2383,48 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
         updated_at
       FROM tasks
       WHERE ${where}
-      ORDER BY updated_at DESC
+      ORDER BY updated_at DESC, id DESC
       LIMIT ?
     `;
 
-    return this.db.prepare(sql).all(limit) as QualityAnomaly[];
+    const rows = useExplicitRange
+      ? this.db.prepare(sql).all(sinceBound, untilBound, limit) as Array<{
+          task_id: string;
+          title: string;
+          agent_name: string;
+          task_type: string;
+          quality_score: number;
+          verification_status: "approved" | "rejected";
+          quality_explanation: string | null;
+          anomaly_type: QualityAnomalyType;
+          created_at: string;
+          updated_at: string;
+        }>
+      : this.db.prepare(sql).all(sinceBound, limit) as Array<{
+          task_id: string;
+          title: string;
+          agent_name: string;
+          task_type: string;
+          quality_score: number;
+          verification_status: "approved" | "rejected";
+          quality_explanation: string | null;
+          anomaly_type: QualityAnomalyType;
+          created_at: string;
+          updated_at: string;
+        }>;
+
+    return rows.map((row) => ({
+      task_id: row.task_id,
+      title: row.title,
+      agent_name: row.agent_name,
+      task_type: row.task_type,
+      quality_score: row.quality_score,
+      verification_status: row.verification_status,
+      quality_explanation: row.quality_explanation,
+      anomaly_type: row.anomaly_type,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    }));
   }
 
   /**

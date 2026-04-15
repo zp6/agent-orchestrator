@@ -220,10 +220,7 @@ export type {
   SecretsHealthCheckRecord,
   AgentSecretsHealthSummary,
   SecretsFleetHealthSummary,
-  QualityAnomaly,
   QualityAnomalySummary,
-  QualityAnomalyQuery,
-  QualityAnomalyType,
 } from "./state/types.js";
 
 // Supervisor decision log — queryable log for orch CLI and dashboard consumers
