@@ -12,6 +12,7 @@ import { scoreIssuePriority } from "../orchestrator/priority-scorer.js";
  */
 export const ISSUE_CLAIM_TTL_MS = 7_200_000;
 import { runGitHubPreDispatchValidation } from "../orchestrator/pre-dispatch-validator.js";
+import { looksLikeStandupTask, extractStandupIssueNumber, shouldSkipStandupDispatch } from "./standup-dispatch-guard.js";
 
 const log = createLogger("trigger-dispatcher");
 
@@ -315,6 +316,22 @@ export async function dispatchGitHubIssues(
         continue;
       }
 
+      // Standup dispatch guard: skip zero-action standups without burning an agent slot
+      if (looksLikeStandupTask(issue.title, sourceRef)) {
+        const issueNumber = extractStandupIssueNumber(sourceRef) ?? issue.number;
+        const standupDecision = await shouldSkipStandupDispatch(issue.repo, issueNumber);
+        if (standupDecision.skip) {
+          log.info("Standup dispatch guard: skipping zero-action standup", {
+            sourceRef,
+            reason: standupDecision.reason,
+            actionItemCount: standupDecision.actionItemCount,
+          });
+          store.markProcessed("github", sourceRef, `standup-skip-${issue.number}`);
+          result.skipped++;
+          continue;
+        }
+      }
+
       let message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}`;
 
       if (validation.draftPR) {
@@ -540,6 +557,21 @@ export async function dispatchIdleAgentBacklog(
         }
         result.skipped++;
         continue;
+      }
+
+      // Standup dispatch guard (idle pickup path)
+      if (looksLikeStandupTask(issue.title, sourceRef)) {
+        const issueNumber = extractStandupIssueNumber(sourceRef) ?? issue.number;
+        const standupDecision = await shouldSkipStandupDispatch(issue.repo, issueNumber);
+        if (standupDecision.skip) {
+          log.info("Idle pickup: standup dispatch guard skipped zero-action standup", {
+            sourceRef,
+            reason: standupDecision.reason,
+          });
+          store.markProcessed("github", sourceRef, `standup-skip-${issue.number}`);
+          result.skipped++;
+          continue;
+        }
       }
 
       let message = `GitHub Issue #${issue.number}: ${issue.title}${issue.labels.length > 0 ? `\nLabels: ${issue.labels.join(", ")}` : ""}\n\n${issue.body}\n\nURL: ${issue.url}`;
