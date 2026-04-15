@@ -26,6 +26,11 @@
  */
 
 import type { OrchestratorConfig } from "../config/schema.js";
+import { getAgentBaseUrl } from "../config/schema.js";
+import { callCapabilityCheck } from "../client/capability-check-client.js";
+import { createLogger } from "../service/logger.js";
+
+const log = createLogger("capability-enforcer");
 
 /** Patterns that identify orchestrator implementation tasks by title. */
 const IMPLEMENTATION_TITLE_PATTERNS: RegExp[] = [
@@ -33,7 +38,40 @@ const IMPLEMENTATION_TITLE_PATTERNS: RegExp[] = [
   /\[orchestrator dashboard\]/i,
   /\[orchestrator reviewer\]/i,
   /\[agent orchestrator\]/i,
+  // Dashboard implementation patterns (routes, panels, widgets, follow-ups)
+  /\[agent[\s-]?dashboard\]/i,
+  /\[agent[\s-]?reviewer\]/i,
+  // Cross-repo follow-up chains that land in the wrong agent
+  /follow-up from #\d+/i,
+  // Implementation work keywords appearing as the primary task label
+  /^create\s+(route|endpoint|api|panel|widget|component)/i,
 ];
+
+/**
+ * Keyword fragments that, when found in a task title, strongly suggest
+ * implementation work unsuitable for research-only agents.
+ * Used as a secondary check when title patterns do not match.
+ */
+const IMPLEMENTATION_TITLE_KEYWORDS: string[] = [
+  "routes",
+  "endpoint",
+  "panel",
+  "widget",
+  "migration",
+  "deployment",
+  "docker",
+  "pr create",
+  "open pr",
+];
+
+/**
+ * Returns true when any implementation keyword appears in the title.
+ * Only checked as a fallback after the pattern check fails.
+ */
+function titleHasImplementationKeyword(title: string): boolean {
+  const lower = title.toLowerCase();
+  return IMPLEMENTATION_TITLE_KEYWORDS.some((kw) => lower.includes(kw));
+}
 
 /**
  * Returns true when the task title or type suggests implementation work that a
@@ -53,6 +91,8 @@ export function isImplementationTask(
     for (const pattern of IMPLEMENTATION_TITLE_PATTERNS) {
       if (pattern.test(title)) return true;
     }
+    // Secondary check: presence of implementation-flavored keywords in the title.
+    if (titleHasImplementationKeyword(title)) return true;
   }
 
   // Cross-repo source refs pointing to a different repo are implementation work.
@@ -103,11 +143,91 @@ export function checkCapabilityEnforcement(params: {
 
   // Violation detected.  Find the best substitute implementation agent.
   const substitute = findImplementationAgent(config, agentName, sourceRef);
+  if (!substitute) {
+    log.warn("Capability violation detected but no substitute agent available — allowing dispatch to original", { agentName, sourceRef });
+    return null;
+  }
 
   const redirectReason =
     `Agent "${agentName}" is tagged research-only but received an implementation task` +
     (title ? ` ("${title}")` : "") +
     `. Rerouted to "${substitute}".`;
+
+  return {
+    blockedAgent: agentName,
+    toAgent: substitute,
+    redirectReason,
+  };
+}
+
+// ── Remote capability check ───────────────────────────────────────────────
+
+/**
+ * Call the agent's `/capability-check` endpoint and return a reroute
+ * descriptor when the agent rejects the task, or `null` when the agent
+ * accepts it (or the endpoint is unavailable).
+ *
+ * This is a second-line enforcement that runs AFTER the local capability
+ * tag check.  It catches cases where:
+ *   • The agent is not yet tagged `research-only` in agents.yaml but its
+ *     container already exposes the endpoint.
+ *   • The task title does not match any local keyword pattern but the agent's
+ *     own classifier rejects it.
+ *
+ * The call is non-blocking: a 404 (endpoint not implemented) or any network
+ * error is treated as "accept" so the local enforcer remains the hard gate.
+ *
+ * @param params.config      Full orchestrator config (for URL and agent lookup)
+ * @param params.agentName   Agent name as it appears in agents.yaml
+ * @param params.taskType    Task type string (usually "implementation")
+ * @param params.title       Issue/task title
+ * @param params.sourceRef   Source reference e.g. "rapartlu/agent-orchestrator#837"
+ */
+export async function runRemoteCapabilityCheck(params: {
+  config: OrchestratorConfig;
+  agentName: string;
+  taskType: string;
+  title?: string;
+  sourceRef?: string;
+}): Promise<CapabilityEnforcementReroute | null> {
+  const { config, agentName, taskType, title, sourceRef } = params;
+
+  // Only check agents that have a docker port configured (i.e., reachable via HTTP).
+  const agentBaseUrl = getAgentBaseUrl(config, agentName);
+  if (!agentBaseUrl) {
+    log.debug("Skipping remote capability check — no docker port configured", { agentName });
+    return null;
+  }
+
+  const outcome = await callCapabilityCheck(agentBaseUrl, {
+    title: title ?? "",
+    task_type: taskType,
+    source_ref: sourceRef,
+  });
+
+  if (outcome.status !== "rejected") {
+    // accepted, not-supported, or error — all treated as "proceed"
+    return null;
+  }
+
+  // Agent rejected the task.  Find the best substitute.
+  const substitute = findImplementationAgent(config, agentName, sourceRef);
+  if (!substitute) {
+    log.warn("Remote capability rejection but no substitute agent available — allowing dispatch to original", { agentName, sourceRef });
+    return null;
+  }
+
+  const redirectReason =
+    `Agent "${agentName}" rejected the task via /capability-check` +
+    (title ? ` ("${title}")` : "") +
+    `: ${outcome.reason}. Rerouted to "${substitute}".`;
+
+  log.warn("Remote capability check: agent rejected task — rerouting", {
+    agentName,
+    toAgent: substitute,
+    reason: outcome.reason,
+    sourceRef,
+  });
 
   return {
     blockedAgent: agentName,
@@ -129,7 +249,7 @@ function findImplementationAgent(
   config: OrchestratorConfig,
   blockedAgent: string,
   sourceRef?: string,
-): string {
+): string | null {
   // Extract owner/repo from "owner/repo#N"
   let targetRepo: string | undefined;
   if (sourceRef) {
@@ -152,6 +272,7 @@ function findImplementationAgent(
     if (!tags.includes("research-only")) return name;
   }
 
-  // 3. Last resort: return blocked agent (shouldn't happen in a well-configured setup)
-  return blockedAgent;
+  // No valid substitute found — return null so callers can fall back gracefully
+  log.warn("No valid implementation agent found for reroute", { blockedAgent, sourceRef });
+  return null;
 }

@@ -40,6 +40,7 @@ import {
 } from "./pre-dispatch-validator.js";
 import {
   checkCapabilityEnforcement,
+  runRemoteCapabilityCheck,
   type CapabilityEnforcementReroute,
 } from "./capability-enforcer.js";
 
@@ -631,6 +632,54 @@ export class Dispatcher {
         "warning",
         `capability-enforcement:${capabilityReroute.blockedAgent}:${options?.sourceRef ?? ""}`,
       );
+    }
+
+    // Remote capability pre-flight (issue #837): belt-and-suspenders check that
+    // calls the agent's own /capability-check endpoint before committing dispatch.
+    // This catches cases where the local tag-based enforcer didn't trigger but the
+    // agent's container would reject the task at execution time (e.g., a research
+    // agent receiving a dashboard implementation task whose title pattern wasn't
+    // matched locally).  The call is non-blocking: 404 and network errors are
+    // treated as "accept" so no dispatch is blocked if the endpoint is absent.
+    if (!capabilityReroute) {
+      let remoteCapCheck: Awaited<ReturnType<typeof runRemoteCapabilityCheck>> = null;
+      try {
+        remoteCapCheck = await runRemoteCapabilityCheck({
+          config: this.config,
+          agentName,
+          taskType: taskTypeForCap,
+          title: options?.title,
+          sourceRef: options?.sourceRef,
+        });
+      } catch (err) {
+        this.log.warn("Remote capability check failed — proceeding with dispatch", {
+          agentName, error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      if (remoteCapCheck) {
+        this.log.warn(
+          "Remote capability pre-flight: agent rejected task — rerouting",
+          {
+            blockedAgent: remoteCapCheck.blockedAgent,
+            toAgent: remoteCapCheck.toAgent,
+            reason: remoteCapCheck.redirectReason,
+            sourceRef: options?.sourceRef,
+          },
+        );
+        agentName = remoteCapCheck.toAgent;
+        routeMethod = "capability-enforcement";
+        routeReason = remoteCapCheck.redirectReason;
+        capabilityReroute = remoteCapCheck;
+        await notifyOperator(
+          "Runtime capability check: agent rejected task via /capability-check",
+          `Agent \`${remoteCapCheck.blockedAgent}\` rejected the task at runtime.\n` +
+            `Rerouted to \`${remoteCapCheck.toAgent}\`.\n` +
+            (options?.title ? `Task: "${options.title}"\n` : "") +
+            (options?.sourceRef ? `Source: ${options.sourceRef}` : ""),
+          "warning",
+          `remote-cap-check:${remoteCapCheck.blockedAgent}:${options?.sourceRef ?? ""}`,
+        );
+      }
     }
 
     // Pre-flight: check token budget pause (issue #436).
