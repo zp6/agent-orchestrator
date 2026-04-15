@@ -409,6 +409,22 @@ export interface EscalationConfig {
    * GitHub issue comment (if the task's source is "github").
    */
   notify_channel?: string;
+
+  /**
+   * Maximum allowed depth of a follow-up task chain before auto-dispatch is
+   * blocked and the task is routed to the escalation queue instead.
+   *
+   * Depth is measured by walking the parent_task_id chain from the new task
+   * back to the root task.  A root task (no parent) is at depth 0; its direct
+   * follow-up is at depth 1; a follow-up of that follow-up is at depth 2; etc.
+   *
+   * When a pending follow-up would exceed this depth, the task is created with
+   * status "escalated" and the operator is notified so a human can decide
+   * whether to continue the chain manually.
+   *
+   * Defaults to 3 when omitted.  Set to 0 to disable the depth cap entirely.
+   */
+  max_followup_depth?: number;
 }
 
 export interface DigestConfig {

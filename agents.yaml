@@ -31,6 +31,16 @@ verification:
   min_score: 0.7
   max_revisions: 1
 
+# ── Escalation config ──────────────────────────────────────────────────────────
+# Controls automatic escalation thresholds.
+# max_followup_depth: maximum length of a follow-up task chain before the next
+#   task is routed to the escalation queue instead of auto-dispatched.
+#   Depth 0 = root task, 1 = first follow-up, 2 = second follow-up, etc.
+#   Default is 3.  Set to 0 to disable the depth cap entirely.
+escalation:
+  retry_limit: 3
+  max_followup_depth: 3
+
 # ── Task type definitions ──────────────────────────────────────────────────────
 # Built-in types (implementation, research, facilitation) have hardcoded
 # defaults in the verifier and do not need entries here — but entries here

@@ -44,6 +44,46 @@ import {
   type CapabilityEnforcementReroute,
 } from "./capability-enforcer.js";
 
+/**
+ * Walk the parent_task_id chain upward from `taskId` (or a parent task id) and
+ * return the depth the *new* task would be at.
+ *
+ * Depth definition:
+ *   - A root task (no parent) is at depth 0.
+ *   - A direct follow-up of a root task is at depth 1.
+ *   - And so on.
+ *
+ * @param parentTaskId The parent_task_id of the task about to be created.
+ *   Pass `undefined` for root tasks (depth will be 0).
+ * @param store        The state store used to resolve parent tasks.
+ * @param maxWalk      Safety guard — stops walking after this many hops to
+ *   prevent infinite loops on corrupt chains.  Defaults to 20.
+ * @returns The depth of the new task (parent's depth + 1, or 0 for roots).
+ */
+export function computeChainDepth(
+  parentTaskId: string | undefined | null,
+  store: StateStore,
+  maxWalk = 20,
+): number {
+  if (!parentTaskId) return 0;
+
+  let depth = 0;
+  let currentId: string | null = parentTaskId;
+
+  for (let i = 0; i < maxWalk; i++) {
+    if (!currentId) break;
+    const task = store.getTask(currentId);
+    if (!task) break;
+    depth++;
+    currentId = task.parent_task_id ?? null;
+  }
+
+  return depth;
+}
+
+/** Default maximum follow-up chain depth before a task is escalated instead of dispatched. */
+export const DEFAULT_MAX_FOLLOWUP_DEPTH = 3;
+
 /** Maximum number of retry attempts for a failed dispatch. */
 export const MAX_RETRIES = 3;
 export const FAILURE_REROUTE_THRESHOLD = 3;
@@ -932,6 +972,64 @@ export class Dispatcher {
         };
       }
     }
+    // Pre-dispatch: enforce follow-up chain depth cap (issue #823).
+    // When this task has a parent, walk the parent_task_id chain to compute the
+    // depth of the new task.  If it would exceed the configured maximum, create
+    // the task as "escalated" immediately so a human can decide whether to
+    // continue the chain — rather than letting the orchestrator auto-dispatch
+    // an unbounded cascade.
+    if (options?.parentTaskId) {
+      const maxDepth: number =
+        this.config.escalation?.max_followup_depth ?? DEFAULT_MAX_FOLLOWUP_DEPTH;
+
+      if (maxDepth > 0) {
+        const depth = computeChainDepth(options.parentTaskId, this.store);
+        if (depth > maxDepth) {
+          this.log.warn("Follow-up chain depth cap exceeded — escalating instead of dispatching", {
+            parentTaskId: options.parentTaskId,
+            depth,
+            maxDepth,
+            sourceRef: options?.sourceRef,
+            agentName,
+          });
+
+          const cappedTask = this.store.createTask({
+            title: options?.title ?? message.slice(0, 100),
+            description: message,
+            source: options?.source ?? "manual",
+            source_ref: options?.sourceRef,
+            agent_name: agentName,
+            task_type: taskType,
+            parent_task_id: options.parentTaskId,
+            step_id: options?.stepId,
+          });
+          this.store.updateTask(cappedTask.id, { status: "escalated" });
+
+          await notifyOperator(
+            "Follow-up chain depth cap exceeded",
+            `Task \`${cappedTask.id}\` is at depth ${depth} (max: ${maxDepth}). ` +
+              `Auto-dispatch was blocked. Resolve the escalation queue to continue manually.\n` +
+              (options?.sourceRef ? `Source: ${options.sourceRef}` : ""),
+            "warning",
+            `chain-depth-cap:${options.parentTaskId}:depth-${depth}`,
+          );
+
+          return {
+            taskId: cappedTask.id,
+            agentName,
+            response: {
+              content:
+                `Follow-up chain depth cap exceeded (depth ${depth} > max ${maxDepth}). ` +
+                `Task ${cappedTask.id} has been escalated for human review.`,
+              model: "",
+              usage: { input_tokens: 0, output_tokens: 0 },
+              stop_reason: "chain-depth-cap",
+            },
+          };
+        }
+      }
+    }
+
     // Create task — reuse the caller's conversationId when provided (e.g. PR
     // feedback or revision tasks that should resume the agent's prior session).
     const conversationId = options?.conversationId ?? ulid();
