@@ -2611,10 +2611,63 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
 
     if (agentsByRepo.size === 0) return;
 
+    // ── Priority review fast-lane (issue #871) ────────────────────────────
+    // Review dispatch-blocking PRs before the general open-PR sweep so they
+    // can unblock pending dispatches within the same daemon cycle.
+    const priorityQueue = this.store.getPriorityReviewQueue();
+    // Track which (repo, prNumber) pairs were handled in the priority phase
+    // so the general sweep below doesn't double-review them.
+    const priorityReviewed = new Set<string>();
+
+    if (priorityQueue.length > 0) {
+      console.log(`[${time}] Priority review fast-lane: ${priorityQueue.length} dispatch-blocking PR(s) queued`);
+      this.log.info("Priority review fast-lane: reviewing dispatch-blocking PRs first", {
+        count: priorityQueue.length,
+        entries: priorityQueue.map((e) => `${e.repo}#${e.pr_number}`),
+      });
+    }
+
+    for (const entry of priorityQueue) {
+      const { repo, pr_number: prNumber, blocked_issue_ref: blockedIssueRef } = entry;
+      try {
+        const result = await this.prReviewer.reviewPR(repo, prNumber);
+        const approved = result.decision === "approve";
+        this.store.completePriorityReview(repo, prNumber, approved);
+        priorityReviewed.add(`${repo}#${prNumber}`);
+
+        console.log(
+          `[${time}] Priority review: ${repo}#${prNumber} → ${result.decision} ` +
+          `(blocked: ${blockedIssueRef}, unblocked: ${approved})`,
+        );
+        this.log.info("Priority review completed", {
+          repo,
+          prNumber,
+          blockedIssueRef,
+          decision: result.decision,
+          unblockedDispatch: approved,
+        });
+      } catch (err) {
+        this.log.warn("Priority review failed for dispatch-blocking PR", {
+          repo,
+          prNumber,
+          blockedIssueRef,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // Remove from queue so it falls through to the general sweep rather than
+        // stalling the priority lane on a consistently failing PR.
+        this.store.removeFromPriorityReviewQueue(repo, prNumber);
+      }
+    }
+
     try {
       for (const [repo, agentName] of agentsByRepo) {
         const results = await this.prReviewer.reviewOpenPRs(repo);
         for (const { prNumber, result, prBody, prBranch, prDiff } of results) {
+          // Skip PRs already handled in the priority fast-lane to avoid double-reviewing
+          if (priorityReviewed.has(`${repo}#${prNumber}`)) {
+            this.log.debug("General sweep: skipping PR already handled in priority fast-lane", { repo, prNumber });
+            continue;
+          }
           console.log(`[${time}] PR review: ${repo}#${prNumber} → ${result.decision} (${result.reason})`);
 
           // Auto-close persistently conflicting PRs and re-dispatch the linked issue.

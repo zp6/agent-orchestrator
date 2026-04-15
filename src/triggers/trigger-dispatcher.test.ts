@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { dispatchGitHubIssues, dispatchIdleAgentBacklog, dispatchLinearChecks, dispatchSlackChecks, buildExistingPRReviewChecklist } from "./trigger-dispatcher.js";
+import { dispatchGitHubIssues, dispatchIdleAgentBacklog, dispatchLinearChecks, dispatchSlackChecks, buildExistingPRReviewChecklist, routeBlockingPRToQueue } from "./trigger-dispatcher.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { StateStore } from "../state/store.js";
@@ -100,6 +100,10 @@ describe("dispatchGitHubIssues", () => {
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
       getSecretMountStatus: vi.fn().mockReturnValue([]),
+      // Priority review queue methods (added in #871)
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
+      addToPriorityReviewQueue: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -266,6 +270,10 @@ describe("pre-dispatch issue state validation", () => {
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
       getSecretMountStatus: vi.fn().mockReturnValue([]),
+      // Priority review queue methods (added in #871)
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
+      addToPriorityReviewQueue: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -344,6 +352,10 @@ describe("duplicate PR detection before dispatch", () => {
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
       // Secret mount health check (added in #775)
       getSecretMountStatus: vi.fn().mockReturnValue([]),
+      // Priority review queue methods (added in #871)
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
+      addToPriorityReviewQueue: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -557,6 +569,10 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
       getSecretMountStatus: vi.fn().mockReturnValue([]),
+      // Priority review queue methods (added in #871)
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
+      addToPriorityReviewQueue: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -673,6 +689,10 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
       getSecretMountStatus: vi.fn().mockReturnValue([]),
+      // Priority review queue methods (added in #871)
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
+      addToPriorityReviewQueue: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1009,6 +1029,10 @@ describe("dispatchIdleAgentBacklog", () => {
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
       // Secret mount health check (added in #775)
       getSecretMountStatus: vi.fn().mockReturnValue([]),
+      // Priority review queue methods (added in #871)
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
+      addToPriorityReviewQueue: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1263,6 +1287,10 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
       getSecretMountStatus: vi.fn().mockReturnValue([]),
+      // Priority review queue methods (added in #871)
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
+      addToPriorityReviewQueue: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1398,6 +1426,10 @@ describe("in-flight branch detection", () => {
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
       getSecretMountStatus: vi.fn().mockReturnValue([]),
+      // Priority review queue methods (added in #871)
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
+      addToPriorityReviewQueue: vi.fn(),
     } as unknown as StateStore;
 
     vi.mocked(mockStore.hasActiveTask).mockReturnValue(false);
@@ -1444,6 +1476,10 @@ describe("in-flight branch detection", () => {
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
       getSecretMountStatus: vi.fn().mockReturnValue([]),
+      // Priority review queue methods (added in #871)
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
+      addToPriorityReviewQueue: vi.fn(),
     } as unknown as StateStore;
 
     await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1491,6 +1527,10 @@ describe("in-flight branch detection", () => {
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
       getSecretMountStatus: vi.fn().mockReturnValue([]),
+      // Priority review queue methods (added in #871)
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
+      addToPriorityReviewQueue: vi.fn(),
     } as unknown as StateStore;
 
     const result = await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1533,6 +1573,10 @@ describe("in-flight branch detection", () => {
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
       getSecretMountStatus: vi.fn().mockReturnValue([]),
+      // Priority review queue methods (added in #871)
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
+      addToPriorityReviewQueue: vi.fn(),
     } as unknown as StateStore;
 
     await dispatchIdleAgentBacklog(branchConfig, mockStore, mockDispatcher);
@@ -1575,6 +1619,10 @@ describe("approved PR skip logic", () => {
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
       getSecretMountStatus: vi.fn().mockReturnValue([]),
+      // Priority review queue methods (added in #871)
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
+      addToPriorityReviewQueue: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1716,6 +1764,10 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
       cancelSupersededTasks: vi.fn().mockReturnValue(0),
       findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
       getSecretMountStatus: vi.fn().mockReturnValue([]),
+      // Priority review queue methods (added in #871)
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
+      addToPriorityReviewQueue: vi.fn(),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
     } as unknown as StateStore;
@@ -1841,5 +1893,118 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
     // Should NOT throw — error is caught and logged
     const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
     expect(result.skipped).toBeGreaterThanOrEqual(1);
+  });
+
+  it("adds open PR to priority review queue when dispatch is blocked (issue #871)", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Feature", body: "Do it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 99, title: "Fix Feature", url: "https://github.com/owner/my-repo/pull/99", state: "open", isDraft: false },
+    ]);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // Should call addToPriorityReviewQueue for the dispatch-blocking open PR
+    expect(mockStore.addToPriorityReviewQueue).toHaveBeenCalledWith(
+      "owner/my-repo",
+      99,
+      "owner/my-repo#42",
+    );
+  });
+
+  it("does not add to priority queue when PR is already in merge queue (issue #871)", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 55, title: "Bugfix", body: "Fix bug", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 88, title: "Fix bug", url: "https://github.com/owner/my-repo/pull/88", state: "open", isDraft: false },
+    ]);
+    // Simulate PR is already in merge queue
+    (mockStore.isPRInMergeQueue as ReturnType<typeof vi.fn>).mockReturnValue(true);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // Should NOT call addToPriorityReviewQueue — already in merge queue
+    expect(mockStore.addToPriorityReviewQueue).not.toHaveBeenCalled();
+  });
+
+  it("does not add to priority queue when PR is already pending review (issue #871)", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 55, title: "Bugfix", body: "Fix bug", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 88, title: "Fix bug", url: "https://github.com/owner/my-repo/pull/88", state: "open", isDraft: false },
+    ]);
+    // Simulate PR is already in priority review queue
+    (mockStore.isPRInPriorityReviewQueue as ReturnType<typeof vi.fn>).mockReturnValue(true);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // Should NOT call addToPriorityReviewQueue — already pending
+    expect(mockStore.addToPriorityReviewQueue).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// routeBlockingPRToQueue (issue #871)
+// ---------------------------------------------------------------------------
+
+describe("routeBlockingPRToQueue (issue #871)", () => {
+  function makeStore(overrides: Record<string, unknown> = {}): StateStore {
+    return {
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
+      addToPriorityReviewQueue: vi.fn(),
+      ...overrides,
+    } as unknown as StateStore;
+  }
+
+  it("returns 'already-in-merge-queue' when PR is already queued for merge", () => {
+    const store = makeStore({ isPRInMergeQueue: vi.fn().mockReturnValue(true) });
+    const result = routeBlockingPRToQueue(store, {
+      repo: "owner/repo",
+      prNumber: 10,
+      failureCode: "open_pr_exists",
+      blockedIssueRef: "owner/repo#42",
+    });
+    expect(result).toBe("already-in-merge-queue");
+    expect(store.addToPriorityReviewQueue).not.toHaveBeenCalled();
+  });
+
+  it("returns 'skipped' for approved_pr_waiting (handled by orphan PR sweep)", () => {
+    const store = makeStore();
+    const result = routeBlockingPRToQueue(store, {
+      repo: "owner/repo",
+      prNumber: 10,
+      failureCode: "approved_pr_waiting",
+      blockedIssueRef: "owner/repo#42",
+    });
+    expect(result).toBe("skipped");
+    expect(store.addToPriorityReviewQueue).not.toHaveBeenCalled();
+  });
+
+  it("returns 'pending-review' and enqueues the PR when open and not yet prioritised", () => {
+    const store = makeStore();
+    const result = routeBlockingPRToQueue(store, {
+      repo: "owner/repo",
+      prNumber: 10,
+      failureCode: "open_pr_exists",
+      blockedIssueRef: "owner/repo#42",
+    });
+    expect(result).toBe("pending-review");
+    expect(store.addToPriorityReviewQueue).toHaveBeenCalledWith("owner/repo", 10, "owner/repo#42");
+  });
+
+  it("returns 'already-in-priority-queue' when PR is already pending priority review", () => {
+    const store = makeStore({ isPRInPriorityReviewQueue: vi.fn().mockReturnValue(true) });
+    const result = routeBlockingPRToQueue(store, {
+      repo: "owner/repo",
+      prNumber: 10,
+      failureCode: "open_pr_exists",
+      blockedIssueRef: "owner/repo#42",
+    });
+    expect(result).toBe("already-in-priority-queue");
+    expect(store.addToPriorityReviewQueue).not.toHaveBeenCalled();
   });
 });

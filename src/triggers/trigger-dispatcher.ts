@@ -105,6 +105,63 @@ function recordAlreadyInReviewTask(
 
 const log = createLogger("trigger-dispatcher");
 
+/**
+ * Route a dispatch-blocking PR to the appropriate queue.
+ *
+ * When a pre-dispatch validation blocks an issue dispatch because an open or
+ * approved PR already exists, this function determines where to route the
+ * blocking PR:
+ *
+ * - `"already-in-merge-queue"` — the PR is already queued for merge; no action needed.
+ * - `"already-in-priority-queue"` — the PR is already in the priority review queue; no-op.
+ * - `"pending-review"` — the PR is open but not yet approved; added to the
+ *   priority_review_queue so the next reviewPRs cycle picks it up before the
+ *   general open-PR sweep. The caller should log this and report a dashboard skip.
+ *
+ * For `approved_pr_waiting` failures the PR has already been approved, so the
+ * orchestrator's orphan-PR sweep and merge queue handle it autonomously. This
+ * function focuses on the `open_pr_exists` case where a review is still needed.
+ *
+ * @returns routing outcome for logging and metrics.
+ */
+export function routeBlockingPRToQueue(
+  store: StateStore,
+  params: {
+    repo: string;
+    prNumber: number;
+    failureCode: string;
+    blockedIssueRef: string;
+  },
+): "pending-review" | "already-in-merge-queue" | "already-in-priority-queue" | "skipped" {
+  const { repo, prNumber, failureCode, blockedIssueRef } = params;
+
+  // Already in the merge queue (approved PR) — the merge sweep will handle it
+  if (store.isPRInMergeQueue(repo, prNumber)) {
+    return "already-in-merge-queue";
+  }
+
+  // Approved PRs are handled by the orphan-PR sweep + merge queue; no priority
+  // review needed since the review is already done.
+  if (failureCode === "approved_pr_waiting") {
+    return "skipped";
+  }
+
+  // PR is open but not yet approved — enqueue for priority review so it is
+  // reviewed in the same daemon cycle rather than waiting for the next general sweep.
+  if (store.isPRInPriorityReviewQueue(repo, prNumber)) {
+    return "already-in-priority-queue";
+  }
+
+  store.addToPriorityReviewQueue(repo, prNumber, blockedIssueRef);
+  log.info("routeBlockingPRToQueue: added dispatch-blocking PR to priority review queue", {
+    repo,
+    prNumber,
+    blockedIssueRef,
+    failureCode,
+  });
+  return "pending-review";
+}
+
 // In-memory registry of source refs currently being dispatched.
 // Keyed by sourceRef → AbortController so the claim-lock supersession logic
 // can both detect duplicates (has() check) and send a cancellation signal to
@@ -418,11 +475,25 @@ export async function dispatchGitHubIssues(
             failureCode: validation.failureCode,
             repo: issue.repo,
           });
+          // Priority review fast-lane (issue #871): route open PRs blocking dispatch
+          // to the priority review queue so they get reviewed in the current cycle
+          // rather than waiting for the next general open-PR sweep.
+          const routeOutcome = routeBlockingPRToQueue(store, {
+            repo: issue.repo,
+            prNumber: validation.blockingPRNumber,
+            failureCode: validation.failureCode,
+            blockedIssueRef: sourceRef,
+          });
+          log.info("Dispatch-blocked PR routed", {
+            sourceRef,
+            blockingPRNumber: validation.blockingPRNumber,
+            routeOutcome,
+          });
           reportDashboardSkip({
             issue_id: sourceRef,
             agent_name: agentName,
             skip_reason: "has_open_pr",
-            condition_value: `hasOpenPR=true,pr=#${validation.blockingPRNumber},repo=${issue.repo}`,
+            condition_value: `hasOpenPR=true,pr=#${validation.blockingPRNumber},repo=${issue.repo},routeOutcome=${routeOutcome}`,
             context: `Pre-dispatch check: ${validation.failureReason}`,
           });
         }
@@ -682,11 +753,24 @@ export async function dispatchIdleAgentBacklog(
             failureCode: validation.failureCode,
             repo: issue.repo,
           });
+          // Priority review fast-lane (issue #871) — idle pickup path: same as
+          // the primary dispatch path, route blocking PRs into the priority queue.
+          const routeOutcome = routeBlockingPRToQueue(store, {
+            repo: issue.repo,
+            prNumber: validation.blockingPRNumber,
+            failureCode: validation.failureCode,
+            blockedIssueRef: sourceRef,
+          });
+          log.info("Idle pickup: dispatch-blocked PR routed", {
+            sourceRef,
+            blockingPRNumber: validation.blockingPRNumber,
+            routeOutcome,
+          });
           reportDashboardSkip({
             issue_id: sourceRef,
             agent_name: agentName,
             skip_reason: "has_open_pr",
-            condition_value: `hasOpenPR=true,pr=#${validation.blockingPRNumber},repo=${issue.repo}`,
+            condition_value: `hasOpenPR=true,pr=#${validation.blockingPRNumber},repo=${issue.repo},routeOutcome=${routeOutcome}`,
             context: `Idle pickup: ${validation.failureReason}`,
           });
         }

@@ -1321,6 +1321,7 @@ export class StateStore {
     this.runSupervisorMemoryMigration();
     this.runPRReviewsMigration();
     this.runMergeQueueMigration();
+    this.runPriorityReviewQueueMigration();
     this.runDaemonStatsMigration();
     this.runPRCreationRetryMigration();
     this.runProcessedTriggersCompletedAtMigration();
@@ -3729,6 +3730,91 @@ export class StateStore {
     this.db
       .prepare("DELETE FROM pr_merge_queue WHERE repo = ? AND pr_number = ?")
       .run(repo, prNumber);
+  }
+
+  // ── Priority review queue (dispatch-blocking PRs) ───────────────────────
+
+  private runPriorityReviewQueueMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS priority_review_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        pr_number INTEGER NOT NULL,
+        blocked_issue_ref TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        enqueued_at TEXT NOT NULL,
+        reviewed_at TEXT,
+        unblocked_dispatch INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(repo, pr_number)
+      );
+      CREATE INDEX IF NOT EXISTS idx_priority_review_queue_status ON priority_review_queue(status);
+      CREATE INDEX IF NOT EXISTS idx_priority_review_queue_repo ON priority_review_queue(repo, status);
+    `);
+  }
+
+  /** Add a dispatch-blocking PR to the priority review queue. No-op if already present. */
+  addToPriorityReviewQueue(repo: string, prNumber: number, blockedIssueRef: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO priority_review_queue (repo, pr_number, blocked_issue_ref, status, enqueued_at)
+         VALUES (?, ?, ?, 'pending', ?)
+         ON CONFLICT(repo, pr_number) DO NOTHING`,
+      )
+      .run(repo, prNumber, blockedIssueRef, new Date().toISOString());
+  }
+
+  /** Return true if the PR is already in the priority review queue with pending status. */
+  isPRInPriorityReviewQueue(repo: string, prNumber: number): boolean {
+    const row = this.db
+      .prepare("SELECT id FROM priority_review_queue WHERE repo = ? AND pr_number = ? AND status = 'pending'")
+      .get(repo, prNumber);
+    return row !== undefined;
+  }
+
+  /** Get all pending priority review entries, ordered by enqueue time (oldest first). */
+  getPriorityReviewQueue(): Array<{ id: number; repo: string; pr_number: number; blocked_issue_ref: string; enqueued_at: string }> {
+    return this.db
+      .prepare("SELECT id, repo, pr_number, blocked_issue_ref, enqueued_at FROM priority_review_queue WHERE status = 'pending' ORDER BY enqueued_at ASC")
+      .all() as Array<{ id: number; repo: string; pr_number: number; blocked_issue_ref: string; enqueued_at: string }>;
+  }
+
+  /** Mark a priority review entry as reviewed. Set unblockedDispatch=true if the review result unblocked a dispatch. */
+  completePriorityReview(repo: string, prNumber: number, unblockedDispatch: boolean): void {
+    this.db
+      .prepare(
+        "UPDATE priority_review_queue SET status = 'reviewed', reviewed_at = ?, unblocked_dispatch = ? WHERE repo = ? AND pr_number = ? AND status = 'pending'",
+      )
+      .run(new Date().toISOString(), unblockedDispatch ? 1 : 0, repo, prNumber);
+  }
+
+  /** Remove a PR from the priority review queue (e.g. if the PR was closed/merged externally). */
+  removeFromPriorityReviewQueue(repo: string, prNumber: number): void {
+    this.db
+      .prepare("DELETE FROM priority_review_queue WHERE repo = ? AND pr_number = ?")
+      .run(repo, prNumber);
+  }
+
+  /**
+   * Get priority review metrics: total enqueued, reviewed, and how many actually
+   * unblocked a dispatch vs were handled by general review.
+   */
+  getPriorityReviewMetrics(): { total_enqueued: number; total_reviewed: number; unblocked_by_priority: number; unblocked_by_general: number } {
+    const row = this.db
+      .prepare(
+        `SELECT
+           COUNT(*) as total_enqueued,
+           SUM(CASE WHEN status = 'reviewed' THEN 1 ELSE 0 END) as total_reviewed,
+           SUM(CASE WHEN status = 'reviewed' AND unblocked_dispatch = 1 THEN 1 ELSE 0 END) as unblocked_by_priority,
+           SUM(CASE WHEN status = 'reviewed' AND unblocked_dispatch = 0 THEN 1 ELSE 0 END) as unblocked_by_general
+         FROM priority_review_queue`,
+      )
+      .get() as { total_enqueued: number; total_reviewed: number; unblocked_by_priority: number; unblocked_by_general: number };
+    return {
+      total_enqueued: row.total_enqueued ?? 0,
+      total_reviewed: row.total_reviewed ?? 0,
+      unblocked_by_priority: row.unblocked_by_priority ?? 0,
+      unblocked_by_general: row.unblocked_by_general ?? 0,
+    };
   }
 
   // ── Daemon stats (persistent counters) ──────────────────────────────────
