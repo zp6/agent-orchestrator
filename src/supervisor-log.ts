@@ -140,3 +140,200 @@ export function formatSupervisorLogForCLI(decisions: SupervisorDecisionRecord[])
 
   return lines.join("\n");
 }
+
+// ── Routing decision grouping ─────────────────────────────────────────────
+
+/**
+ * A grouped routing decision entry: one dispatch (or no-op) with the
+ * skipped alternatives from within the same 60-second window.
+ */
+export interface RoutingDecisionEntry {
+  /** ISO-8601 timestamp of the chosen dispatch (or the "none" decision). */
+  timestamp: string;
+  /** Agent the work was routed to, or null for no-op cycles. */
+  agent_name: string | null;
+  /** Issue/task reference that was chosen, or null. */
+  chosen_issue: string | null;
+  /** Issues that were considered but skipped in the same window. */
+  skipped_issues: string[];
+  /** One-sentence rationale extracted from the dispatch reason. */
+  rationale: string;
+  /** Raw action: "dispatch", "none", "follow-up", etc. */
+  action: string;
+  /** Outcome: "dispatched", "skipped", "escalated", etc. */
+  outcome: string;
+}
+
+/**
+ * Group supervisor decisions into routing decision entries.
+ *
+ * For each "dispatch" decision, collects "none"/"skipped" records within
+ * a ±60s window as the alternatives that were passed over. If a cycle
+ * produced only skips (no dispatch), the first skip is used as the entry.
+ *
+ * @param decisions  Raw decisions, newest-first (from querySupervisorLog).
+ * @param limit      Maximum entries to return (default 10, max 25).
+ */
+export function buildRoutingDecisions(
+  decisions: SupervisorDecisionRecord[],
+  limit = 10,
+): RoutingDecisionEntry[] {
+  const cap = Math.min(limit, 25);
+  const WINDOW_MS = 60_000; // 60-second grouping window
+
+  const entries: RoutingDecisionEntry[] = [];
+  const used = new Set<number | string>(); // by index or id
+
+  // Work oldest-to-newest for grouping, then reverse output
+  const ordered = [...decisions].reverse();
+
+  for (let i = 0; i < ordered.length && entries.length < cap; i++) {
+    const d = ordered[i];
+    if (used.has(d.id)) continue;
+
+    const ts = new Date(d.created_at).getTime();
+
+    if (d.action === "dispatch" || d.action === "follow-up") {
+      used.add(d.id);
+
+      // Collect skips within the window
+      const skipped: string[] = [];
+      for (let j = 0; j < ordered.length; j++) {
+        if (i === j) continue;
+        const other = ordered[j];
+        if (used.has(other.id)) continue;
+        const otherTs = new Date(other.created_at).getTime();
+        if (Math.abs(otherTs - ts) <= WINDOW_MS && other.outcome === "skipped") {
+          const ref = other.issue_ref ?? other.reason.match(/#\d+/)?.[0] ?? null;
+          if (ref && !skipped.includes(ref)) skipped.push(ref);
+          used.add(other.id);
+        }
+      }
+
+      entries.push({
+        timestamp: d.created_at,
+        agent_name: d.agent_name ?? null,
+        chosen_issue: d.issue_ref ?? null,
+        skipped_issues: skipped,
+        rationale: extractOneLineSentence(d.reason),
+        action: d.action,
+        outcome: d.outcome,
+      });
+    } else if (d.outcome === "skipped" || d.action === "none") {
+      // No-dispatch cycle — emit as a "skipped all" entry
+      const windowSkips: string[] = [];
+      for (let j = 0; j < ordered.length; j++) {
+        const other = ordered[j];
+        if (used.has(other.id)) continue;
+        const otherTs = new Date(other.created_at).getTime();
+        if (Math.abs(otherTs - ts) <= WINDOW_MS && other.outcome === "skipped") {
+          const ref = other.issue_ref ?? other.reason.match(/#\d+/)?.[0] ?? null;
+          if (ref && !windowSkips.includes(ref)) windowSkips.push(ref);
+          used.add(other.id);
+        }
+      }
+      used.add(d.id);
+
+      entries.push({
+        timestamp: d.created_at,
+        agent_name: d.agent_name ?? null,
+        chosen_issue: null,
+        skipped_issues: windowSkips,
+        rationale: extractOneLineSentence(d.reason),
+        action: d.action,
+        outcome: d.outcome,
+      });
+    }
+  }
+
+  // Return newest-first
+  return entries.reverse();
+}
+
+/** Extract a single sentence (up to 120 chars) from a reason string. */
+function extractOneLineSentence(reason: string): string {
+  const sentence = reason.split(/[.!?\n]/)[0].trim();
+  return sentence.length > 120 ? sentence.slice(0, 117) + "…" : sentence;
+}
+
+/**
+ * Format routing decision entries for Telegram (Markdown).
+ *
+ * Example output per entry:
+ *
+ *   🚀 *dispatch* → `claude-agent-orchestrator`
+ *   Issue: #42 · Skipped: #41, #39
+ *   _2026-04-16 10:32_
+ *   Agent is idle and issue #42 addresses the failing health check
+ *
+ * @param entries  From buildRoutingDecisions(), newest-first.
+ * @returns        Telegram Markdown-formatted string.
+ */
+export function formatDecisionsForTelegram(entries: RoutingDecisionEntry[]): string {
+  if (entries.length === 0) {
+    return "🤖 *Routing Decisions*\n\nNo dispatch decisions recorded yet.";
+  }
+
+  const ACTION_ICON: Record<string, string> = {
+    dispatch: "🚀",
+    "follow-up": "↩️",
+    none: "⏸",
+    verify: "🔍",
+    redeploy: "🔄",
+  };
+
+  const lines: string[] = [`🤖 *Routing Decisions* (last ${entries.length})`, ``];
+
+  for (const e of entries) {
+    const icon = ACTION_ICON[e.action] ?? "🤖";
+    const agent = e.agent_name ? ` → \`${e.agent_name.slice(0, 28)}\`` : "";
+    const ts = new Date(e.timestamp).toISOString().replace("T", " ").slice(0, 16);
+
+    lines.push(`${icon} *${e.action}*${agent}`);
+
+    const chosen = e.chosen_issue ? `Chosen: ${e.chosen_issue}` : "No dispatch";
+    const skipped =
+      e.skipped_issues.length > 0 ? ` · Skipped: ${e.skipped_issues.slice(0, 3).join(", ")}` : "";
+    lines.push(`  ${chosen}${skipped}`);
+    lines.push(`  _${ts}_ · ${e.outcome}`);
+    lines.push(`  ${e.rationale}`);
+    lines.push(``);
+  }
+
+  // Trim trailing blank line
+  if (lines[lines.length - 1] === "") lines.pop();
+
+  return lines.join("\n");
+}
+
+/**
+ * Format routing decision entries for CLI output (plain text).
+ *
+ * @param entries  From buildRoutingDecisions(), newest-first.
+ * @returns        Multi-line string suitable for stdout.
+ */
+export function formatDecisionsForCLI(entries: RoutingDecisionEntry[]): string {
+  if (entries.length === 0) {
+    return "No routing decisions recorded yet.";
+  }
+
+  const lines: string[] = [];
+
+  for (const e of entries) {
+    const ts = new Date(e.timestamp).toISOString().replace("T", " ").slice(0, 16);
+    const agent = e.agent_name ?? "(none)";
+    const chosen = e.chosen_issue ?? "—";
+    const skipped =
+      e.skipped_issues.length > 0 ? e.skipped_issues.slice(0, 5).join(", ") : "(none)";
+
+    lines.push(`[${ts}] ${e.action.padEnd(10)} → ${agent}`);
+    lines.push(`  Chosen:  ${chosen}`);
+    lines.push(`  Skipped: ${skipped}`);
+    lines.push(`  Reason:  ${e.rationale}`);
+    lines.push(`  Outcome: ${e.outcome}`);
+    lines.push(``);
+  }
+
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines.join("\n");
+}

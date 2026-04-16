@@ -24,6 +24,7 @@
  *   /score <task-id> → display quality score and verification details for a task
  *   /backfill-scores [limit] → backfill quality_score for approved tasks with null scores (limit 1-20, default 5)
  *   /reconcile [hours] → cross-repo reconciliation status: last result per repo with outcome and timestamp (default: all time)
+ *   /decisions [n] → last N routing decisions with chosen issue, skipped alternatives, and one-sentence rationale (default 5, max 10)
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -47,6 +48,10 @@ import { buildIssueAgeHeatmap, formatIssueAgeHeatmap } from "../reviewer/issue-a
 import type { CalibrationDriftProvider } from "../reviewer/calibration-drift.js";
 import { CalibrationDriftMonitor } from "../reviewer/calibration-drift.js";
 import { Verifier } from "../reviewer/verifier.js";
+import {
+  buildRoutingDecisions,
+  formatDecisionsForTelegram,
+} from "../supervisor-log.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
 const log = createLogger("telegram-commands");
@@ -95,7 +100,8 @@ type CommandName =
   | "fpr"
   | "score"
   | "backfill-scores"
-  | "reconcile";
+  | "reconcile"
+  | "decisions";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -124,6 +130,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "score",
   "backfill-scores",
   "reconcile",
+  "decisions",
 ]);
 
 interface ParsedCommand {
@@ -357,6 +364,12 @@ async function executeCommand(
       const hoursStr = cmd.args[0]?.trim();
       const sinceHours = hoursStr ? Math.min(Math.max(parseInt(hoursStr, 10) || 0, 0), 720) : undefined;
       return handleReconcile(store, sinceHours || undefined);
+    }
+
+    case "decisions": {
+      const n = parseInt(cmd.args[0] ?? "5", 10);
+      const limit = Number.isNaN(n) || n < 1 ? 5 : Math.min(n, 10);
+      return handleDecisions(store, limit);
     }
   }
 }
@@ -645,6 +658,16 @@ async function handleLogs(store: ITelegramStateStore, limit: number): Promise<st
   }
 
   return lines.join("\n").trimEnd();
+}
+
+/**
+ * /decisions [N] — last N routing decisions with chosen issue, skipped
+ * alternatives, and one-sentence rationale (default 5, max 10).
+ */
+function handleDecisions(store: ITelegramStateStore, limit: number): string {
+  const raw = store.getRecentSupervisorDecisions(Math.min(limit * 10, 100));
+  const entries = buildRoutingDecisions(raw, limit);
+  return formatDecisionsForTelegram(entries);
 }
 
 function handleSupervisorLog(store: ITelegramStateStore, limit: number): string {

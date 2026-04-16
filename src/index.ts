@@ -254,7 +254,15 @@ export type {
 } from "./state/types.js";
 
 // Supervisor decision log — queryable log for orch CLI and dashboard consumers
-export { querySupervisorLog, formatSupervisorLogForCLI, formatRationaleSummary } from "./supervisor-log.js";
+export {
+  querySupervisorLog,
+  formatSupervisorLogForCLI,
+  formatRationaleSummary,
+  buildRoutingDecisions,
+  formatDecisionsForTelegram,
+  formatDecisionsForCLI,
+} from "./supervisor-log.js";
+export type { RoutingDecisionEntry } from "./supervisor-log.js";
 
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
