@@ -3,7 +3,7 @@
  *
  * Commands handled:
  *   /status      → real-time counts from state.db (active, pending, recent)
- *   /health      → checks DB connectivity, GitHub API, Telegram bot token
+ *   /health      → unified operator snapshot: connectivity checks + last-6h dispatch stats + per-agent quality (24h) + reconciliation status + open escalations
  *   /pause       → writes paused=true flag to system_flags
  *   /resume      → writes paused=false flag to system_flags
  *   /dispatch <agent> <instruction...>  → inserts dispatch_request row for orchestrator
@@ -227,13 +227,14 @@ async function executeCommand(
   conflictStatsProvider?: ConflictStatsProvider,
   calibrationDriftProvider?: CalibrationDriftProvider,
   verifier?: Verifier,
+  dashboardUrl?: string,
 ): Promise<string> {
   switch (cmd.command) {
     case "status":
       return handleStatus(store);
 
     case "health":
-      return handleHealth(store, botToken);
+      return handleHealth(store, botToken, dashboardUrl);
 
     case "pause": {
       store.setSystemFlag("paused", "true");
@@ -523,69 +524,211 @@ function handleDeescalation(
 async function handleHealth(
   store: ITelegramStateStore,
   botToken: string,
+  dashboardUrl?: string,
 ): Promise<string> {
-  const results: { label: string; ok: boolean; detail: string }[] = [];
+  const sections: string[] = [];
 
-  // 1. DB connectivity
+  // ── Section 1: Connectivity ───────────────────────────────────────────────
+  const connResults: { label: string; ok: boolean; detail: string }[] = [];
+
   try {
     store.listTasks({ limit: 1 });
-    results.push({ label: "SQLite state.db", ok: true, detail: "query succeeded" });
+    connResults.push({ label: "SQLite state.db", ok: true, detail: "query succeeded" });
   } catch (err) {
-    results.push({
+    connResults.push({
       label: "SQLite state.db",
       ok: false,
       detail: err instanceof Error ? err.message : String(err),
     });
   }
 
-  // 2. GitHub API reachability
   try {
     const resp = await fetch("https://api.github.com", {
       headers: { "User-Agent": "claude-orchestrator-reviewer" },
       signal: AbortSignal.timeout(5000),
     });
-    results.push({
+    connResults.push({
       label: "GitHub API",
       ok: resp.ok || resp.status === 200,
       detail: `HTTP ${resp.status}`,
     });
   } catch (err) {
-    results.push({
+    connResults.push({
       label: "GitHub API",
       ok: false,
       detail: err instanceof Error ? err.message : "unreachable",
     });
   }
 
-  // 3. Telegram bot token validity (getMe)
   try {
     const me = await telegramRequest<{ ok: boolean; result?: { username?: string } }>(
       botToken,
       "getMe",
     );
-    results.push({
+    connResults.push({
       label: "Telegram bot token",
       ok: me.ok,
       detail: me.result?.username ? `@${me.result.username}` : "valid",
     });
   } catch (err) {
-    results.push({
+    connResults.push({
       label: "Telegram bot token",
       ok: false,
       detail: err instanceof Error ? err.message : "invalid",
     });
   }
 
-  const allOk = results.every((r) => r.ok);
-  const lines = [
-    `${allOk ? "✅" : "⚠️"} *Health Check*`,
-    ``,
-    ...results.map(
-      (r) => `${r.ok ? "✅" : "❌"} *${r.label}*: ${r.detail}`,
-    ),
-  ];
+  const connAllOk = connResults.every((r) => r.ok);
+  sections.push(
+    [
+      `*📡 Connectivity* ${connAllOk ? "✅" : "⚠️"}`,
+      ...connResults.map((r) => `${r.ok ? "✅" : "❌"} ${r.label}: ${r.detail}`),
+    ].join("\n"),
+  );
 
-  return lines.join("\n");
+  // ── Section 2: Dispatch stats (last 6h) ───────────────────────────────────
+  try {
+    const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+    const recentDecisions = store.querySupervisorDecisions({ limit: 500, since: sixHoursAgo });
+
+    let dispatched = 0;
+    let skipped = 0;
+    let blocked = 0;
+
+    for (const d of recentDecisions) {
+      if (d.outcome === "dispatched" || d.action === "dispatch" || d.action === "follow-up") {
+        dispatched++;
+      } else if (d.outcome === "blocked") {
+        blocked++;
+      } else if (d.outcome === "skipped" || d.action === "none") {
+        skipped++;
+      }
+    }
+
+    const total = dispatched + skipped + blocked;
+    const skipBlockRate =
+      total > 0 ? Math.round(((skipped + blocked) / total) * 100) : 0;
+
+    const dispatchLines = [
+      `*📊 Dispatch — last 6h*`,
+      `Dispatched: ${dispatched}  |  Skipped: ${skipped}  |  Blocked: ${blocked}`,
+      `Skip/block rate: ${skipBlockRate}%`,
+    ];
+    if (dashboardUrl) {
+      dispatchLines.push(`[→ Dispatch health panel](${dashboardUrl}/dispatch)`);
+    }
+    sections.push(dispatchLines.join("\n"));
+  } catch {
+    sections.push(`*📊 Dispatch — last 6h*\n_unavailable_`);
+  }
+
+  // ── Section 3: Per-agent quality (last 24h) ───────────────────────────────
+  try {
+    const accuracyStats = store.getRoutingAccuracyStats(1);
+    const qualityLines = [`*🎯 Quality — last 24h*`];
+
+    if (accuracyStats.length === 0) {
+      qualityLines.push(`_No scored tasks in window_`);
+    } else {
+      for (const s of accuracyStats.slice(0, 6)) {
+        const score =
+          s.avg_quality_score != null
+            ? s.avg_quality_score.toFixed(2)
+            : "n/a";
+        const trend =
+          s.avg_quality_score != null && s.avg_quality_score >= 0.8
+            ? "✅"
+            : s.avg_quality_score != null && s.avg_quality_score >= 0.7
+              ? "⚠️"
+              : "❌";
+        qualityLines.push(
+          `${trend} \`${s.agent_name}\`: ${score} (${s.total_routed} tasks)`,
+        );
+      }
+    }
+
+    if (dashboardUrl) {
+      qualityLines.push(`[→ Quality dashboard](${dashboardUrl}/quality)`);
+    }
+    sections.push(qualityLines.join("\n"));
+  } catch {
+    sections.push(`*🎯 Quality — last 24h*\n_unavailable_`);
+  }
+
+  // ── Section 4: Reconciliation ─────────────────────────────────────────────
+  try {
+    const reconcEvents = store.getLastReconciliationPerRepo();
+    const reconcLines = [`*🔄 Reconciliation*`];
+
+    if (reconcEvents.length === 0) {
+      reconcLines.push(`_No reconciliation events recorded_`);
+    } else {
+      for (const ev of reconcEvents.slice(0, 5)) {
+        const icon =
+          ev.status === "success"
+            ? "✅"
+            : ev.status === "partial"
+              ? "⚠️"
+              : "❌";
+        const age = formatAge(ev.created_at);
+        const repoShort = ev.repo.replace(/^[^/]+\//, "");
+        reconcLines.push(`${icon} \`${repoShort}\`: ${ev.status} (${age})`);
+      }
+    }
+
+    if (dashboardUrl) {
+      reconcLines.push(`[→ Reconciliation log](${dashboardUrl}/reconcile)`);
+    }
+    sections.push(reconcLines.join("\n"));
+  } catch {
+    sections.push(`*🔄 Reconciliation*\n_unavailable_`);
+  }
+
+  // ── Section 5: Open escalations ───────────────────────────────────────────
+  try {
+    const escalated = store.listTasks({ status: "escalated", limit: 5 });
+    const escLines = [`*🚨 Escalations*`];
+
+    if (escalated.length === 0) {
+      escLines.push(`✅ None`);
+    } else {
+      escLines.push(`${escalated.length} open — run /ack, /resolve, or /status for details`);
+      for (const t of escalated.slice(0, 3)) {
+        const title = t.title.length > 50 ? t.title.slice(0, 47) + "…" : t.title;
+        escLines.push(`  • \`${t.id.slice(0, 8)}\` ${title}`);
+      }
+      if (escalated.length > 3) {
+        escLines.push(`  • _…and ${escalated.length - 3} more_`);
+      }
+    }
+
+    if (dashboardUrl) {
+      escLines.push(`[→ Escalations](${dashboardUrl}/escalations)`);
+    }
+    sections.push(escLines.join("\n"));
+  } catch {
+    sections.push(`*🚨 Escalations*\n_unavailable_`);
+  }
+
+  // ── Header ────────────────────────────────────────────────────────────────
+  const now = new Date().toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  const overallOk = connAllOk;
+  const header = `${overallOk ? "🏥" : "⚠️"} *System Health* — ${now}`;
+
+  return [header, "", ...sections].join("\n\n");
+}
+
+/** Format an ISO-8601 timestamp as a human-readable age string (e.g. "2h ago"). */
+function formatAge(isoTs: string): string {
+  const diffMs = Date.now() - new Date(isoTs).getTime();
+  if (diffMs < 0) return "just now";
+  const mins = Math.floor(diffMs / 60_000);
+  if (mins < 2) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
 }
 
 function handleQueue(store: ITelegramStateStore, repo?: string): string {
@@ -1590,6 +1733,9 @@ export class TelegramCommandHandler {
   private conflictStatsProvider?: ConflictStatsProvider;
   private calibrationDriftProvider?: CalibrationDriftProvider;
   private verifier?: Verifier;
+  /** Optional base URL of the operator dashboard (e.g. "https://dashboard.example.com").
+   *  When provided, /health includes clickable drill-down links for each panel. */
+  private dashboardUrl?: string;
 
   constructor(
     store: ITelegramStateStore,
@@ -1598,6 +1744,8 @@ export class TelegramCommandHandler {
       conflictStatsProvider?: ConflictStatsProvider;
       calibrationDriftProvider?: CalibrationDriftProvider;
       verifier?: Verifier;
+      /** Base URL of the operator dashboard, used to generate drill-down links in /health. */
+      dashboardUrl?: string;
     } = {},
   ) {
     this.store = store;
@@ -1605,6 +1753,7 @@ export class TelegramCommandHandler {
     this.conflictStatsProvider = opts.conflictStatsProvider;
     this.calibrationDriftProvider = opts.calibrationDriftProvider;
     this.verifier = opts.verifier;
+    this.dashboardUrl = opts.dashboardUrl ?? process.env.DASHBOARD_URL;
   }
 
   /**
@@ -1638,7 +1787,7 @@ export class TelegramCommandHandler {
             log.info("Received Telegram command", { command: cmd.command, args: cmd.args });
 
             try {
-              const reply = await executeCommand(cmd, this.store, config.botToken, this.conflictStatsProvider, this.calibrationDriftProvider, this.verifier);
+              const reply = await executeCommand(cmd, this.store, config.botToken, this.conflictStatsProvider, this.calibrationDriftProvider, this.verifier, this.dashboardUrl);
               await sendMessage(config.botToken, cmd.chatId, reply);
             } catch (err) {
               log.error("Error executing command", {
