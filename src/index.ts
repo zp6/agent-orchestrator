@@ -56,7 +56,15 @@ export type { AgentTrendsOptions } from "./reviewer/agent-trends.js";
 // Mount in the orchestrator or dashboard server:
 //   app.get('/quality-anomalies', (_req, res) => res.json(getQualityAnomaliesApiPayload(store)));
 export { getQualityAnomaliesApiPayload } from "./reviewer/quality-anomalies.js";
-export type { QualityAnomaliesOptions } from "./reviewer/quality-anomalies.js";
+export {
+  QualityAnomalySpikeDetector,
+  formatQualityAnomalySpikeAlert,
+} from "./reviewer/quality-anomalies.js";
+export type {
+  QualityAnomaliesOptions,
+  QualityAnomalySpikeDetectorOptions,
+  QualityAnomalySpikeSummary,
+} from "./reviewer/quality-anomalies.js";
 
 // Schema-consumer auto-discovery registry (issue #99).
 // Replaces the static SCHEMA_CONSUMER_MAP with a live map derived from
