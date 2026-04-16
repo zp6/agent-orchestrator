@@ -623,6 +623,42 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
     return row?.count ?? 0;
   }
 
+  /**
+   * Return ALL verified tasks (approved OR rejected) whose quality_score is null.
+   *
+   * Approved tasks with null scores arise when the orchestrator marks a task
+   * approved without running the verifier's LLM pass (e.g. via a direct DB
+   * write or a fast-path approval).  Rejected tasks with null scores arise when
+   * a rejection happens before a score can be computed (e.g. hard-block by
+   * content filter before the scorer runs).
+   *
+   * Both categories are eligible for score inference via inferMissingScore()
+   * so that quality_score is always non-null after a task has been verified.
+   */
+  getVerifiedTasksWithNullScores(limit: number = 100): Task[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE verification_status IN ('approved', 'rejected')
+           AND quality_score IS NULL
+         ORDER BY updated_at DESC
+         LIMIT ?`,
+      )
+      .all(limit) as Task[];
+  }
+
+  /** Count of verified tasks (approved OR rejected) with null quality_score. */
+  getVerifiedTasksWithNullScoresCount(): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) as count FROM tasks
+         WHERE verification_status IN ('approved', 'rejected')
+           AND quality_score IS NULL`,
+      )
+      .get() as { count: number } | undefined;
+    return row?.count ?? 0;
+  }
+
   getRecentVerifiedTasks(limit: number = 20): Task[] {
     return this.db
       .prepare(

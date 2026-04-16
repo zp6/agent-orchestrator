@@ -1510,23 +1510,24 @@ async function handleBackfillScores(
   verifier: Verifier | undefined,
   limit: number,
 ): Promise<string> {
-  const unscorredCount = store.getApprovedTasksWithNullScoresCount();
+  // Cover both approved AND rejected tasks with null scores (issue #229).
+  const unscorredCount = store.getVerifiedTasksWithNullScoresCount();
 
   if (unscorredCount === 0) {
     return [
       `✅ *No backfill needed*`,
       ``,
-      `All approved tasks have quality scores. Dashboard quality trend charts are current.`,
+      `All verified tasks (approved and rejected) have quality scores. Dashboard quality trend charts are current.`,
     ].join("\n");
   }
 
-  const tasksToBackfill = store.getApprovedTasksWithNullScores(limit);
+  const tasksToBackfill = store.getVerifiedTasksWithNullScores(limit);
 
   if (tasksToBackfill.length === 0) {
     return [
       `ℹ️ *No tasks in this batch*`,
       ``,
-      `Found ${unscorredCount} approved tasks needing scores, but none were returned in query.`,
+      `Found ${unscorredCount} verified tasks needing scores, but none were returned in query.`,
     ].join("\n");
   }
 
@@ -1565,9 +1566,18 @@ async function handleBackfillScores(
     try {
       const verResult = await verifier.verify(task.id);
 
+      // Preserve existing rejection for already-rejected tasks — we only need
+      // to fill in the numeric score, not reconsider the decision.
+      const alreadyRejected = task.verification_status === "rejected";
+      const effectiveStatus: "approved" | "rejected" = alreadyRejected
+        ? "rejected"
+        : verResult.approved
+          ? "approved"
+          : "rejected";
+
       // Update task with verification results
       store.updateTask(task.id, {
-        verification_status: verResult.approved ? "approved" : "rejected",
+        verification_status: effectiveStatus,
         quality_score: verResult.score,
         verification_notes: verResult.notes,
         quality_explanation: verResult.explanation ?? null,
@@ -1578,7 +1588,7 @@ async function handleBackfillScores(
         task_id: task.id,
         score: verResult.score,
         first_pass: 1, // Backfill is always first (and only) pass
-        rejection_reason: verResult.approved ? null : (verResult.revision ?? null),
+        rejection_reason: effectiveStatus !== "approved" ? (verResult.revision ?? null) : null,
         blocked_reason:
           verResult.blockedReason === "hard_block_sub50"
             ? "hard_block_sub50"

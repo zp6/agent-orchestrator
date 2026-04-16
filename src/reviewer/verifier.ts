@@ -1659,37 +1659,58 @@ export class Verifier {
   async ensureScoresPopulated(batchLimit: number = 10): Promise<number> {
     let scored = 0;
 
-    // Phase 1: approved tasks with null quality_score → infer score
-    const nullScoreTasks = this.store.getApprovedTasksWithNullScores(batchLimit);
+    // Phase 1: verified tasks (approved OR rejected) with null quality_score → infer score
+    // Covers both approved tasks that bypassed the verifier and rejected tasks that
+    // were hard-blocked before a score could be computed.
+    const nullScoreTasks = this.store.getVerifiedTasksWithNullScores(batchLimit);
     if (nullScoreTasks.length > 0) {
-      this.log.info("ensureScoresPopulated: backfilling approved tasks with null scores", {
+      this.log.info("ensureScoresPopulated: backfilling verified tasks with null scores", {
         count: nullScoreTasks.length,
+        approved: nullScoreTasks.filter((t) => t.verification_status === "approved").length,
+        rejected: nullScoreTasks.filter((t) => t.verification_status === "rejected").length,
       });
       for (const task of nullScoreTasks) {
         try {
           const inferredResult = await this.inferMissingScore(task);
-          const effectiveStatus = inferredResult.approved ? "approved" : "rejected";
+
+          // For tasks already marked rejected, preserve the rejection — do not
+          // flip them to approved even if the inferred score is above threshold.
+          // We only need to fill in the numeric score so quality analytics work.
+          // For approved tasks, apply the normal score-approval invariant: if the
+          // inferred score is below threshold, downgrade to rejected.
+          const alreadyRejected = task.verification_status === "rejected";
+          const effectiveStatus: "approved" | "rejected" = alreadyRejected
+            ? "rejected"
+            : inferredResult.approved
+              ? "approved"
+              : "rejected";
 
           this.store.updateTask(task.id, {
             verification_status: effectiveStatus,
             quality_score: inferredResult.score,
             verification_notes: inferredResult.notes,
-            quality_explanation: inferredResult.approved
+            quality_explanation: effectiveStatus === "approved"
               ? (inferredResult.approvalRationale ?? null)
-              : (inferredResult.explanation ?? `Score ${inferredResult.score.toFixed(2)} below threshold — inferred score triggered rejection`),
+              : (inferredResult.explanation ?? `Score ${inferredResult.score.toFixed(2)} — inferred score backfill`),
           });
 
           this.recordVerificationResult(
             task.id,
             task.agent_name ?? "unknown",
             inferredResult.score,
-            inferredResult.approved,
-            inferredResult.approved ? undefined : (inferredResult.explanation ?? "Inferred score below threshold"),
+            effectiveStatus === "approved",
+            effectiveStatus !== "approved" ? (inferredResult.explanation ?? "Inferred score below threshold") : undefined,
             inferredResult.blockedReason,
             inferredResult.approvalRationale,
           );
 
           scored++;
+          this.log.info("ensureScoresPopulated: backfilled score", {
+            taskId: task.id,
+            inferredScore: inferredResult.score,
+            originalStatus: task.verification_status,
+            effectiveStatus,
+          });
         } catch (err) {
           this.log.error("ensureScoresPopulated: failed to infer score", {
             taskId: task.id,

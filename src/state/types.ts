@@ -600,6 +600,18 @@ export interface IStateStore {
    * Used to check if backfill is needed.
    */
   getApprovedTasksWithNullScoresCount(): number;
+  /**
+   * Get ALL verified tasks (approved OR rejected) that have null quality_score.
+   * Used by ensureScoresPopulated() and /backfill-scores to close the score gap
+   * for both approved and rejected tasks that were verified without a score being
+   * written — e.g. tasks approved/rejected by the orchestrator outside the
+   * verifier's normal flow.
+   */
+  getVerifiedTasksWithNullScores(limit?: number): Task[];
+  /**
+   * Count of ALL verified tasks (approved OR rejected) with null quality_score.
+   */
+  getVerifiedTasksWithNullScoresCount(): number;
   getAgentStats(): AgentStats[];
   getEfficiencyTrend(
     days?: number,
