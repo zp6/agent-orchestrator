@@ -162,6 +162,22 @@ export type {
   StandupDispatchGuardOptions,
 } from "./reviewer/standup-dispatch-guard.js";
 
+// PR existence guard (issue #178) — skip re-dispatch when open PR already exists
+export {
+  checkPRExistenceBeforeDispatch,
+  looksLikeGitHubIssueTask,
+  extractIssueNumberFromSourceRef,
+  extractRepoFromSourceRef,
+  formatPRCheckResult,
+  fetchOpenPRs,
+  findMatchingPR,
+} from "./reviewer/pr-existence-guard.js";
+export type {
+  PRExistenceCheckResult,
+  PRExistenceResolution,
+  OpenPRSummary,
+} from "./reviewer/pr-existence-guard.js";
+
 // Standup handler utilities (used by guard and PR reviewer)
 export {
   isStandupIssue,
