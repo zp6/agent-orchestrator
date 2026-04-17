@@ -6688,6 +6688,9 @@ export class StateStore {
   // ── Learned Patterns (immune system / anti-pattern registry) ─────────────
 
   private runLearnedPatternsMigration(): void {
+    // Create base table without active column index — the column may not exist
+    // yet on tables created by older versions. Indexes are created after
+    // the column migration below.
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS learned_patterns (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -6705,17 +6708,15 @@ export class StateStore {
         created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
         updated_at       TEXT    NOT NULL DEFAULT (datetime('now'))
       );
-      CREATE INDEX IF NOT EXISTS idx_learned_patterns_type   ON learned_patterns(pattern_type);
-      CREATE INDEX IF NOT EXISTS idx_learned_patterns_active ON learned_patterns(active);
-      CREATE INDEX IF NOT EXISTS idx_learned_patterns_conf   ON learned_patterns(confidence DESC);
+      CREATE INDEX IF NOT EXISTS idx_learned_patterns_type ON learned_patterns(pattern_type);
+      CREATE INDEX IF NOT EXISTS idx_learned_patterns_conf ON learned_patterns(confidence DESC);
     `);
 
-    // Add suppressed_at / promoted_at if missing (dashboard uses these for suppress/promote actions)
+    // Column migrations — add missing columns for older tables
     const cols = this.db.prepare("PRAGMA table_info(learned_patterns)").all() as { name: string }[];
     const colNames = new Set(cols.map((c) => c.name));
     if (!colNames.has("active")) {
       this.db.exec("ALTER TABLE learned_patterns ADD COLUMN active INTEGER NOT NULL DEFAULT 1");
-      this.db.exec("CREATE INDEX IF NOT EXISTS idx_learned_patterns_active ON learned_patterns(active)");
     }
     if (!colNames.has("suppressed_at")) {
       this.db.exec("ALTER TABLE learned_patterns ADD COLUMN suppressed_at TEXT");
@@ -6723,6 +6724,9 @@ export class StateStore {
     if (!colNames.has("promoted_at")) {
       this.db.exec("ALTER TABLE learned_patterns ADD COLUMN promoted_at TEXT");
     }
+
+    // Create indexes AFTER column migrations so all referenced columns exist
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_learned_patterns_active ON learned_patterns(active)");
   }
 
   /**
