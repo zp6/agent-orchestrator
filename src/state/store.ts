@@ -60,10 +60,14 @@ import type {
   ReconciliationStatus,
   ReconciliationEventRecord,
   ReconciliationLastPerRepo,
+  TaskType,
+  VerifierThreshold,
+  VerifierAlertState,
+  IThresholdAdjustmentStore,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
-export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
+export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore {
   private db: Database.Database;
 
   constructor(dbPath: string = process.env.STATE_DB_PATH ?? "state.db") {
@@ -186,6 +190,30 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
 
       CREATE INDEX IF NOT EXISTS idx_pr_outcome_records_recorded_at
         ON pr_outcome_records (recorded_at DESC);
+    `);
+
+    // Phase 2 calibration: persisted per-verifier thresholds (idempotent)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS verifier_thresholds (
+        verifier_id    TEXT NOT NULL,
+        task_type      TEXT NOT NULL,
+        threshold      REAL NOT NULL,
+        last_adjusted_at TEXT NOT NULL DEFAULT (datetime('now')),
+        justification  TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (verifier_id, task_type)
+      );
+    `);
+
+    // Phase 2 calibration: consecutive-bad-cycle alert state per bucket (idempotent)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS verifier_alert_state (
+        verifier_id            TEXT NOT NULL,
+        task_type              TEXT NOT NULL,
+        score_bucket           REAL NOT NULL,
+        consecutive_bad_cycles INTEGER NOT NULL DEFAULT 0,
+        last_checked_at        TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (verifier_id, task_type, score_bucket)
+      );
     `);
 
     // Add priority column to tasks if it doesn't exist yet (idempotent)
@@ -1963,6 +1991,80 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
       a.agent_name.localeCompare(b.agent_name) ||
       a.task_type.localeCompare(b.task_type),
     );
+  }
+
+  // ── Phase 2 calibration: verifier threshold auto-adjustment ──────────────
+
+  /**
+   * Return the persisted threshold for (verifierId, taskType), or null if
+   * the threshold has never been explicitly set (caller should use the
+   * default APPROVAL_THRESHOLD = 0.80 in that case).
+   */
+  getVerifierThreshold(verifierId: string, taskType: TaskType): VerifierThreshold | null {
+    const row = this.db
+      .prepare(
+        `SELECT verifier_id, task_type, threshold, last_adjusted_at, justification
+         FROM verifier_thresholds
+         WHERE verifier_id = ? AND task_type = ?`,
+      )
+      .get(verifierId, taskType) as VerifierThreshold | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * Persist an updated threshold for (verifierId, taskType) with an auditable
+   * justification string. Uses UPSERT so repeated calls are idempotent.
+   */
+  setVerifierThreshold(
+    verifierId: string,
+    taskType: TaskType,
+    threshold: number,
+    justification: string,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO verifier_thresholds (verifier_id, task_type, threshold, last_adjusted_at, justification)
+         VALUES (?, ?, ?, datetime('now'), ?)
+         ON CONFLICT(verifier_id, task_type)
+         DO UPDATE SET
+           threshold        = excluded.threshold,
+           last_adjusted_at = excluded.last_adjusted_at,
+           justification    = excluded.justification`,
+      )
+      .run(verifierId, taskType, threshold, justification);
+  }
+
+  /**
+   * Return all alert states for a verifier (across all task types and score buckets).
+   * Returns an empty array when no state has been recorded yet.
+   */
+  getVerifierAlertStates(verifierId: string): VerifierAlertState[] {
+    return this.db
+      .prepare(
+        `SELECT verifier_id, task_type, score_bucket, consecutive_bad_cycles, last_checked_at
+         FROM verifier_alert_state
+         WHERE verifier_id = ?
+         ORDER BY task_type, score_bucket`,
+      )
+      .all(verifierId) as VerifierAlertState[];
+  }
+
+  /**
+   * Upsert the consecutive-bad-cycle counter for one (verifier, task_type, bucket) triplet.
+   * Sets `last_checked_at` to the current UTC timestamp on every write.
+   */
+  upsertVerifierAlertState(state: Omit<VerifierAlertState, "last_checked_at">): void {
+    this.db
+      .prepare(
+        `INSERT INTO verifier_alert_state
+           (verifier_id, task_type, score_bucket, consecutive_bad_cycles, last_checked_at)
+         VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(verifier_id, task_type, score_bucket)
+         DO UPDATE SET
+           consecutive_bad_cycles = excluded.consecutive_bad_cycles,
+           last_checked_at        = excluded.last_checked_at`,
+      )
+      .run(state.verifier_id, state.task_type, state.score_bucket, state.consecutive_bad_cycles);
   }
 
   // ── System flags (pause / resume / operator overrides) ───────────────────

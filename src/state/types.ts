@@ -867,6 +867,70 @@ export interface IScoreOutcomeStore {
   getAdjustedThresholds(targetMergeRate?: number, currentMinScore?: number): AdjustedThreshold[];
 }
 
+// ── Verifier threshold auto-adjustment types (Phase 2 calibration) ──────────
+
+/**
+ * A persisted per-verifier quality threshold, stored in `verifier_thresholds`.
+ *
+ * Written by `ThresholdAdjuster.adjustThreshold()` when calibration data
+ * supports a change; the delta is capped at ±0.05 per cycle (Phase 2 §4).
+ */
+export interface VerifierThreshold {
+  verifier_id: string;
+  task_type: TaskType;
+  /** Current approval threshold (0–1). Default: 0.80 (APPROVAL_THRESHOLD). */
+  threshold: number;
+  /** ISO-8601 timestamp when this row was last updated. */
+  last_adjusted_at: string;
+  /**
+   * Human-readable justification for the last adjustment.
+   * Includes the score bucket, merge_rate, sample count, and raw vs clamped delta,
+   * so every threshold change is fully auditable.
+   */
+  justification: string;
+}
+
+/**
+ * Per-(verifier, task_type, score_bucket) alert state, stored in `verifier_alert_state`.
+ *
+ * Tracks how many consecutive adjustment cycles have seen merge_rate < 0.70,
+ * enabling the "2+ consecutive bad cycles" Telegram alert from Phase 2 §5.
+ */
+export interface VerifierAlertState {
+  verifier_id: string;
+  task_type: TaskType;
+  score_bucket: number;
+  /** Number of consecutive adjustment cycles where merge_rate < 0.70. */
+  consecutive_bad_cycles: number;
+  /** ISO-8601 timestamp of the last check. */
+  last_checked_at: string;
+}
+
+/**
+ * Store interface for verifier threshold auto-adjustment (Phase 2 calibration).
+ *
+ * Implemented by `StateStore`. Consumed by `ThresholdAdjuster`.
+ */
+export interface IThresholdAdjustmentStore {
+  /** Full calibration table (no minimum sample filter). */
+  getCalibrationTable(): ScoreCalibrationRow[];
+  /** Returns the persisted threshold for (verifier, taskType), or null if not yet set. */
+  getVerifierThreshold(verifierId: string, taskType: TaskType): VerifierThreshold | null;
+  /** Persist an updated threshold with its justification. */
+  setVerifierThreshold(
+    verifierId: string,
+    taskType: TaskType,
+    threshold: number,
+    justification: string,
+  ): void;
+  /** Returns all alert states for a verifier across all task types and buckets. */
+  getVerifierAlertStates(verifierId: string): VerifierAlertState[];
+  /** Upsert the consecutive-bad-cycle count for one (verifier, task_type, bucket). */
+  upsertVerifierAlertState(
+    state: Omit<VerifierAlertState, "last_checked_at">,
+  ): void;
+}
+
 // ── PR iteration tracking types ───────────────────────────────────────────
 
 /**
