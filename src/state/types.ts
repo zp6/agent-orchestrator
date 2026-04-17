@@ -749,6 +749,24 @@ export interface IStateStore {
    */
   getTokenStats(sinceHours?: number): LlmTokenStats[];
 
+  // Score coverage metric for dashboard quality panel
+  /**
+   * Return a score-coverage metric showing what fraction of 'done' tasks
+   * have a non-null quality_score.  Only considers tasks older than `graceMinutes`
+   * (default 5) to give the verifier time to score newly-completed tasks.
+   */
+  getScoreCoverageMetric(graceMinutes?: number): ScoreCoverageMetric;
+
+  /**
+   * Return 'done' tasks older than `graceMinutes` that still have null quality_score.
+   * Used by ensureScoresPopulated() Phase 3 to catch short-circuit exits and
+   * orchestrator-routed tasks that bypassed the normal verification flow.
+   *
+   * @param graceMinutes - Minimum age in minutes (default 5).
+   * @param limit - Maximum rows to return (default 50).
+   */
+  getDoneTasksWithNullScores(graceMinutes?: number, limit?: number): Task[];
+
   // Reconciliation event queries (reads from shared reconciliation_events table)
   /**
    * Return the most recent reconciliation event per repo.
@@ -1579,6 +1597,51 @@ export interface QualityAnomalySummary {
   per_agent: Array<{ agent_name: string; count: number }>;
   /** The anomaly records themselves */
   anomalies: QualityAnomaly[];
+}
+
+// ── Score coverage metric types ──────────────────────────────────────────
+
+/**
+ * Dimension label for tasks that received a canonical score without
+ * LLM verification — e.g. short-circuit exits like 'already-in-review',
+ * pre-dispatch guard blocks, or orchestrator-routed no-ops.
+ *
+ * The canonical score is 1.0 for tasks that required no action.
+ */
+export type ShortCircuitDimension =
+  | "no_action_needed"      // already-in-review, zero-action standup, etc.
+  | "pre_dispatch_blocked"  // pre-dispatch guard exit (issue closed, auth failure, etc.)
+  | "orchestrator_routed";  // orchestrator handled routing without agent work
+
+/**
+ * Score coverage metric for the dashboard quality panel.
+ *
+ * Provides a single percentage representing how many 'done' tasks
+ * have a non-null quality_score, enabling operators to spot verification
+ * gaps at a glance.
+ */
+export interface ScoreCoverageMetric {
+  /** ISO-8601 timestamp when the metric was computed. */
+  generated_at: string;
+  /** Total 'done' tasks older than the grace period (default 5 min). */
+  total_done_tasks: number;
+  /** Done tasks with a non-null quality_score. */
+  scored_tasks: number;
+  /** Done tasks with null quality_score (verification gap). */
+  unscored_tasks: number;
+  /**
+   * scored_tasks / total_done_tasks as a 0–1 fraction.
+   * Null when total_done_tasks is 0.
+   */
+  coverage_pct: number | null;
+  /** Per-agent breakdown of score coverage. */
+  per_agent: Array<{
+    agent_name: string;
+    total: number;
+    scored: number;
+    unscored: number;
+    coverage_pct: number | null;
+  }>;
 }
 
 // ── Reconciliation event types ────────────────────────────────────────────

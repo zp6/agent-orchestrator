@@ -96,7 +96,7 @@ export {
   PRIORITY_QUALITY_FLOOR,
 } from "./reviewer/verifier.js";
 export type { VerificationResult, QualityDimensions } from "./reviewer/verifier.js";
-export type { SubtaskRollupPolicy, SubtaskRollupResult, SubtaskChildSummary } from "./state/types.js";
+export type { SubtaskRollupPolicy, SubtaskRollupResult, SubtaskChildSummary, ShortCircuitDimension, ScoreCoverageMetric } from "./state/types.js";
 
 export { Supervisor, extractIssueRefs, isDecisionAlreadyResolved, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo, formatConflictStatsSection, formatPRConfidenceSection, formatRoutingAccuracySection, formatQualityByTaskTypeSection } from "./reviewer/supervisor.js";
 export type { SupervisorDecision, ConflictStatsProvider, PRConfidenceProvider, RoutingAccuracyProvider } from "./reviewer/supervisor.js";

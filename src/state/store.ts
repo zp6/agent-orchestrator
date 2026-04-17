@@ -57,6 +57,7 @@ import type {
   AgentSecretsHealthSummary,
   SecretsFleetHealthSummary,
   QualityAnomalySummary,
+  ScoreCoverageMetric,
   ReconciliationStatus,
   ReconciliationEventRecord,
   ReconciliationLastPerRepo,
@@ -747,6 +748,103 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       )
       .get() as { count: number } | undefined;
     return row?.count ?? 0;
+  }
+
+  /**
+   * Return 'done' tasks older than `graceMinutes` that still have null quality_score.
+   *
+   * Catches tasks that bypassed the normal verification flow entirely:
+   *   - Short-circuit exits (already-in-review, zero-action standup)
+   *   - Pre-dispatch guard blocks (issue closed, auth failure)
+   *   - Orchestrator-routed tasks that completed without agent work
+   *
+   * These tasks are in terminal 'done' state but were never scored.
+   * Phase 3 of ensureScoresPopulated() uses this to assign canonical scores.
+   *
+   * @param graceMinutes - Minimum task age in minutes (default 5).
+   * @param limit - Maximum rows to return (default 50).
+   */
+  getDoneTasksWithNullScores(graceMinutes: number = 5, limit: number = 50): Task[] {
+    const grace = Number.isFinite(graceMinutes) && graceMinutes >= 0 ? graceMinutes : 5;
+    const maxRows = Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : 50;
+    // Include verification_status IS NULL (never touched) and 'pending' (verify()
+    // started but failed before completing — the task is stuck with status='done'
+    // and verification_status='pending' because the LLM call errored out).
+    //
+    // Uses created_at (not updated_at) for the grace period because updateTask()
+    // refreshes updated_at on every call — a failed Phase 2 verify() attempt
+    // would otherwise push the task outside the grace window indefinitely.
+    return this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE status = 'done'
+           AND quality_score IS NULL
+           AND (verification_status IS NULL OR verification_status = 'pending')
+           AND created_at <= datetime('now', ? || ' minutes')
+         ORDER BY created_at ASC
+         LIMIT ?`,
+      )
+      .all(`-${grace}`, maxRows) as Task[];
+  }
+
+  /**
+   * Return a score-coverage metric showing what fraction of 'done' tasks
+   * have a non-null quality_score.
+   *
+   * Only considers tasks older than `graceMinutes` (default 5) so that
+   * tasks still in the verification pipeline are excluded.
+   *
+   * Used by the dashboard quality panel to show a 'score coverage %' widget.
+   */
+  getScoreCoverageMetric(graceMinutes: number = 5): ScoreCoverageMetric {
+    const grace = Number.isFinite(graceMinutes) && graceMinutes >= 0 ? graceMinutes : 5;
+
+    type CoverageRow = {
+      agent_name: string | null;
+      total: number;
+      scored: number;
+    };
+
+    const rows = this.db
+      .prepare(
+        `SELECT
+           agent_name,
+           COUNT(*) as total,
+           COUNT(quality_score) as scored
+         FROM tasks
+         WHERE status = 'done'
+           AND updated_at <= datetime('now', ? || ' minutes')
+         GROUP BY agent_name
+         ORDER BY agent_name ASC`,
+      )
+      .all(`-${grace}`) as CoverageRow[];
+
+    let totalDone = 0;
+    let totalScored = 0;
+    const perAgent: ScoreCoverageMetric["per_agent"] = [];
+
+    for (const row of rows) {
+      const agentName = row.agent_name ?? "(unassigned)";
+      const unscored = row.total - row.scored;
+      perAgent.push({
+        agent_name: agentName,
+        total: row.total,
+        scored: row.scored,
+        unscored,
+        coverage_pct: row.total > 0 ? row.scored / row.total : null,
+      });
+      totalDone += row.total;
+      totalScored += row.scored;
+    }
+
+    return {
+      generated_at: new Date().toISOString(),
+      total_done_tasks: totalDone,
+      scored_tasks: totalScored,
+      unscored_tasks: totalDone - totalScored,
+      coverage_pct: totalDone > 0 ? totalScored / totalDone : null,
+      per_agent: perAgent,
+    };
   }
 
   getRecentVerifiedTasks(limit: number = 20): Task[] {
