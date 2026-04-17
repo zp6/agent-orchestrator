@@ -4,12 +4,13 @@ import type { OrchestratorConfig } from "../config/schema.js";
 
 const mockCountOpenPRs = vi.fn();
 const mockCachedGetIssueState = vi.fn();
+const mockFindExistingPRsForIssue = vi.fn();
 
 vi.mock("../triggers/github.js", () => ({
   countOpenPRs: (...args: unknown[]) => mockCountOpenPRs(...args),
   findApprovedPRForIssue: vi.fn().mockReturnValue(null),
   findBranchForIssue: vi.fn().mockReturnValue(null),
-  findExistingPRsForIssue: vi.fn().mockReturnValue([]),
+  findExistingPRsForIssue: (...args: unknown[]) => mockFindExistingPRsForIssue(...args),
 }));
 
 vi.mock("../triggers/issue-state-bridge.js", () => ({
@@ -48,12 +49,14 @@ function makeConfig(): OrchestratorConfig {
 beforeEach(() => {
   mockCountOpenPRs.mockReset();
   mockCachedGetIssueState.mockReset();
+  mockFindExistingPRsForIssue.mockReset();
   mockCachedGetIssueState.mockReturnValue({
     state: "open",
     hasOpenPR: false,
     hasMergedPR: false,
     fetchedAt: Date.now(),
   });
+  mockFindExistingPRsForIssue.mockReturnValue([]);
 });
 
 describe("runGitHubPreDispatchValidation", () => {
@@ -111,6 +114,34 @@ describe("runGitHubPreDispatchValidation", () => {
     expect(result.outcome).toBe("passed");
     expect(result.checks.some((check) => check.name === "repo_pr_capacity" && check.code === "within_pr_cap")).toBe(true);
     expect(mockCachedGetIssueState).toHaveBeenCalled();
+  });
+
+  it("blocks dispatch when an open PR already exists even if the cache says no PR exists", () => {
+    const config = makeConfig();
+    const store = new StateStore(":memory:");
+    mockCountOpenPRs.mockReturnValue(0);
+    mockCachedGetIssueState.mockReturnValue({
+      state: "open",
+      hasOpenPR: false,
+      hasMergedPR: false,
+      fetchedAt: Date.now(),
+    });
+    mockFindExistingPRsForIssue.mockReturnValue([
+      { number: 17, title: "WIP fix", url: "https://github.com/owner/repo/pull/17", state: "open", isDraft: false },
+    ]);
+
+    const result = runGitHubPreDispatchValidation({
+      config,
+      store,
+      source: "github",
+      agentName: "test-agent",
+      issue: { repo: "owner/repo", number: 42 },
+    });
+
+    expect(result.outcome).toBe("blocked");
+    expect(result.failureCode).toBe("open_pr_exists");
+    expect(result.failureReason).toContain("already has open PR #17");
+    expect(mockFindExistingPRsForIssue).toHaveBeenCalledWith("owner/repo", 42);
   });
 });
 
@@ -194,7 +225,7 @@ describe("runGitHubPreDispatchValidation — agent_registered check (issue #864)
     expect(registryCheck?.code).toBe("agent_in_registry");
   });
 
-  it("includes the known agent names in the failure reason", () => {
+  it("includes the known agent names in the failure reason (agent registry)", () => {
     const config = makeConfig();
     const store = new StateStore(":memory:");
 
@@ -207,5 +238,137 @@ describe("runGitHubPreDispatchValidation — agent_registered check (issue #864)
     });
 
     expect(result.failureReason).toContain("test-agent"); // the known agent in makeConfig()
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Pre-dispatch open-PR dedup gate — issue #884
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("runGitHubPreDispatchValidation — open-PR dedup gate (issue #884)", () => {
+  it("blocks dispatch when a non-draft open PR already closes the issue", () => {
+    const config = makeConfig();
+    const store = new StateStore(":memory:");
+    mockCountOpenPRs.mockReturnValue(1);
+    mockFindExistingPRsForIssue.mockReturnValue([
+      { number: 42, title: "Fix it", url: "https://github.com/owner/repo/pull/42", state: "open", isDraft: false },
+    ]);
+
+    const result = runGitHubPreDispatchValidation({
+      config,
+      store,
+      source: "github",
+      agentName: "test-agent",
+      issue: { repo: "owner/repo", number: 10 },
+    });
+
+    expect(result.outcome).toBe("blocked");
+    expect(result.failureCode).toBe("open_pr_exists");
+    expect(result.failureReason).toContain("open PR #42");
+    expect(result.blockingPRNumber).toBe(42);
+  });
+
+  it("blocks dispatch even when cache reports hasOpenPR: false (stale cache bypass, issue #884)", () => {
+    // Simulate the exact failure mode: cache says no open PR (fresh 60-second
+    // hit) but the agent opened a PR in the same cycle. The validator must
+    // call findExistingPRsForIssue unconditionally to catch this.
+    const config = makeConfig();
+    const store = new StateStore(":memory:");
+    mockCountOpenPRs.mockReturnValue(1);
+    // Cache claims hasOpenPR: false — stale data from earlier in the poll cycle
+    mockCachedGetIssueState.mockReturnValue({
+      state: "open",
+      hasOpenPR: false,
+      hasMergedPR: false,
+      fetchedAt: Date.now(),
+    });
+    // But live API shows an open PR
+    mockFindExistingPRsForIssue.mockReturnValue([
+      { number: 99, title: "Already done", url: "https://github.com/owner/repo/pull/99", state: "open", isDraft: false },
+    ]);
+
+    const result = runGitHubPreDispatchValidation({
+      config,
+      store,
+      source: "github",
+      agentName: "test-agent",
+      issue: { repo: "owner/repo", number: 11 },
+    });
+
+    expect(result.outcome).toBe("blocked");
+    expect(result.failureCode).toBe("open_pr_exists");
+    expect(result.blockingPRNumber).toBe(99);
+    // Confirm findExistingPRsForIssue was called regardless of cached state
+    expect(mockFindExistingPRsForIssue).toHaveBeenCalledWith("owner/repo", 11);
+  });
+
+  it("allows dispatch through a draft PR (draft does not gate dispatch)", () => {
+    const config = makeConfig();
+    const store = new StateStore(":memory:");
+    mockCountOpenPRs.mockReturnValue(1);
+    mockFindExistingPRsForIssue.mockReturnValue([
+      { number: 55, title: "WIP", url: "https://github.com/owner/repo/pull/55", state: "open", isDraft: true },
+    ]);
+
+    const result = runGitHubPreDispatchValidation({
+      config,
+      store,
+      source: "github",
+      agentName: "test-agent",
+      issue: { repo: "owner/repo", number: 12 },
+    });
+
+    // Draft PRs should not block; agent is asked to continue existing work
+    expect(result.outcome).toBe("passed");
+    expect(result.draftPR).not.toBeNull();
+    expect(result.draftPR?.number).toBe(55);
+  });
+
+  it("always calls findExistingPRsForIssue regardless of cache state", () => {
+    const config = makeConfig();
+    const store = new StateStore(":memory:");
+    mockCountOpenPRs.mockReturnValue(0);
+    // Cache reports no open/merged PRs — but we should still call the live check
+    mockCachedGetIssueState.mockReturnValue({
+      state: "open",
+      hasOpenPR: false,
+      hasMergedPR: false,
+      fetchedAt: Date.now(),
+    });
+    mockFindExistingPRsForIssue.mockReturnValue([]);
+
+    runGitHubPreDispatchValidation({
+      config,
+      store,
+      source: "github",
+      agentName: "test-agent",
+      issue: { repo: "owner/repo", number: 13 },
+    });
+
+    // Must have been called unconditionally — not gated on cache
+    expect(mockFindExistingPRsForIssue).toHaveBeenCalledWith("owner/repo", 13);
+  });
+
+  it("persists an open_pr_exists block to the dispatch_validations table", () => {
+    const config = makeConfig();
+    const store = new StateStore(":memory:");
+    mockCountOpenPRs.mockReturnValue(1);
+    mockFindExistingPRsForIssue.mockReturnValue([
+      { number: 77, title: "My PR", url: "https://github.com/owner/repo/pull/77", state: "open", isDraft: false },
+    ]);
+
+    runGitHubPreDispatchValidation({
+      config,
+      store,
+      source: "github",
+      agentName: "test-agent",
+      issue: { repo: "owner/repo", number: 14 },
+    });
+
+    const rows = store.getDispatchValidationHistory("owner/repo#14", 10);
+    expect(rows.length).toBeGreaterThan(0);
+    const block = rows.find((r) => r.failure_code === "open_pr_exists");
+    expect(block).toBeDefined();
+    expect(block?.outcome).toBe("blocked");
   });
 });

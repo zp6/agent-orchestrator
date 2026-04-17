@@ -412,10 +412,9 @@ export function runGitHubPreDispatchValidation(params: {
   }
   checks.push(makePassedCheck("issue_state", "issue_open", `issue ${sourceRef} is open`));
 
-  let linkedPRs: LinkedPR[] = [];
-  if (issueState.hasOpenPR || issueState.hasMergedPR) {
-    linkedPRs = findExistingPRsForIssue(issue.repo, issue.number);
-  }
+  // Always query the live GitHub API for linked PRs so a freshly opened PR is
+  // never hidden behind the issue cache's 60s TTL window.
+  const linkedPRs: LinkedPR[] = findExistingPRsForIssue(issue.repo, issue.number);
   const mergedPR = linkedPRs.find((pr) => pr.state === "merged") ?? null;
   if (mergedPR) {
     // Issue #775: A merged PR against an OPEN issue does NOT block dispatch.
