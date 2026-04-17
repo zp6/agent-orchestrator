@@ -28,6 +28,8 @@ import {
 import type { RoutingAccuracyProvider } from "./routing-accuracy.js";
 import type { CalibrationDriftProvider } from "./calibration-drift.js";
 import { formatDriftAlertLine } from "./calibration-drift.js";
+import type { TriageCoachingProvider, TriageCoachingDirective } from "./triage-coaching.js";
+import { formatTriageCoachingSection } from "./triage-coaching.js";
 
 /**
  * Minimal interface for providing conflict stats to the supervisor.
@@ -483,6 +485,7 @@ export class Supervisor {
   private routingAccuracyProvider?: RoutingAccuracyProvider;
   private calibrationDriftProvider?: CalibrationDriftProvider;
   private qualitySLAProvider?: QualitySLAProvider;
+  private triageCoachingProvider?: TriageCoachingProvider;
   private notifier: Notifier;
 
   constructor(
@@ -494,6 +497,9 @@ export class Supervisor {
       routingAccuracyProvider?: RoutingAccuracyProvider;
       calibrationDriftProvider?: CalibrationDriftProvider;
       qualitySLAProvider?: QualitySLAProvider;
+      /** Per-agent triage coaching (issue #245). Injected into context when
+       *  an agent's rolling triage score drops below the configured threshold. */
+      triageCoachingProvider?: TriageCoachingProvider;
       notifier?: Notifier;
     } = {},
   ) {
@@ -502,6 +508,7 @@ export class Supervisor {
     this.routingAccuracyProvider = opts.routingAccuracyProvider;
     this.calibrationDriftProvider = opts.calibrationDriftProvider;
     this.qualitySLAProvider = opts.qualitySLAProvider;
+    this.triageCoachingProvider = opts.triageCoachingProvider;
     this.notifier = opts.notifier ?? createNotifier();
   }
 
@@ -969,6 +976,20 @@ export class Supervisor {
             `- ${b.agent_name}: avg ${b.avg_score.toFixed(2)} (below threshold ${b.threshold_min.toFixed(2)})`,
         );
         sections.push(`## Quality SLA Breaches\n${breachLines.join("\n")}`);
+      }
+    }
+
+    // Per-agent triage coaching directives (issue #245).
+    // Injected when an agent's rolling triage score drops below the configured
+    // threshold (default 0.80).  Surfaces the specific missing schema fields so
+    // the supervisor can include them in the housekeeping dispatch message,
+    // preventing repeat rejections for the same schema gap.
+    if (this.triageCoachingProvider) {
+      const agentNames = Object.keys(this.config.agents);
+      const coachingDirectives = this.triageCoachingProvider.getTriageCoachingDirectives(agentNames);
+      const coachingLines = formatTriageCoachingSection(coachingDirectives);
+      if (coachingLines.length > 0) {
+        sections.push(`## Triage Coaching Directives\n${coachingLines.join("\n")}`);
       }
     }
 

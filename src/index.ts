@@ -101,6 +101,23 @@ export type { SubtaskRollupPolicy, SubtaskRollupResult, SubtaskChildSummary } fr
 export { Supervisor, extractIssueRefs, isDecisionAlreadyResolved, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo, formatConflictStatsSection, formatPRConfidenceSection, formatRoutingAccuracySection, formatQualityByTaskTypeSection } from "./reviewer/supervisor.js";
 export type { SupervisorDecision, ConflictStatsProvider, PRConfidenceProvider, RoutingAccuracyProvider } from "./reviewer/supervisor.js";
 
+// Per-agent triage coaching directives (issue #245).
+// Injects agent-specific schema coaching into housekeeping dispatch prompts
+// when the agent's rolling triage score drops below 0.80.
+export {
+  TriageCoachingAdvisor,
+  buildTriageCoachingDirective,
+  formatTriageCoachingSection,
+  injectTriageCoachingIntoPrompt,
+  TRIAGE_COACHING_THRESHOLD,
+  TRIAGE_COACHING_WINDOW,
+} from "./reviewer/triage-coaching.js";
+export type {
+  TriageCoachingDirective,
+  TriageCoachingProvider,
+  AgentTriageStats,
+} from "./reviewer/triage-coaching.js";
+
 export { RoutingAccuracyTracker } from "./reviewer/routing-accuracy.js";
 
 export { RerouteQualityTracker } from "./reviewer/reroute-quality-tracker.js";
