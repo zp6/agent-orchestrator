@@ -179,6 +179,20 @@ export type {
   StandupDispatchGuardOptions,
 } from "./reviewer/standup-dispatch-guard.js";
 
+// Standup batch splitter (issue #259) — split large standups into sequential child task batches
+export {
+  parseActionItems,
+  splitIntoBatches,
+  formatBatchAsTask,
+  BATCH_SIZE,
+  SPLIT_THRESHOLD,
+} from "./reviewer/standup-batch-splitter.js";
+export type {
+  ActionItem,
+  StandupBatch,
+  BatchSplitResult,
+} from "./reviewer/standup-batch-splitter.js";
+
 // PR existence guard (issue #178) — skip re-dispatch when open PR already exists
 export {
   checkPRExistenceBeforeDispatch,

@@ -26,6 +26,11 @@ import {
   isSynthesisFailed,
   type GitHubIssue,
 } from "./standup-handler.js";
+import {
+  parseActionItems,
+  splitIntoBatches,
+  type StandupBatch,
+} from "./standup-batch-splitter.js";
 import type { IStandupHealthStore } from "../state/types.js";
 import type { Notifier } from "../notify.js";
 import type { ShortCircuitCallback } from "./pr-existence-guard.js";
@@ -43,6 +48,19 @@ export interface StandupDispatchDecision {
   actionItemCount: number;
   /** Whether synthesis failure was detected (triggers fallback recovery). */
   synthesisFailed: boolean;
+  /**
+   * True when the standup has more than SPLIT_THRESHOLD action items and
+   * should be split into sequential child task batches instead of a single
+   * large dispatch. The orchestrator should fan out batches sequentially,
+   * gating each on the prior batch's PR merging.
+   */
+  shouldSplit?: boolean;
+  /**
+   * Populated when shouldSplit is true. Each StandupBatch describes one
+   * sequential child task. Batches must be dispatched in batchIndex order;
+   * batch N+1 must not be dispatched until batch N's PR is merged.
+   */
+  batches?: StandupBatch[];
 }
 
 export interface StandupDispatchGuardOptions {
@@ -116,8 +134,31 @@ export async function shouldSkipStandupDispatch(
     const actionItemCount = extractActionItemCount(issue);
     const synthesisFailed = isSynthesisFailed(issue);
 
-    // 4. If there ARE action items, dispatch normally
+    // 4. If there ARE action items, check whether to split into batches
     if (actionItemCount > 0) {
+      // Parse action items from the body for potential batch splitting
+      const parsedItems = parseActionItems(issue.body);
+      const parentIssueRef = `${repo}#${issueNumber}`;
+      const splitResult = splitIntoBatches(parsedItems, parentIssueRef);
+
+      if (splitResult.shouldSplit) {
+        log.info("Large standup detected — splitting into sequential child task batches", {
+          repo,
+          issueNumber,
+          actionItemCount,
+          batchCount: splitResult.batches.length,
+        });
+
+        return {
+          skip: false,
+          reason: `Standup #${issueNumber} has ${actionItemCount} action items — splitting into ${splitResult.batches.length} sequential batches of up to 3 items each`,
+          actionItemCount,
+          synthesisFailed,
+          shouldSplit: true,
+          batches: splitResult.batches,
+        };
+      }
+
       return {
         skip: false,
         reason: `Standup #${issueNumber} has ${actionItemCount} action items — dispatching to agent`,
