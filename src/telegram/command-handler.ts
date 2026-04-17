@@ -17,7 +17,7 @@
  *   /sla [status|set|clear] → configure and monitor quality SLA thresholds
  *   /quality [tasks] → live per-agent quality health snapshot over the most recent tasks (default 20)
  *   /verification-calibration [days] → score histograms, low-conf approvals, and drift alerts
- *   /calibration [days]  → alias for /verification-calibration
+ *   /calibration         → verifier × score-bucket × task-type merge-rate table (highlights merge_rate < 0.70; flags n<30 cells)
  *   /token-stats [hours] → per-call-type LLM token usage (default: 720h = 30 days)
  *   /first-pass-rate [weeks] → first-pass rate widget: month-to-date rate, 30-day trend, and agent/task-type drill-down toward 80% goal
  *   /fpr [weeks]  → alias for /first-pass-rate
@@ -38,6 +38,7 @@ import type {
   ITelegramStateStore,
   Task,
   LlmTokenStats,
+  ScoreCalibrationRow,
   VerificationStats,
   FirstPassRateWidget,
   QualityHealthReport,
@@ -310,14 +311,16 @@ async function executeCommand(
     case "s":
       return handleWeeklySummary(store, conflictStatsProvider);
 
-    case "verification-calibration":
-    case "calibration": {
+    case "verification-calibration": {
       const days = parseInt(cmd.args[0] ?? "30", 10);
       const windowDays = Number.isNaN(days) || days < 1 ? 30 : Math.min(days, 90);
       const provider: CalibrationDriftProvider = calibrationDriftProvider ?? new CalibrationDriftMonitor(store);
       const report = provider.buildReport({ windowDays });
       return provider.formatDistributionPage(report);
     }
+
+    case "calibration":
+      return handleCalibrationTable(store);
 
     case "sla":
       return handleSLA(store, cmd.args);
@@ -1213,6 +1216,106 @@ function handleQualityTasks(store: ITelegramStateStore, limit: number): string {
     const max = Math.max(...scores);
     lines.push(``);
     lines.push(`*Summary:* avg ${(avg * 100).toFixed(0)}% · min ${(min * 100).toFixed(0)}% · max ${(max * 100).toFixed(0)}% · ${scores.length} scored`);
+  }
+
+  return lines.join("\n");
+}
+
+// ── /calibration handler ─────────────────────────────────────────────────
+
+const CALIBRATION_MERGE_RATE_ALERT = 0.70;
+const CALIBRATION_MIN_SAMPLE = 30;
+
+/**
+ * Renders a compact merge-rate table grouped by verifier and task type.
+ *
+ * Format per row:
+ *   *agent / task_type*
+ *     0.5: ~43% (n=8)  0.6: 71% ⚠️ (n=45)  0.7: 85% (n=32)
+ *
+ * Legend:
+ *   ⚠️  merge_rate < 0.70 (calibration alert threshold)
+ *   ~   n < 30 (insufficient data — rate shown for reference only)
+ */
+function handleCalibrationTable(store: ITelegramStateStore): string {
+  // Prefer getCalibrationTable() (no min-sample filter) when available;
+  // fall back to getCalibrationData() (min 3 records) on older store versions.
+  const storeAsAny = store as unknown as Record<string, unknown>;
+  const rows: ScoreCalibrationRow[] =
+    typeof storeAsAny.getCalibrationTable === "function"
+      ? (storeAsAny.getCalibrationTable as () => ScoreCalibrationRow[])()
+      : store.getCalibrationData();
+
+  if (rows.length === 0) {
+    return [
+      "📊 *Calibration Table*",
+      "",
+      "No outcome data recorded yet\\. Merge\\/rejection events will populate this table\\.",
+      "_(Use /verification\\-calibration for score distribution histograms)_",
+    ].join("\n");
+  }
+
+  // Collect all score buckets present in the data (sorted ascending).
+  const allBuckets = [...new Set(rows.map((r) => r.score_bucket))].sort((a, b) => a - b);
+
+  // Group rows by (agent_name, task_type).
+  const groupMap = new Map<string, typeof rows>();
+  for (const row of rows) {
+    const key = `${row.agent_name}\x00${row.task_type}`;
+    const list = groupMap.get(key) ?? [];
+    list.push(row);
+    groupMap.set(key, list);
+  }
+
+  const lines: string[] = [];
+  lines.push("📊 *Calibration Table* — verifier × score\\-bucket → merge rate");
+  lines.push(
+    `_⚠️ = merge\\_rate < ${(CALIBRATION_MERGE_RATE_ALERT * 100).toFixed(0)}% \\| ~ = n<${CALIBRATION_MIN_SAMPLE} \\(insufficient\\)_`,
+  );
+  lines.push(
+    `_Buckets: ${allBuckets.map((b) => b.toFixed(1)).join(", ")}_`,
+  );
+
+  // Tally alerts for the footer.
+  let alertCells = 0;
+  let insufficientCells = 0;
+
+  for (const [key, cellRows] of groupMap) {
+    const [agentName, taskType] = key.split("\x00");
+    lines.push("");
+    lines.push(`*${agentName}* / ${taskType}`);
+
+    const bucketParts: string[] = [];
+    for (const bucket of allBuckets) {
+      const cell = cellRows.find((r) => r.score_bucket === bucket);
+      if (!cell) continue; // bucket not present for this agent/task combination
+
+      const bucketLabel = bucket.toFixed(1);
+      if (cell.total_count < CALIBRATION_MIN_SAMPLE) {
+        // Insufficient data — show tilde-prefixed rate for reference.
+        const ratePct = (cell.actual_merge_rate * 100).toFixed(0);
+        bucketParts.push(`  ${bucketLabel}: ~${ratePct}% (n=${cell.total_count})`);
+        insufficientCells++;
+      } else {
+        const ratePct = (cell.actual_merge_rate * 100).toFixed(0);
+        const alert = cell.actual_merge_rate < CALIBRATION_MERGE_RATE_ALERT ? " ⚠️" : "";
+        if (alert) alertCells++;
+        bucketParts.push(`  ${bucketLabel}: ${ratePct}%${alert} (n=${cell.total_count})`);
+      }
+    }
+    lines.push(bucketParts.join("\n"));
+  }
+
+  lines.push("");
+  const summaryParts: string[] = [];
+  if (alertCells > 0)
+    summaryParts.push(`⚠️ ${alertCells} bucket${alertCells === 1 ? "" : "s"} below ${(CALIBRATION_MERGE_RATE_ALERT * 100).toFixed(0)}% merge rate`);
+  if (insufficientCells > 0)
+    summaryParts.push(`~ ${insufficientCells} bucket${insufficientCells === 1 ? "" : "s"} with insufficient data \\(n<${CALIBRATION_MIN_SAMPLE}\\)`);
+  if (summaryParts.length > 0) {
+    lines.push(summaryParts.join(" \\| "));
+  } else {
+    lines.push("✅ All buckets have sufficient data and are within threshold\\.");
   }
 
   return lines.join("\n");

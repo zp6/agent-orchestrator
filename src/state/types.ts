@@ -525,6 +525,38 @@ export interface AgentSLAThreshold {
 }
 
 /**
+ * Score coverage metric for the quality panel dashboard.
+ *
+ * Measures what fraction of 'done' tasks older than a minimum age (default 5 min)
+ * have a non-null quality_score.  A coverage_pct of 1.0 (100%) means every
+ * completed task has been scored — the target state after issue #250.
+ *
+ * Short-circuit exits (e.g. 'already-in-review') and pre-dispatch guard exits
+ * contribute to `total_done` but used to contribute to `unscored_done` because
+ * they bypassed the normal verify path.  After issue #250, these tasks receive
+ * a canonical score of 1.0 ('no_action_needed') so they no longer inflate the
+ * gap.
+ */
+export interface ScoreCoverageMetric {
+  /** ISO-8601 timestamp when the metric was computed. */
+  generated_at: string;
+  /** Minimum task age (minutes) used as the eligibility floor. Default: 5. */
+  min_age_minutes: number;
+  /** Tasks in 'done' status older than min_age_minutes. */
+  total_done: number;
+  /** Done tasks that have a non-null quality_score. */
+  scored_done: number;
+  /** Done tasks that still have quality_score = null. */
+  unscored_done: number;
+  /**
+   * Fraction of done tasks that are scored (0.0–1.0).
+   * 1.0 = full coverage, 0.0 = no tasks scored.
+   * Null when total_done = 0 (no eligible tasks).
+   */
+  coverage_pct: number | null;
+}
+
+/**
  * Core StateStore interface consumed by reviewer modules.
  *
  * This is intentionally scoped to the methods the orchestrator's StateStore
@@ -612,6 +644,25 @@ export interface IStateStore {
    * Count of ALL verified tasks (approved OR rejected) with null quality_score.
    */
   getVerifiedTasksWithNullScoresCount(): number;
+  /**
+   * Return done tasks with null quality_score that are older than minAgeMinutes.
+   * Used by ensureScoresPopulated() and gap-fill mechanisms to prioritise
+   * coverage gaps — short-circuit exits and pre-dispatch guards may skip the
+   * normal verify path, leaving null scores on 'done' tasks indefinitely.
+   *
+   * @param minAgeMinutes - Minimum task age in minutes (default 5).
+   * @param limit         - Maximum rows to return (default 100).
+   */
+  getDoneTasksWithNullScoreOlderThan(minAgeMinutes?: number, limit?: number): Task[];
+  /**
+   * Compute the score coverage metric: what fraction of 'done' tasks have a
+   * non-null quality_score.  Used by the dashboard quality panel to surface a
+   * 'score coverage %' badge.
+   *
+   * @param minAgeMinutes - Only count tasks older than this (default 5) to
+   *                        exclude tasks still in the verify pipeline.
+   */
+  getScoreCoverage(minAgeMinutes?: number): ScoreCoverageMetric;
   getAgentStats(): AgentStats[];
   getEfficiencyTrend(
     days?: number,
@@ -807,6 +858,12 @@ export interface AdjustedThreshold {
 export interface IScoreOutcomeStore {
   recordPROutcome(record: Omit<PROutcomeRecord, "id" | "recorded_at">): void;
   getCalibrationData(): ScoreCalibrationRow[];
+  /**
+   * Returns ALL (agent_name, task_type, score_bucket) cells from pr_outcome_records
+   * with no minimum sample filter, so callers can distinguish insufficient-data cells
+   * (n < 30) from well-calibrated ones (n ≥ 30) and flag them appropriately.
+   */
+  getCalibrationTable(): ScoreCalibrationRow[];
   getAdjustedThresholds(targetMergeRate?: number, currentMinScore?: number): AdjustedThreshold[];
 }
 

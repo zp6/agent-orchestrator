@@ -733,6 +733,71 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
       .all(limit) as Task[];
   }
 
+  /**
+   * Return done tasks with null quality_score that are older than minAgeMinutes.
+   *
+   * Issue #250: 'done' tasks that went through short-circuit paths (already-in-review,
+   * pre-dispatch guard exits, orchestrator-routed tasks) may bypass the normal
+   * verify path and end up with quality_score = null indefinitely. This method
+   * feeds ensureScoresPopulated() and the short-circuit score recorder so those
+   * gaps are closed.
+   *
+   * @param minAgeMinutes - Minimum task age in minutes. Default: 5.
+   * @param limit         - Maximum rows to return. Default: 100.
+   */
+  getDoneTasksWithNullScoreOlderThan(minAgeMinutes: number = 5, limit: number = 100): Task[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE status = 'done'
+           AND quality_score IS NULL
+           AND updated_at <= datetime('now', ? || ' minutes')
+         ORDER BY updated_at ASC
+         LIMIT ?`,
+      )
+      .all(`-${minAgeMinutes}`, limit) as Task[];
+  }
+
+  /**
+   * Compute the score coverage metric for the dashboard quality panel.
+   *
+   * Issue #250 acceptance criterion: dashboard shows 'score coverage %'.
+   * A coverage_pct of 1.0 means every eligible done task has a quality_score.
+   *
+   * @param minAgeMinutes - Only count tasks older than this (default 5) to
+   *                        exclude tasks still in the verify pipeline.
+   */
+  getScoreCoverage(minAgeMinutes: number = 5): import("./types.js").ScoreCoverageMetric {
+    const row = this.db
+      .prepare(
+        `SELECT
+           COUNT(*) as total_done,
+           SUM(CASE WHEN quality_score IS NOT NULL THEN 1 ELSE 0 END) as scored_done,
+           SUM(CASE WHEN quality_score IS NULL THEN 1 ELSE 0 END) as unscored_done
+         FROM tasks
+         WHERE status = 'done'
+           AND updated_at <= datetime('now', ? || ' minutes')`,
+      )
+      .get(`-${minAgeMinutes}`) as {
+        total_done: number;
+        scored_done: number;
+        unscored_done: number;
+      } | undefined;
+
+    const total_done = row?.total_done ?? 0;
+    const scored_done = row?.scored_done ?? 0;
+    const unscored_done = row?.unscored_done ?? 0;
+
+    return {
+      generated_at: new Date().toISOString(),
+      min_age_minutes: minAgeMinutes,
+      total_done,
+      scored_done,
+      unscored_done,
+      coverage_pct: total_done > 0 ? scored_done / total_done : null,
+    };
+  }
+
   getAgentStats(): AgentStats[] {
     return this.db
       .prepare(`
@@ -1812,6 +1877,28 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
          FROM pr_outcome_records
          GROUP BY agent_name, task_type, score_bucket
          HAVING COUNT(*) >= 3
+         ORDER BY agent_name, task_type, score_bucket ASC`,
+      )
+      .all() as ScoreCalibrationRow[];
+  }
+
+  /**
+   * Returns ALL (agent_name, task_type, score_bucket) cells from pr_outcome_records
+   * without any minimum sample filter.  Callers should treat cells with
+   * total_count < 30 as having insufficient data.
+   */
+  getCalibrationTable(): ScoreCalibrationRow[] {
+    return this.db
+      .prepare(
+        `SELECT
+           agent_name,
+           task_type,
+           score_bucket,
+           COUNT(*) AS total_count,
+           SUM(CASE WHEN outcome = 'merged' THEN 1 ELSE 0 END) AS merge_count,
+           CAST(SUM(CASE WHEN outcome = 'merged' THEN 1 ELSE 0 END) AS REAL) / COUNT(*) AS actual_merge_rate
+         FROM pr_outcome_records
+         GROUP BY agent_name, task_type, score_bucket
          ORDER BY agent_name, task_type, score_bucket ASC`,
       )
       .all() as ScoreCalibrationRow[];
