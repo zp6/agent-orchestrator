@@ -6712,6 +6712,10 @@ export class StateStore {
     // Add suppressed_at / promoted_at if missing (dashboard uses these for suppress/promote actions)
     const cols = this.db.prepare("PRAGMA table_info(learned_patterns)").all() as { name: string }[];
     const colNames = new Set(cols.map((c) => c.name));
+    if (!colNames.has("active")) {
+      this.db.exec("ALTER TABLE learned_patterns ADD COLUMN active INTEGER NOT NULL DEFAULT 1");
+      this.db.exec("CREATE INDEX IF NOT EXISTS idx_learned_patterns_active ON learned_patterns(active)");
+    }
     if (!colNames.has("suppressed_at")) {
       this.db.exec("ALTER TABLE learned_patterns ADD COLUMN suppressed_at TEXT");
     }
