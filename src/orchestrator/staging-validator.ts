@@ -58,6 +58,13 @@ export async function validateMergedPR(
 
   log.info("Running post-merge validation", { repo, prNumber, agentName, sha: mergeSha });
 
+  // Per-call timeout: abort if the validation agent doesn't respond within 120s.
+  // Without this a single hung test runner can consume the entire daemon cycle budget
+  // (1200s), causing a DEADLOCK for all other pending work.
+  const VALIDATION_TIMEOUT_MS = 120_000;
+  const controller = new AbortController();
+  const validationTimer = setTimeout(() => controller.abort(), VALIDATION_TIMEOUT_MS);
+
   try {
     const client = new AgentClient(config);
     const response = await client.send(agentName, [
@@ -71,7 +78,9 @@ export async function validateMergedPR(
       "Reply with ONLY: PASS or FAIL followed by the test summary.",
     ].join("\n"), {
       systemPrompt: "You are a CI validator. Run the commands exactly as given and report the result. No commentary — just PASS/FAIL and the test output.",
+      signal: controller.signal,
     });
+    clearTimeout(validationTimer);
 
     const passed = response.content.toUpperCase().includes("PASS")
       && !response.content.toUpperCase().includes("FAIL");
@@ -102,10 +111,18 @@ export async function validateMergedPR(
 
     return result;
   } catch (err) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
-    log.error("Post-merge validation error", { repo, prNumber, error: errorMsg });
+    clearTimeout(validationTimer);
+    const isTimeout = err instanceof Error && err.name === "AbortError";
+    const errorMsg = isTimeout
+      ? `Validation timed out after ${VALIDATION_TIMEOUT_MS / 1000}s — agent unresponsive`
+      : (err instanceof Error ? err.message : String(err));
+    if (isTimeout) {
+      log.warn("Post-merge validation timed out — skipping revert (fail-open)", { repo, prNumber, timeoutMs: VALIDATION_TIMEOUT_MS });
+    } else {
+      log.error("Post-merge validation error", { repo, prNumber, error: errorMsg });
+    }
     return {
-      repo, prNumber, sha: mergeSha, passed: true, // fail-open: don't revert on validation errors
+      repo, prNumber, sha: mergeSha, passed: true, // fail-open: don't revert on validation errors or timeouts
       output: `Validation error: ${errorMsg}`,
       duration_ms: Date.now() - start,
     };
