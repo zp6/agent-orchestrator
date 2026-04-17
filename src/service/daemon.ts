@@ -459,6 +459,31 @@ export class Daemon {
       this.log.warn("Failed to seed learned rules from CLAUDE.md", { error: err instanceof Error ? err.message : String(err) });
     }
 
+    // Startup stale-dist check: rebuild immediately if dist/ is older than HEAD.
+    // This catches the case where source was updated (PR merge, git pull) but
+    // `npm run build` was never run — the daemon would otherwise silently execute
+    // stale compiled code for up to SELF_UPDATE_EVERY_N_CYCLES cycles (~50 min).
+    {
+      const repoDir = resolve(new URL("../../..", import.meta.url).pathname);
+      const rebuilt = this.rebuildIfDistStale(repoDir);
+      if (rebuilt) {
+        // Re-exec so the current process loads the fresh dist immediately.
+        this.log.info("Startup stale-dist rebuild complete — re-execing daemon");
+        await notifyOperator("Daemon restarted: stale dist/ rebuilt on startup", "", "info");
+        const { spawn } = await import("node:child_process");
+        const nodeArgs = process.argv.slice(1);
+        const child = spawn(process.execPath, nodeArgs, {
+          detached: true,
+          stdio: "ignore",
+          env: process.env,
+          cwd: repoDir,
+        });
+        child.unref();
+        writePid(child.pid!);
+        process.exit(0);
+      }
+    }
+
     // Start independent Telegram polling (3s interval, doesn't block cycles)
     startTelegramPolling({ config: this.config, store: this.store, dispatcher: this.dispatcher });
 
@@ -755,6 +780,61 @@ export class Daemon {
    * changes, rebuilds the TypeScript, and re-execs the daemon process so the
    * new code takes effect without operator intervention.
    */
+  /**
+   * Checks whether dist/ is stale relative to the latest git commit and, if so,
+   * rebuilds immediately.  This catches the case where source was updated (git pull
+   * or a PR merge) but `npm run build` was never run — meaning the daemon would
+   * silently execute old compiled code even though HEAD is current.
+   *
+   * Staleness is determined by comparing the mtime of dist/service/daemon-entry.js
+   * against the author timestamp of the HEAD commit.  A rebuild is triggered when:
+   *   - dist/service/daemon-entry.js is missing, OR
+   *   - its mtime is older than the HEAD commit timestamp
+   *
+   * Returns true if a rebuild was performed, false otherwise.
+   */
+  private rebuildIfDistStale(repoDir: string): boolean {
+    try {
+      const distFile = resolve(repoDir, "dist/service/daemon-entry.js");
+
+      // If dist doesn't exist at all, we must rebuild.
+      if (!existsSync(distFile)) {
+        this.log.warn("Stale dist: dist/service/daemon-entry.js missing — rebuilding");
+        execSync("npm run build", { cwd: repoDir, stdio: "pipe" });
+        this.log.info("Stale dist: rebuild complete (was missing)");
+        return true;
+      }
+
+      const distMtimeMs = statSync(distFile).mtimeMs;
+
+      // git log -1 --format=%ct prints the commit timestamp as Unix seconds.
+      const headCommitSec = execSync("git log -1 --format=%ct HEAD", {
+        cwd: repoDir,
+        stdio: "pipe",
+      })
+        .toString()
+        .trim();
+      const headCommitMs = parseInt(headCommitSec, 10) * 1000;
+
+      if (distMtimeMs >= headCommitMs) return false; // dist is fresh
+
+      const staleSec = Math.round((headCommitMs - distMtimeMs) / 1000);
+      this.log.warn("Stale dist detected — rebuilding", {
+        distMtime: new Date(distMtimeMs).toISOString(),
+        headCommit: new Date(headCommitMs).toISOString(),
+        staleBySeconds: staleSec,
+      });
+      execSync("npm run build", { cwd: repoDir, stdio: "pipe" });
+      this.log.info("Stale dist: rebuild complete", { staleBySeconds: staleSec });
+      return true;
+    } catch (err) {
+      this.log.warn("Stale dist check failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
   private async selfUpdate(): Promise<void> {
     const repoDir = resolve(new URL("../../..", import.meta.url).pathname);
     try {
@@ -762,7 +842,13 @@ export class Daemon {
       const behind = execSync("git rev-list HEAD..origin/main --count", { cwd: repoDir, stdio: "pipe" })
         .toString()
         .trim();
-      if (behind === "0") return;
+      if (behind === "0") {
+        // Git is current but dist might still be stale (e.g. git pull without build,
+        // or a manual file edit).  Rebuild silently if needed; no re-exec required
+        // because this is an in-place fix that takes effect on the next cycle.
+        this.rebuildIfDistStale(repoDir);
+        return;
+      }
 
       const commits = execSync("git log HEAD..origin/main --oneline", { cwd: repoDir, stdio: "pipe" })
         .toString()
