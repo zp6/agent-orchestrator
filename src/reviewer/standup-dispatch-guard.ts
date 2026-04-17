@@ -28,6 +28,7 @@ import {
 } from "./standup-handler.js";
 import type { IStandupHealthStore } from "../state/types.js";
 import type { Notifier } from "../notify.js";
+import type { ShortCircuitCallback } from "./pr-existence-guard.js";
 
 const log = createLogger("standup-dispatch-guard");
 
@@ -53,6 +54,17 @@ export interface StandupDispatchGuardOptions {
   store?: IStandupHealthStore;
   /** Telegram notifier for fallback escalation alerts. */
   notifier?: Notifier;
+  /**
+   * Task ID to record a canonical 1.0 score for when the guard handles a
+   * zero-action standup.  Requires `onShortCircuit` to be set — if omitted,
+   * scoring is deferred to the Phase 3 backfill.
+   */
+  taskId?: string;
+  /**
+   * Called immediately when `skip: true` and `taskId` is provided.
+   * Typically wired to `verifier.recordShortCircuitScore()`.
+   */
+  onShortCircuit?: ShortCircuitCallback;
 }
 
 // ── Guard ────────────────────────────────────────────────────────────────
@@ -142,6 +154,8 @@ export async function shouldSkipStandupDispatch(
     );
 
     const elapsed = Date.now() - startTime;
+    const skipReason = `Standup #${issueNumber} has 0 action items — acknowledged and ${synthesisFailed ? "fallback attempted" : "closed"} without agent dispatch (${elapsed}ms)`;
+
     log.info("Zero-action standup handled without dispatch", {
       repo,
       issueNumber,
@@ -149,9 +163,27 @@ export async function shouldSkipStandupDispatch(
       synthesisFailed,
     });
 
+    // Immediately record a canonical short-circuit score so the task is
+    // covered without waiting for Phase 3 backfill (~5 min latency).
+    if (opts.taskId && opts.onShortCircuit) {
+      try {
+        opts.onShortCircuit(opts.taskId, "no_action_needed", skipReason);
+        log.info("Recorded short-circuit score for zero-action standup", {
+          taskId: opts.taskId,
+          issueNumber,
+        });
+      } catch (scoreErr) {
+        // Scoring failure must not block the guard decision — log and continue.
+        log.warn("Failed to record short-circuit score — Phase 3 backfill will cover it", {
+          taskId: opts.taskId,
+          error: scoreErr instanceof Error ? scoreErr.message : String(scoreErr),
+        });
+      }
+    }
+
     return {
       skip: true,
-      reason: `Standup #${issueNumber} has 0 action items — acknowledged and ${synthesisFailed ? "fallback attempted" : "closed"} without agent dispatch (${elapsed}ms)`,
+      reason: skipReason,
       actionItemCount: 0,
       synthesisFailed,
     };

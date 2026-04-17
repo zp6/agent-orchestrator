@@ -26,8 +26,45 @@
 
 import { execSync } from "child_process";
 import { createLogger } from "../service/logger.js";
+import type { ShortCircuitDimension } from "../state/types.js";
 
 const log = createLogger("pr-existence-guard");
+
+// ── Callback type ─────────────────────────────────────────────────────────────
+
+/**
+ * Callback invoked immediately when a short-circuit exit is taken.
+ *
+ * The orchestrator provides this as part of guard options so that
+ * `recordShortCircuitScore()` is called at the moment of short-circuiting
+ * rather than relying on the Phase 3 backfill (5+ min latency).
+ *
+ * @param taskId    - Task to score
+ * @param dimension - Short-circuit category
+ * @param reason    - Human-readable explanation
+ */
+export type ShortCircuitCallback = (
+  taskId: string,
+  dimension: ShortCircuitDimension,
+  reason: string,
+) => void;
+
+/**
+ * Options accepted by `checkPRExistenceBeforeDispatch()`.
+ */
+export interface PRExistenceGuardOptions {
+  /**
+   * Task ID to record a canonical 1.0 score for when the guard finds an
+   * existing PR.  Requires `onShortCircuit` to be set — if omitted, scoring
+   * is deferred to the Phase 3 backfill.
+   */
+  taskId?: string;
+  /**
+   * Called immediately when resolution === 'already-in-review' and `taskId`
+   * is provided.  Typically wired to `verifier.recordShortCircuitScore()`.
+   */
+  onShortCircuit?: ShortCircuitCallback;
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -66,15 +103,21 @@ export interface OpenPRSummary {
  * Call this BEFORE dispatching any GitHub-sourced task.  If an open PR is
  * found, return the result's `skip: true` and route to the review queue.
  *
+ * Pass `opts.taskId` + `opts.onShortCircuit` to record an immediate 1.0
+ * quality score when the guard blocks — this eliminates the 5+ minute
+ * Phase 3 backfill latency for these tasks.
+ *
  * @param repo         - Repository in "owner/repo" format
  * @param issueNumber  - GitHub issue number to check
  * @param prListCache  - Optional pre-fetched list of open PRs (avoids a second
  *                       gh CLI call when the caller already has the list)
+ * @param opts         - Optional task ID and scoring callback for immediate scoring
  */
 export async function checkPRExistenceBeforeDispatch(
   repo: string,
   issueNumber: number,
   prListCache?: OpenPRSummary[],
+  opts?: PRExistenceGuardOptions,
 ): Promise<PRExistenceCheckResult> {
   try {
     const openPRs = prListCache ?? fetchOpenPRs(repo);
@@ -91,6 +134,25 @@ export async function checkPRExistenceBeforeDispatch(
         prUrl: match.url,
         branch: match.headRefName,
       });
+
+      // Immediately record a canonical short-circuit score so the task is
+      // covered without waiting for Phase 3 backfill (~5 min latency).
+      if (opts?.taskId && opts.onShortCircuit) {
+        try {
+          opts.onShortCircuit(opts.taskId, "no_action_needed", reason);
+          log.info("Recorded short-circuit score for already-in-review task", {
+            taskId: opts.taskId,
+            prNumber: match.number,
+          });
+        } catch (scoreErr) {
+          // Scoring failure must not block the guard decision — log and continue.
+          log.warn("Failed to record short-circuit score — Phase 3 backfill will cover it", {
+            taskId: opts.taskId,
+            error: scoreErr instanceof Error ? scoreErr.message : String(scoreErr),
+          });
+        }
+      }
+
       return {
         skip: true,
         resolution: "already-in-review",

@@ -273,3 +273,77 @@ describe("formatPRCheckResult", () => {
     expect(result).toBe("check-failed");
   });
 });
+
+// ── onShortCircuit callback (issue #255) ──────────────────────────────────────
+
+describe("checkPRExistenceBeforeDispatch — onShortCircuit callback", () => {
+  it("invokes onShortCircuit with 'no_action_needed' when PR found and taskId provided", async () => {
+    const onShortCircuit = vi.fn();
+
+    const result = await checkPRExistenceBeforeDispatch(
+      "owner/repo",
+      42,
+      mockPRs,
+      { taskId: "task-42", onShortCircuit },
+    );
+
+    expect(result.skip).toBe(true);
+    expect(result.resolution).toBe("already-in-review");
+    expect(onShortCircuit).toHaveBeenCalledOnce();
+    expect(onShortCircuit).toHaveBeenCalledWith(
+      "task-42",
+      "no_action_needed",
+      expect.stringContaining("#42"),
+    );
+  });
+
+  it("does NOT invoke onShortCircuit when no PR found", async () => {
+    const onShortCircuit = vi.fn();
+
+    const result = await checkPRExistenceBeforeDispatch(
+      "owner/repo",
+      999,
+      mockPRs,
+      { taskId: "task-999", onShortCircuit },
+    );
+
+    expect(result.skip).toBe(false);
+    expect(onShortCircuit).not.toHaveBeenCalled();
+  });
+
+  it("does NOT invoke onShortCircuit when taskId is missing", async () => {
+    const onShortCircuit = vi.fn();
+
+    await checkPRExistenceBeforeDispatch(
+      "owner/repo",
+      42,
+      mockPRs,
+      { onShortCircuit }, // no taskId
+    );
+
+    expect(onShortCircuit).not.toHaveBeenCalled();
+  });
+
+  it("still returns correct result if onShortCircuit throws", async () => {
+    const onShortCircuit = vi.fn().mockImplementationOnce(() => {
+      throw new Error("scoring failure");
+    });
+
+    // Should not throw — scoring errors must be swallowed
+    const result = await checkPRExistenceBeforeDispatch(
+      "owner/repo",
+      42,
+      mockPRs,
+      { taskId: "task-err", onShortCircuit },
+    );
+
+    expect(result.skip).toBe(true);
+    expect(result.resolution).toBe("already-in-review");
+  });
+
+  it("works without opts — backward-compatible", async () => {
+    // Calling without opts must not throw
+    const result = await checkPRExistenceBeforeDispatch("owner/repo", 42, mockPRs);
+    expect(result.skip).toBe(true);
+  });
+});

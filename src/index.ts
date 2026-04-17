@@ -193,6 +193,8 @@ export type {
   PRExistenceCheckResult,
   PRExistenceResolution,
   OpenPRSummary,
+  ShortCircuitCallback,
+  PRExistenceGuardOptions,
 } from "./reviewer/pr-existence-guard.js";
 
 // Standup handler utilities (used by guard and PR reviewer)
