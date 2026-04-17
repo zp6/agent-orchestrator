@@ -1350,6 +1350,7 @@ export class StateStore {
     this.runSkipPatternMigration();
     this.runHealthCheckEventsMigration();
     this.runStagingValidationsMigration();
+    this.runVerificationOutcomesMigration();
   }
 
   private runPhase2Migration(): void {
@@ -7984,5 +7985,182 @@ export class StateStore {
       params.duration_ms ?? null,
       new Date().toISOString(),
     );
+  }
+
+  // ── Verification Outcome Logs (calibration feedback loop) ─────────────────
+
+  /**
+   * Create the verification_outcome_logs table.
+   *
+   * Implements Phase 1 of the calibration strategy from
+   * findings/verification-calibration.md: track each PR's merge outcome
+   * against the original verification score so the calibration loop can
+   * identify per-verifier score accuracy over time.
+   *
+   * The `pr_outcome` column is initially NULL; it is populated by the
+   * GitHub PR events poller once the PR reaches a terminal state.
+   */
+  private runVerificationOutcomesMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS verification_outcome_logs (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id          TEXT NOT NULL,
+        pr_url           TEXT,
+        verifier_agent   TEXT NOT NULL,
+        verification_score REAL NOT NULL,
+        score_bucket     TEXT NOT NULL,
+        task_type        TEXT NOT NULL,
+        verified_at      TEXT NOT NULL,
+
+        -- Outcome fields — populated post-merge/close by PR events poller
+        pr_outcome       TEXT,           -- 'merged_clean' | 'merged_with_feedback' | 'rejected' | 'redispatched'
+        review_comment_count INTEGER,
+        days_to_resolution REAL,
+        resolved_at      TEXT,
+
+        -- Derived weight for calibration (1.0 | 0.5 | 0.0)
+        merge_weight     REAL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_vol_task_id ON verification_outcome_logs(task_id);
+      CREATE INDEX IF NOT EXISTS idx_vol_verifier ON verification_outcome_logs(verifier_agent, score_bucket, task_type);
+      CREATE INDEX IF NOT EXISTS idx_vol_verified_at ON verification_outcome_logs(verified_at);
+      CREATE INDEX IF NOT EXISTS idx_vol_pr_outcome ON verification_outcome_logs(pr_outcome);
+    `);
+  }
+
+  /**
+   * Insert a new verification outcome log entry when a task is verified.
+   * The `pr_outcome` and related fields are left NULL until the PR events
+   * poller resolves the terminal state.
+   */
+  insertVerificationOutcome(params: {
+    task_id: string;
+    pr_url?: string | null;
+    verifier_agent: string;
+    verification_score: number;
+    task_type: string;
+    verified_at?: string;
+  }): void {
+    const score = params.verification_score;
+    const bucket = this.scoreToCalibrationBucket(score);
+    this.db.prepare(`
+      INSERT OR IGNORE INTO verification_outcome_logs
+        (task_id, pr_url, verifier_agent, verification_score, score_bucket, task_type, verified_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      params.task_id,
+      params.pr_url ?? null,
+      params.verifier_agent,
+      score,
+      bucket,
+      params.task_type ?? "implementation",
+      params.verified_at ?? new Date().toISOString(),
+    );
+  }
+
+  /**
+   * Populate the outcome fields for a verification outcome log entry once
+   * the associated PR reaches a terminal state (merged, rejected, etc.).
+   * Called by the GitHub PR events poller.
+   */
+  updateVerificationOutcome(params: {
+    task_id: string;
+    pr_outcome: "merged_clean" | "merged_with_feedback" | "rejected" | "redispatched";
+    review_comment_count: number;
+    days_to_resolution: number;
+    resolved_at: string;
+  }): void {
+    const merge_weight =
+      params.pr_outcome === "merged_clean"
+        ? 1.0
+        : params.pr_outcome === "merged_with_feedback"
+          ? 0.5
+          : 0.0;
+
+    this.db.prepare(`
+      UPDATE verification_outcome_logs
+      SET pr_outcome = ?, review_comment_count = ?, days_to_resolution = ?,
+          resolved_at = ?, merge_weight = ?
+      WHERE task_id = ?
+    `).run(
+      params.pr_outcome,
+      params.review_comment_count,
+      params.days_to_resolution,
+      params.resolved_at,
+      merge_weight,
+      params.task_id,
+    );
+  }
+
+  /**
+   * Query the calibration lookup table: aggregate outcomes by
+   * (verifier_agent, score_bucket, task_type) to compute empirical
+   * merge rates per bucket.
+   *
+   * Only rows with a resolved pr_outcome are included; pending entries
+   * (pr_outcome IS NULL) are excluded from rate calculations.
+   */
+  getCalibrationTable(): Array<{
+    verifier_agent: string;
+    score_bucket: string;
+    task_type: string;
+    n: number;
+    merge_rate: number;
+    stddev: number;
+  }> {
+    return this.db.prepare(`
+      SELECT
+        verifier_agent,
+        score_bucket,
+        task_type,
+        COUNT(*) AS n,
+        AVG(merge_weight) AS merge_rate,
+        -- Population stddev approximation via variance
+        SQRT(AVG(merge_weight * merge_weight) - AVG(merge_weight) * AVG(merge_weight)) AS stddev
+      FROM verification_outcome_logs
+      WHERE pr_outcome IS NOT NULL
+      GROUP BY verifier_agent, score_bucket, task_type
+      ORDER BY verifier_agent, score_bucket, task_type
+    `).all() as Array<{
+      verifier_agent: string;
+      score_bucket: string;
+      task_type: string;
+      n: number;
+      merge_rate: number;
+      stddev: number;
+    }>;
+  }
+
+  /**
+   * Return all pending verification outcome log entries (where pr_outcome
+   * is NULL and a pr_url is known), for the GitHub events poller to process.
+   */
+  getPendingVerificationOutcomes(): Array<{
+    task_id: string;
+    pr_url: string;
+    verifier_agent: string;
+    verified_at: string;
+  }> {
+    return this.db.prepare(`
+      SELECT task_id, pr_url, verifier_agent, verified_at
+      FROM verification_outcome_logs
+      WHERE pr_outcome IS NULL AND pr_url IS NOT NULL
+      ORDER BY verified_at ASC
+    `).all() as Array<{
+      task_id: string;
+      pr_url: string;
+      verifier_agent: string;
+      verified_at: string;
+    }>;
+  }
+
+  /** Map a verification score to its calibration bucket string. */
+  private scoreToCalibrationBucket(score: number): string {
+    if (score < 0.5) return "0.0-0.5";
+    if (score < 0.6) return "0.5-0.6";
+    if (score < 0.7) return "0.6-0.7";
+    if (score < 0.8) return "0.7-0.8";
+    if (score < 0.9) return "0.8-0.9";
+    return "0.9-1.0";
   }
 }

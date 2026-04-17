@@ -55,6 +55,7 @@ import {
   verifyAndReviseTask,
 } from "./reviewer-ops.js";
 import { executeCoordinatedMerge } from "../orchestrator/multi-repo-coordinator.js";
+import { pollVerificationOutcomes } from "../orchestrator/verification-outcome-poller.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const QUALITY_SLA_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
@@ -752,6 +753,15 @@ export class Daemon {
             .catch((err) => { this.log.warn("Skip-pattern check failed", { error: err instanceof Error ? err.message : String(err) }); }),
         );
       }
+
+      // Verification outcome poller — runs every cycle; resolves pending
+      // verification_outcome_logs entries once their PRs reach terminal state.
+      // Drives the calibration feedback loop (findings/verification-calibration.md).
+      batch4.push(
+        pollVerificationOutcomes(this.store)
+          .then((resolved) => { if (resolved > 0) this.log.info("Verification outcomes resolved", { resolved }); })
+          .catch((err) => { this.log.warn("Verification outcome poller failed", { error: err instanceof Error ? err.message : String(err) }); }),
+      );
 
       if (batch4.length > 0) await this.runBatch("periodic", batch4);
 
