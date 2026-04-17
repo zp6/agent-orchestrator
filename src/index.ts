@@ -211,6 +211,14 @@ export type {
   PRExistenceGuardOptions,
 } from "./reviewer/pr-existence-guard.js";
 
+// Duplicate-dispatch surge detector (issue #262) — Telegram alert when >= 3 already-in-review
+// blocks occur within a 30-minute window; 2-hour cooldown prevents alert fatigue.
+export { DuplicateDispatchSurgeDetector } from "./reviewer/duplicate-dispatch-surge-detector.js";
+export type {
+  SurgeEvent,
+  SurgeAlertConfig,
+} from "./reviewer/duplicate-dispatch-surge-detector.js";
+
 // Standup handler utilities (used by guard and PR reviewer)
 export {
   isStandupIssue,
