@@ -162,6 +162,8 @@ export interface RoutingDecisionEntry {
   action: string;
   /** Outcome: "dispatched", "skipped", "escalated", etc. */
   outcome: string;
+  /** High-level category used by the reroute dashboard. */
+  category: RoutingDecisionCategory;
 }
 
 /**
@@ -177,6 +179,7 @@ export interface RoutingDecisionEntry {
 export function buildRoutingDecisions(
   decisions: SupervisorDecisionRecord[],
   limit = 10,
+  opts: RoutingDecisionFilter = {},
 ): RoutingDecisionEntry[] {
   const cap = Math.min(limit, 25);
   const WINDOW_MS = 60_000; // 60-second grouping window
@@ -218,6 +221,7 @@ export function buildRoutingDecisions(
         rationale: extractOneLineSentence(d.reason),
         action: d.action,
         outcome: d.outcome,
+        category: classifyRoutingDecisionCategory(d),
       });
     } else if (d.outcome === "skipped" || d.action === "none") {
       // No-dispatch cycle — emit as a "skipped all" entry
@@ -242,18 +246,84 @@ export function buildRoutingDecisions(
         rationale: extractOneLineSentence(d.reason),
         action: d.action,
         outcome: d.outcome,
+        category: classifyRoutingDecisionCategory(d),
       });
     }
   }
 
+  const filtered = opts.category ? entries.filter((entry) => entry.category === opts.category) : entries;
+
   // Return newest-first
-  return entries.reverse();
+  return filtered.reverse();
 }
 
 /** Extract a single sentence (up to 120 chars) from a reason string. */
 function extractOneLineSentence(reason: string): string {
   const sentence = reason.split(/[.!?\n]/)[0].trim();
   return sentence.length > 120 ? sentence.slice(0, 117) + "…" : sentence;
+}
+
+/**
+ * High-level category for routing/timeline filtering.
+ *
+ * The reroute dashboard uses this to surface dedicated filter tabs for
+ * conflict recovery, quality revision, and stale-branch nudges.
+ */
+export type RoutingDecisionCategory =
+  | "conflict-re-dispatch"
+  | "quality-revision"
+  | "stale-branch-nudge"
+  | "other";
+
+export interface RoutingDecisionFilter {
+  category?: RoutingDecisionCategory;
+}
+
+function decisionText(decision: SupervisorDecisionRecord): string {
+  const parts = [decision.reason, decision.message, decision.rationale]
+    .filter((part): part is string => typeof part === "string" && part.length > 0);
+  return parts.join(" ").toLowerCase();
+}
+
+/**
+ * Classify a routing decision for dashboard filters.
+ */
+export function classifyRoutingDecisionCategory(
+  decision: SupervisorDecisionRecord,
+): RoutingDecisionCategory {
+  const text = decisionText(decision);
+  if (
+    /\[conflict recovery\]/i.test(text) ||
+    /\bconflict recovery\b/i.test(text) ||
+    /\bconflict re-?dispatch\b/i.test(text) ||
+    /\bconflict redispatch\b/i.test(text) ||
+    /\bmerge conflict\b/i.test(text) ||
+    /\bauto-?rebase\b/i.test(text) ||
+    /\bpersistent merge conflicts?\b/i.test(text)
+  ) {
+    return "conflict-re-dispatch";
+  }
+  if (
+    /\bstale branch\b/i.test(text) ||
+    /\bbranch behind main\b/i.test(text) ||
+    /\bbehind main\b/i.test(text) ||
+    /\brebase before opening\b/i.test(text) ||
+    /\brebase required\b/i.test(text) ||
+    /\bstale-branch\b/i.test(text)
+  ) {
+    return "stale-branch-nudge";
+  }
+  if (
+    /\brequest[- ]changes\b/i.test(text) ||
+    /\bchanges requested\b/i.test(text) ||
+    /\bquality revision\b/i.test(text) ||
+    /\breview feedback\b/i.test(text) ||
+    /\bfeedback task\b/i.test(text) ||
+    /\bneeds revision\b/i.test(text)
+  ) {
+    return "quality-revision";
+  }
+  return "other";
 }
 
 /**
@@ -288,8 +358,16 @@ export function formatDecisionsForTelegram(entries: RoutingDecisionEntry[]): str
     const icon = ACTION_ICON[e.action] ?? "🤖";
     const agent = e.agent_name ? ` → \`${e.agent_name.slice(0, 28)}\`` : "";
     const ts = new Date(e.timestamp).toISOString().replace("T", " ").slice(0, 16);
+    const category =
+      e.category === "conflict-re-dispatch"
+        ? " · ⚔️ conflict re-dispatch"
+        : e.category === "stale-branch-nudge"
+          ? " · 🌿 stale-branch nudge"
+          : e.category === "quality-revision"
+            ? " · ✏️ quality revision"
+            : "";
 
-    lines.push(`${icon} *${e.action}*${agent}`);
+    lines.push(`${icon} *${e.action}*${agent}${category}`);
 
     const chosen = e.chosen_issue ? `Chosen: ${e.chosen_issue}` : "No dispatch";
     const skipped =

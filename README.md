@@ -157,6 +157,7 @@ The package also exports direct payload builders that the dashboard or orchestra
 
 - `getAgentTrendsApiPayload(store)` → `GET /agent-trends`
 - `getQualityAnomaliesApiPayload(store, opts)` → `GET /quality-anomalies`
+- `getReroutesApiPayload(store, opts)` → `GET /api/reroutes`
 
 ---
 

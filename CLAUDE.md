@@ -60,6 +60,7 @@ When this container is used for LLM PR reviews:
 - PR iteration metrics: surface multi-round review patterns and coaching directives
 - Routing accuracy tracker: per-agent quality metrics to inform routing decisions
 - Reroute quality tracker: flag auto-reroutes that degrade outcomes; identify problematic routing patterns
+- Conflict recovery reroute monitor: track conflict-recovery dispatch rates and alert on spikes
 - Shared security allowlist: example/template file patterns synchronized with security scanner in agent-proxy
 - Schema-consumer impact detection: flag cross-repo schema changes in PR reviews
 - Standup handler: process zero-action standups; retry failed synthesis
@@ -95,9 +96,10 @@ src/
     score-calibrator.ts             — score → outcome feedback loop; threshold recommendations
     calibration-drift.ts            — score distribution drift alerts with dedup cooldown
     pr-iteration-metrics.ts         — multi-round PR review patterns and coaching directives
-    routing-accuracy.ts             — per-agent quality stats to inform routing preferences
-    reroute-quality-tracker.ts      — reroute decision correlation with quality outcomes; degradation detection
-    schema-impact.ts                — schema-consumer map; inject consumer notice into reviews
+    routing-accuracy.ts             - per-agent quality stats to inform routing preferences
+    reroute-quality-tracker.ts      - reroute decision correlation with quality outcomes; degradation detection
+    reroute-conflict-recovery.ts    - conflict-recovery routing metrics and Telegram alerts
+    schema-impact.ts                - schema-consumer map; inject consumer notice into reviews
     schema-contract.ts              — schema contract drift detection (CREATE/ALTER/INSERT column checks)
     schema-contract.json            — checked-in registry of canonical column names per shared table
     schema-consumer-registry.ts     — dynamic schema-consumer map auto-discovered from state.db access logs

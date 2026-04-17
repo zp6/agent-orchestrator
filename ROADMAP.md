@@ -5,6 +5,7 @@ _Last updated: 2026-04-15_
 ## Completed
 
 - **#181 — Triage acceptance criteria schema**: Added `TRIAGE_OUTPUT_SCHEMA`, `TRIAGE_REQUIRED_FIELDS`, `TRIAGE_SYSTEM_PROMPT`, and `Verifier.checkTriageSchemaCompliance()` to `verifier.ts`. Housekeeping/triage tasks now pass through a deterministic JSON schema pre-check (four required fields at 0.25 weight each) before LLM scoring. Missing any single field triggers immediate revision with explicit field names. Adds `"housekeeping"` to `TaskType` and `triage_schema_compliance` to `approvalRationale` known prefixes.
+- **#312 — Conflict recovery reroute metrics and alerts**: Added reroute category classification, a dashboard payload for conflict-recovery rates, and a Telegram alert monitor for repeated conflict recoveries.
 
 ## Next up
 

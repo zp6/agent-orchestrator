@@ -1,8 +1,8 @@
 /**
  * Orchestrator adapter — one-call wiring for the orchestrator daemon.
  *
- * Provides `createReviewerInstances()` so the daemon can bootstrap all five
- * reviewer modules with a single call, passing its own StateStore and config.
+ * Provides `createReviewerInstances()` so the daemon can bootstrap all reviewer
+ * modules with a single call, passing its own StateStore and config.
  *
  * Usage:
  *
@@ -23,6 +23,7 @@ import { IssueCreator } from "../reviewer/issue-creator.js";
 import { HealthIncidentRouter } from "../reviewer/health-incident-router.js";
 import { RoutingAccuracyTracker } from "../reviewer/routing-accuracy.js";
 import { CalibrationDriftMonitor } from "../reviewer/calibration-drift.js";
+import { ConflictRecoveryAlertMonitor } from "../reviewer/reroute-conflict-recovery.js";
 import { ScoreCalibrator } from "../reviewer/score-calibrator.js";
 import type { ReviewerConfig } from "../config.js";
 import type { Notifier } from "../notify.js";
@@ -41,6 +42,8 @@ export interface ReviewerInstances {
   issueCreator: IssueCreator;
   /** Detects calibration drift and surfaces score distribution histograms. */
   calibrationDriftMonitor: CalibrationDriftMonitor;
+  /** Detects conflict-recovery spikes and alerts Telegram. */
+  conflictRecoveryMonitor: ConflictRecoveryAlertMonitor;
   /**
    * Records PR outcomes (merged/rejected/changes_requested/redispatched) and
    * derives per-agent min_score threshold recommendations from the accumulated
@@ -71,7 +74,7 @@ export interface CreateReviewerOptions {
 }
 
 /**
- * Construct all five reviewer modules in one call.
+ * Construct all reviewer modules in one call.
  *
  * @param config  - Reviewer config (a subset of OrchestratorConfig).
  * @param store   - The orchestrator's StateStore instance (satisfies IStateStore).
@@ -108,6 +111,11 @@ export function createReviewerInstances(
       : undefined,
   });
 
+  const conflictRecoveryMonitor = new ConflictRecoveryAlertMonitor(store, opts.notifier, {
+    hours: 24,
+    threshold: 0.2,
+  });
+
   // Wire ScoreCalibrator if the store implements IScoreOutcomeStore.
   // The reviewer's own StateStore does; the orchestrator's StateStore may not (yet).
   const scoreCalibrator =
@@ -137,6 +145,7 @@ export function createReviewerInstances(
     detector: new ImprovementDetector(config, store),
     issueCreator: new IssueCreator(config),
     calibrationDriftMonitor,
+    conflictRecoveryMonitor,
     scoreCalibrator,
     healthIncidentRouter: new HealthIncidentRouter(opts.notifier),
   };

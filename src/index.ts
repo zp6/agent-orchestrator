@@ -275,10 +275,27 @@ export {
   formatSupervisorLogForCLI,
   formatRationaleSummary,
   buildRoutingDecisions,
+  classifyRoutingDecisionCategory,
   formatDecisionsForTelegram,
   formatDecisionsForCLI,
 } from "./supervisor-log.js";
-export type { RoutingDecisionEntry } from "./supervisor-log.js";
+export type { RoutingDecisionEntry, RoutingDecisionCategory } from "./supervisor-log.js";
+
+export {
+  getReroutesApiPayload,
+  formatConflictRecoveryAlert,
+  ConflictRecoveryAlertMonitor,
+  CONFLICT_RECOVERY_RATE_THRESHOLD,
+  DEFAULT_REROUTE_WINDOW_HOURS,
+} from "./reviewer/reroute-conflict-recovery.js";
+export type {
+  ReroutesApiOptions,
+  ReroutesApiPayload,
+  AgentConflictRecoveryRate,
+  RepoConflictRecoveryRate,
+  ConflictRecoveryAlertPayload,
+  ConflictRecoveryAlertRow,
+} from "./reviewer/reroute-conflict-recovery.js";
 
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
