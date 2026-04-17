@@ -84,10 +84,16 @@ export async function validateMergedPR(
 
     if (passed) {
       log.info("Post-merge validation PASSED", { repo, prNumber, duration: result.duration_ms });
-      store.addLog({
-        task_id: "",
-        direction: "system",
-        content: `[staging-validation] PR #${prNumber} (${repo}) PASSED — tests OK after merge.`,
+      // Use recordStagingValidation instead of addLog: staging validation events are
+      // not tied to a specific task, so addLog(task_id: "") would violate the
+      // FOREIGN KEY constraint on task_logs.task_id → tasks.id.
+      store.recordStagingValidation({
+        repo,
+        prNumber,
+        sha: mergeSha,
+        passed: true,
+        output: result.output,
+        duration_ms: result.duration_ms,
       });
     } else {
       log.error("Post-merge validation FAILED", { repo, prNumber, output: result.output.slice(0, 200) });

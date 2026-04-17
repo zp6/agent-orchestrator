@@ -1349,6 +1349,7 @@ export class StateStore {
     this.runSecretMountStatusMigration();
     this.runSkipPatternMigration();
     this.runHealthCheckEventsMigration();
+    this.runStagingValidationsMigration();
   }
 
   private runPhase2Migration(): void {
@@ -7923,5 +7924,61 @@ export class StateStore {
       dispatch_rate_pct: totalEvaluated > 0 ? (totalDispatched / totalEvaluated) * 100 : null,
       baseline_dispatch_rate_pct: 45,
     };
+  }
+
+  // ── Staging Validations (issue #896) ──────────────────────────────────────
+
+  /**
+   * Create the staging_validations table.  Idempotent — safe to call on
+   * databases that were created before this migration shipped.
+   *
+   * Intentionally has NO foreign key to tasks(id) because post-merge
+   * validation events are not tied to a specific task.
+   */
+  private runStagingValidationsMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS staging_validations (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo       TEXT NOT NULL,
+        pr_number  INTEGER NOT NULL,
+        sha        TEXT NOT NULL,
+        passed     INTEGER NOT NULL,
+        output     TEXT,
+        duration_ms INTEGER,
+        validated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sv_repo_pr ON staging_validations(repo, pr_number);
+      CREATE INDEX IF NOT EXISTS idx_sv_validated_at ON staging_validations(validated_at);
+    `);
+  }
+
+  /**
+   * Persist a post-merge staging validation result.
+   *
+   * Use this instead of addLog() — addLog() requires a valid task_id
+   * (FK → tasks.id) but staging validation events are not tied to any
+   * specific task, so using addLog() with task_id="" causes a FOREIGN KEY
+   * constraint failure.
+   */
+  recordStagingValidation(params: {
+    repo: string;
+    prNumber: number;
+    sha: string;
+    passed: boolean;
+    output?: string;
+    duration_ms?: number;
+  }): void {
+    this.db.prepare(`
+      INSERT INTO staging_validations (repo, pr_number, sha, passed, output, duration_ms, validated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      params.repo,
+      params.prNumber,
+      params.sha,
+      params.passed ? 1 : 0,
+      params.output ?? null,
+      params.duration_ms ?? null,
+      new Date().toISOString(),
+    );
   }
 }
