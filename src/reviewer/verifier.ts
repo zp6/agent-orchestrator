@@ -1578,19 +1578,26 @@ export class Verifier {
    * Returns count of tasks repaired.
    */
   async repairNullScoresForApprovedTasks(): Promise<number> {
-    // Query tasks without a hard limit; we want to find ALL approved tasks with null scores
-    const allTasks = this.store.listTasks({ limit: 10000 });
-    const nullScoreTasks = allTasks.filter(
-      (t) => t.verification_status === "approved" && t.quality_score === null,
-    );
+    // Issue #244: expand from approved-only to both approved AND rejected.
+    // The name is kept for backwards compatibility (/backfill-scores Telegram
+    // command calls this method by name).
+    //
+    // Previously this only covered verification_status = 'approved'.  Rejected
+    // tasks with null quality_score were invisible to this repair, causing
+    // quality analytics (trend charts, calibration drift, SLA alerts) to be
+    // blind to ~half the verified task history whenever rejections accumulated
+    // without scores.
+    const nullScoreTasks = this.store.getVerifiedTasksWithNullScores(10000);
 
     if (nullScoreTasks.length === 0) {
-      this.log.info("No approved tasks with null quality_score found");
+      this.log.info("No verified tasks with null quality_score found");
       return 0;
     }
 
-    this.log.info("Repairing null scores for approved tasks", {
+    this.log.info("Repairing null scores for verified tasks", {
       count: nullScoreTasks.length,
+      approved: nullScoreTasks.filter((t) => t.verification_status === "approved").length,
+      rejected: nullScoreTasks.filter((t) => t.verification_status === "rejected").length,
       taskIds: nullScoreTasks.map((t) => t.id.slice(0, 12)),
     });
 
@@ -1599,16 +1606,22 @@ export class Verifier {
       try {
         const inferredResult = await this.inferMissingScore(task);
 
-        // Issue #203: inferMissingScore now applies score-threshold guards.
-        // If the inferred score is below threshold, update verification_status
-        // to "rejected" to maintain the score-approval invariant.
-        const effectiveStatus = inferredResult.approved ? "approved" : "rejected";
+        // For tasks already marked rejected, preserve the rejection — do not
+        // flip them to approved even if the inferred score is above threshold.
+        // For approved tasks, apply the normal score-approval invariant: if the
+        // inferred score is below threshold, downgrade to rejected.
+        const alreadyRejected = task.verification_status === "rejected";
+        const effectiveStatus: "approved" | "rejected" = alreadyRejected
+          ? "rejected"
+          : inferredResult.approved
+            ? "approved"
+            : "rejected";
 
         this.store.updateTask(task.id, {
           verification_status: effectiveStatus,
           quality_score: inferredResult.score,
           verification_notes: inferredResult.notes,
-          quality_explanation: inferredResult.approved
+          quality_explanation: effectiveStatus === "approved"
             ? (inferredResult.approvalRationale ?? null)
             : (inferredResult.explanation ?? `Score ${inferredResult.score.toFixed(2)} below threshold — inferred score triggered rejection`),
         });
@@ -1617,22 +1630,23 @@ export class Verifier {
           task.id,
           task.agent_name ?? "unknown",
           inferredResult.score,
-          inferredResult.approved,
-          inferredResult.approved ? undefined : (inferredResult.explanation ?? "Inferred score below threshold"),
+          effectiveStatus === "approved",
+          effectiveStatus !== "approved" ? (inferredResult.explanation ?? "Inferred score below threshold") : undefined,
           inferredResult.blockedReason,
           inferredResult.approvalRationale,
         );
 
         repaired++;
-        this.log.info("Repaired null score for approved task", {
+        this.log.info("Repaired null score for verified task", {
           taskId: task.id,
           inferredScore: inferredResult.score,
+          originalStatus: task.verification_status,
           effectiveStatus,
           approvalRationale: inferredResult.approvalRationale,
           blockedReason: inferredResult.blockedReason,
         });
       } catch (err) {
-        this.log.error("Failed to repair null score for approved task", {
+        this.log.error("Failed to repair null score for verified task", {
           taskId: task.id,
           error: err instanceof Error ? err.message : String(err),
         });
@@ -1656,12 +1670,16 @@ export class Verifier {
    * so that quality trend analysis, calibration drift detection, and routing
    * accuracy tracking are never blind.
    */
-  async ensureScoresPopulated(batchLimit: number = 10): Promise<number> {
+  async ensureScoresPopulated(batchLimit: number = 50): Promise<number> {
     let scored = 0;
 
     // Phase 1: verified tasks (approved OR rejected) with null quality_score → infer score
     // Covers both approved tasks that bypassed the verifier and rejected tasks that
     // were hard-blocked before a score could be computed.
+    //
+    // Issue #244: the default batchLimit is raised from 10 to 50 so that a single
+    // cycle can drain a backlog of up to 50 null-score tasks without waiting for
+    // the next daemon cycle.
     const nullScoreTasks = this.store.getVerifiedTasksWithNullScores(batchLimit);
     if (nullScoreTasks.length > 0) {
       this.log.info("ensureScoresPopulated: backfilling verified tasks with null scores", {
@@ -1721,23 +1739,26 @@ export class Verifier {
     }
 
     // Phase 2: done tasks with verification_status IS NULL → full verify
-    const remaining = batchLimit - scored;
-    if (remaining > 0) {
-      const unverified = this.store.getUnverified(remaining);
-      if (unverified.length > 0) {
-        this.log.info("ensureScoresPopulated: verifying unscored done tasks", {
-          count: unverified.length,
-        });
-        for (const task of unverified) {
-          try {
-            await this.verify(task.id);
-            scored++;
-          } catch (err) {
-            this.log.error("ensureScoresPopulated: verification failed", {
-              taskId: task.id,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
+    //
+    // Issue #244: Phase 2 previously used `remaining = batchLimit - scored`
+    // which meant Phase 2 was starved whenever Phase 1 filled the batch.  For
+    // example, with batchLimit=10 and 10+ null-score verified tasks, Phase 2
+    // would get `remaining = 0` and unverified done tasks would accumulate
+    // indefinitely.  The fix: each phase uses the full batchLimit independently.
+    const unverified = this.store.getUnverified(batchLimit);
+    if (unverified.length > 0) {
+      this.log.info("ensureScoresPopulated: verifying unscored done tasks", {
+        count: unverified.length,
+      });
+      for (const task of unverified) {
+        try {
+          await this.verify(task.id);
+          scored++;
+        } catch (err) {
+          this.log.error("ensureScoresPopulated: verification failed", {
+            taskId: task.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       }
     }

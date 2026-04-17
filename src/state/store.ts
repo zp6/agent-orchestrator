@@ -518,6 +518,26 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
     return row ?? null;
   }
 
+  /**
+   * Default quality_score written when a caller sets verification_status to
+   * 'approved' without providing an explicit score.  Chosen to be a
+   * recognisable "marginal-pass" sentinel so analytics never see null, while
+   * still being below the ideal 0.80 threshold — operators can identify
+   * tasks that need score refinement via ensureScoresPopulated().
+   *
+   * Exported for tests and callers that need to distinguish a sentinel from a
+   * real score.
+   */
+  static readonly NULL_SCORE_APPROVED_SENTINEL = 0.75;
+
+  /**
+   * Default quality_score written when a caller sets verification_status to
+   * 'rejected' without providing an explicit score.  Chosen to sit at the
+   * hard-block boundary (0.50) — clearly below the approval threshold and
+   * distinguishable from real scores while remaining valid for analytics.
+   */
+  static readonly NULL_SCORE_REJECTED_SENTINEL = 0.50;
+
   updateTask(id: string, updates: Partial<Task>): void {
     // ── Score-approval invariant enforcement (issue #203) ────────────────
     // Defence-in-depth: prevent any caller from writing an approved task
@@ -546,6 +566,48 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore {
         .get(id) as { verification_status: string | null } | undefined;
       if (existing?.verification_status === "approved") {
         normalizedUpdates.verification_status = "rejected";
+      }
+    }
+
+    // ── Null-score guard (issue #244) ─────────────────────────────────────
+    // Prevent creating verified tasks with null quality_score.
+    //
+    // If a caller sets verification_status to 'approved' or 'rejected' but
+    // does NOT supply quality_score in the same call, AND the task currently
+    // has quality_score = NULL, write a conservative default sentinel so that:
+    //   (a) quality trend charts, calibration drift, and SLA checks always
+    //       have a non-null value to aggregate over,
+    //   (b) dashboard task lists show a score for every verified task,
+    //   (c) the score-approval invariant above remains consistent.
+    //
+    // Callers that supply an explicit quality_score are unaffected.
+    // The sentinel values (0.75 approved, 0.50 rejected) are exported as
+    // StateStore.NULL_SCORE_APPROVED_SENTINEL / NULL_SCORE_REJECTED_SENTINEL
+    // so tests can distinguish defaults from real verifier scores.
+    //
+    // ensureScoresPopulated() will NOT refine these defaults (they are no longer
+    // null), but repairNullScoresForApprovedTasks() / the /backfill-scores
+    // Telegram command can be run manually to LLM-infer actual scores.
+    if (
+      (normalizedUpdates.verification_status === "approved" ||
+       normalizedUpdates.verification_status === "rejected") &&
+      normalizedUpdates.quality_score == null
+    ) {
+      const existing = this.db
+        .prepare("SELECT quality_score FROM tasks WHERE id = ?")
+        .get(id) as { quality_score: number | null } | undefined;
+      if (existing?.quality_score == null) {
+        const sentinel =
+          normalizedUpdates.verification_status === "approved"
+            ? StateStore.NULL_SCORE_APPROVED_SENTINEL
+            : StateStore.NULL_SCORE_REJECTED_SENTINEL;
+        normalizedUpdates.quality_score = sentinel;
+        console.warn(
+          `[StateStore] updateTask(${id}): no quality_score supplied for ` +
+          `verification_status='${normalizedUpdates.verification_status}' — ` +
+          `writing default sentinel ${sentinel}. ` +
+          `Run repairNullScoresForApprovedTasks() to LLM-infer real scores.`,
+        );
       }
     }
 
