@@ -568,27 +568,29 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
   static readonly NULL_SCORE_REJECTED_SENTINEL = 0.50;
 
   updateTask(id: string, updates: Partial<Task>): void {
-    // ── Score-approval invariant enforcement (issue #203) ────────────────
+    // ── Score-approval invariant enforcement (issue #203, #258) ──────────
     // Defence-in-depth: prevent any caller from writing an approved task
-    // with a quality_score below the hard-block threshold (0.50).
+    // with a quality_score below the acceptance floor (0.60).
     // This catches bugs, race conditions, and external callers that bypass
-    // the verifier's own guards.
+    // the verifier's own guards.  The floor covers two sub-ranges:
+    //   < 0.50 (hard_block_sub50) — fundamentally incomplete work
+    //   [0.50, 0.60) (low_score_sub60) — partial work still below acceptance bar
     const normalizedUpdates = { ...updates };
     if (
       normalizedUpdates.verification_status === "approved" &&
       normalizedUpdates.quality_score != null &&
-      normalizedUpdates.quality_score < StateStore.HARD_BLOCK_THRESHOLD
+      normalizedUpdates.quality_score < StateStore.SUB_THRESHOLD_REJECTION_LIMIT
     ) {
       normalizedUpdates.verification_status = "rejected";
     }
 
     // Also handle the case where only quality_score is being updated:
-    // if the new score is below the hard-block threshold, check the current
+    // if the new score is below the acceptance floor, check the current
     // verification_status in the DB and reject if currently approved.
     if (
       normalizedUpdates.verification_status === undefined &&
       normalizedUpdates.quality_score != null &&
-      normalizedUpdates.quality_score < StateStore.HARD_BLOCK_THRESHOLD
+      normalizedUpdates.quality_score < StateStore.SUB_THRESHOLD_REJECTION_LIMIT
     ) {
       const existing = this.db
         .prepare("SELECT verification_status FROM tasks WHERE id = ?")
@@ -2586,18 +2588,45 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
   private static readonly HARD_BLOCK_THRESHOLD = 0.50;
 
   /**
+   * Acceptance floor: scores strictly below this value are unconditionally
+   * rejected.  Covers both sub-ranges:
+   *   < 0.50                    → hard_block_sub50 (fundamentally incomplete)
+   *   [0.50, 0.60)              → low_score_sub60  (partial, below acceptance bar)
+   *
+   * Any `insertVerificationResult` call with score < 0.60 and first_pass = 1
+   * is normalised to first_pass = 0 so the verification_results table never
+   * contains an 'approved' record whose score would contradict the quality gate.
+   * This is the storage-layer equivalent of the verifier's applySubThresholdRejectionGuard().
+   */
+  private static readonly SUB_THRESHOLD_REJECTION_LIMIT = 0.60;
+
+  /**
    * Persist a verification result record after each LLM scoring decision.
    *
-   * Fire-and-forget — errors are swallowed so instrumentation never interrupts
-   * the main verification flow.
+   * Enforces two score-gate invariants at the write path (belt-and-suspenders):
+   *   1. score < 0.50 → first_pass forced to 0, blocked_reason = 'hard_block_sub50'
+   *   2. score in [0.50, 0.60) → first_pass forced to 0, blocked_reason = 'low_score_sub60'
+   *
+   * This means the verification_results table can never contain an 'approved'
+   * record (first_pass = 1) with quality_score < 0.60, regardless of how the
+   * record was constructed. Callers that already set blockedReason correctly are
+   * unaffected — normalisation is a no-op when first_pass is already 0.
    */
   insertVerificationResult(record: Omit<VerificationResultRecord, "id">): void {
     const isHardBlocked = record.score < StateStore.HARD_BLOCK_THRESHOLD;
+    const isSubThreshold =
+      !isHardBlocked && record.score < StateStore.SUB_THRESHOLD_REJECTION_LIMIT;
+
     const normalizedRecord = {
       ...record,
-      first_pass: isHardBlocked ? 0 : record.first_pass,
-      blocked_reason: isHardBlocked ? "hard_block_sub50" : record.blocked_reason,
-      approval_rationale: isHardBlocked ? null : record.approval_rationale,
+      first_pass: isHardBlocked || isSubThreshold ? 0 : record.first_pass,
+      blocked_reason: isHardBlocked
+        ? "hard_block_sub50"
+        : isSubThreshold
+          ? "low_score_sub60"
+          : record.blocked_reason,
+      approval_rationale:
+        isHardBlocked || isSubThreshold ? null : record.approval_rationale,
     };
 
     this.db
@@ -2608,6 +2637,35 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
            (@task_id, @score, @first_pass, @rejection_reason, @blocked_reason, @approval_rationale, @threshold, @agent_id, @timestamp)`,
       )
       .run(normalizedRecord);
+  }
+
+  /**
+   * Audit query: return verification_results records where first_pass = 1
+   * (approved) but score < minScore within the last `days` days.
+   *
+   * Use this to validate the score threshold gate — the result set should be
+   * empty when the gate is enforced correctly. A non-empty result set indicates
+   * either a past write-path gap or a race condition that needs investigation.
+   *
+   * Acceptance criteria for issue #258:
+   *   `getApprovedBelowThreshold(0.60, 30)` must return an empty array.
+   *
+   * @param minScore - Score threshold (exclusive lower bound). Default 0.60.
+   * @param days     - Look-back window in calendar days. Default 30.
+   */
+  getApprovedBelowThreshold(
+    minScore: number = StateStore.SUB_THRESHOLD_REJECTION_LIMIT,
+    days: number = 30,
+  ): VerificationResultRecord[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM verification_results
+         WHERE first_pass = 1
+           AND score < ?
+           AND timestamp >= datetime('now', ? || ' days')
+         ORDER BY timestamp DESC`,
+      )
+      .all(minScore, `-${days}`) as VerificationResultRecord[];
   }
 
   /**

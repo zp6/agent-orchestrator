@@ -1371,6 +1371,18 @@ export interface IVerificationResultStore {
    * @returns The most recent VerificationResultRecord for the task, or null.
    */
   getLatestVerificationRecord(taskId: string): VerificationResultRecord | null;
+  /**
+   * Audit query: return verification_results records where first_pass = 1
+   * (approved) but score < minScore within the last `days` days.
+   *
+   * Used to validate the score threshold gate — the result set should always
+   * be empty when the gate is enforced correctly (acceptance criterion for
+   * issue #258). A non-empty result indicates a past write-path gap.
+   *
+   * @param minScore - Score threshold (exclusive lower bound). Default 0.60.
+   * @param days     - Look-back window in calendar days. Default 30.
+   */
+  getApprovedBelowThreshold(minScore?: number, days?: number): VerificationResultRecord[];
 }
 
 /**
