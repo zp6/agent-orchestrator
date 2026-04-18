@@ -38,7 +38,10 @@ const RETIRE_SAVE_RATE_THRESHOLD = 0.05;
 const RETIRE_MIN_HITS = 50;
 
 /** LLM timeout for pattern extraction. */
-const LLM_TIMEOUT_MS = 60_000;
+const LLM_TIMEOUT_MS = 120_000;
+
+/** Max signals to send to the LLM per cycle. Keeps the prompt manageable. */
+const MAX_SIGNALS_PER_CYCLE = 20;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -114,7 +117,12 @@ export async function learnPatterns(
 
   let learned = 0;
   try {
-    const extracted = await extractPatternsFromSignals(config, signals, existing);
+    // Cap signals to keep the LLM prompt manageable and avoid timeouts
+    const cappedSignals = signals.slice(0, MAX_SIGNALS_PER_CYCLE);
+    if (signals.length > MAX_SIGNALS_PER_CYCLE) {
+      log.debug("Capped signals for LLM extraction", { total: signals.length, sent: MAX_SIGNALS_PER_CYCLE });
+    }
+    const extracted = await extractPatternsFromSignals(config, cappedSignals, existing);
 
     for (const pattern of extracted) {
       // Validate pattern_type against allowed enum values
