@@ -120,7 +120,27 @@ export function detectMultiRepoChangeSets(
   agentName: string,
   config: OrchestratorConfig,
 ): MultiRepoChangeSet[] {
-  if (task.task_type === "research") return [];
+  // Only detect cross-repo requirements for genuine implementation tasks.
+  // Skip research, facilitation, housekeeping, revisions, and coordinated
+  // changes — these mention other repos in their descriptions/results
+  // without actually needing cross-repo code changes, causing cascade spam.
+  if (task.task_type === "research" || task.task_type === "facilitation") return [];
+
+  const title = task.title?.toLowerCase() ?? "";
+  if (
+    title.includes("[housekeeping]") ||
+    title.includes("[revision]") ||
+    title.startsWith("[meeting") ||
+    title.includes("coordinated change") ||
+    title.includes("backlog triage") ||
+    title.includes("bootstrap roadmap")
+  ) {
+    return [];
+  }
+
+  // Only run for tasks with a GitHub source — manual/internal tasks shouldn't
+  // trigger cross-repo coordination.
+  if (task.source !== "github") return [];
 
   const ownerAgent = config.agents[agentName];
   const ownedRepo = ownerAgent?.github;
