@@ -191,6 +191,55 @@ export class PRReviewer {
       }
     }
 
+    // Housekeeping PR metadata validation: must include JSON schema with triage results
+    if (this.isHousekeepingPR(pr)) {
+      const validation = this.validateHousekeepingJsonSchema(pr.body);
+      if (!validation.valid) {
+        this.log.warn("Housekeeping PR missing JSON schema", {
+          repo,
+          prNumber,
+          title: pr.title,
+          error: validation.error,
+        });
+
+        // Request changes with actionable feedback including example schema
+        const exampleSchema = JSON.stringify({
+          duplicates_checked: true,
+          stale_issues: [],
+          priority_reordering: [],
+          outcome_summary: "Summary of triage findings and actions taken"
+        }, null, 2);
+
+        const result: PRReviewResult = {
+          decision: "request-changes",
+          comment: `**[Housekeeping PR] Missing required JSON metadata block**
+
+Your PR body must include a JSON metadata block with the triage findings. This allows structured downstream processing and audit trails.
+
+**Required fields:**
+- \`duplicates_checked\` (boolean) — whether you checked for duplicate issues
+- \`stale_issues\` (array/object) — issues marked as stale or closed
+- \`priority_reordering\` (array/object) — issues reordered in priority
+- \`outcome_summary\` (string) — human-readable summary of actions taken
+
+**Example:**
+\`\`\`json
+${exampleSchema}
+\`\`\`
+
+**Error:** ${validation.error}
+
+Please add this block to your PR description and try again.`,
+          reason: `Housekeeping PR missing JSON metadata schema: ${validation.error}`,
+        };
+
+        await this.executeDecision(repo, prNumber, result, undefined, pr);
+        return result;
+      }
+
+      this.log.info("Housekeeping PR JSON schema valid", { repo, prNumber, title: pr.title });
+    }
+
     // Escalate after too many review rounds instead of endlessly requesting changes.
     // The ceiling is configurable via agents.yaml: pr_review.feedback_ceiling (default: 3).
     const reviewCeiling = this.config.pr_review?.feedback_ceiling ?? 3;
@@ -651,6 +700,120 @@ export class PRReviewer {
 
   private hasIssueRef(pr: PRInfo): boolean {
     return /(?:closes|fixes|resolves)\s+#\d+/i.test(pr.body);
+  }
+
+  /**
+   * Detect if a PR is a housekeeping PR (backlog triage, sync, documentation updates, etc.)
+   * Housekeeping PRs must include a mandatory JSON schema in the PR body.
+   */
+  private isHousekeepingPR(pr: PRInfo): boolean {
+    // Title patterns for housekeeping: "chore:", "triage", "sync", "housekeeping", etc.
+    const housekeepingPatterns = [
+      /chore:\s*(triage|sync|backlog|housekeeping|audit)/i,
+      /\[housekeeping\]/i,
+      /backlog\s+triage/i,
+    ];
+
+    if (housekeepingPatterns.some(pattern => pattern.test(pr.title))) {
+      return true;
+    }
+
+    // Also detect by file changes: if only docs/config files changed (CLAUDE.md, ROADMAP.md, etc)
+    try {
+      const changedFiles = extractChangedFiles(pr.diff);
+      const docsOnlyPatterns = /\.(md|yaml|yml|json)$/i;
+      const configFiles = /^(CLAUDE\.md|ROADMAP\.md|agents\.yaml|agents\.yml)$/;
+
+      // If all changes are to docs/config files, treat as housekeeping
+      const allDocChanges = changedFiles.length > 0 &&
+                           changedFiles.every(f => docsOnlyPatterns.test(f) || configFiles.test(f.split('/').pop() ?? ''));
+
+      if (allDocChanges && changedFiles.some(f => configFiles.test(f.split('/').pop() ?? ''))) {
+        return true;
+      }
+    } catch {
+      // Best-effort: if we can't parse the diff, fall back to title patterns only
+    }
+
+    return false;
+  }
+
+  /**
+   * Validate that a housekeeping PR body includes the mandatory JSON metadata schema.
+   * Returns { valid: true } if valid, { valid: false, error: string } if invalid.
+   */
+  private validateHousekeepingJsonSchema(body: string): { valid: boolean; error?: string } {
+    // Extract JSON from markdown code block: ```json ... ```
+    const jsonBlockMatch = body.match(/```json\s*([\s\S]*?)```/);
+    if (!jsonBlockMatch) {
+      return {
+        valid: false,
+        error: "Missing JSON metadata block in PR description"
+      };
+    }
+
+    const jsonStr = jsonBlockMatch[1].trim();
+    let jsonObj: unknown;
+    try {
+      jsonObj = JSON.parse(jsonStr);
+    } catch (err) {
+      return {
+        valid: false,
+        error: `Invalid JSON in metadata block: ${err instanceof Error ? err.message : "parse error"}`
+      };
+    }
+
+    // Validate it's an object
+    if (typeof jsonObj !== 'object' || jsonObj === null || Array.isArray(jsonObj)) {
+      return {
+        valid: false,
+        error: "JSON metadata block must be an object (not an array or primitive)"
+      };
+    }
+
+    // Check required fields
+    const obj = jsonObj as Record<string, unknown>;
+    const requiredFields = ['duplicates_checked', 'stale_issues', 'priority_reordering', 'outcome_summary'];
+    const missingFields = requiredFields.filter(field => !(field in obj));
+
+    if (missingFields.length > 0) {
+      return {
+        valid: false,
+        error: `Missing required fields in JSON metadata: ${missingFields.join(', ')}`
+      };
+    }
+
+    // Validate field types
+    if (typeof obj.duplicates_checked !== 'boolean') {
+      return {
+        valid: false,
+        error: "Field 'duplicates_checked' must be a boolean"
+      };
+    }
+
+    if (typeof obj.outcome_summary !== 'string' || obj.outcome_summary.trim().length === 0) {
+      return {
+        valid: false,
+        error: "Field 'outcome_summary' must be a non-empty string"
+      };
+    }
+
+    // stale_issues and priority_reordering must be arrays (null is not valid, use [] for empty)
+    if (obj.stale_issues !== undefined && (obj.stale_issues === null || !Array.isArray(obj.stale_issues))) {
+      return {
+        valid: false,
+        error: "Field 'stale_issues' must be an array"
+      };
+    }
+
+    if (obj.priority_reordering !== undefined && (obj.priority_reordering === null || !Array.isArray(obj.priority_reordering))) {
+      return {
+        valid: false,
+        error: "Field 'priority_reordering' must be an array"
+      };
+    }
+
+    return { valid: true };
   }
 
   /**

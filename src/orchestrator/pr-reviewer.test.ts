@@ -1396,6 +1396,158 @@ describe("PRReviewer", () => {
       expect(result.comment).toBe(proseyComment);
     });
   });
+
+  // ── Housekeeping PR JSON Schema Validation Tests ─────────────────────
+  describe("Housekeeping PR validation", () => {
+    // Some earlier tests override execSync.mockImplementation which persists because
+    // vi.clearAllMocks() only clears call history, not implementations. Restore the
+    // default implementation before each housekeeping test to ensure isolation.
+    beforeEach(async () => {
+      const { execSync: mockExecSync } = await import("node:child_process");
+      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) {
+          return mockPRStateResponse;
+        }
+        if (cmd.includes("gh pr view")) {
+          return mockPRViewResponse;
+        }
+        if (cmd.includes("gh pr diff")) {
+          return mockDiffResponse;
+        }
+        if (cmd.includes("gh issue list")) {
+          return mockIssueListResponse;
+        }
+        if (cmd.includes("gh pr list")) {
+          return JSON.stringify([
+            { number: 9, title: "Test PR", body: "Description\n\nCloses #9" },
+            { number: 10, title: "Another PR", body: "Another description" },
+          ]);
+        }
+        if (cmd.includes("gh pr review") || cmd.includes("gh pr edit") || cmd.includes("gh pr comment") || cmd.includes("gh pr merge")) {
+          return "";
+        }
+        return "";
+      });
+    });
+
+    it("accepts housekeeping PR with valid JSON schema and passes to LLM review", async () => {
+      const validSchema = JSON.stringify({
+        duplicates_checked: true,
+        stale_issues: [390],
+        priority_reordering: [],
+        outcome_summary: "Closed duplicate #390. No stale issues."
+      });
+
+      mockPRViewResponse = JSON.stringify({
+        number: 100,
+        title: "[agent-a] chore: backlog triage 2026-04-18",
+        body: `## Summary\nTriage results\n\n\`\`\`json\n${validSchema}\n\`\`\`\n\nCloses #392`,
+        author: { login: "agent" },
+        headRefName: "issue-392-triage",
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+
+      mockDiffResponse = "+++ b/CLAUDE.md\n+++ b/ROADMAP.md";
+
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({
+          decision: "approve",
+          comment: "Looks good.",
+          reason: "Clean implementation",
+        })}],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 100);
+
+      // Should pass housekeeping validation and go to LLM review which approves
+      expect(result.decision).toBe("approve");
+      expect(mockCreate).toHaveBeenCalled();
+    });
+
+    it("skips housekeeping validation for non-housekeeping PRs and proceeds to LLM review", async () => {
+      mockPRViewResponse = JSON.stringify({
+        number: 9,
+        title: "[agent-a] Add feature X",
+        body: "Regular feature implementation with no JSON schema needed",
+        author: { login: "agent" },
+        headRefName: "issue-88-feature",
+        changedFiles: 3,
+        mergeable: "MERGEABLE",
+      });
+
+      mockDiffResponse = "+++ b/src/feature.ts";
+
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: JSON.stringify({
+          decision: "request-changes",
+          comment: "Needs work.",
+          reason: "Incomplete",
+        })}],
+      });
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 9);
+
+      // Should skip housekeeping validation and go straight to LLM review
+      expect(mockCreate).toHaveBeenCalled();
+      expect(result.comment).toBe("1. Needs work.");
+    });
+
+    it("rejects housekeeping PR with empty outcome_summary", async () => {
+      const invalidSchema = JSON.stringify({
+        duplicates_checked: true,
+        stale_issues: [],
+        priority_reordering: [],
+        outcome_summary: ""
+      });
+
+      mockPRViewResponse = JSON.stringify({
+        number: 101,
+        title: "[agent-a] chore: backlog triage 2026-04-18",
+        body: `## Summary\nTriage results\n\n\`\`\`json\n${invalidSchema}\n\`\`\`\n\nCloses #393`,
+        author: { login: "agent" },
+        headRefName: "issue-393-triage",
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+
+      mockDiffResponse = "+++ b/CLAUDE.md\n+++ b/ROADMAP.md";
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 101);
+
+      // Should fail schema validation (empty outcome_summary) without calling LLM
+      expect(result.decision).toBe("request-changes");
+      expect(mockCreate).not.toHaveBeenCalled();
+      expect(result.comment).toContain("outcome_summary");
+    });
+
+    it("rejects housekeeping PR with stale_issues set to null", async () => {
+      const invalidSchema = `{"duplicates_checked":true,"stale_issues":null,"priority_reordering":[],"outcome_summary":"Triage done."}`;
+
+      mockPRViewResponse = JSON.stringify({
+        number: 102,
+        title: "[agent-a] chore: backlog triage 2026-04-18",
+        body: `## Summary\nTriage results\n\n\`\`\`json\n${invalidSchema}\n\`\`\`\n\nCloses #394`,
+        author: { login: "agent" },
+        headRefName: "issue-394-triage",
+        changedFiles: 2,
+        mergeable: "MERGEABLE",
+      });
+
+      mockDiffResponse = "+++ b/CLAUDE.md\n+++ b/ROADMAP.md";
+
+      const reviewer = new PRReviewer(config);
+      const result = await reviewer.reviewPR("owner/repo", 102);
+
+      // Should fail schema validation (stale_issues is null, not an array) without calling LLM
+      expect(result.decision).toBe("request-changes");
+      expect(mockCreate).not.toHaveBeenCalled();
+      expect(result.comment).toContain("stale_issues");
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
