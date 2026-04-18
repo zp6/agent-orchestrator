@@ -232,6 +232,24 @@ export type {
   SurgeAlertConfig,
 } from "./reviewer/duplicate-dispatch-surge-detector.js";
 
+// Semantic duplicate guard (issue #275) — pre-dispatch token-overlap similarity
+// check to detect when two open issues describe the same feature, preventing
+// double-implementation cost and merge conflicts from competing PRs.
+export {
+  checkSemanticDuplicates,
+  formatDedupCandidates,
+  tokenize,
+  jaccardSimilarity,
+  DEFAULT_SIMILARITY_THRESHOLD,
+  DEFAULT_WINDOW_HOURS,
+} from "./reviewer/semantic-duplicate-guard.js";
+export type {
+  RecentDispatchedIssue,
+  DedupCandidate,
+  SemanticDuplicateCheckResult,
+  SemanticDuplicateGuardOptions,
+} from "./reviewer/semantic-duplicate-guard.js";
+
 // Standup handler utilities (used by guard and PR reviewer)
 export {
   isStandupIssue,
