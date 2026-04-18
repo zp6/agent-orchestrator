@@ -109,6 +109,10 @@ describe("dispatchGitHubIssues", () => {
       acquireDispatchLock: vi.fn(),
       releaseDispatchLock: vi.fn(),
       cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
+      getInFlightReservation: vi.fn().mockReturnValue(undefined),
+      addInFlightReservation: vi.fn(),
+      removeInFlightReservation: vi.fn(),
+      cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -348,6 +352,10 @@ describe("pre-dispatch issue state validation", () => {
       acquireDispatchLock: vi.fn(),
       releaseDispatchLock: vi.fn(),
       cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
+      getInFlightReservation: vi.fn().mockReturnValue(undefined),
+      addInFlightReservation: vi.fn(),
+      removeInFlightReservation: vi.fn(),
+      cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -435,6 +443,10 @@ describe("duplicate PR detection before dispatch", () => {
       acquireDispatchLock: vi.fn(),
       releaseDispatchLock: vi.fn(),
       cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
+      getInFlightReservation: vi.fn().mockReturnValue(undefined),
+      addInFlightReservation: vi.fn(),
+      removeInFlightReservation: vi.fn(),
+      cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -657,6 +669,10 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       acquireDispatchLock: vi.fn(),
       releaseDispatchLock: vi.fn(),
       cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
+      getInFlightReservation: vi.fn().mockReturnValue(undefined),
+      addInFlightReservation: vi.fn(),
+      removeInFlightReservation: vi.fn(),
+      cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -782,6 +798,10 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       acquireDispatchLock: vi.fn(),
       releaseDispatchLock: vi.fn(),
       cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
+      getInFlightReservation: vi.fn().mockReturnValue(undefined),
+      addInFlightReservation: vi.fn(),
+      removeInFlightReservation: vi.fn(),
+      cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1008,6 +1028,7 @@ describe("dispatchLinearChecks", () => {
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
       isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
       clearSourceRefPriority: vi.fn(),
+      removeInFlightReservation: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "linear-agent", response: { content: "done" } }),
@@ -1056,6 +1077,7 @@ describe("dispatchSlackChecks", () => {
       isAgentAuthDegraded: vi.fn().mockReturnValue(false),
       isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
       clearSourceRefPriority: vi.fn(),
+      removeInFlightReservation: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "slack-agent", response: { content: "done" } }),
@@ -1127,6 +1149,10 @@ describe("dispatchIdleAgentBacklog", () => {
       acquireDispatchLock: vi.fn(),
       releaseDispatchLock: vi.fn(),
       cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
+      getInFlightReservation: vi.fn().mockReturnValue(undefined),
+      addInFlightReservation: vi.fn(),
+      removeInFlightReservation: vi.fn(),
+      cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1390,6 +1416,10 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       acquireDispatchLock: vi.fn(),
       releaseDispatchLock: vi.fn(),
       cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
+      getInFlightReservation: vi.fn().mockReturnValue(undefined),
+      addInFlightReservation: vi.fn(),
+      removeInFlightReservation: vi.fn(),
+      cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1534,6 +1564,10 @@ describe("in-flight branch detection", () => {
       acquireDispatchLock: vi.fn(),
       releaseDispatchLock: vi.fn(),
       cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
+      getInFlightReservation: vi.fn().mockReturnValue(undefined),
+      addInFlightReservation: vi.fn(),
+      removeInFlightReservation: vi.fn(),
+      cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
 
     vi.mocked(mockStore.hasActiveTask).mockReturnValue(false);
@@ -1589,6 +1623,10 @@ describe("in-flight branch detection", () => {
       acquireDispatchLock: vi.fn(),
       releaseDispatchLock: vi.fn(),
       cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
+      getInFlightReservation: vi.fn().mockReturnValue(undefined),
+      addInFlightReservation: vi.fn(),
+      removeInFlightReservation: vi.fn(),
+      cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
 
     await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1645,6 +1683,10 @@ describe("in-flight branch detection", () => {
       acquireDispatchLock: vi.fn(),
       releaseDispatchLock: vi.fn(),
       cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
+      getInFlightReservation: vi.fn().mockReturnValue(undefined),
+      addInFlightReservation: vi.fn(),
+      removeInFlightReservation: vi.fn(),
+      cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
 
     const result = await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1696,6 +1738,10 @@ describe("in-flight branch detection", () => {
       acquireDispatchLock: vi.fn(),
       releaseDispatchLock: vi.fn(),
       cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
+      getInFlightReservation: vi.fn().mockReturnValue(undefined),
+      addInFlightReservation: vi.fn(),
+      removeInFlightReservation: vi.fn(),
+      cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
 
     await dispatchIdleAgentBacklog(branchConfig, mockStore, mockDispatcher);
@@ -1747,6 +1793,10 @@ describe("approved PR skip logic", () => {
       acquireDispatchLock: vi.fn(),
       releaseDispatchLock: vi.fn(),
       cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
+      getInFlightReservation: vi.fn().mockReturnValue(undefined),
+      addInFlightReservation: vi.fn(),
+      removeInFlightReservation: vi.fn(),
+      cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1899,6 +1949,16 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
       cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
+      // Per-issue dispatch lock (added in #916)
+      getDispatchLock: vi.fn().mockReturnValue(undefined),
+      acquireDispatchLock: vi.fn(),
+      releaseDispatchLock: vi.fn(),
+      cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
+      // In-flight reservation (added in #927)
+      getInFlightReservation: vi.fn().mockReturnValue(undefined),
+      addInFlightReservation: vi.fn(),
+      removeInFlightReservation: vi.fn(),
+      cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),

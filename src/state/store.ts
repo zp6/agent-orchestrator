@@ -860,6 +860,30 @@ export interface DispatchLock {
 }
 
 /**
+ * An in-flight dispatch reservation record (issue #927).
+ *
+ * Written the moment an issue claim is acquired — before the agent starts
+ * work. Covers the race window between claim acquisition and PR creation
+ * (5–25 minutes) that the 10-minute dispatch_lock TTL does not fully cover.
+ * A subsequent dispatch attempt for the same sourceRef will find this
+ * reservation and abort before starting a duplicate implementation.
+ */
+export interface InFlightReservation {
+  /** The trigger source: "github" | "linear" | "slack" */
+  source: string;
+  /** The source ref, e.g. "owner/repo#42" */
+  source_ref: string;
+  /** Agent that holds this reservation */
+  agent_name: string;
+  /** Task ID created for this dispatch (null until task record is written) */
+  task_id: string | null;
+  /** ISO timestamp when the reservation was created */
+  reserved_at: string;
+  /** ISO timestamp after which the reservation is considered expired */
+  expires_at: string;
+}
+
+/**
  * A single routing decision record.
  * Written at dispatch time; quality_score is filled when the task is verified.
  */
@@ -1373,6 +1397,7 @@ export class StateStore {
     this.runHealthCheckEventsMigration();
     this.runStagingValidationsMigration();
     this.runVerificationOutcomesMigration();
+    this.runInFlightReservationsMigration();
   }
 
   private runPhase2Migration(): void {
@@ -5885,6 +5910,148 @@ export class StateStore {
       .prepare(`DELETE FROM dispatch_locks WHERE expires_at <= ?`)
       .run(now);
     return result.changes;
+  }
+
+  // ---------------------------------------------------------------------------
+  // In-Flight Dispatch Reservation (issue #927)
+  //
+  // A write-ahead reservation that is created the moment an issue claim is
+  // acquired — BEFORE the agent even starts work. This covers the race window
+  // between claim acquisition and PR creation (typically 5–25 minutes), which
+  // the 10-minute dispatch_lock TTL does not fully cover.
+  //
+  // Unlike dispatch_locks (which prevent rapid re-dispatch storms), the
+  // reservation represents "an agent is actively building this right now".
+  // It is checked early in the dispatch loop so a second agent cannot start
+  // a duplicate implementation even if the dispatch_lock has already expired.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Default TTL for in-flight dispatch reservations: 20 minutes.
+   * Configurable via `triggers.in_flight_reservation_ttl_ms` in agents.yaml.
+   *
+   * 20 minutes covers the typical time from claim acquisition to PR creation.
+   * Reservations are also released explicitly when the task reaches a terminal
+   * state (done / failed / superseded), so the TTL is a safety ceiling rather
+   * than the expected lifetime.
+   */
+  static readonly IN_FLIGHT_RESERVATION_TTL_MS = 1_200_000; // 20 minutes
+
+  private runInFlightReservationsMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS in_flight_reservations (
+        source       TEXT NOT NULL,
+        source_ref   TEXT NOT NULL,
+        agent_name   TEXT NOT NULL,
+        task_id      TEXT,
+        reserved_at  TEXT NOT NULL,
+        expires_at   TEXT NOT NULL,
+        PRIMARY KEY (source, source_ref)
+      );
+      CREATE INDEX IF NOT EXISTS idx_ifr_expires ON in_flight_reservations(expires_at);
+    `);
+  }
+
+  /**
+   * Write an in-flight reservation for (source, sourceRef) immediately after
+   * acquiring the issue claim.
+   *
+   * Uses INSERT OR REPLACE so that if a reservation already exists for this
+   * sourceRef (e.g., from a superseded dispatch that wasn't cleaned up), the
+   * new dispatch refreshes it with an updated TTL.
+   */
+  addInFlightReservation(
+    source: string,
+    sourceRef: string,
+    agentName: string,
+    ttlMs = StateStore.IN_FLIGHT_RESERVATION_TTL_MS,
+  ): void {
+    const now = new Date();
+    const reservedAt = now.toISOString();
+    const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO in_flight_reservations
+           (source, source_ref, agent_name, task_id, reserved_at, expires_at)
+         VALUES (?, ?, ?, NULL, ?, ?)`,
+      )
+      .run(source, sourceRef, agentName, reservedAt, expiresAt);
+  }
+
+  /**
+   * Return the active (non-expired) in-flight reservation for a sourceRef, or
+   * undefined when no active reservation exists.
+   */
+  getInFlightReservation(
+    source: string,
+    sourceRef: string,
+  ): InFlightReservation | undefined {
+    const now = new Date().toISOString();
+    return this.db
+      .prepare(
+        `SELECT * FROM in_flight_reservations
+         WHERE source = ? AND source_ref = ? AND expires_at > ?`,
+      )
+      .get(source, sourceRef, now) as InFlightReservation | undefined;
+  }
+
+  /**
+   * Update the task_id on an existing reservation once the task record has
+   * been created. Used by the dashboard to correlate reservations with tasks.
+   */
+  updateInFlightReservationTaskId(
+    source: string,
+    sourceRef: string,
+    taskId: string,
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE in_flight_reservations SET task_id = ? WHERE source = ? AND source_ref = ?`,
+      )
+      .run(taskId, source, sourceRef);
+  }
+
+  /**
+   * Remove the in-flight reservation for (source, sourceRef).
+   *
+   * Called when the task reaches a terminal state — done, failed, or
+   * superseded — so the reservation does not unnecessarily block future
+   * dispatches after the work is complete.
+   */
+  removeInFlightReservation(source: string, sourceRef: string): void {
+    this.db
+      .prepare(`DELETE FROM in_flight_reservations WHERE source = ? AND source_ref = ?`)
+      .run(source, sourceRef);
+  }
+
+  /**
+   * Delete all expired in-flight reservations. Called at the start of each
+   * daemon dispatch cycle to keep the table tidy.
+   *
+   * @returns Number of reservations that were evicted.
+   */
+  cleanExpiredInFlightReservations(): number {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(`DELETE FROM in_flight_reservations WHERE expires_at <= ?`)
+      .run(now);
+    return result.changes;
+  }
+
+  /**
+   * List all currently active (non-expired) in-flight reservations.
+   * Used by the dashboard and CLI to give operators visibility into
+   * what is actively being worked on right now.
+   */
+  listActiveInFlightReservations(): InFlightReservation[] {
+    const now = new Date().toISOString();
+    return this.db
+      .prepare(
+        `SELECT * FROM in_flight_reservations
+         WHERE expires_at > ?
+         ORDER BY reserved_at DESC`,
+      )
+      .all(now) as InFlightReservation[];
   }
 
   // ---------------------------------------------------------------------------

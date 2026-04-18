@@ -504,6 +504,16 @@ export interface TriggersConfig {
   dispatch_lock_ttl_ms?: number;
 
   /**
+   * How long (ms) an in-flight dispatch reservation is held after an issue
+   * claim is acquired. The reservation covers the race window between claim
+   * acquisition and PR creation (typically 5–25 minutes). Any subsequent
+   * dispatch attempt for the same issue within this TTL is rejected even if
+   * the dispatch_lock has already expired.
+   * Defaults to 1200000 (20 minutes) when omitted.
+   */
+  in_flight_reservation_ttl_ms?: number;
+
+  /**
    * Maximum number of issues the orchestrator can auto-create per repo.
    * Prevents flooding a repo with orchestrator-generated issues.
    * Defaults to 10 when omitted.

@@ -286,6 +286,14 @@ function fireAndForget(
         agentName: claimOwner,
       });
     }
+    // Release the in-flight reservation now that the agent's work is done.
+    // The reservation covered the window between claim acquisition and task
+    // completion (PR open). Removing it here allows future re-dispatches for
+    // the same issue if the PR is closed or reverted without merging.
+    store.removeInFlightReservation(options.source, options.sourceRef);
+    log.debug("In-flight reservation released after dispatch settled", {
+      sourceRef: options.sourceRef,
+    });
     if (!result.taskId) {
       log.info("Fire-and-forget dispatch skipped by dispatcher", {
         agentName: result.agentName,
@@ -296,10 +304,9 @@ function fireAndForget(
       });
       return;
     }
-    // Attach the task ID to the claim record while the task is in-flight so
-    // the dashboard can correlate claim → task.  The claim may already have
-    // been released above (dispatch settled instantly); this is a best-effort
-    // update and intentionally non-transactional.
+    // Attach the task ID to both the claim record and the in-flight reservation
+    // while the task is in-flight so the dashboard can correlate them.
+    // Both writes are best-effort and intentionally non-transactional.
     store.updateClaimTaskId(options.source, options.sourceRef, result.taskId);
     store.markProcessed(options.source, options.sourceRef, result.taskId);
     log.info("Fire-and-forget dispatch completed", { taskId: result.taskId, agentName: result.agentName });
@@ -334,6 +341,10 @@ function fireAndForget(
         agentName: claimOwner,
       });
     }
+    // Release the in-flight reservation on error so the issue is not
+    // permanently blocked. The TTL is a safety net, but explicit cleanup
+    // gives the fastest possible recovery on dispatch failures.
+    store.removeInFlightReservation(options.source, options.sourceRef);
     log.error("Fire-and-forget dispatch failed", { agentName: options.agentName ?? options.sourceRef, sourceRef: options.sourceRef, error: err instanceof Error ? err.message : String(err) });
   });
 }
@@ -378,8 +389,9 @@ export async function dispatchGitHubIssues(
     return count;
   }
 
-  // Evict expired claims and dispatch locks at the start of each cycle so
-  // stale entries from crashed agents never permanently block an issue.
+  // Evict expired claims, dispatch locks, and in-flight reservations at the
+  // start of each cycle so stale entries from crashed agents never permanently
+  // block an issue.
   const expiredClaims = store.cleanExpiredClaims();
   if (expiredClaims > 0) {
     log.info("Cleaned expired issue claims", { count: expiredClaims });
@@ -387,6 +399,10 @@ export async function dispatchGitHubIssues(
   const expiredLocks = store.cleanExpiredDispatchLocks();
   if (expiredLocks > 0) {
     log.info("Cleaned expired dispatch locks", { count: expiredLocks });
+  }
+  const expiredReservations = store.cleanExpiredInFlightReservations();
+  if (expiredReservations > 0) {
+    log.info("Cleaned expired in-flight reservations", { count: expiredReservations });
   }
 
   for (const [agentName, agent] of Object.entries(config.agents)) {
@@ -438,6 +454,28 @@ export async function dispatchGitHubIssues(
 
       if (inFlightDispatches.has(sourceRef)) {
         log.info("Skipping duplicate GitHub issue already in-flight", { sourceRef });
+        result.skipped++;
+        continue;
+      }
+
+      // In-flight dispatch reservation (issue #927): block dispatch when an
+      // agent is actively building this issue right now.
+      // The reservation is written the moment a claim is acquired — before the
+      // agent even starts — with a 20-minute TTL. This covers the race window
+      // between claim acquisition and PR creation that the 10-minute
+      // dispatch_lock TTL does not fully cover (an agent typically takes
+      // 5–25 minutes to open a PR). If the daemon restarts and loses the
+      // in-memory inFlightDispatches map, the DB-backed reservation ensures
+      // a second daemon instance cannot trigger a duplicate implementation.
+      const existingReservation = store.getInFlightReservation("github", sourceRef);
+      if (existingReservation) {
+        log.info("Skipping dispatch: in-flight reservation active", {
+          sourceRef,
+          reservedBy: existingReservation.agent_name,
+          reservedAt: existingReservation.reserved_at,
+          expiresAt: existingReservation.expires_at,
+          taskId: existingReservation.task_id,
+        });
         result.skipped++;
         continue;
       }
@@ -623,6 +661,22 @@ export async function dispatchGitHubIssues(
       const dispatchLockTtl = config.triggers?.dispatch_lock_ttl_ms ?? StateStore.DISPATCH_LOCK_TTL_MS;
       store.acquireDispatchLock("github", sourceRef, agentName, dispatchLockTtl);
 
+      // Write the in-flight reservation (issue #927) immediately after acquiring
+      // the claim and before calling fireAndForget. This write-ahead record
+      // survives daemon restarts and covers the 5–25 minute window between now
+      // and when the agent opens a PR — a window the 10-minute dispatch_lock
+      // alone does not fully cover. The reservation is removed when the task
+      // reaches a terminal state (done / failed / superseded).
+      const reservationTtl =
+        config.triggers?.in_flight_reservation_ttl_ms ??
+        StateStore.IN_FLIGHT_RESERVATION_TTL_MS;
+      store.addInFlightReservation("github", sourceRef, agentName, reservationTtl);
+      log.info("In-flight reservation written", {
+        sourceRef,
+        agentName,
+        expiresInMs: reservationTtl,
+      });
+
       // Fire and forget — don't block the daemon cycle.
       // Pass sourceRepo (not agentName) so the router can detect cross-repo
       // destinations. For issues that target the owning agent the router still
@@ -750,6 +804,22 @@ export async function dispatchIdleAgentBacklog(
           result.skipped++;
           continue;
         }
+      }
+
+      // In-flight reservation check (issue #927) — idle pickup path.
+      // Checked before the dispatch lock so a longer-TTL reservation prevents
+      // duplicate implementation even if the 10-minute dispatch_lock has expired.
+      const idleExistingReservation = store.getInFlightReservation("github", sourceRef);
+      if (idleExistingReservation) {
+        log.info("Idle pickup: skipping dispatch — in-flight reservation active", {
+          sourceRef,
+          reservedBy: idleExistingReservation.agent_name,
+          reservedAt: idleExistingReservation.reserved_at,
+          expiresAt: idleExistingReservation.expires_at,
+          taskId: idleExistingReservation.task_id,
+        });
+        result.skipped++;
+        continue;
       }
 
       // Per-issue dispatch lock (issue #916) — idle pickup path.
@@ -909,6 +979,17 @@ export async function dispatchIdleAgentBacklog(
       // Acquire per-issue dispatch lock (issue #916) — idle pickup path.
       const idleDispatchLockTtl = config.triggers?.dispatch_lock_ttl_ms ?? StateStore.DISPATCH_LOCK_TTL_MS;
       store.acquireDispatchLock("github", sourceRef, agentName, idleDispatchLockTtl);
+
+      // Write in-flight reservation (issue #927) — idle pickup path.
+      const idleReservationTtl =
+        config.triggers?.in_flight_reservation_ttl_ms ??
+        StateStore.IN_FLIGHT_RESERVATION_TTL_MS;
+      store.addInFlightReservation("github", sourceRef, agentName, idleReservationTtl);
+      log.info("Idle pickup: in-flight reservation written", {
+        sourceRef,
+        agentName,
+        expiresInMs: idleReservationTtl,
+      });
 
       // Pass sourceRepo instead of agentName so the router can detect cross-repo
       // destinations (same rationale as dispatchGitHubIssues above).
