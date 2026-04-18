@@ -47,6 +47,7 @@ Each functional pool runs a Claude instance (primary) and a Codex/OpenAI instanc
 - **Iteration cost tracking** — per-PR revision cost leaderboard with automatic improvement issue routing
 - **Cross-repo feature tracker** — detects feature consistency gaps across Claude/Codex pool members
 - **Health check postmortem** — auto-files structured incident reports for recurring health failures
+- **Verification calibration** — logs verification outcomes (`verification_outcome_logs`) and polls PR events to build quality-score training data
 
 ## CRITICAL: NEVER Push Directly to Main
 
