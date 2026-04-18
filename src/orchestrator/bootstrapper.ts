@@ -19,7 +19,7 @@ export interface BootstrapOptions {
   scopeOwns?: string[];
   /** Explicit scope: what this agent does NOT own. */
   scopeExcludes?: string[];
-  /** Whether to auto-create a Codex pool variant (default: true). */
+  /** Whether to auto-create a Codex pool variant (default: false — Codex currently out of tokens). */
   createCodexVariant?: boolean;
   /** Pool name (defaults to agent name). */
   pool?: string;
@@ -95,7 +95,7 @@ export class Bootstrapper {
 
     // 7. Auto-create Codex variant
     let codexVariantCreated = false;
-    if (options.createCodexVariant !== false) {
+    if (options.createCodexVariant === true) {
       const codexPort = port + 1;
       this.registerCodexVariant(options, configPath, codexPort);
       codexVariantCreated = true;

@@ -6,23 +6,19 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 
 ## Architecture
 
-### Agent Fleet (11 agents across 5 repos)
+### Agent Fleet (7 Claude agents across 6 repos)
 
-Each functional pool runs a Claude instance (primary) and a Codex/OpenAI instance (parallel throughput + rate-limit resilience).
+> **Note:** Codex (OpenAI) pool variants are currently disabled — out of tokens. Infrastructure remains in place for re-enablement.
 
 | Agent | Port | Model | Pool | Purpose |
 |-------|------|-------|------|---------|
 | claude-agent-orchestrator | 3472 | claude-opus-4-6 | orchestrator | Core daemon, state store, dispatching, triggers |
-| codex-agent-orchestrator | 3480 | gpt-5.4-mini | orchestrator | Orchestrator (Codex) — parallel throughput |
-| claude-orchestrator-reviewer | 3474 | claude-sonnet-4-6 | reviewer | PR review, verification, supervisor (primary) |
-| codex-orchestrator-reviewer | 3481 | gpt-5.4-mini | reviewer | Reviewer (Codex) — parallel throughput |
+| claude-orchestrator-reviewer | 3474 | claude-sonnet-4-6 | reviewer | PR review, verification, supervisor |
 | claude-orchestrator-dashboard | 3473 | claude-sonnet-4-6 | dashboard | Dashboard UI, CLI commands, metrics |
-| codex-orchestrator-dashboard | 3482 | gpt-5.4-mini | dashboard | Dashboard (Codex) — parallel throughput |
 | claude-orchestrator-telegram | 3477 | claude-haiku-4-5 | — | Telegram command handling |
 | claude-research-agent | 3478 | claude-opus-4-6 | research | Research, investigation, technology evaluation |
-| codex-research-agent | 3483 | gpt-5.4-mini | research | Research (Codex) — parallel throughput |
 | claude-proxy | 3471 | claude-opus-4-6 | proxy | Proxy server, container management |
-| codex-proxy | 3484 | gpt-5.4-mini | proxy | Proxy (Codex) — parallel throughput |
+| meeting-facilitator-agent | 3485 | claude-sonnet-4-6 | — | Meeting facilitation, structured discussions |
 
 ### Repos
 
@@ -36,10 +32,10 @@ Each functional pool runs a Claude instance (primary) and a Codex/OpenAI instanc
 
 ### Key Features
 
-- **Multi-provider pools** — each pool runs Claude + Codex in parallel for throughput and rate-limit resilience
+- **Multi-provider pools** — infrastructure supports Claude + Codex in parallel (Codex currently disabled)
 - **Agent pools** — multiple instances share workload via round-robin (orchestrator, reviewer, dashboard, research, proxy)
 - **Persistent sessions** — conversations resume across requests via `x-conversation-id` header
-- **Per-agent models** — Opus for coding, Sonnet for reviews, Haiku for Telegram, gpt-5.4-mini for Codex variants
+- **Per-agent models** — Opus for coding, Sonnet for reviews, Haiku for Telegram
 - **Auto-rebase** — pre-submit validator auto-rebases stale branches before PR creation
 - **Telegram bot** — two-way communication: `@TheSupervisor_rapartlu_bot`
 - **Antibody log** — pre-dispatch failure prediction filter; blocks known-bad agent/task combos

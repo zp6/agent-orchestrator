@@ -73,10 +73,11 @@ describe("createLLMClient — per-task provider preference", () => {
     }
   });
 
-  it("respects explicit task_providers override to codex", () => {
+  it("codex provider setting still routes to Claude (codex disabled)", () => {
+    // Codex agents are currently disabled — even explicit codex preference falls back to Claude
     const config = makeConfig({ task_providers: { verifier: "codex" } });
     createLLMClient(config, "verifier");
-    expect(selectedBaseUrl()).toBe(CODEX_PORT_URL);
+    expect(selectedBaseUrl()).toBe(CLAUDE_PORT_URL);
   });
 
   it("respects explicit task_providers override to claude", () => {
@@ -86,17 +87,17 @@ describe("createLLMClient — per-task provider preference", () => {
     expect(selectedBaseUrl()).toBe(CLAUDE_PORT_URL);
   });
 
-  it("task_providers=auto falls back to global provider", () => {
-    // global=codex, task_providers.supervisor=auto → should use codex ordering
+  it("task_providers=auto falls back to Claude (codex disabled)", () => {
+    // global=codex, task_providers.supervisor=auto → codex disabled, routes to Claude
     const config = makeConfig({ provider: "codex", task_providers: { supervisor: "auto" } });
     createLLMClient(config, "supervisor");
-    expect(selectedBaseUrl()).toBe(CODEX_PORT_URL);
+    expect(selectedBaseUrl()).toBe(CLAUDE_PORT_URL);
   });
 
-  it("global provider=codex without task override picks Codex", () => {
+  it("global provider=codex still picks Claude (codex disabled)", () => {
     const config = makeConfig({ provider: "codex" });
     createLLMClient(config, "default");
-    expect(selectedBaseUrl()).toBe(CODEX_PORT_URL);
+    expect(selectedBaseUrl()).toBe(CLAUDE_PORT_URL);
   });
 
   it("global provider=claude always picks Claude", () => {

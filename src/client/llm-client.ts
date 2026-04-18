@@ -61,10 +61,8 @@ function getPreferredLLMAgents(config: OrchestratorConfig, taskKind?: LLMTaskKin
     }
   }
 
-  const providerDefaults =
-    effectiveProvider === "codex"
-      ? ["codex-orchestrator-reviewer", "claude-orchestrator-reviewer"]
-      : ["claude-orchestrator-reviewer", "codex-orchestrator-reviewer"];
+  // Codex agents are currently disabled (out of tokens) — route only to Claude.
+  const providerDefaults = ["claude-orchestrator-reviewer"];
 
   const fallbackReviewers = Object.keys(config.agents).filter((name) =>
     name.endsWith("orchestrator-reviewer"),
