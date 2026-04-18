@@ -381,3 +381,143 @@ describe("end-to-end: score 0.38 submitted via verifier is stored as rejected", 
     expect(violations).toHaveLength(0);
   });
 });
+
+// ── Issue #279: hard floor regression tests ───────────────────────────────────
+// The specific scores (0.48 and 0.50) that were observed as approved-despite-
+// being-below-floor in production (tasks 01KPF2ZF and 01KPF9RB).
+//
+// These tests verify that the floor is enforced at the earliest possible point —
+// parseResponse() — in addition to the existing guard functions.
+
+describe("hard floor at 0.60: scores 0.48 and 0.50 must never be approved (issue #279)", () => {
+  let store: StateStore;
+
+  function seedDoneTask(taskId: string): void {
+    const raw = store as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } };
+    raw.db
+      .prepare(
+        `INSERT INTO tasks (id, title, description, status, agent_name, task_type, result, created_at, updated_at)
+         VALUES (?, ?, ?, 'done', 'agent-a', 'implementation', 'result', '2026-04-18', '2026-04-18')`,
+      )
+      .run(taskId, `Task ${taskId}`, "Test task");
+  }
+
+  beforeEach(() => {
+    store = new StateStore(":memory:");
+  });
+
+  it("score 0.48 with LLM approved:true → hard_block_sub50, rejected (issue #279, task 01KPF2ZF)", async () => {
+    const taskId = "01KPF2ZFHARDFLOOR000000000A";
+    seedDoneTask(taskId);
+
+    const verifier = new Verifier(store);
+    (verifier as any).runLLMPass = vi.fn().mockResolvedValue({
+      approved: true,   // LLM mistakenly approves
+      score: 0.48,
+      notes: "LLM approved despite score below 0.50 hard block",
+      revision: "Fix the core logic and add tests.",
+      explanation: "Incomplete implementation — core acceptance criteria unmet.",
+    });
+
+    const result = await verifier.verify(taskId);
+    const task = store.getTask(taskId);
+    const record = store.getLatestVerificationRecord(taskId);
+
+    // Floor must have fired in parseResponse (earliest gate)
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("hard_block_sub50");
+    expect(result.marginalApproval).toBeUndefined();
+    expect(result.approvalRationale).toBeUndefined();
+
+    // Task must land as rejected in state.db
+    expect(task?.verification_status).toBe("rejected");
+    expect(task?.quality_score).toBe(0.48);
+
+    // Store-layer record must also be normalised
+    expect(record?.first_pass).toBe(0);
+    expect(record?.blocked_reason).toBe("hard_block_sub50");
+
+    // Audit query confirms no approved record below 0.60 exists
+    const violations = store.getApprovedBelowThreshold(0.60, 30);
+    expect(violations).toHaveLength(0);
+  });
+
+  it("score 0.50 with LLM approved:true → low_score_sub60, rejected (issue #279, task 01KPF9RB)", async () => {
+    const taskId = "01KPF9RBHARDFLOOR000000000B";
+    seedDoneTask(taskId);
+
+    const verifier = new Verifier(store);
+    (verifier as any).runLLMPass = vi.fn().mockResolvedValue({
+      approved: true,   // LLM mistakenly approves at the boundary score
+      score: 0.50,
+      notes: "LLM approved at boundary score — should be rejected by [0.50, 0.60) floor",
+      revision: "Improve completeness and add missing tests.",
+      explanation: "Partial work — significant gaps remain below the acceptance bar.",
+    });
+
+    const result = await verifier.verify(taskId);
+    const task = store.getTask(taskId);
+    const record = store.getLatestVerificationRecord(taskId);
+
+    // Floor must have fired in parseResponse (earliest gate)
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("low_score_sub60");
+    expect(result.marginalApproval).toBeUndefined();
+    expect(result.approvalRationale).toBeUndefined();
+
+    // Task must land as rejected in state.db
+    expect(task?.verification_status).toBe("rejected");
+    expect(task?.quality_score).toBe(0.50);
+
+    // Store-layer record must also be normalised
+    expect(record?.first_pass).toBe(0);
+    expect(record?.blocked_reason).toBe("low_score_sub60");
+
+    // Audit query confirms no approved record below 0.60 exists
+    const violations = store.getApprovedBelowThreshold(0.60, 30);
+    expect(violations).toHaveLength(0);
+  });
+
+  it("score exactly 0.60 with LLM approved:true → approved (marginal floor is inclusive)", async () => {
+    const taskId = "01KPFFLOORAT60000000000000C";
+    seedDoneTask(taskId);
+
+    const verifier = new Verifier(store);
+    (verifier as any).runLLMPass = vi.fn().mockResolvedValue({
+      approved: true,
+      score: 0.60,
+      notes: "Marginal work — passes at the floor",
+      marginal_reason: "Missing edge case coverage limited confidence.",
+    });
+
+    const result = await verifier.verify(taskId);
+    const task = store.getTask(taskId);
+
+    // Exactly 0.60 is the floor — should be approved with marginal badge
+    expect(result.approved).toBe(true);
+    expect(result.blockedReason).toBeUndefined();
+    expect(result.marginalApproval).toBe(true);
+
+    // Task should be approved in state.db
+    expect(task?.verification_status).toBe("approved");
+    expect(task?.quality_score).toBe(0.60);
+  });
+
+  it("score 0.59 with LLM approved:true → low_score_sub60 (just below floor)", async () => {
+    const taskId = "01KPFFLOORJUSTBELOW00000000D";
+    seedDoneTask(taskId);
+
+    const verifier = new Verifier(store);
+    (verifier as any).runLLMPass = vi.fn().mockResolvedValue({
+      approved: true,
+      score: 0.59,
+      notes: "Just below the floor — must be rejected",
+    });
+
+    const result = await verifier.verify(taskId);
+
+    expect(result.approved).toBe(false);
+    expect(result.blockedReason).toBe("low_score_sub60");
+    expect(result.marginalApproval).toBeUndefined();
+  });
+});

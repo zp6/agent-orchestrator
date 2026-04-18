@@ -279,8 +279,9 @@ Scoring guide:
 - 0.9-1.0: Excellent — complete scan, well-reasoned changes, specific outcome summary
 - 0.75-0.89: Good — covers most issues with minor gaps in reasoning or coverage
 - 0.60-0.74: Marginal — triage performed but with shallow reasoning or coverage gaps; use marginal_reason
-- 0.5-0.59: Acceptable — some triage performed but significant issues not covered
-- Below 0.5: Needs revision — superficial or missing key parts of the triage
+- Below 0.60: Rejected — score is below the hard floor; set approved:false and provide specific revision guidance
+
+IMPORTANT: Any score below 0.60 MUST have approved:false. There is no approval path below the 0.60 floor regardless of mitigating factors.
 
 Dimension guide (for triage tasks):
 - **correctness**: Were issues correctly classified? Are action/reason pairs accurate?
@@ -389,8 +390,9 @@ Scoring guide:
 - 0.9-1.0: Excellent — thorough, correct, well-structured
 - 0.75-0.89: Good — meets requirements with minor gaps
 - 0.60-0.74: Marginal — meets minimum bar but with meaningful quality gaps; use marginal_reason
-- 0.5-0.59: Acceptable — partially addresses the task
-- Below 0.5: Needs revision — incomplete or incorrect
+- Below 0.60: Rejected — score is below the hard floor; set approved:false and provide specific revision guidance
+
+IMPORTANT: Any score below 0.60 MUST have approved:false. There is no approval path below the 0.60 floor regardless of mitigating factors.
 
 Dimension guide:
 - **correctness**: Does the code work correctly with no logic errors? Is it sound?
@@ -445,8 +447,9 @@ Scoring guide (before schema compliance deductions):
 - 0.9-1.0: Excellent — comprehensive analysis with evidence, alternatives, and clear recommendation
 - 0.75-0.89: Good — solid analysis with minor gaps in coverage or evidence
 - 0.60-0.74: Marginal — addresses the question but with meaningful depth or evidence gaps; use marginal_reason
-- 0.5-0.59: Acceptable — addresses the question but lacks depth or alternatives
-- Below 0.5: Needs revision — superficial, missing key considerations, or not actionable
+- Below 0.60: Rejected — score is below the hard floor; set approved:false and provide specific revision guidance
+
+IMPORTANT: Any score below 0.60 MUST have approved:false. There is no approval path below the 0.60 floor regardless of mitigating factors.
 
 Dimension guide (for research tasks, these map to content quality):
 - **correctness**: Are the claims technically sound and factually accurate?
@@ -486,8 +489,9 @@ Scoring guide:
 - 0.9-1.0: Excellent — thorough, correct, well-structured
 - 0.75-0.89: Good — meets requirements with minor gaps
 - 0.60-0.74: Marginal — meets minimum bar but with meaningful quality gaps; use marginal_reason
-- 0.5-0.59: Acceptable — partially addresses the task
-- Below 0.5: Needs revision — incomplete or incorrect
+- Below 0.60: Rejected — score is below the hard floor; set approved:false and provide specific revision guidance
+
+IMPORTANT: Any score below 0.60 MUST have approved:false. There is no approval path below the 0.60 floor regardless of mitigating factors.
 
 Dimension guide:
 - **correctness**: Does the code work correctly with no logic errors? Is it sound?
@@ -943,7 +947,15 @@ export class Verifier {
         agentName: task.agent_name,
       });
 
-      const inferredResult = await this.inferMissingScore(task);
+      const rawInferredResult = await this.inferMissingScore(task);
+
+      // Apply the hard floor guards defensively after inferMissingScore returns
+      // (issue #279).  inferMissingScore applies them internally, but if it is
+      // mocked, stubbed, or extended in the future without guards the floor
+      // still enforces: no inferred result with score < 0.60 may be approved.
+      const inferredResult = this.applySubThresholdRejectionGuard(
+        this.applyHardBlockGuard(rawInferredResult),
+      );
 
       // Issue #203: inferMissingScore now applies hard-block and sub-threshold
       // guards.  If the inferred score is below threshold, the result will have
@@ -1606,16 +1618,6 @@ export class Verifier {
       const explanation =
         score < 0.80 && parsed.explanation ? String(parsed.explanation) : undefined;
 
-      // Detect marginal approvals: approved tasks scoring in [0.60, 0.74]
-      const isMarginalApproval =
-        approved &&
-        score >= MARGINAL_APPROVAL_LOW &&
-        score <= MARGINAL_APPROVAL_HIGH;
-      const marginalReason =
-        isMarginalApproval && parsed.marginal_reason
-          ? String(parsed.marginal_reason)
-          : undefined;
-
       // Parse dimensions if provided
       let dimensions: QualityDimensions | undefined;
       if (
@@ -1643,15 +1645,48 @@ export class Verifier {
         };
       }
 
-      // ── Hard-block guard ────────────────────────────────────────────────
-      // Any score below HARD_BLOCK_THRESHOLD (0.50) is unconditionally rejected.
-      // The LLM may return `approved: true` for very low scores in rare cases;
-      // this guard ensures those scores can never reach state.db as 'approved'.
+      // ── Hard floor: reject all scores below 0.60 (issue #279) ──────────────
+      //
+      // Two sub-ranges, each with a distinct blocked_reason:
+      //
+      //   < 0.50  → hard_block_sub50: fundamentally incomplete/incorrect work.
+      //             Unconditional rejection — no amount of borderline leniency
+      //             or marginal approval should override this gate.
+      //
+      //   [0.50, 0.60) → low_score_sub60: partial work that still falls well
+      //             below the acceptance floor.  Rejected with dimension-level
+      //             feedback so the agent can target specific gaps.
+      //
+      // Both gates are applied inline here (parseResponse is the single source
+      // of truth for all LLM-derived VerificationResults) AND redundantly in
+      // applyHardBlockGuard / applySubThresholdRejectionGuard for defence-in-depth.
       const isHardBlocked = score < HARD_BLOCK_THRESHOLD;
-      const effectiveApproved = isHardBlocked ? false : approved;
-      const blockedReason: "hard_block_sub50" | undefined = isHardBlocked
-        ? "hard_block_sub50"
-        : undefined;
+      const isBelowMarginalFloor =
+        !isHardBlocked && score < SUB_THRESHOLD_REJECTION_LIMIT;
+
+      // Effective approval: tasks below the marginal floor are NEVER approved.
+      const effectiveApproved =
+        isHardBlocked || isBelowMarginalFloor ? false : approved;
+
+      // Blocked reason — persisted to verification_results.blocked_reason for
+      // the dashboard rejection log and audit queries.
+      const blockedReason: "hard_block_sub50" | "low_score_sub60" | undefined =
+        isHardBlocked
+          ? "hard_block_sub50"
+          : isBelowMarginalFloor
+            ? "low_score_sub60"
+            : undefined;
+
+      // Marginal approval detection uses effectiveApproved so that sub-threshold
+      // tasks (which are never approved) are never flagged as marginal.
+      const isMarginalApproval =
+        effectiveApproved &&
+        score >= MARGINAL_APPROVAL_LOW &&
+        score <= MARGINAL_APPROVAL_HIGH;
+      const marginalReason =
+        isMarginalApproval && parsed.marginal_reason
+          ? String(parsed.marginal_reason)
+          : undefined;
 
       return {
         approved: effectiveApproved,
@@ -1660,8 +1695,8 @@ export class Verifier {
         revision: parsed.revision ? String(parsed.revision) : undefined,
         explanation,
         dimensions,
-        ...(isMarginalApproval && !isHardBlocked && { marginalApproval: true }),
-        ...(marginalReason && !isHardBlocked && { marginalReason }),
+        ...(isMarginalApproval && { marginalApproval: true }),
+        ...(marginalReason && { marginalReason }),
         ...(blockedReason && { blockedReason }),
       };
     } catch {
