@@ -317,8 +317,8 @@ export function enforceChecklist(comment: string): string {
 
 // ─── Default timeouts ────────────────────────────────────────────────────────
 
-const DEFAULT_LLM_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-const PR_REVIEW_LLM_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — PR reviews need more time
+const DEFAULT_LLM_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes — keeps sequential verification under DEADLOCK threshold
+const PR_REVIEW_LLM_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes — same budget; hung calls skip and retry next cycle
 
 // ─── ReviewerClient ──────────────────────────────────────────────────────────
 
