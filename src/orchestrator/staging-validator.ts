@@ -82,8 +82,9 @@ export async function validateMergedPR(
     });
     clearTimeout(validationTimer);
 
-    const passed = response.content.toUpperCase().includes("PASS")
-      && !response.content.toUpperCase().includes("FAIL");
+    // Use word-boundary regex to avoid false negatives from "failures" matching "FAIL"
+    const upperContent = response.content.toUpperCase();
+    const passed = /\bPASS\b/.test(upperContent) && !/\bFAIL\b/.test(upperContent);
 
     const result: ValidationResult = {
       repo, prNumber, sha: mergeSha, passed,
