@@ -85,6 +85,7 @@ const {
 
   class MockDispatcher {
     constructor(..._args: unknown[]) {}
+    attachDuplicateIdDetector = vi.fn();
   }
 
   class MockReviewerClient {

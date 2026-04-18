@@ -213,7 +213,10 @@ describe("ProviderConfig", () => {
   it("agent provider field is set for all agents", () => {
     const config = loadConfig(configPath);
     expect(config.agents["claude-agent-orchestrator"].provider).toBe("claude");
-    expect(config.agents["codex-orchestrator-reviewer"].provider).toBe("openai");
+    // Codex agents were removed (out of tokens) — verify all remaining agents are claude
+    for (const [name, agent] of Object.entries(config.agents)) {
+      expect(agent.provider, `agent ${name} should have provider "claude"`).toBe("claude");
+    }
   });
 });
 

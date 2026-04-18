@@ -108,6 +108,10 @@ const mockRunGitHubPreDispatchValidation = vi.mocked(runGitHubPreDispatchValidat
 // Track the last mockSend across beforeEach
 let mockSend: ReturnType<typeof vi.fn>;
 
+// Track router mocks so individual tests can override route behaviour
+let mockRoute: ReturnType<typeof vi.fn>;
+let mockRouteWithFallback: ReturnType<typeof vi.fn>;
+
 // Mock the agent client so we don't make real network calls.
 // Must use a regular function (not arrow) so `new AgentClient()` works as a constructor.
 vi.mock("../client/agent-client.js", () => ({
@@ -120,9 +124,13 @@ vi.mock("../client/agent-client.js", () => ({
 
 // Mock routers so dispatch() doesn't require a live agent config.
 vi.mock("./router.js", () => ({
+  LLM_FALLBACK_THRESHOLD: 0.3,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   Router: function MockRouter(this: any) {
-    this.route = vi.fn().mockReturnValue([{ agentName: "test-agent", confidence: 1.0, reason: "mock" }]);
+    mockRoute = vi.fn().mockReturnValue([{ agentName: "test-agent", confidence: 1.0, reason: "mock" }]);
+    mockRouteWithFallback = vi.fn().mockResolvedValue([{ agentName: "test-agent", confidence: 1.0, reason: "mock" }]);
+    this.route = mockRoute;
+    this.routeWithFallback = mockRouteWithFallback;
   },
 }));
 
@@ -2861,14 +2869,15 @@ describe("dispatch() — repo-to-agent affinity guardrail (issue #928)", () => {
 
   it("auto-routed task to wrong agent is silently corrected to the canonical agent", async () => {
     const config = makeAffinityConfig();
-    // Router mock returns "dashboard-agent" (the wrong agent for orchestrator issues)
-    const Router = (await import("./router.js")).Router as unknown as new () => { route: ReturnType<typeof vi.fn>; routeWithFallback?: ReturnType<typeof vi.fn> };
-    const routerInstance = new Router();
-    (routerInstance.route as ReturnType<typeof vi.fn>).mockReturnValue([
-      { agentName: "dashboard-agent", confidence: 0.6, reason: "LLM fallback" },
-    ]);
 
     const dispatcher = new Dispatcher(config, store);
+    // Override router mocks to return "dashboard-agent" (the wrong agent for orchestrator issues)
+    mockRoute.mockReturnValue([
+      { agentName: "dashboard-agent", confidence: 0.6, reason: "LLM fallback" },
+    ]);
+    mockRouteWithFallback.mockResolvedValue([
+      { agentName: "dashboard-agent", confidence: 0.6, reason: "LLM fallback" },
+    ]);
     mockSend.mockResolvedValueOnce({
       content: "done",
       usage: { input_tokens: 5, output_tokens: 10 },
