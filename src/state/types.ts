@@ -1242,6 +1242,16 @@ export interface VerificationResultRecord {
   agent_id: string;
   /** ISO-8601 UTC timestamp of the verification event. */
   timestamp: string;
+  /**
+   * Whether CLI smoke tests were run and passed for this task (issue #277).
+   *
+   * - `null` / `undefined` — task was not CLI-related; smoke tests were not run
+   * - `1` — all applicable smoke tests passed
+   * - `0` — one or more smoke tests failed (score penalty was applied)
+   *
+   * Stored as SQLite INTEGER (0/1/NULL) and mapped to boolean by the dashboard.
+   */
+  cli_smoke_test_passed?: number | null;
 }
 
 /**

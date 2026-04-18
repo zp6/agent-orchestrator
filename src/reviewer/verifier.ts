@@ -22,6 +22,11 @@ import type {
   ShortCircuitDimension,
 } from "../state/types.js";
 import type { Notifier } from "../notify.js";
+import {
+  isCLITask,
+  runSmokeTestsForTask,
+  SMOKE_TEST_SCORE_PENALTY,
+} from "./cli-smoke-test.js";
 
 /**
  * Per-dimension quality scores for verification results.
@@ -686,6 +691,8 @@ export class Verifier {
     rejectionReason?: string,
     blockedReason?: "hard_block_sub50" | "low_score_sub60",
     approvalRationale?: string,
+    /** null = non-CLI task; 1 = smoke tests passed; 0 = smoke tests failed */
+    cliSmokeTestPassed?: number | null,
   ): void {
     // Prefer the explicitly-wired store; fall back to a runtime check on the
     // main store (the reviewer's own StateStore implements IVerificationResultStore).
@@ -709,6 +716,7 @@ export class Verifier {
         threshold: APPROVAL_THRESHOLD,
         agent_id: agentId,
         timestamp: new Date().toISOString(),
+        cli_smoke_test_passed: cliSmokeTestPassed ?? null,
       });
     } catch (err) {
       // Never let instrumentation interrupt the main flow.
@@ -1107,6 +1115,55 @@ export class Verifier {
       this.applyHardBlockGuard(firstPassResult),
     );
 
+    // ── CLI smoke test quality gate (issue #277) ────────────────────────────
+    // For tasks that reference CLI commands, automatically run the relevant
+    // smoke test specs and apply a score penalty if any tests fail.
+    // This runs after LLM scoring so the penalty stacks on top of the LLM score.
+    // Environment errors (binary not found, timeout) are fail-open — they are
+    // recorded in verification_notes but do NOT trigger a penalty.
+    let smokeTestReport = null as ReturnType<typeof runSmokeTestsForTask> | null;
+    let cliSmokeTestPassed: number | null = null;
+
+    if (isCLITask(task.title, task.description)) {
+      this.log.info("CLI task detected — running smoke tests", {
+        taskId,
+        title: task.title,
+        agent: task.agent_name,
+      });
+
+      try {
+        smokeTestReport = runSmokeTestsForTask(task.title, task.description, this.log);
+
+        // Map boolean → SQLite integer for storage
+        // null when no specs were selected (isCLITask=true but no keyword match)
+        if (smokeTestReport.results.length > 0) {
+          cliSmokeTestPassed = smokeTestReport.allPassed ? 1 : 0;
+        }
+
+        this.log.info("CLI smoke tests complete", {
+          taskId,
+          testsRun: smokeTestReport.results.length,
+          allPassed: smokeTestReport.allPassed,
+          anyFailed: smokeTestReport.anyFailed,
+          scorePenalty: smokeTestReport.scorePenalty,
+        });
+      } catch (err) {
+        // Never let smoke tests interrupt the main verification flow
+        this.log.warn("CLI smoke test runner error — skipping smoke gate", { taskId, err });
+        smokeTestReport = null;
+      }
+    }
+
+    /**
+     * Apply the smoke test score penalty to an LLM-derived score.
+     * Clamps to [0, 1] and re-runs the guards so the quality floor is always
+     * enforced on the final (post-penalty) score.
+     */
+    const applySmokePenalty = (score: number): number => {
+      if (!smokeTestReport || smokeTestReport.scorePenalty === 0) return score;
+      return Math.max(0, score - smokeTestReport.scorePenalty);
+    };
+
     // ── Borderline second-pass guard ────────────────────────────────────────
     const isBorderline =
       enforcedFirstPassResult.score >= BORDERLINE_LOW &&
@@ -1191,30 +1248,43 @@ export class Verifier {
           ? (enforcedSecondPassResult.marginalReason ?? enforcedFirstPassResult.marginalReason)
           : undefined;
 
+      // ── Smoke test penalty (borderline path) ───────────────────────────────
+      // Apply after both LLM passes; re-enforce guards so the quality floor
+      // is always honoured on the penalty-adjusted score.
+      const borderlinePenaltyScore = applySmokePenalty(enforcedFirstPassResult.score);
+      const borderlineScokeAdjusted = borderlinePenaltyScore < enforcedFirstPassResult.score;
+      const borderlineFinalApproved =
+        finalApproved &&
+        !this.applyHardBlockGuard({ ...enforcedFirstPassResult, score: borderlinePenaltyScore }).blockedReason &&
+        borderlinePenaltyScore >= SUB_THRESHOLD_REJECTION_LIMIT;
+
       // Prefix combined notes with marginal badge when applicable.
       const marginalBadge =
         finalMarginalApproval
-          ? `⚠️ MARGINAL APPROVAL — score ${(enforcedFirstPassResult.score * 100).toFixed(0)}%` +
+          ? `⚠️ MARGINAL APPROVAL — score ${(borderlinePenaltyScore * 100).toFixed(0)}%` +
             (finalMarginalReason ? ` — ${finalMarginalReason}` : "") +
             "\n\n"
           : "";
-      const enrichedNotes = `${marginalBadge}${combinedNotes}`;
+      const smokeSection = smokeTestReport?.reportText
+        ? `\n\n${smokeTestReport.reportText}`
+        : "";
+      const enrichedNotes = `${marginalBadge}${combinedNotes}${smokeSection}`;
 
       // Derive approval_rationale for auditable low-score approvals.
       // For borderline tasks that cleared the second pass, use 'second_pass_passed'
       // as the base code; upgrade to 'marginal_approval' when the score also falls
       // in the marginal range and both codes apply.
-      const secondPassApprovalRationale = finalApproved
+      const secondPassApprovalRationale = borderlineFinalApproved
         ? finalMarginalApproval
           ? `marginal_approval${finalMarginalReason ? `: ${finalMarginalReason}` : ""}`
           : "second_pass_passed"
         : undefined;
 
       const finalResult: VerificationResult = {
-        approved: finalApproved,
-        score: enforcedFirstPassResult.score,
+        approved: borderlineFinalApproved,
+        score: borderlinePenaltyScore,
         notes: enrichedNotes,
-        revision: finalApproved ? undefined : enrichedRevision,
+        revision: borderlineFinalApproved ? undefined : enrichedRevision,
         explanation: finalExplanation,
         dimensions: usedDimensions,
         secondPass: {
@@ -1233,16 +1303,20 @@ export class Verifier {
         firstPassApproved: enforcedFirstPassResult.approved,
         secondPassApproved: enforcedSecondPassResult.approved,
         agreed,
-        finalApproved,
+        finalApproved: borderlineFinalApproved,
         agent: task.agent_name,
+        ...(borderlineScokeAdjusted && {
+          smokeTestPenalty: SMOKE_TEST_SCORE_PENALTY,
+          prepenaltyScore: enforcedFirstPassResult.score,
+        }),
         ...(finalExplanation && { explanation: finalExplanation }),
         ...(finalMarginalApproval && { marginalApproval: true, marginalReason: finalMarginalReason }),
         ...(secondPassApprovalRationale && { approvalRationale: secondPassApprovalRationale }),
       });
 
       this.store.updateTask(taskId, {
-        verification_status: finalApproved ? "approved" : "rejected",
-        quality_score: enforcedFirstPassResult.score,
+        verification_status: borderlineFinalApproved ? "approved" : "rejected",
+        quality_score: borderlinePenaltyScore,
         verification_notes: enrichedNotes,
         quality_explanation: finalExplanation ?? null,
       });
@@ -1250,11 +1324,12 @@ export class Verifier {
       this.recordVerificationResult(
         taskId,
         task.agent_name ?? "unknown",
-        enforcedFirstPassResult.score,
-        finalApproved,
-        finalApproved ? undefined : (finalExplanation ?? finalResult.revision),
+        borderlinePenaltyScore,
+        borderlineFinalApproved,
+        borderlineFinalApproved ? undefined : (finalExplanation ?? finalResult.revision),
         finalResult.blockedReason,
         secondPassApprovalRationale,
+        cliSmokeTestPassed,
       );
 
       // ── Priority quality gate (borderline path) ──────────────────────────
@@ -1267,48 +1342,70 @@ export class Verifier {
     }
 
     // ── Standard (non-borderline) result ────────────────────────────────────
+
+    // Apply CLI smoke test penalty and re-enforce quality guards on the
+    // penalty-adjusted score so the quality floor is always honoured.
+    const standardPenaltyScore = applySmokePenalty(enforcedFirstPassResult.score);
+    const standardScoreAdjusted = standardPenaltyScore < enforcedFirstPassResult.score;
+
+    // Re-enforce hard-block and sub-threshold guards with the adjusted score.
+    // This ensures a penalty that drops a task below 0.60 is treated as a rejection.
+    const penaltyAdjustedResult = this.applySubThresholdRejectionGuard(
+      this.applyHardBlockGuard({
+        ...enforcedFirstPassResult,
+        score: standardPenaltyScore,
+      }),
+    );
+
     this.log.info("Verification complete", {
       taskId,
-      approved: enforcedFirstPassResult.approved,
-      score: enforcedFirstPassResult.score,
+      approved: penaltyAdjustedResult.approved,
+      score: penaltyAdjustedResult.score,
       agent: task.agent_name,
-      ...(enforcedFirstPassResult.explanation && { explanation: enforcedFirstPassResult.explanation }),
-      ...(enforcedFirstPassResult.marginalApproval && {
-        marginalApproval: true,
-        marginalReason: enforcedFirstPassResult.marginalReason,
+      ...(standardScoreAdjusted && {
+        smokeTestPenalty: SMOKE_TEST_SCORE_PENALTY,
+        prepenaltyScore: enforcedFirstPassResult.score,
       }),
-      ...(enforcedFirstPassResult.blockedReason && { blockedReason: enforcedFirstPassResult.blockedReason }),
+      ...(penaltyAdjustedResult.explanation && { explanation: penaltyAdjustedResult.explanation }),
+      ...(penaltyAdjustedResult.marginalApproval && {
+        marginalApproval: true,
+        marginalReason: penaltyAdjustedResult.marginalReason,
+      }),
+      ...(penaltyAdjustedResult.blockedReason && { blockedReason: penaltyAdjustedResult.blockedReason }),
     });
 
     // Enrich revision with explanation and dimension breakdown so agents understand the low score.
     const dimensionsBreakdown =
-      !enforcedFirstPassResult.approved && enforcedFirstPassResult.dimensions
-        ? `\n\n${this.formatDimensionsBreakdown(enforcedFirstPassResult.dimensions, isResearch, isHousekeeping)}`
+      !penaltyAdjustedResult.approved && penaltyAdjustedResult.dimensions
+        ? `\n\n${this.formatDimensionsBreakdown(penaltyAdjustedResult.dimensions, isResearch, isHousekeeping)}`
         : "";
     const enrichedRevision =
-      !enforcedFirstPassResult.approved &&
-      enforcedFirstPassResult.revision &&
-      enforcedFirstPassResult.explanation
-        ? `${enforcedFirstPassResult.explanation}${dimensionsBreakdown}\n\n${enforcedFirstPassResult.revision}`
-        : enforcedFirstPassResult.revision;
+      !penaltyAdjustedResult.approved &&
+      penaltyAdjustedResult.revision &&
+      penaltyAdjustedResult.explanation
+        ? `${penaltyAdjustedResult.explanation}${dimensionsBreakdown}\n\n${penaltyAdjustedResult.revision}`
+        : penaltyAdjustedResult.revision;
 
     // Prefix notes with marginal badge so the dashboard task list can surface it.
     const marginalBadge =
-      enforcedFirstPassResult.blockedReason === "hard_block_sub50"
-        ? `🚧 HARD BLOCK — score ${(enforcedFirstPassResult.score * 100).toFixed(0)}% below 50% threshold\n\n`
-        : enforcedFirstPassResult.blockedReason === "low_score_sub60"
-          ? `🔴 QUALITY GATE REJECT — score ${(enforcedFirstPassResult.score * 100).toFixed(0)}% below the 60% minimum floor\n\n`
-          : enforcedFirstPassResult.marginalApproval
-            ? `⚠️ MARGINAL APPROVAL — score ${(enforcedFirstPassResult.score * 100).toFixed(0)}%` +
-              (enforcedFirstPassResult.marginalReason ? ` — ${enforcedFirstPassResult.marginalReason}` : "") +
+      penaltyAdjustedResult.blockedReason === "hard_block_sub50"
+        ? `🚧 HARD BLOCK — score ${(penaltyAdjustedResult.score * 100).toFixed(0)}% below 50% threshold\n\n`
+        : penaltyAdjustedResult.blockedReason === "low_score_sub60"
+          ? `🔴 QUALITY GATE REJECT — score ${(penaltyAdjustedResult.score * 100).toFixed(0)}% below the 60% minimum floor\n\n`
+          : penaltyAdjustedResult.marginalApproval
+            ? `⚠️ MARGINAL APPROVAL — score ${(penaltyAdjustedResult.score * 100).toFixed(0)}%` +
+              (penaltyAdjustedResult.marginalReason ? ` — ${penaltyAdjustedResult.marginalReason}` : "") +
           "\n\n"
           : "";
-    const enrichedNotes = `${marginalBadge}${enforcedFirstPassResult.notes}`;
+    const smokeSection = smokeTestReport?.reportText
+      ? `\n\n${smokeTestReport.reportText}`
+      : "";
+    const enrichedNotes = `${marginalBadge}${penaltyAdjustedResult.notes}${smokeSection}`;
 
     // Derive approval_rationale for auditable low-score approvals.
-    const singlePassApprovalRationale = enforcedFirstPassResult.approved
-      ? enforcedFirstPassResult.marginalApproval
-        ? `marginal_approval${enforcedFirstPassResult.marginalReason ? `: ${enforcedFirstPassResult.marginalReason}` : ""}`
+    const singlePassApprovalRationale = penaltyAdjustedResult.approved
+      ? penaltyAdjustedResult.marginalApproval
+        ? `marginal_approval${penaltyAdjustedResult.marginalReason ? `: ${penaltyAdjustedResult.marginalReason}` : ""}`
         : isHousekeeping
           ? "triage_schema_compliance"
           : isResearch
@@ -1317,26 +1414,27 @@ export class Verifier {
       : undefined;
 
     this.store.updateTask(taskId, {
-      verification_status: enforcedFirstPassResult.approved ? "approved" : "rejected",
-      quality_score: enforcedFirstPassResult.score,
+      verification_status: penaltyAdjustedResult.approved ? "approved" : "rejected",
+      quality_score: penaltyAdjustedResult.score,
       verification_notes: enrichedNotes,
-      quality_explanation: enforcedFirstPassResult.explanation ?? null,
+      quality_explanation: penaltyAdjustedResult.explanation ?? null,
     });
 
     this.recordVerificationResult(
       taskId,
       task.agent_name ?? "unknown",
-      enforcedFirstPassResult.score,
-      enforcedFirstPassResult.approved,
-      enforcedFirstPassResult.approved
+      penaltyAdjustedResult.score,
+      penaltyAdjustedResult.approved,
+      penaltyAdjustedResult.approved
         ? undefined
-        : (enforcedFirstPassResult.explanation ?? enforcedFirstPassResult.revision),
-      enforcedFirstPassResult.blockedReason,
+        : (penaltyAdjustedResult.explanation ?? penaltyAdjustedResult.revision),
+      penaltyAdjustedResult.blockedReason,
       singlePassApprovalRationale,
+      cliSmokeTestPassed,
     );
 
     const standardResult: VerificationResult = {
-      ...enforcedFirstPassResult,
+      ...penaltyAdjustedResult,
       notes: enrichedNotes,
       revision: enrichedRevision,
       ...(singlePassApprovalRationale && { approvalRationale: singlePassApprovalRationale }),

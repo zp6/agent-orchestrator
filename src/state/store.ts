@@ -427,6 +427,17 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       // Column already exists — ignore
     }
 
+    // Add cli_smoke_test_passed column to verification_results (idempotent — issue #277).
+    // Records whether CLI smoke tests were run and passed for CLI-related tasks.
+    // NULL = smoke tests were not applicable (non-CLI task).
+    // 1    = smoke tests ran and all confirmed tests passed.
+    // 0    = one or more smoke tests failed (score penalty applied).
+    try {
+      this.db.exec("ALTER TABLE verification_results ADD COLUMN cli_smoke_test_passed INTEGER");
+    } catch {
+      // Column already exists — ignore
+    }
+
     // Secrets health checks table (idempotent — issue #125).
     // Records per-agent, per-secret mount status snapshots for fleet health monitoring.
     this.db.exec(`
@@ -2696,11 +2707,14 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
     this.db
       .prepare(
         `INSERT INTO verification_results
-           (task_id, score, first_pass, rejection_reason, blocked_reason, approval_rationale, threshold, agent_id, timestamp)
+           (task_id, score, first_pass, rejection_reason, blocked_reason, approval_rationale, threshold, agent_id, timestamp, cli_smoke_test_passed)
          VALUES
-           (@task_id, @score, @first_pass, @rejection_reason, @blocked_reason, @approval_rationale, @threshold, @agent_id, @timestamp)`,
+           (@task_id, @score, @first_pass, @rejection_reason, @blocked_reason, @approval_rationale, @threshold, @agent_id, @timestamp, @cli_smoke_test_passed)`,
       )
-      .run(normalizedRecord);
+      .run({
+        ...normalizedRecord,
+        cli_smoke_test_passed: normalizedRecord.cli_smoke_test_passed ?? null,
+      });
   }
 
   /**
