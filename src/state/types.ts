@@ -781,6 +781,18 @@ export interface IStateStore {
    * @param sinceHours - Optional look-back window in hours
    */
   getRecentReconciliationEvents(limit?: number, sinceHours?: number): ReconciliationEventRecord[];
+
+  // Operator override (issue #272)
+  /**
+   * Allow an operator to approve-with-override or reject a task held in
+   * 'needs_operator_review' status (score < 0.60).
+   *
+   * @param taskId — task ID to override
+   * @param decision — 'approve' to approve-with-override, 'reject' to reject
+   * @param operatorNote — free-text reason for the override decision
+   * @returns true if the override was applied, false if the task was not held
+   */
+  operatorOverride(taskId: string, decision: "approve" | "reject", operatorNote: string): boolean;
 }
 
 // ── Score calibration types ───────────────────────────────────────────────

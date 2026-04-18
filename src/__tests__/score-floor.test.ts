@@ -7,13 +7,13 @@
  *
  * Key invariants:
  *   - score >= 0.60 + approved → stays approved
- *   - score < 0.60 + approved  → downgraded to needs_revision
+ *   - score < 0.60 + approved  → downgraded to needs_operator_review
  *   - score exactly 0.60       → stays approved (inclusive floor)
- *   - null score + approved (task has null score) → downgraded to needs_revision
+ *   - null score + approved (task has null score) → downgraded to needs_operator_review
  *   - null score + approved (task already has score >= 0.60) → stays approved
- *   - score < 0.60 + needs_revision → not affected (only 'approved' is guarded)
+ *   - score < 0.60 + needs_operator_review → not affected (only 'approved' is guarded)
  *   - score < 0.60 + rejected  → not affected (only 'approved' is guarded)
- *   - downgraded tasks get a [floor-downgrade:...] prefix in verification_notes
+ *   - downgraded tasks get a [operator-review-required:...] prefix in verification_notes
  *   - APPROVAL_SCORE_FLOOR === 0.60 (exported constant)
  */
 
@@ -114,41 +114,41 @@ describe("Score floor enforcement in updateTask() (issue #266)", () => {
 
   // ── Below-floor approvals: downgrade ────────────────────────────────────
 
-  it("score 0.59 with approved → downgraded to needs_revision", () => {
+  it("score 0.59 with approved → downgraded to needs_operator_review", () => {
     seedTask(store, "T04");
     store.updateTask("T04", { verification_status: "approved", quality_score: 0.59 });
     const task = store.getTask("T04");
-    expect(task?.verification_status).toBe("needs_revision");
+    expect(task?.verification_status).toBe("needs_operator_review");
   });
 
-  it("score 0.00 with approved → downgraded to needs_revision", () => {
+  it("score 0.00 with approved → downgraded to needs_operator_review", () => {
     seedTask(store, "T05");
     store.updateTask("T05", { verification_status: "approved", quality_score: 0.00 });
     const task = store.getTask("T05");
-    expect(task?.verification_status).toBe("needs_revision");
+    expect(task?.verification_status).toBe("needs_operator_review");
   });
 
-  it("score 0.38 with approved → downgraded to needs_revision", () => {
+  it("score 0.38 with approved → downgraded to needs_operator_review", () => {
     seedTask(store, "T06");
     store.updateTask("T06", { verification_status: "approved", quality_score: 0.38 });
     const task = store.getTask("T06");
-    expect(task?.verification_status).toBe("needs_revision");
+    expect(task?.verification_status).toBe("needs_operator_review");
   });
 
-  it("score 0.05 with approved → downgraded to needs_revision", () => {
+  it("score 0.05 with approved → downgraded to needs_operator_review", () => {
     seedTask(store, "T07");
     store.updateTask("T07", { verification_status: "approved", quality_score: 0.05 });
     const task = store.getTask("T07");
-    expect(task?.verification_status).toBe("needs_revision");
+    expect(task?.verification_status).toBe("needs_operator_review");
   });
 
   // ── Non-approved statuses: not affected ─────────────────────────────────
 
-  it("score 0.50 with needs_revision → not affected (only 'approved' is guarded)", () => {
+  it("score 0.50 with needs_operator_review → not affected (only 'approved' is guarded)", () => {
     seedTask(store, "T08");
-    store.updateTask("T08", { verification_status: "needs_revision", quality_score: 0.50 });
+    store.updateTask("T08", { verification_status: "needs_operator_review", quality_score: 0.50 });
     const task = store.getTask("T08");
-    expect(task?.verification_status).toBe("needs_revision");
+    expect(task?.verification_status).toBe("needs_operator_review");
   });
 
   it("score 0.30 with rejected → not affected", () => {
@@ -160,12 +160,12 @@ describe("Score floor enforcement in updateTask() (issue #266)", () => {
 
   // ── Null score + approved ────────────────────────────────────────────────
 
-  it("null score + approved (task has null score) → downgraded to needs_revision", () => {
+  it("null score + approved (task has null score) → downgraded to needs_operator_review", () => {
     // Task starts with null quality_score — cannot verify floor is met
     seedTask(store, "T10", { quality_score: null });
     store.updateTask("T10", { verification_status: "approved" });
     const task = store.getTask("T10");
-    expect(task?.verification_status).toBe("needs_revision");
+    expect(task?.verification_status).toBe("needs_operator_review");
   });
 
   it("null score + approved (task already has score 0.80) → stays approved", () => {
@@ -176,9 +176,9 @@ describe("Score floor enforcement in updateTask() (issue #266)", () => {
     expect(task?.verification_status).toBe("approved");
   });
 
-  // ── floor-downgrade note in verification_notes ───────────────────────────
+  // ── operator-review-required note in verification_notes ───────────────────────────
 
-  it("score_explanation gets [floor-downgrade: score X.XX < 0.60] prefix when downgraded", () => {
+  it("score_explanation gets [operator-review-required: score X.XX < 0.60] prefix when downgraded", () => {
     seedTask(store, "T12", { verification_notes: "Existing notes." });
     store.updateTask("T12", {
       verification_status: "approved",
@@ -186,40 +186,40 @@ describe("Score floor enforcement in updateTask() (issue #266)", () => {
       verification_notes: "Verifier pass notes.",
     });
     const task = store.getTask("T12");
-    expect(task?.verification_status).toBe("needs_revision");
-    expect(task?.verification_notes).toMatch(/^\[floor-downgrade: score 0\.45 < 0\.60\]/);
+    expect(task?.verification_status).toBe("needs_operator_review");
+    expect(task?.verification_notes).toMatch(/^\[operator-review-required: score 0\.45 < 0\.60\]/);
     expect(task?.verification_notes).toContain("Verifier pass notes.");
   });
 
-  it("floor-downgrade note is written even when no verification_notes supplied", () => {
+  it("operator-review-required note is written even when no verification_notes supplied", () => {
     seedTask(store, "T13");
     store.updateTask("T13", { verification_status: "approved", quality_score: 0.12 });
     const task = store.getTask("T13");
-    expect(task?.verification_status).toBe("needs_revision");
-    expect(task?.verification_notes).toMatch(/^\[floor-downgrade: score 0\.12 < 0\.60\]/);
+    expect(task?.verification_status).toBe("needs_operator_review");
+    expect(task?.verification_notes).toMatch(/^\[operator-review-required: score 0\.12 < 0\.60\]/);
   });
 
-  it("null-score downgrade gets floor-downgrade note about null score", () => {
+  it("null-score downgrade gets operator-review-required note about null score", () => {
     seedTask(store, "T14", { quality_score: null });
     store.updateTask("T14", { verification_status: "approved" });
     const task = store.getTask("T14");
-    expect(task?.verification_status).toBe("needs_revision");
-    expect(task?.verification_notes).toMatch(/\[floor-downgrade: null score cannot verify floor/);
+    expect(task?.verification_status).toBe("needs_operator_review");
+    expect(task?.verification_notes).toMatch(/\[operator-review-required: null score cannot verify floor/);
   });
 
   // ── Score-only update path ────────────────────────────────────────────────
   // When only quality_score is updated (no verification_status in the call),
   // and the existing DB record is 'approved', the guard must also fire.
 
-  it("score-only update below floor on an approved task → downgraded to needs_revision", () => {
+  it("score-only update below floor on an approved task → downgraded to needs_operator_review", () => {
     // Task is already approved with a good score
     seedTask(store, "T15", { quality_score: 0.80, verification_status: "approved" });
     // Score-only update drops below floor
     store.updateTask("T15", { quality_score: 0.55 });
     const task = store.getTask("T15");
-    expect(task?.verification_status).toBe("needs_revision");
+    expect(task?.verification_status).toBe("needs_operator_review");
     expect(task?.quality_score).toBe(0.55);
-    expect(task?.verification_notes).toMatch(/\[floor-downgrade: score 0\.55 < 0\.60\]/);
+    expect(task?.verification_notes).toMatch(/\[operator-review-required: score 0\.55 < 0\.60\]/);
   });
 
   it("score-only update above floor on an approved task → stays approved", () => {

@@ -93,15 +93,17 @@ export interface VerificationResult {
    * Set when the verifier's quality-gate enforcement overrides the LLM's decision:
    *
    * - `'hard_block_sub50'`  — score < 0.50: fundamentally incomplete work;
-   *   unconditional rejection (hardest gate).
+   *   held for operator review (hardest gate).
    * - `'low_score_sub60'`   — score in [0.50, 0.60): partial work that still falls
-   *   well below the acceptance floor; rejected with dimension-level feedback so
-   *   the agent can target specific gaps.
+   *   well below the acceptance floor; held for operator review with dimension-level
+   *   feedback so the operator can make an informed override-or-reject decision.
+   * - `'held_for_operator_review'` — generic hold: score < 0.60, task requires
+   *   explicit operator approval before it can proceed.
    *
-   * Both values persist to `verification_results.blocked_reason` so the dashboard
-   * rejection log can distinguish enforced-gate rejections from ordinary LLM rejections.
+   * All values persist to `verification_results.blocked_reason` so the dashboard
+   * can distinguish enforced-gate holds from ordinary LLM rejections.
    */
-  blockedReason?: "hard_block_sub50" | "low_score_sub60";
+  blockedReason?: "hard_block_sub50" | "low_score_sub60" | "held_for_operator_review";
   /**
    * Explains why a low-scoring task was approved, making the quality system
    * legible to operators. Undefined when the task was rejected or scored ≥ 0.75.
@@ -689,7 +691,7 @@ export class Verifier {
     score: number,
     approved: boolean,
     rejectionReason?: string,
-    blockedReason?: "hard_block_sub50" | "low_score_sub60",
+    blockedReason?: "hard_block_sub50" | "low_score_sub60" | "held_for_operator_review",
     approvalRationale?: string,
     /** null = non-CLI task; 1 = smoke tests passed; 0 = smoke tests failed */
     cliSmokeTestPassed?: number | null,
@@ -728,6 +730,9 @@ export class Verifier {
    * Enforce the sub-0.50 hard-block after a verification decision has been
    * parsed. This protects the write path even if a future caller bypasses the
    * parser's own guard.
+   *
+   * Issue #272: tasks below 0.50 are now held for operator review rather than
+   * auto-rejected. The operator can approve-with-override (logged) or reject.
    */
   private applyHardBlockGuard(result: VerificationResult): VerificationResult {
     if (result.score >= HARD_BLOCK_THRESHOLD) return result;
@@ -858,6 +863,80 @@ export class Verifier {
     }
 
     return { ...result, priorityQualityEscalated: true };
+  }
+
+  /**
+   * Hold a sub-0.60 task for operator review instead of auto-rejecting.
+   *
+   * Issue #272: tasks below the quality floor (0.60) are placed in
+   * `needs_operator_review` status and a Telegram alert is sent. The operator
+   * can approve-with-override (logged with rationale) or reject.
+   *
+   * This replaces the previous silent auto-rejection which allowed critically
+   * low scores (0.30, 0.48, 0.58) to be silently re-dispatched without
+   * operator awareness.
+   *
+   * @param taskId — task ID being verified
+   * @param agentName — agent that produced the work
+   * @param result — the guard-enforced verification result (approved=false, score < 0.60)
+   */
+  private async holdForOperatorReview(
+    taskId: string,
+    agentName: string | null | undefined,
+    result: VerificationResult,
+  ): Promise<void> {
+    const scorePct = (result.score * 100).toFixed(0);
+    const agent = agentName ?? "unknown";
+    const tier = result.score < HARD_BLOCK_THRESHOLD ? "critical" : "low";
+    const gate = result.blockedReason === "hard_block_sub50"
+      ? `hard block (< ${(HARD_BLOCK_THRESHOLD * 100).toFixed(0)}%)`
+      : `quality floor (< ${(SUB_THRESHOLD_REJECTION_LIMIT * 100).toFixed(0)}%)`;
+
+    this.log.warn("Holding task for operator review — score below quality floor", {
+      taskId,
+      score: result.score,
+      agent,
+      blockedReason: result.blockedReason,
+      tier,
+    });
+
+    // Move task to needs_operator_review status so the daemon does not
+    // auto-retry or auto-approve. The task stays in this state until an
+    // operator explicitly approves-with-override or rejects via the
+    // Telegram /resolve command or dashboard.
+    this.store.updateTask(taskId, {
+      verification_status: "needs_operator_review" as any,
+      quality_score: result.score,
+      verification_notes: result.notes,
+      quality_explanation: result.explanation ?? null,
+    });
+
+    // Alert the operator via Telegram.
+    if (this.notifier) {
+      const dimBreakdown = result.dimensions
+        ? Object.entries(result.dimensions)
+          .map(([dim, score]) => `  ${dim}: ${((score as number) * 100).toFixed(0)}%`)
+          .join("\n")
+        : null;
+
+      const body = [
+        `Task \`${taskId.slice(0, 12)}\` scored *${scorePct}%* — below the ${gate}.`,
+        ``,
+        `*Task:* \`${taskId}\``,
+        `*Agent:* \`${agent}\``,
+        `*Score:* ${scorePct}% (floor: ${(SUB_THRESHOLD_REJECTION_LIMIT * 100).toFixed(0)}%)`,
+        `*Gate:* ${result.blockedReason ?? "sub_threshold"}`,
+        ...(dimBreakdown ? [``, `*Dimensions:*`, dimBreakdown] : []),
+        ``,
+        `Task held in \`needs_operator_review\`. Use \`/resolve ${taskId.slice(0, 8)}\` to approve-with-override or reject.`,
+      ].join("\n");
+
+      await this.notifier.notifyOperator(
+        "Quality floor hold: task requires operator review",
+        body,
+        "high",
+      );
+    }
   }
 
   /**
@@ -1314,6 +1393,32 @@ export class Verifier {
         ...(secondPassApprovalRationale && { approvalRationale: secondPassApprovalRationale }),
       });
 
+      // Issue #272: if the borderline path produced a sub-0.60 score (e.g. smoke
+      // test penalty dropped it below the floor), hold for operator review.
+      const borderlineHeld = !borderlineFinalApproved && borderlinePenaltyScore < SUB_THRESHOLD_REJECTION_LIMIT;
+
+      if (borderlineHeld) {
+        const heldResult: VerificationResult = {
+          ...finalResult,
+          blockedReason: "held_for_operator_review",
+        };
+
+        await this.holdForOperatorReview(taskId, task.agent_name, heldResult);
+
+        this.recordVerificationResult(
+          taskId,
+          task.agent_name ?? "unknown",
+          borderlinePenaltyScore,
+          false,
+          finalExplanation ?? finalResult.revision,
+          "held_for_operator_review",
+          undefined,
+          cliSmokeTestPassed,
+        );
+
+        return heldResult;
+      }
+
       this.store.updateTask(taskId, {
         verification_status: borderlineFinalApproved ? "approved" : "rejected",
         quality_score: borderlinePenaltyScore,
@@ -1387,11 +1492,14 @@ export class Verifier {
         : penaltyAdjustedResult.revision;
 
     // Prefix notes with marginal badge so the dashboard task list can surface it.
+    // Issue #272: sub-0.60 tasks now show "HELD FOR REVIEW" badge instead of silent rejection.
+    const isHeldForReview = !!penaltyAdjustedResult.blockedReason &&
+      (penaltyAdjustedResult.blockedReason === "hard_block_sub50" || penaltyAdjustedResult.blockedReason === "low_score_sub60");
     const marginalBadge =
       penaltyAdjustedResult.blockedReason === "hard_block_sub50"
-        ? `🚧 HARD BLOCK — score ${(penaltyAdjustedResult.score * 100).toFixed(0)}% below 50% threshold\n\n`
+        ? `🚧 HELD FOR OPERATOR REVIEW — score ${(penaltyAdjustedResult.score * 100).toFixed(0)}% below 50% hard floor\n\n`
         : penaltyAdjustedResult.blockedReason === "low_score_sub60"
-          ? `🔴 QUALITY GATE REJECT — score ${(penaltyAdjustedResult.score * 100).toFixed(0)}% below the 60% minimum floor\n\n`
+          ? `🔴 HELD FOR OPERATOR REVIEW — score ${(penaltyAdjustedResult.score * 100).toFixed(0)}% below the 60% minimum floor\n\n`
           : penaltyAdjustedResult.marginalApproval
             ? `⚠️ MARGINAL APPROVAL — score ${(penaltyAdjustedResult.score * 100).toFixed(0)}%` +
               (penaltyAdjustedResult.marginalReason ? ` — ${penaltyAdjustedResult.marginalReason}` : "") +
@@ -1412,6 +1520,32 @@ export class Verifier {
             ? "research_task_schema_pass"
             : undefined
       : undefined;
+
+    // Issue #272: hold sub-0.60 tasks for operator review instead of auto-rejecting.
+    // The operator can approve-with-override or reject via /resolve.
+    if (isHeldForReview) {
+      const heldResult: VerificationResult = {
+        ...penaltyAdjustedResult,
+        notes: enrichedNotes,
+        revision: enrichedRevision,
+        blockedReason: "held_for_operator_review",
+      };
+
+      await this.holdForOperatorReview(taskId, task.agent_name, heldResult);
+
+      this.recordVerificationResult(
+        taskId,
+        task.agent_name ?? "unknown",
+        penaltyAdjustedResult.score,
+        false,
+        penaltyAdjustedResult.explanation ?? penaltyAdjustedResult.revision,
+        penaltyAdjustedResult.blockedReason,
+        undefined,
+        cliSmokeTestPassed,
+      );
+
+      return heldResult;
+    }
 
     this.store.updateTask(taskId, {
       verification_status: penaltyAdjustedResult.approved ? "approved" : "rejected",

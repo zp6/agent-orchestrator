@@ -40,7 +40,7 @@ describe("hard-block enforcement", () => {
     store = new StateStore(":memory:");
   });
 
-  it("stores a sub-0.50 verification as rejected even if the caller reports approved", async () => {
+  it("holds a sub-0.50 verification for operator review even if the caller reports approved (issue #272)", async () => {
     const taskId = "01HZXHARDBLOCK0000000000001";
     insertDoneTask(store, taskId);
 
@@ -58,10 +58,11 @@ describe("hard-block enforcement", () => {
     const record = store.getLatestVerificationRecord(taskId);
 
     expect(result.approved).toBe(false);
-    expect(result.blockedReason).toBe("hard_block_sub50");
-    expect(task?.verification_status).toBe("rejected");
+    expect(result.blockedReason).toBe("held_for_operator_review");
+    // Issue #272: sub-0.60 tasks are now held for operator review
+    expect(task?.verification_status).toBe("needs_operator_review");
     expect(task?.quality_score).toBe(0.38);
-    expect(task?.verification_notes).toContain("HARD BLOCK");
+    expect(task?.verification_notes).toContain("HELD FOR OPERATOR REVIEW");
     expect(record?.first_pass).toBe(0);
     expect(record?.blocked_reason).toBe("hard_block_sub50");
   });
@@ -192,7 +193,7 @@ describe("sub-threshold rejection (0.50–0.60) enforcement at store write path"
 
   // ── updateTask invariant ──────────────────────────────────────────────────
 
-  it("updateTask downgrades approved status to needs_revision with quality_score of 0.55 (sub-threshold) [issue #266]", () => {
+  it("updateTask downgrades approved status to needs_operator_review with quality_score of 0.55 (sub-threshold) [issue #272]", () => {
     const raw = store as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } };
     raw.db
       .prepare(
@@ -207,13 +208,13 @@ describe("sub-threshold rejection (0.50–0.60) enforcement at store write path"
     });
 
     const task = store.getTask("T-UPDATE-LOW");
-    // Issue #266: store layer downgrades to needs_revision (not rejected) so
-    // the task stays in the work queue and is re-dispatched rather than closed.
-    expect(task?.verification_status).toBe("needs_revision");
+    // Issue #272: store layer holds for operator review (not auto-rejected)
+    // so the operator can approve-with-override or reject explicitly.
+    expect(task?.verification_status).toBe("needs_operator_review");
     expect(task?.quality_score).toBe(0.55);
   });
 
-  it("updateTask downgrades approved status to needs_revision with quality_score of 0.38 (hard block) [issue #266]", () => {
+  it("updateTask downgrades approved status to needs_operator_review with quality_score of 0.38 (hard block) [issue #272]", () => {
     const raw = store as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } };
     raw.db
       .prepare(
@@ -228,9 +229,9 @@ describe("sub-threshold rejection (0.50–0.60) enforcement at store write path"
     });
 
     const task = store.getTask("T-UPDATE-HARD");
-    // Issue #266: store layer downgrades to needs_revision (not rejected) so
-    // the task stays in the work queue and is re-dispatched rather than closed.
-    expect(task?.verification_status).toBe("needs_revision");
+    // Issue #272: store layer holds for operator review (not auto-rejected)
+    // so the operator can approve-with-override or reject explicitly.
+    expect(task?.verification_status).toBe("needs_operator_review");
     expect(task?.quality_score).toBe(0.38);
   });
 
@@ -316,7 +317,7 @@ describe("end-to-end: score 0.38 submitted via verifier is stored as rejected", 
     store = new StateStore(":memory:");
   });
 
-  it("stores a sub-0.60 verification as rejected at the store write path", async () => {
+  it("holds a sub-0.60 verification for operator review (issue #272)", async () => {
     const taskId = "01HZXSUB60E2E00000000000001";
     const raw = store as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } };
     raw.db
@@ -338,9 +339,9 @@ describe("end-to-end: score 0.38 submitted via verifier is stored as rejected", 
     const result = await verifier.verify(taskId);
     const task = store.getTask(taskId);
 
-    // Verifier should override to rejected due to hard-block (< 0.50)
+    // Issue #272: held for operator review instead of auto-rejected
     expect(result.approved).toBe(false);
-    expect(task?.verification_status).toBe("rejected");
+    expect(task?.verification_status).toBe("needs_operator_review");
     expect(task?.quality_score).toBe(0.38);
 
     // getApprovedBelowThreshold should return zero violations
@@ -348,7 +349,7 @@ describe("end-to-end: score 0.38 submitted via verifier is stored as rejected", 
     expect(violations).toHaveLength(0);
   });
 
-  it("stores a score-0.55 task as rejected, audit query returns zero violations", async () => {
+  it("holds a score-0.55 task for operator review, audit query returns zero violations (issue #272)", async () => {
     const taskId = "01HZXSUB60E2E00000000000002";
     const raw = store as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } };
     raw.db
@@ -370,10 +371,10 @@ describe("end-to-end: score 0.38 submitted via verifier is stored as rejected", 
     const result = await verifier.verify(taskId);
     const task = store.getTask(taskId);
 
-    // Verifier should override to rejected via sub-threshold guard
+    // Issue #272: held for operator review instead of auto-rejected
     expect(result.approved).toBe(false);
-    expect(result.blockedReason).toBe("low_score_sub60");
-    expect(task?.verification_status).toBe("rejected");
+    expect(result.blockedReason).toBe("held_for_operator_review");
+    expect(task?.verification_status).toBe("needs_operator_review");
     expect(task?.quality_score).toBe(0.55);
 
     // Acceptance criterion: no approved records with score < 0.60 in last 30 days
@@ -406,7 +407,7 @@ describe("hard floor at 0.60: scores 0.48 and 0.50 must never be approved (issue
     store = new StateStore(":memory:");
   });
 
-  it("score 0.48 with LLM approved:true → hard_block_sub50, rejected (issue #279, task 01KPF2ZF)", async () => {
+  it("score 0.48 with LLM approved:true → held for operator review (issue #272, #279)", async () => {
     const taskId = "01KPF2ZFHARDFLOOR000000000A";
     seedDoneTask(taskId);
 
@@ -423,17 +424,17 @@ describe("hard floor at 0.60: scores 0.48 and 0.50 must never be approved (issue
     const task = store.getTask(taskId);
     const record = store.getLatestVerificationRecord(taskId);
 
-    // Floor must have fired in parseResponse (earliest gate)
+    // Floor fires and holds for operator review instead of auto-rejecting
     expect(result.approved).toBe(false);
-    expect(result.blockedReason).toBe("hard_block_sub50");
+    expect(result.blockedReason).toBe("held_for_operator_review");
     expect(result.marginalApproval).toBeUndefined();
     expect(result.approvalRationale).toBeUndefined();
 
-    // Task must land as rejected in state.db
-    expect(task?.verification_status).toBe("rejected");
+    // Issue #272: task held in needs_operator_review (not auto-rejected)
+    expect(task?.verification_status).toBe("needs_operator_review");
     expect(task?.quality_score).toBe(0.48);
 
-    // Store-layer record must also be normalised
+    // Store-layer record still tracks the original gate reason
     expect(record?.first_pass).toBe(0);
     expect(record?.blocked_reason).toBe("hard_block_sub50");
 
@@ -442,7 +443,7 @@ describe("hard floor at 0.60: scores 0.48 and 0.50 must never be approved (issue
     expect(violations).toHaveLength(0);
   });
 
-  it("score 0.50 with LLM approved:true → low_score_sub60, rejected (issue #279, task 01KPF9RB)", async () => {
+  it("score 0.50 with LLM approved:true → held for operator review (issue #272, #279)", async () => {
     const taskId = "01KPF9RBHARDFLOOR000000000B";
     seedDoneTask(taskId);
 
@@ -450,7 +451,7 @@ describe("hard floor at 0.60: scores 0.48 and 0.50 must never be approved (issue
     (verifier as any).runLLMPass = vi.fn().mockResolvedValue({
       approved: true,   // LLM mistakenly approves at the boundary score
       score: 0.50,
-      notes: "LLM approved at boundary score — should be rejected by [0.50, 0.60) floor",
+      notes: "LLM approved at boundary score — should be held for operator review",
       revision: "Improve completeness and add missing tests.",
       explanation: "Partial work — significant gaps remain below the acceptance bar.",
     });
@@ -459,17 +460,17 @@ describe("hard floor at 0.60: scores 0.48 and 0.50 must never be approved (issue
     const task = store.getTask(taskId);
     const record = store.getLatestVerificationRecord(taskId);
 
-    // Floor must have fired in parseResponse (earliest gate)
+    // Floor fires and holds for operator review
     expect(result.approved).toBe(false);
-    expect(result.blockedReason).toBe("low_score_sub60");
+    expect(result.blockedReason).toBe("held_for_operator_review");
     expect(result.marginalApproval).toBeUndefined();
     expect(result.approvalRationale).toBeUndefined();
 
-    // Task must land as rejected in state.db
-    expect(task?.verification_status).toBe("rejected");
+    // Issue #272: task held in needs_operator_review (not auto-rejected)
+    expect(task?.verification_status).toBe("needs_operator_review");
     expect(task?.quality_score).toBe(0.50);
 
-    // Store-layer record must also be normalised
+    // Store-layer record still tracks the original gate reason
     expect(record?.first_pass).toBe(0);
     expect(record?.blocked_reason).toBe("low_score_sub60");
 
@@ -503,7 +504,71 @@ describe("hard floor at 0.60: scores 0.48 and 0.50 must never be approved (issue
     expect(task?.quality_score).toBe(0.60);
   });
 
-  it("score 0.59 with LLM approved:true → low_score_sub60 (just below floor)", async () => {
+  it("operator can approve-with-override a task held for review (issue #272)", async () => {
+    const taskId = "01KPFOPERATOROVERRIDE0000000E";
+    seedDoneTask(taskId);
+
+    const verifier = new Verifier(store);
+    (verifier as any).runLLMPass = vi.fn().mockResolvedValue({
+      approved: true,
+      score: 0.52,
+      notes: "Low score but operator may override",
+    });
+
+    await verifier.verify(taskId);
+
+    // Task should be held for operator review
+    let task = store.getTask(taskId);
+    expect(task?.verification_status).toBe("needs_operator_review");
+
+    // Operator approves with override
+    const overrideResult = store.operatorOverride(taskId, "approve", "Reviewed manually — acceptable for this context");
+    expect(overrideResult).toBe(true);
+
+    task = store.getTask(taskId);
+    expect(task?.verification_status).toBe("approved");
+    expect(task?.verification_notes).toContain("operator-override: APPROVED");
+  });
+
+  it("operator can reject a task held for review (issue #272)", async () => {
+    const taskId = "01KPFOPERATORREJECT00000000F";
+    seedDoneTask(taskId);
+
+    const verifier = new Verifier(store);
+    (verifier as any).runLLMPass = vi.fn().mockResolvedValue({
+      approved: true,
+      score: 0.45,
+      notes: "Very low score",
+    });
+
+    await verifier.verify(taskId);
+
+    let task = store.getTask(taskId);
+    expect(task?.verification_status).toBe("needs_operator_review");
+
+    // Operator rejects
+    const overrideResult = store.operatorOverride(taskId, "reject", "Not acceptable — needs complete rewrite");
+    expect(overrideResult).toBe(true);
+
+    task = store.getTask(taskId);
+    expect(task?.verification_status).toBe("rejected");
+    expect(task?.verification_notes).toContain("operator-override: REJECTED");
+  });
+
+  it("operatorOverride returns false for tasks not in needs_operator_review status", () => {
+    const raw = store as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } };
+    raw.db
+      .prepare(
+        `INSERT INTO tasks (id, title, description, status, agent_name, task_type, verification_status, created_at, updated_at)
+         VALUES ('T-NOT-HELD', 'Test', 'desc', 'done', 'agent-a', 'implementation', 'approved', '2026-04-18', '2026-04-18')`,
+      )
+      .run();
+
+    const result = store.operatorOverride("T-NOT-HELD", "reject", "Not in review");
+    expect(result).toBe(false);
+  });
+
+  it("score 0.59 with LLM approved:true → held for operator review (just below floor, issue #272)", async () => {
     const taskId = "01KPFFLOORJUSTBELOW00000000D";
     seedDoneTask(taskId);
 
@@ -511,13 +576,13 @@ describe("hard floor at 0.60: scores 0.48 and 0.50 must never be approved (issue
     (verifier as any).runLLMPass = vi.fn().mockResolvedValue({
       approved: true,
       score: 0.59,
-      notes: "Just below the floor — must be rejected",
+      notes: "Just below the floor — held for operator review",
     });
 
     const result = await verifier.verify(taskId);
 
     expect(result.approved).toBe(false);
-    expect(result.blockedReason).toBe("low_score_sub60");
+    expect(result.blockedReason).toBe("held_for_operator_review");
     expect(result.marginalApproval).toBeUndefined();
   });
 });

@@ -591,7 +591,7 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
   static readonly NULL_SCORE_REJECTED_SENTINEL = 0.50;
 
   updateTask(id: string, updates: Partial<Task>): void {
-    // ── Score-approval invariant enforcement (issue #203, #258, #266) ────
+    // ── Score-approval invariant enforcement (issue #203, #258, #266, #272) ──
     // Defence-in-depth: prevent any caller from writing an approved task
     // with a quality_score below the acceptance floor (0.60).
     // This catches bugs, race conditions, and external callers that bypass
@@ -599,10 +599,10 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
     //   < 0.50 (hard_block_sub50) — fundamentally incomplete work
     //   [0.50, 0.60) (low_score_sub60) — partial work still below acceptance bar
     //
-    // Issue #266: downgrade to 'needs_revision' (not 'rejected') so the task
-    // stays in the work queue and is re-dispatched rather than permanently
-    // closed.  This is the persisting-layer choke point — ALL callers are
-    // covered here regardless of which code path triggered the write.
+    // Issue #272: downgrade to 'needs_operator_review' (not 'needs_revision')
+    // so the task is held for explicit operator override rather than silently
+    // re-dispatched. The operator must approve-with-override or reject via
+    // /resolve in Telegram or the dashboard.
     const normalizedUpdates = { ...updates };
     if (
       normalizedUpdates.verification_status === "approved" &&
@@ -610,10 +610,10 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       normalizedUpdates.quality_score < StateStore.SUB_THRESHOLD_REJECTION_LIMIT
     ) {
       const scoreStr = normalizedUpdates.quality_score.toFixed(2);
-      normalizedUpdates.verification_status = "needs_revision";
+      normalizedUpdates.verification_status = "needs_operator_review";
       // Prepend a floor-downgrade note so operators can see the downgrade in
       // audit logs and the dashboard task list.
-      const floorNote = `[floor-downgrade: score ${scoreStr} < ${StateStore.SUB_THRESHOLD_REJECTION_LIMIT.toFixed(2)}]`;
+      const floorNote = `[operator-review-required: score ${scoreStr} < ${StateStore.SUB_THRESHOLD_REJECTION_LIMIT.toFixed(2)}]`;
       if (normalizedUpdates.verification_notes != null) {
         normalizedUpdates.verification_notes = `${floorNote} ${normalizedUpdates.verification_notes}`;
       } else {
@@ -634,19 +634,19 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
         .get(id) as { verification_status: string | null; verification_notes: string | null } | undefined;
       if (existing?.verification_status === "approved") {
         const scoreStr = normalizedUpdates.quality_score.toFixed(2);
-        normalizedUpdates.verification_status = "needs_revision";
-        const floorNote = `[floor-downgrade: score ${scoreStr} < ${StateStore.SUB_THRESHOLD_REJECTION_LIMIT.toFixed(2)}]`;
+        normalizedUpdates.verification_status = "needs_operator_review";
+        const floorNote = `[operator-review-required: score ${scoreStr} < ${StateStore.SUB_THRESHOLD_REJECTION_LIMIT.toFixed(2)}]`;
         normalizedUpdates.verification_notes = existing.verification_notes
           ? `${floorNote} ${existing.verification_notes}`
           : floorNote;
       }
     }
 
-    // ── Null-score approved guard (issue #266) ────────────────────────────
+    // ── Null-score approved guard (issue #266, #272) ───────────────────────
     // If a caller sets verification_status to 'approved' but supplies no
     // quality_score AND the task currently has quality_score = NULL, we
-    // cannot verify the floor is met — downgrade to 'needs_revision' so the
-    // task is re-dispatched rather than silently approved with an unknown score.
+    // cannot verify the floor is met — hold for operator review so the
+    // task requires explicit approval rather than silently passing.
     if (
       normalizedUpdates.verification_status === "approved" &&
       normalizedUpdates.quality_score == null
@@ -655,8 +655,8 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
         .prepare("SELECT quality_score FROM tasks WHERE id = ?")
         .get(id) as { quality_score: number | null } | undefined;
       if (existing?.quality_score == null) {
-        normalizedUpdates.verification_status = "needs_revision";
-        const floorNote = `[floor-downgrade: null score cannot verify floor ${StateStore.SUB_THRESHOLD_REJECTION_LIMIT}]`;
+        normalizedUpdates.verification_status = "needs_operator_review";
+        const floorNote = `[operator-review-required: null score cannot verify floor ${StateStore.SUB_THRESHOLD_REJECTION_LIMIT}]`;
         if (normalizedUpdates.verification_notes != null) {
           normalizedUpdates.verification_notes = `${floorNote} ${normalizedUpdates.verification_notes}`;
         } else {
@@ -664,7 +664,7 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
         }
         console.warn(
           `[StateStore] updateTask(${id}): 'approved' with no quality_score and ` +
-          `task has null score — downgrading to 'needs_revision'. ` +
+          `task has null score — holding for operator review. ` +
           `Run repairNullScoresForApprovedTasks() to LLM-infer real scores.`,
         );
       }
@@ -2890,6 +2890,86 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       )
       .get(taskId) as import("./types.js").VerificationResultRecord | undefined;
     return row ?? null;
+  }
+
+  // ── Operator override (issue #272) ───────────────────────────────────────
+
+  /**
+   * Allow an operator to approve-with-override or reject a task that was held
+   * for operator review (verification_status = 'needs_operator_review').
+   *
+   * Records the override decision in the verification_notes audit trail and
+   * updates the task's verification_status accordingly.
+   *
+   * @param taskId — task ID to override
+   * @param decision — 'approve' to approve-with-override, 'reject' to reject
+   * @param operatorNote — free-text reason for the override decision
+   * @returns true if the override was applied, false if the task was not in
+   *          'needs_operator_review' status
+   */
+  operatorOverride(
+    taskId: string,
+    decision: "approve" | "reject",
+    operatorNote: string,
+  ): boolean {
+    const existing = this.db
+      .prepare("SELECT verification_status, verification_notes, quality_score FROM tasks WHERE id = ?")
+      .get(taskId) as {
+        verification_status: string | null;
+        verification_notes: string | null;
+        quality_score: number | null;
+      } | undefined;
+
+    if (!existing || existing.verification_status !== "needs_operator_review") {
+      return false;
+    }
+
+    const timestamp = new Date().toISOString();
+    const overrideNote = decision === "approve"
+      ? `[operator-override: APPROVED at ${timestamp}] ${operatorNote}`
+      : `[operator-override: REJECTED at ${timestamp}] ${operatorNote}`;
+
+    const newStatus = decision === "approve" ? "approved" : "rejected";
+    const newNotes = existing.verification_notes
+      ? `${overrideNote}\n\n${existing.verification_notes}`
+      : overrideNote;
+
+    // Bypass the normal floor guard for approved overrides — the operator
+    // is explicitly approving below-floor work with their rationale logged.
+    // Check if approval_rationale column exists (may not in older schemas).
+    const cols = this.db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+    const hasApprovalRationale = cols.some((c) => c.name === "approval_rationale");
+
+    if (hasApprovalRationale) {
+      this.db
+        .prepare(
+          `UPDATE tasks
+           SET verification_status = ?,
+               verification_notes = ?,
+               approval_rationale = ?,
+               updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          newStatus,
+          newNotes,
+          decision === "approve" ? `operator_override: ${operatorNote}` : null,
+          timestamp,
+          taskId,
+        );
+    } else {
+      this.db
+        .prepare(
+          `UPDATE tasks
+           SET verification_status = ?,
+               verification_notes = ?,
+               updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(newStatus, newNotes, timestamp, taskId);
+    }
+
+    return true;
   }
 
   // ── First-pass rate widget (issue #88) ───────────────────────────────────
