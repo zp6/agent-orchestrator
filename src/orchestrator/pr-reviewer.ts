@@ -994,32 +994,95 @@ Please add this block to your PR description and try again.`,
         continue;
       }
 
-      // Mark as merging and attempt the squash merge
+      // Mark as merging and attempt the squash merge.
+      // Strategy: try GitHub's native auto-merge first (`--auto`) so the PR
+      // merges as soon as all required status checks pass.  If the repository
+      // does not have branch-protection rules that allow auto-merge (GitHub
+      // rejects the flag with "Pull request auto-merge is not allowed"), fall
+      // back to an immediate squash merge so the queue keeps moving.
       this.store.markQueuedPRMerging(repo, next.pr_number);
       this.log.info("Processing merge queue: merging PR", { repo, prNumber: next.pr_number, branch: next.branch });
 
+      // Step 1 — try to enable GitHub's native auto-merge.
+      let autoMergeEnabled = false;
       try {
         execSync(
-          `gh pr merge ${next.pr_number} --repo ${repo} --squash --delete-branch`,
+          `gh pr merge ${next.pr_number} --repo ${repo} --squash --auto --delete-branch`,
           { encoding: "utf-8", timeout: 60000 },
         );
-        this.store.markQueuedPRMerged(repo, next.pr_number);
-        this.log.info("Merge queue: PR merged successfully", { repo, prNumber: next.pr_number });
+        autoMergeEnabled = true;
+        this.log.info(
+          "Merge queue: auto-merge enabled — PR will merge when all required checks pass",
+          { repo, prNumber: next.pr_number },
+        );
+        // Leave the entry in "merging" status; the next daemon cycle will
+        // detect the PR closing and call markQueuedPRMerged + post-merge steps.
+      } catch (autoErr) {
+        const autoErrMsg = autoErr instanceof Error ? autoErr.message : String(autoErr);
+        // GitHub returns a non-zero exit when auto-merge is not supported by
+        // the repository (no branch-protection rules, or the feature is
+        // disabled).  Detect this case and fall through to the immediate merge.
+        const isUnsupported =
+          autoErrMsg.includes("auto-merge is not allowed") ||
+          autoErrMsg.includes("Auto merge is not allowed") ||
+          autoErrMsg.includes("not enabled") ||
+          autoErrMsg.includes("autoMergeAllowed");
+        if (!isUnsupported) {
+          // A real error (e.g. network failure, bad token) — surface it.
+          const errMsg = autoErrMsg;
+          this.store.markQueuedPRFailed(repo, next.pr_number, errMsg);
+          this.log.error("Merge queue: PR merge failed (auto-merge attempt)", { repo, prNumber: next.pr_number, error: errMsg });
+          try {
+            execSync(
+              `gh pr comment ${next.pr_number} --repo ${repo} --body ${shellEscape(`**[orchestrator] Merge Queue — Merge Failed** ❌\n\nFailed to enable auto-merge:\n\`\`\`\n${errMsg.slice(0, 500)}\n\`\`\`\nThis PR has been removed from the merge queue. Please resolve any issues and re-open a review.`)}`,
+              { encoding: "utf-8", timeout: 30000 },
+            );
+          } catch {
+            // Best effort
+          }
+          continue; // skip to next repo
+        }
 
-        // Close cross-repo issues referenced in the merged PR body
-        this.closeCrossRepoIssuesForPR(repo, next.pr_number);
-
-        // Rebase remaining queued branches now that main has advanced
-        await this.rebaseRemainingQueue(repo, next.branch);
-        await this.restartAgentsForRepo(repo);
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        this.store.markQueuedPRFailed(repo, next.pr_number, errMsg);
-        this.log.error("Merge queue: PR merge failed", { repo, prNumber: next.pr_number, error: errMsg });
-        // Post a comment so the agent knows the merge failed
+        // Step 2 — auto-merge not available; fall back to immediate squash merge.
+        this.log.info(
+          "Merge queue: auto-merge not available for repo — falling back to immediate merge",
+          { repo, prNumber: next.pr_number },
+        );
         try {
           execSync(
-            `gh pr comment ${next.pr_number} --repo ${repo} --body ${shellEscape(`**[orchestrator] Merge Queue — Merge Failed** ❌\n\nFailed to merge PR automatically:\n\`\`\`\n${errMsg.slice(0, 500)}\n\`\`\`\nThis PR has been removed from the merge queue. Please resolve any issues and re-open a review.`)}`,
+            `gh pr merge ${next.pr_number} --repo ${repo} --squash --delete-branch`,
+            { encoding: "utf-8", timeout: 60000 },
+          );
+          this.store.markQueuedPRMerged(repo, next.pr_number);
+          this.log.info("Merge queue: PR merged successfully (immediate)", { repo, prNumber: next.pr_number });
+
+          // Close cross-repo issues referenced in the merged PR body
+          this.closeCrossRepoIssuesForPR(repo, next.pr_number);
+
+          // Rebase remaining queued branches now that main has advanced
+          await this.rebaseRemainingQueue(repo, next.branch);
+          await this.restartAgentsForRepo(repo);
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          this.store.markQueuedPRFailed(repo, next.pr_number, errMsg);
+          this.log.error("Merge queue: PR merge failed", { repo, prNumber: next.pr_number, error: errMsg });
+          // Post a comment so the agent knows the merge failed
+          try {
+            execSync(
+              `gh pr comment ${next.pr_number} --repo ${repo} --body ${shellEscape(`**[orchestrator] Merge Queue — Merge Failed** ❌\n\nFailed to merge PR automatically:\n\`\`\`\n${errMsg.slice(0, 500)}\n\`\`\`\nThis PR has been removed from the merge queue. Please resolve any issues and re-open a review.`)}`,
+              { encoding: "utf-8", timeout: 30000 },
+            );
+          } catch {
+            // Best effort
+          }
+        }
+      }
+
+      // If auto-merge was enabled, post a comment confirming it's queued.
+      if (autoMergeEnabled) {
+        try {
+          execSync(
+            `gh pr comment ${next.pr_number} --repo ${repo} --body ${shellEscape(`**[orchestrator] Merge Queue — Auto-merge enabled** ⏳\n\nThis PR will be merged automatically once all required status checks pass.`)}`,
             { encoding: "utf-8", timeout: 30000 },
           );
         } catch {
