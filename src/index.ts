@@ -135,6 +135,13 @@ export type {
 
 export { RoutingAccuracyTracker } from "./reviewer/routing-accuracy.js";
 
+export {
+  RoutingViolationDetector,
+  detectViolation,
+  buildRepoOwnerMap,
+  formatViolationsForDisplay,
+} from "./reviewer/routing-violations.js";
+
 export { RerouteQualityTracker } from "./reviewer/reroute-quality-tracker.js";
 export type {
   RerouteDecision,

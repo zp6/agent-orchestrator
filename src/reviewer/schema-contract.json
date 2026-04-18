@@ -128,6 +128,25 @@
         "source_repo",
         "created_at"
       ]
+    },
+    {
+      "table": "routing_violations",
+      "writer_repo": "rapartlu/agent-reviewer",
+      "consumer_repos": [
+        "rapartlu/agent-orchestrator",
+        "rapartlu/agent-dashboard",
+        "rapartlu/agent-reviewer"
+      ],
+      "canonical_columns": [
+        "id",
+        "task_id",
+        "agent_name",
+        "target_repo",
+        "expected_agent",
+        "task_title",
+        "dispatched_at",
+        "detected_at"
+      ]
     }
   ]
 }

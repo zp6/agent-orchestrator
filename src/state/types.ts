@@ -1833,4 +1833,40 @@ export interface ITelegramStateStore
    * `needs_operator_review` status (or does not exist).
    */
   operatorOverride(taskId: string, decision: "approve" | "reject", operatorNote: string): boolean;
+
+  // Routing violations (issue #293)
+  /**
+   * Record an agent-to-repo routing violation.
+   * Called when a task is dispatched to an agent that does not own the target repo.
+   */
+  recordRoutingViolation(violation: Omit<RoutingViolation, "id">): void;
+  /**
+   * Return the most recent routing violations, newest first.
+   * @param limit — max rows to return (default 20)
+   */
+  getRoutingViolations(limit?: number): RoutingViolation[];
+}
+
+// ── Routing violation types (issue #293) ─────────────────────────────────
+
+/**
+ * A routing violation: a task was dispatched to an agent that does not own
+ * the target repo.  Persisted to `routing_violations` in state.db.
+ */
+export interface RoutingViolation {
+  id?: number;
+  /** Task ID that was mis-routed. */
+  task_id: string;
+  /** Agent that received the task. */
+  agent_name: string;
+  /** Target repo slug (owner/repo) extracted from source_ref. */
+  target_repo: string;
+  /** The agent that should have received the task (repo owner). */
+  expected_agent: string | null;
+  /** ISO-8601 timestamp of the dispatch. */
+  dispatched_at: string;
+  /** ISO-8601 timestamp when the violation was detected. */
+  detected_at: string;
+  /** Optional task title for display. */
+  task_title?: string | null;
 }

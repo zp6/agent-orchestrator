@@ -29,6 +29,7 @@
  *   /review-queue          → list all tasks held for operator review (needs_operator_review) with score and risk tier
  *   /approve <task-id> [note] → approve a held task with operator override, bypassing the 0.60 floor
  *   /reject <task-id> [note]  → reject a held task from the operator review queue
+ *   /routing-violations [n]   → list the last N agent-to-repo routing violations (default 10)
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -111,7 +112,8 @@ type CommandName =
   | "suppress"
   | "review-queue"
   | "approve"
-  | "reject";
+  | "reject"
+  | "routing-violations";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -145,6 +147,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "review-queue",
   "approve",
   "reject",
+  "routing-violations",
 ]);
 
 interface ParsedCommand {
@@ -434,6 +437,12 @@ async function executeCommand(
       }
       const note = noteParts.join(" ").trim() || "Rejected by operator via Telegram";
       return handleOperatorOverride(store, taskId, "reject", note);
+    }
+
+    case "routing-violations": {
+      const limitStr = cmd.args[0]?.trim();
+      const limit = limitStr ? Math.min(Math.max(parseInt(limitStr, 10) || 10, 1), 50) : 10;
+      return handleRoutingViolations(store, limit);
     }
   }
 }
@@ -1989,6 +1998,40 @@ function handleOperatorOverride(
       ? `Task is now marked as *approved* and will be treated as complete.`
       : `Task is now marked as *rejected* and will require re-work.`,
   ].join("\n");
+}
+
+// ── Routing violations handler (issue #293) ─────────────────────────────
+
+function handleRoutingViolations(store: ITelegramStateStore, limit: number): string {
+  const violations = store.getRoutingViolations(limit);
+
+  if (violations.length === 0) {
+    return [
+      `✅ *Routing Violations — None*`,
+      ``,
+      `No agent-to-repo routing violations detected.`,
+      `Violations are recorded when a task is dispatched to an agent`,
+      `that does not own the target repository.`,
+    ].join("\n");
+  }
+
+  const lines: string[] = [
+    `🚨 *Routing Violations — ${violations.length} recorded*`,
+    ``,
+  ];
+
+  for (const v of violations.slice(0, limit)) {
+    const shortId = v.task_id.slice(0, 8);
+    const title = (v.task_title ?? "—").slice(0, 40);
+    const detected = formatAgo(v.detected_at);
+
+    lines.push(`❌ \`${shortId}\` — ${title}`);
+    lines.push(`  Agent: \`${v.agent_name}\` → Repo: \`${v.target_repo}\``);
+    lines.push(`  Expected: \`${v.expected_agent ?? "unknown"}\` · ${detected}`);
+    lines.push(``);
+  }
+
+  return lines.join("\n");
 }
 
 // ── TelegramCommandHandler class ──────────────────────────────────────────

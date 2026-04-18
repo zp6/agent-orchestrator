@@ -65,6 +65,7 @@ import type {
   VerifierThreshold,
   VerifierAlertState,
   IThresholdAdjustmentStore,
+  RoutingViolation,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -437,6 +438,27 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
     } catch {
       // Column already exists — ignore
     }
+
+    // Routing violations table (idempotent — issue #293).
+    // Records agent-to-repo routing violations for operator visibility.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS routing_violations (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id         TEXT NOT NULL,
+        agent_name      TEXT NOT NULL,
+        target_repo     TEXT NOT NULL,
+        expected_agent  TEXT,
+        task_title      TEXT,
+        dispatched_at   TEXT NOT NULL,
+        detected_at     TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_routing_violations_detected_at
+        ON routing_violations (detected_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_routing_violations_task_id
+        ON routing_violations (task_id);
+    `);
 
     // Secrets health checks table (idempotent — issue #125).
     // Records per-agent, per-secret mount status snapshots for fleet health monitoring.
@@ -2375,6 +2397,44 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       )
       .all() as Task[];
     return rows;
+  }
+
+  // ── Routing violations (issue #293) ─────────────────────────────────────
+
+  /**
+   * Record an agent-to-repo routing violation.
+   */
+  recordRoutingViolation(violation: Omit<RoutingViolation, "id">): void {
+    this.db
+      .prepare(
+        `INSERT INTO routing_violations
+           (task_id, agent_name, target_repo, expected_agent, task_title, dispatched_at, detected_at)
+         VALUES
+           (@task_id, @agent_name, @target_repo, @expected_agent, @task_title, @dispatched_at, @detected_at)`,
+      )
+      .run({
+        task_id: violation.task_id,
+        agent_name: violation.agent_name,
+        target_repo: violation.target_repo,
+        expected_agent: violation.expected_agent ?? null,
+        task_title: violation.task_title ?? null,
+        dispatched_at: violation.dispatched_at,
+        detected_at: violation.detected_at,
+      });
+  }
+
+  /**
+   * Return the most recent routing violations, newest first.
+   */
+  getRoutingViolations(limit: number = 20): RoutingViolation[] {
+    const safeLimit = Math.max(1, Math.min(limit, 100));
+    return this.db
+      .prepare(
+        `SELECT * FROM routing_violations
+         ORDER BY detected_at DESC
+         LIMIT ?`,
+      )
+      .all(safeLimit) as RoutingViolation[];
   }
 
   /**
