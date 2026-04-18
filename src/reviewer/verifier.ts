@@ -982,6 +982,33 @@ export class Verifier {
       return inferredResult;
     }
 
+    // ── Already-handled pattern check ───────────────────────────────────────
+    // Agents that correctly detect an existing open / mergeable PR should not
+    // be penalised for "lacking implementation content".  If the result preview
+    // matches a well-known already-handled pattern, short-circuit immediately
+    // with score=1.0 rather than running LLM scoring.
+    const resultText = task.result ?? "";
+    const isAlreadyHandled =
+      resultText.startsWith("already-in-review:") ||
+      /already[\s-]handled/i.test(resultText) ||
+      /pr already exists and is mergeable/i.test(resultText);
+
+    if (isAlreadyHandled) {
+      this.log.info(
+        "Already-handled pattern detected — short-circuiting with score 1.0",
+        {
+          taskId,
+          agentName: task.agent_name,
+          resultPreview: resultText.slice(0, 120),
+        },
+      );
+      return this.recordShortCircuitScore(
+        taskId,
+        "no_action_needed",
+        "Agent correctly identified that work was already handled (existing open PR or already-in-review).",
+      );
+    }
+
     this.store.updateTask(taskId, { verification_status: "pending" });
 
     const client = createLLMClient();
