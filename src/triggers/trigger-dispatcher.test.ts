@@ -1892,6 +1892,11 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
       isPRInMergeQueue: vi.fn().mockReturnValue(false),
       isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
       addToPriorityReviewQueue: vi.fn(),
+      // Per-issue dispatch lock methods (added in #916)
+      getDispatchLock: vi.fn().mockReturnValue(undefined),
+      acquireDispatchLock: vi.fn(),
+      releaseDispatchLock: vi.fn(),
+      cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
     } as unknown as StateStore;
