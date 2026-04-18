@@ -112,6 +112,23 @@ export interface PRReviewResult {
    * instead of enqueueing it for merge.
    */
   shouldCloseInsteadOfMerge?: boolean;
+  /**
+   * Populated on `request-changes` decisions only. How urgent is the fix?
+   *   - 'critical' — security vulnerability or data loss risk
+   *   - 'major'    — runtime bug that will break functionality
+   *   - 'minor'    — missing non-critical functionality
+   * Null on approve/escalate or when the LLM did not supply the field.
+   */
+  severity?: "critical" | "major" | "minor" | null;
+  /**
+   * Populated on `request-changes` decisions only. What type of issue?
+   *   - 'security'              — credential leak, injection, auth bypass
+   *   - 'correctness'           — logic error, wrong output, crash
+   *   - 'data-integrity'        — data loss, corruption, missing persistence
+   *   - 'missing-functionality' — required feature not implemented
+   * Null on approve/escalate or when the LLM did not supply the field.
+   */
+  category?: "security" | "correctness" | "data-integrity" | "missing-functionality" | null;
 }
 
 const SYSTEM_PROMPT = `You are a code reviewer for a multi-agent system. Your job is to catch real bugs and security issues, NOT to enforce style preferences.
@@ -146,14 +163,20 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   "decision": "approve|request-changes|escalate",
   "comment": "Your review comment to post on the PR",
   "reason": "Brief internal reason for the decision",
-  "confidence": 0.0
+  "confidence": 0.0,
+  "severity": null,
+  "category": null
 }
 
 The confidence field (required) is a 0.0-1.0 float reflecting your certainty:
 - 0.9-1.0: very confident (obvious approval or clear blocking bug)
 - 0.7-0.89: reasonably confident (standard review)
 - 0.5-0.69: borderline (uncertain about scope, impact, or correctness)
-- below 0.5: very uncertain (incomplete information, complex tradeoffs)`;
+- below 0.5: very uncertain (incomplete information, complex tradeoffs)
+
+The severity and category fields are REQUIRED when decision is "request-changes", otherwise set them to null:
+- severity: "critical" (security vulnerability or data loss risk) | "major" (runtime bug that breaks functionality) | "minor" (missing non-critical functionality)
+- category: "security" (credential leak, injection, auth bypass) | "correctness" (logic error, wrong output, crash) | "data-integrity" (data loss, corruption, missing persistence) | "missing-functionality" (required feature not implemented)`;
 
 // ── Issue number helpers ──────────────────────────────────────────────────────
 
@@ -1788,11 +1811,30 @@ export class PRReviewer {
           rawConfidence <= 1
             ? rawConfidence
             : null;
+        const VALID_SEVERITIES = ["critical", "major", "minor"] as const;
+        const VALID_CATEGORIES = [
+          "security",
+          "correctness",
+          "data-integrity",
+          "missing-functionality",
+        ] as const;
+        const severity =
+          decision === "request-changes" &&
+          VALID_SEVERITIES.includes(parsed.severity as (typeof VALID_SEVERITIES)[number])
+            ? (parsed.severity as PRReviewResult["severity"])
+            : null;
+        const category =
+          decision === "request-changes" &&
+          VALID_CATEGORIES.includes(parsed.category as (typeof VALID_CATEGORIES)[number])
+            ? (parsed.category as PRReviewResult["category"])
+            : null;
         return {
           decision,
           comment: decision === "request-changes" ? enforceChecklist(comment) : comment,
           reason: String(parsed.reason ?? ""),
           confidence,
+          severity,
+          category,
         };
       } catch {
         continue;
@@ -1804,6 +1846,8 @@ export class PRReviewer {
       comment: "Could not parse review — escalating to human.",
       reason: "Parse failure",
       confidence: null,
+      severity: null,
+      category: null,
     };
   }
 
