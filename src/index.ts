@@ -193,6 +193,19 @@ export type {
   BatchSplitResult,
 } from "./reviewer/standup-batch-splitter.js";
 
+// Score integrity audit (issue #263) — bucket breakdown, violation list, and gate status
+export {
+  getScoreIntegrityReport,
+  isEnforcementActive,
+  SCORE_BUCKETS,
+  DEFAULT_MIN_SCORE,
+} from "./reviewer/score-integrity.js";
+export type {
+  ScoreBucketCount,
+  ViolationEntry,
+  ScoreIntegrityReport,
+} from "./reviewer/score-integrity.js";
+
 // PR existence guard (issue #178) — skip re-dispatch when open PR already exists
 export {
   checkPRExistenceBeforeDispatch,
