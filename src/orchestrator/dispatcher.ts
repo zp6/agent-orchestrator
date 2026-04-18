@@ -581,6 +581,81 @@ export class Dispatcher {
       routeConfidence = matches[0].confidence;
       routeReason = `Auto-routed (${matches[0].reason}, confidence: ${matches[0].confidence.toFixed(2)})`;
       this.log.info("Routed task", { agentName, reason: routeReason, confidence: matches[0].confidence });
+
+      // ── Repo-to-agent affinity correction (issue #928) ──────────────────────
+      // When the auto-router selects an agent that doesn't match the repo affinity
+      // table, silently override to the canonical agent.  This prevents quality
+      // degradation from cross-domain misfires (e.g. dashboard agent receiving
+      // orchestrator-core implementation tasks).
+      // Only fires for auto-routed tasks; explicit dispatches use the warn path
+      // further down so the operator's choice is preserved with a warning.
+      const affinityTaskRepo = extractRepoFromSourceRef(options?.sourceRef);
+      if (affinityTaskRepo) {
+        const affinityMappedAgent = this.config.dispatch?.repo_affinity?.[affinityTaskRepo];
+        if (
+          affinityMappedAgent &&
+          affinityMappedAgent !== agentName &&
+          this.config.agents[affinityMappedAgent]
+        ) {
+          this.log.info("Repo-affinity correction: overriding auto-route to canonical agent", {
+            taskRepo: affinityTaskRepo,
+            originalAgent: agentName,
+            canonicalAgent: affinityMappedAgent,
+            sourceRef: options?.sourceRef,
+            originalReason: routeReason,
+          });
+          agentName = affinityMappedAgent;
+          routeMethod = "deterministic";
+          routeReason =
+            `Repo-affinity correction: task from "${affinityTaskRepo}" redirected ` +
+            `from auto-routed "${matches[0].agentName}" to canonical agent "${affinityMappedAgent}"`;
+        }
+      }
+    }
+
+    // ── Repo-to-agent affinity warning for explicit dispatches (issue #928) ───
+    // When an agent is explicitly specified and it doesn't match the repo
+    // affinity table, emit a routing warning and write a supervisor decision
+    // record.  The explicit agent is still honoured — the caller is treated as
+    // an intentional override.
+    if (options?.agentName) {
+      const explicitAffinityRepo = extractRepoFromSourceRef(options?.sourceRef);
+      if (explicitAffinityRepo) {
+        const explicitMappedAgent = this.config.dispatch?.repo_affinity?.[explicitAffinityRepo];
+        if (
+          explicitMappedAgent &&
+          explicitMappedAgent !== agentName &&
+          this.config.agents[explicitMappedAgent]
+        ) {
+          this.log.warn("Repo-affinity mismatch: explicit dispatch to non-canonical agent", {
+            taskRepo: explicitAffinityRepo,
+            dispatchedAgent: agentName,
+            canonicalAgent: explicitMappedAgent,
+            sourceRef: options?.sourceRef,
+          });
+          this.store.addSupervisorDecision({
+            action: "warn",
+            agent_name: agentName,
+            reason:
+              `Repo-affinity mismatch: task from "${explicitAffinityRepo}" explicitly dispatched ` +
+              `to "${agentName}" but affinity maps to "${explicitMappedAgent}". ` +
+              `Proceeding with explicit override — cross-domain dispatch may produce lower-quality output.`,
+            hard_gates: ["REPO_AFFINITY_MISMATCH"],
+            outcome: "skipped",
+            task_id: undefined,
+            route_method: "explicit",
+          });
+          notifyOperator(
+            `Repo-affinity mismatch: cross-domain dispatch to ${agentName}`,
+            `Task from \`${explicitAffinityRepo}\` routed to \`${agentName}\` ` +
+              `but affinity maps to \`${explicitMappedAgent}\`.\n` +
+              (options?.sourceRef ? `Source: ${options.sourceRef}\n` : "") +
+              `Proceeding with explicit override — results may be lower quality.`,
+            "warning",
+            `repo-affinity:${explicitAffinityRepo}:${agentName}`,
+          );
+        }
+      }
     }
 
     // ── Unknown-agent guard (issue #864) ──────────────────────────────────────

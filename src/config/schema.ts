@@ -550,6 +550,32 @@ export interface DispatchConfig {
    * Defaults to 3 when omitted.
    */
   max_open_prs?: number;
+
+  /**
+   * Repo-to-agent affinity table (issue #928).
+   *
+   * Maps a GitHub repo (e.g. "rapartlu/agent-orchestrator") to the canonical
+   * agent name responsible for that repo (e.g. "claude-agent-orchestrator").
+   *
+   * When a task's source_ref repo is in this table:
+   *  - Auto-routed tasks: silently corrected to the canonical agent when the
+   *    router selects a different one.
+   *  - Explicitly-dispatched tasks: a routing warning is logged and a supervisor
+   *    decision record is written; the explicit agent is still honoured (the
+   *    caller is assumed to know what they're doing — an explicit override).
+   *
+   * The affinity guard only fires when the affinity-mapped agent is registered
+   * in the agent list; unknown mapped agents are skipped so a stale config
+   * entry never blocks dispatch entirely.
+   *
+   * Example (in agents.yaml):
+   *   dispatch:
+   *     repo_affinity:
+   *       "rapartlu/agent-orchestrator": "claude-agent-orchestrator"
+   *       "rapartlu/agent-dashboard": "claude-orchestrator-dashboard"
+   *       "rapartlu/agent-proxy": "claude-proxy"
+   */
+  repo_affinity?: Record<string, string>;
 }
 
 /**

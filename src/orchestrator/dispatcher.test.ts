@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   Dispatcher,
   FAILURE_REROUTE_THRESHOLD,
@@ -2787,5 +2787,261 @@ describe("Dispatcher — UNKNOWN_AGENT dispatch guard (issue #864)", () => {
 
     expect(result.response.content).toContain("codex-orchestrator-reviewer");
     expect(result.response.content).toContain("agent registry");
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Repo-to-agent affinity guardrail (issue #928)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("dispatch() — repo-to-agent affinity guardrail (issue #928)", () => {
+  let store: StateStore;
+
+  /**
+   * Build a config with three agents and an affinity table.
+   * "test-agent" is the router-default (the module-level Router mock returns it).
+   * "orchestrator-agent" is the canonical agent for "owner/orchestrator".
+   * "dashboard-agent" is the canonical agent for "owner/dashboard".
+   *
+   * This lets us test auto-route correction: the router picks "test-agent"
+   * but the affinity map redirects orchestrator tasks to "orchestrator-agent".
+   */
+  const makeAffinityConfig = (): OrchestratorConfig => ({
+    proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 5000 },
+    orchestrator_dir: "/tmp",
+    base_dir: "/projects",
+    dispatch: {
+      repo_affinity: {
+        // router default ("test-agent") won't match for orchestrator tasks →
+        // auto-route correction kicks in and picks "orchestrator-agent" instead.
+        "owner/orchestrator": "orchestrator-agent",
+        "owner/dashboard": "dashboard-agent",
+      },
+    },
+    agents: {
+      // The module-level Router mock always returns this agent name.
+      // It's included so the unknown-agent guard passes in auto-route tests.
+      "test-agent": {
+        dir: "test-agent",
+        description: "Router default agent (mock)",
+        capabilities: ["implementation"],
+        owns_topics: ["test"],
+        github: "owner/other-repo",
+        docker: { port: 3457, api_key: "secret" },
+      },
+      "orchestrator-agent": {
+        dir: "orchestrator-agent",
+        description: "Handles orchestrator repo",
+        capabilities: ["implementation"],
+        owns_topics: ["orchestrator"],
+        github: "owner/orchestrator",
+        docker: { port: 3490, api_key: "secret" },
+      },
+      "dashboard-agent": {
+        dir: "dashboard-agent",
+        description: "Handles dashboard repo",
+        capabilities: ["implementation"],
+        owns_topics: ["dashboard"],
+        github: "owner/dashboard",
+        docker: { port: 3491, api_key: "secret" },
+      },
+    },
+  });
+
+  beforeEach(() => {
+    store = new StateStore(":memory:");
+    vi.clearAllMocks();
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+    mockCachedValidateForDispatch.mockReturnValue(null);
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  it("auto-routed task to wrong agent is silently corrected to the canonical agent", async () => {
+    const config = makeAffinityConfig();
+    // Router mock returns "dashboard-agent" (the wrong agent for orchestrator issues)
+    const Router = (await import("./router.js")).Router as unknown as new () => { route: ReturnType<typeof vi.fn>; routeWithFallback?: ReturnType<typeof vi.fn> };
+    const routerInstance = new Router();
+    (routerInstance.route as ReturnType<typeof vi.fn>).mockReturnValue([
+      { agentName: "dashboard-agent", confidence: 0.6, reason: "LLM fallback" },
+    ]);
+
+    const dispatcher = new Dispatcher(config, store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+
+    // Dispatch WITHOUT specifying agentName (auto-route path)
+    const result = await dispatcher.dispatch("Implement feature in orchestrator", {
+      source: "github",
+      sourceRef: "owner/orchestrator#42",
+      // No agentName — relies on router
+    });
+
+    // The affinity guardrail should have corrected the route to orchestrator-agent
+    expect(result.agentName).toBe("orchestrator-agent");
+    expect(result.taskId).not.toBe("");
+  });
+
+  it("auto-routed task to correct canonical agent is not redirected", async () => {
+    const config = makeAffinityConfig();
+    const dispatcher = new Dispatcher(config, store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+
+    // Router is mocked to return "orchestrator-agent" — the correct canonical agent
+    // The Router mock in this test file returns "test-agent" by default.
+    // We dispatch with an explicit sourceRef pointing to owner/orchestrator.
+    const result = await dispatcher.dispatch("Fix orchestrator bug", {
+      agentName: "orchestrator-agent", // explicit — correct
+      source: "github",
+      sourceRef: "owner/orchestrator#99",
+    });
+
+    // No affinity mismatch — should succeed normally, no warning notification
+    expect(result.taskId).not.toBe("");
+    expect(mockNotifyOperator).not.toHaveBeenCalledWith(
+      expect.stringContaining("affinity"),
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+    );
+  });
+
+  it("explicit dispatch to non-canonical agent emits warning but proceeds", async () => {
+    const config = makeAffinityConfig();
+    const dispatcher = new Dispatcher(config, store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+
+    // Explicit dispatch: dashboard-agent receives an orchestrator task (mismatch)
+    const result = await dispatcher.dispatch("Orchestrator backend work", {
+      agentName: "dashboard-agent",
+      source: "github",
+      sourceRef: "owner/orchestrator#10",
+    });
+
+    // Should still proceed (explicit override), but with a warning
+    expect(result.taskId).not.toBe("");
+    expect(result.response.stop_reason).not.toBe("repo-affinity-blocked");
+
+    // A Telegram notification should have been sent about the mismatch
+    expect(mockNotifyOperator).toHaveBeenCalledWith(
+      expect.stringContaining("affinity"),
+      expect.stringContaining("dashboard-agent"),
+      "warning",
+      expect.stringContaining("repo-affinity"),
+    );
+  });
+
+  it("explicit dispatch mismatch writes a supervisor decision record", async () => {
+    const config = makeAffinityConfig();
+    const dispatcher = new Dispatcher(config, store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+
+    await dispatcher.dispatch("Orchestrator backend work", {
+      agentName: "dashboard-agent",
+      source: "github",
+      sourceRef: "owner/orchestrator#10",
+    });
+
+    const decisions = store.getRecentSupervisorDecisions(10);
+    const affinityDecision = decisions.find((d) =>
+      d.hard_gates?.includes("REPO_AFFINITY_MISMATCH"),
+    );
+    expect(affinityDecision).toBeDefined();
+    expect(affinityDecision?.agent_name).toBe("dashboard-agent");
+    expect(affinityDecision?.reason).toContain("owner/orchestrator");
+    expect(affinityDecision?.reason).toContain("orchestrator-agent");
+  });
+
+  it("affinity guardrail does not fire when affinity map is absent", async () => {
+    // Config without any affinity map
+    const config = makeConfig(); // standard config, no dispatch.repo_affinity
+    const dispatcher = new Dispatcher(config, store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+
+    await dispatcher.dispatch("Normal dispatch", {
+      agentName: "test-agent",
+      source: "github",
+      sourceRef: "owner/repo#5",
+    });
+
+    // No affinity-related notification
+    expect(mockNotifyOperator).not.toHaveBeenCalledWith(
+      expect.stringContaining("affinity"),
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+    );
+  });
+
+  it("affinity guardrail is skipped when mapped agent is not registered", async () => {
+    const config = makeAffinityConfig();
+    // Map orchestrator repo to an agent that doesn't exist in agents list
+    config.dispatch = {
+      repo_affinity: {
+        "owner/orchestrator": "nonexistent-agent",
+      },
+    };
+
+    const dispatcher = new Dispatcher(config, store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+
+    // Should proceed without error — stale config entry doesn't block dispatch
+    const result = await dispatcher.dispatch("Orchestrator work", {
+      agentName: "dashboard-agent",
+      source: "github",
+      sourceRef: "owner/orchestrator#20",
+    });
+
+    expect(result.taskId).not.toBe("");
+    // No warning for unknown mapped agent
+    expect(mockNotifyOperator).not.toHaveBeenCalledWith(
+      expect.stringContaining("affinity"),
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+    );
+  });
+
+  it("affinity guardrail does not fire for tasks without a sourceRef", async () => {
+    const config = makeAffinityConfig();
+    const dispatcher = new Dispatcher(config, store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+
+    // Manual dispatch without sourceRef — no repo to check affinity for
+    const result = await dispatcher.dispatch("Ad-hoc task", {
+      agentName: "dashboard-agent",
+      source: "manual",
+      // No sourceRef
+    });
+
+    expect(result.taskId).not.toBe("");
+    expect(mockNotifyOperator).not.toHaveBeenCalledWith(
+      expect.stringContaining("affinity"),
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+    );
   });
 });
