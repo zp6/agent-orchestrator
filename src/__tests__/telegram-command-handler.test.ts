@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TelegramCommandHandler } from "../telegram/command-handler.js";
+import { DuplicateDispatchSurgeDetector } from "../reviewer/duplicate-dispatch-surge-detector.js";
 import type {
   AgentHealth,
   DispatchRequest,
@@ -140,7 +141,11 @@ function makeStore(
   };
 }
 
-async function runTelegramCommand(store: IStateStore, text: string): Promise<string> {
+async function runTelegramCommand(
+  store: IStateStore,
+  text: string,
+  opts?: { surgeDetector?: DuplicateDispatchSurgeDetector },
+): Promise<string> {
   const savedToken = process.env.TELEGRAM_BOT_TOKEN;
   const savedChat = process.env.TELEGRAM_CHAT_ID;
   process.env.TELEGRAM_BOT_TOKEN = "token";
@@ -188,7 +193,10 @@ async function runTelegramCommand(store: IStateStore, text: string): Promise<str
     return new Response("{}", { status: 200 });
   });
 
-  const handler = new TelegramCommandHandler(store, { pollIntervalMs: 1 });
+  const handler = new TelegramCommandHandler(store, {
+    pollIntervalMs: 1,
+    surgeDetector: opts?.surgeDetector,
+  });
   const stop = handler.start();
 
   await sent;
@@ -770,5 +778,105 @@ describe("/reject command — operator override reject", () => {
     const store = makeStore([task]);
     const reply = await runTelegramCommand(store, "/reject 01KPREJECT0000000000000002");
     expect(reply).toContain("No held task found");
+  });
+});
+
+describe("/suppress command — suppress dispatch storm alerts per-issue", () => {
+  it("shows usage when no arguments provided", async () => {
+    const store = makeStore([]);
+    const reply = await runTelegramCommand(store, "/suppress");
+    expect(reply).toContain("Usage");
+    expect(reply).toContain("/suppress <repo> <issue>");
+    expect(reply).toContain("Example");
+  });
+
+  it("shows usage when only repo is provided", async () => {
+    const store = makeStore([]);
+    const reply = await runTelegramCommand(store, "/suppress rapartlu/agent-reviewer");
+    expect(reply).toContain("Usage");
+    expect(reply).toContain("/suppress <repo> <issue>");
+  });
+
+  it("shows error when surge detector is not available", async () => {
+    const store = makeStore([]);
+    const reply = await runTelegramCommand(store, "/suppress rapartlu/agent-reviewer 250");
+    expect(reply).toContain("Surge detector not available");
+  });
+
+  it("suppresses an issue when surge detector is available", async () => {
+    const store = makeStore([]);
+    const surgeDetector = new DuplicateDispatchSurgeDetector({
+      telegramBotToken: "test-token",
+      telegramChatId: "test-chat",
+    });
+
+    const reply = await runTelegramCommand(store, "/suppress rapartlu/agent-reviewer 250", {
+      surgeDetector,
+    });
+
+    expect(reply).toContain("Suppressed");
+    expect(reply).toContain("#250");
+    expect(reply).toContain("rapartlu/agent-reviewer");
+    expect(surgeDetector.isSuppressed("rapartlu/agent-reviewer", "#250")).toBe(true);
+  });
+
+  it("accepts issue numbers with or without # prefix", async () => {
+    const store = makeStore([]);
+    const surgeDetector = new DuplicateDispatchSurgeDetector({
+      telegramBotToken: "test-token",
+      telegramChatId: "test-chat",
+    });
+
+    // Suppress using bare number
+    await runTelegramCommand(store, "/suppress rapartlu/agent-reviewer 250", {
+      surgeDetector,
+    });
+    expect(surgeDetector.isSuppressed("rapartlu/agent-reviewer", "#250")).toBe(true);
+
+    // Suppress using # prefix
+    await runTelegramCommand(store, "/suppress rapartlu/agent-reviewer #999", {
+      surgeDetector,
+    });
+    expect(surgeDetector.isSuppressed("rapartlu/agent-reviewer", "#999")).toBe(true);
+  });
+
+  it("suppresses issues independently — suppressing one issue doesn't affect others", async () => {
+    const store = makeStore([]);
+    const surgeDetector = new DuplicateDispatchSurgeDetector({
+      telegramBotToken: "test-token",
+      telegramChatId: "test-chat",
+    });
+
+    await runTelegramCommand(store, "/suppress rapartlu/agent-reviewer 250", {
+      surgeDetector,
+    });
+    await runTelegramCommand(store, "/suppress rapartlu/agent-proxy 423", {
+      surgeDetector,
+    });
+
+    expect(surgeDetector.isSuppressed("rapartlu/agent-reviewer", "#250")).toBe(true);
+    expect(surgeDetector.isSuppressed("rapartlu/agent-proxy", "#423")).toBe(true);
+    expect(surgeDetector.isSuppressed("rapartlu/agent-reviewer", "#423")).toBe(false);
+    expect(surgeDetector.isSuppressed("rapartlu/agent-proxy", "#250")).toBe(false);
+  });
+
+  it("reflects suppression status when queried again", async () => {
+    const store = makeStore([]);
+    const surgeDetector = new DuplicateDispatchSurgeDetector({
+      telegramBotToken: "test-token",
+      telegramChatId: "test-chat",
+    });
+
+    // First suppress: should show suppressed message
+    const reply1 = await runTelegramCommand(store, "/suppress rapartlu/agent-reviewer 250", {
+      surgeDetector,
+    });
+    expect(reply1).toContain("Suppressed");
+
+    // Second call to suppress same issue: should still show suppressed (idempotent)
+    const reply2 = await runTelegramCommand(store, "/suppress rapartlu/agent-reviewer 250", {
+      surgeDetector,
+    });
+    expect(reply2).toContain("Suppressed");
   });
 });
