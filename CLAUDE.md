@@ -71,6 +71,11 @@ When this container is used for LLM PR reviews:
 - Pre-dispatch PR existence guard: prevent re-implementation when a PR already exists for an issue
 - Per-verifier threshold auto-adjustment: Phase 2 calibration that adapts `min_score` per verifier instance
 - Per-agent quality coaching: inject agent-specific coaching directives into housekeeping task prompts
+- CLI smoke tests: lightweight end-to-end checks callable from CLI to verify core reviewer paths
+- Fleet health sparklines: per-agent rolling health event windows surfaced to dashboard and Telegram
+- Routing violation detection: surface routing decisions that breach configured policy rules
+- Semantic duplicate guard: deduplicate improvement-detector issue candidates using semantic similarity
+- Quality system health: aggregate health status covering score floor, bypass rates, and calibration drift
 
 **Out of scope (belongs to orchestrator-core):**
 - Daemon loop, state store, dispatching infrastructure
@@ -121,6 +126,11 @@ src/
     pr-existence-guard.ts           — pre-dispatch guard: check if a PR already exists before re-implementing
     score-integrity.ts              — score integrity audit: bucket breakdown and per-task violation list
     threshold-adjuster.ts           — per-verifier threshold auto-adjustment (Phase 2 calibration)
+    cli-smoke-test.ts               — lightweight end-to-end smoke tests callable from CLI
+    fleet-health-sparklines.ts      — per-agent health sparklines: rolling window of health events
+    routing-violations.ts           — detect and surface routing decisions that breach policy rules
+    semantic-duplicate-guard.ts     — semantic deduplication of improvement-detector issue candidates
+    quality-system-health.ts        — aggregate quality-system health status: score floor, bypass rates, drift
   integration/
     orchestrator-adapter.ts         — createReviewerInstances() adapter for orchestrator import
   service/
