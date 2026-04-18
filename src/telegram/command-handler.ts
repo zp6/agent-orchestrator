@@ -25,6 +25,7 @@
  *   /backfill-scores [limit] → backfill quality_score for approved tasks with null scores (limit 1-20, default 5)
  *   /reconcile [hours] → cross-repo reconciliation status: last result per repo with outcome and timestamp (default: all time)
  *   /decisions [n] → last N routing decisions with chosen issue, skipped alternatives, and one-sentence rationale (default 5, max 10)
+ *   /suppress <repo> <issue> → suppress Telegram storm alerts for a specific issue (e.g. /suppress rapartlu/agent-proxy 423)
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -53,6 +54,7 @@ import {
   buildRoutingDecisions,
   formatDecisionsForTelegram,
 } from "../supervisor-log.js";
+import type { DuplicateDispatchSurgeDetector } from "../reviewer/duplicate-dispatch-surge-detector.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
 const log = createLogger("telegram-commands");
@@ -102,7 +104,8 @@ type CommandName =
   | "score"
   | "backfill-scores"
   | "reconcile"
-  | "decisions";
+  | "decisions"
+  | "suppress";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -132,6 +135,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "backfill-scores",
   "reconcile",
   "decisions",
+  "suppress",
 ]);
 
 interface ParsedCommand {
@@ -229,6 +233,7 @@ async function executeCommand(
   calibrationDriftProvider?: CalibrationDriftProvider,
   verifier?: Verifier,
   dashboardUrl?: string,
+  surgeDetector?: DuplicateDispatchSurgeDetector,
 ): Promise<string> {
   switch (cmd.command) {
     case "status":
@@ -374,6 +379,31 @@ async function executeCommand(
       const n = parseInt(cmd.args[0] ?? "5", 10);
       const limit = Number.isNaN(n) || n < 1 ? 5 : Math.min(n, 10);
       return handleDecisions(store, limit);
+    }
+
+    case "suppress": {
+      // /suppress <repo> <issue>
+      // e.g. /suppress rapartlu/agent-proxy 423
+      const [repo, issueArg] = cmd.args;
+      if (!repo || !issueArg) {
+        return [
+          "⚠️ Usage: `/suppress <repo> <issue>`",
+          "Example: `/suppress rapartlu/agent-proxy 423`",
+          "",
+          "Silences storm alerts for the given issue until the reviewer restarts.",
+          "Use `/suppress <repo> <issue>` again to re-check suppression status.",
+        ].join("\n");
+      }
+      if (!surgeDetector) {
+        return "⚠️ Surge detector not available — cannot suppress.";
+      }
+      surgeDetector.suppress(repo, issueArg);
+      const normRef = issueArg.startsWith("#") ? issueArg : `#${issueArg}`;
+      return [
+        `🔕 *Suppressed* — storm alerts for issue ${normRef} in \`${repo}\` silenced.`,
+        ``,
+        `No further dispatch-storm Telegram messages will be sent for this issue until the reviewer restarts.`,
+      ].join("\n");
     }
   }
 }
@@ -1849,6 +1879,11 @@ export class TelegramCommandHandler {
   /** Optional base URL of the operator dashboard (e.g. "https://dashboard.example.com").
    *  When provided, /health includes clickable drill-down links for each panel. */
   private dashboardUrl?: string;
+  /**
+   * Optional surge detector instance.  When provided, the `/suppress` command
+   * can silence storm alerts for specific issues in the current session.
+   */
+  private surgeDetector?: DuplicateDispatchSurgeDetector;
 
   constructor(
     store: ITelegramStateStore,
@@ -1859,6 +1894,11 @@ export class TelegramCommandHandler {
       verifier?: Verifier;
       /** Base URL of the operator dashboard, used to generate drill-down links in /health. */
       dashboardUrl?: string;
+      /**
+       * Surge detector instance — required for `/suppress` to work.
+       * When omitted, `/suppress` returns a "not available" message.
+       */
+      surgeDetector?: DuplicateDispatchSurgeDetector;
     } = {},
   ) {
     this.store = store;
@@ -1867,6 +1907,7 @@ export class TelegramCommandHandler {
     this.calibrationDriftProvider = opts.calibrationDriftProvider;
     this.verifier = opts.verifier;
     this.dashboardUrl = opts.dashboardUrl ?? process.env.DASHBOARD_URL;
+    this.surgeDetector = opts.surgeDetector;
   }
 
   /**
@@ -1900,7 +1941,7 @@ export class TelegramCommandHandler {
             log.info("Received Telegram command", { command: cmd.command, args: cmd.args });
 
             try {
-              const reply = await executeCommand(cmd, this.store, config.botToken, this.conflictStatsProvider, this.calibrationDriftProvider, this.verifier, this.dashboardUrl);
+              const reply = await executeCommand(cmd, this.store, config.botToken, this.conflictStatsProvider, this.calibrationDriftProvider, this.verifier, this.dashboardUrl, this.surgeDetector);
               await sendMessage(config.botToken, cmd.chatId, reply);
             } catch (err) {
               log.error("Error executing command", {
