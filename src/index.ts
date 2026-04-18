@@ -353,6 +353,18 @@ export type {
   ConflictRecoveryAlertRow,
 } from "./reviewer/reroute-conflict-recovery.js";
 
+// CLI smoke test verifier (issue #274)
+export {
+  runCLISmokeTest,
+  validateCLISmokeResult,
+  formatSmokeTestReport,
+  getFleetSmokeTestSpecs,
+} from "./reviewer/cli-smoke-test.js";
+export type {
+  CLISmokeTestSpec,
+  CLISmokeTestResult,
+} from "./reviewer/cli-smoke-test.js";
+
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
 
