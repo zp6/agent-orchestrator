@@ -7,6 +7,7 @@ import { ReviewerClient, type SupervisorDecision } from "../client/reviewer-clie
 import { Dispatcher, MAX_RETRIES, TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS, extractRepoFromSourceRef } from "../orchestrator/dispatcher.js";
 import { ResearchLinker } from "../orchestrator/research-linker.js";
 import { IssueCreator } from "../orchestrator/issue-creator.js";
+import { SchemaRegistrySyncDetector } from "../orchestrator/schema-registry-sync.js";
 import { Deployer } from "../orchestrator/deployer.js";
 import { PRReviewer } from "../orchestrator/pr-reviewer.js";
 import { findOrphanBranches, createPRForBranch, deleteStaleOrphanBranches, STALE_BRANCH_BEHIND_THRESHOLD } from "../orchestrator/pr-creator.js";
@@ -1899,6 +1900,27 @@ export class Daemon {
         for (const issue of created) {
           console.log(`  Created: ${issue.url}`);
         }
+      }
+
+      // Schema registry auto-sync: detect and notify consumer repos of schema changes
+      try {
+        const syncDetector = new SchemaRegistrySyncDetector(
+          this.config,
+          this.store,
+          this.issueCreator,
+        );
+        const schemaIssues = await syncDetector.detectSchemaRegistryChanges();
+        if (schemaIssues.length > 0) {
+          console.log(`[${time}] Created ${schemaIssues.length} schema registry change notification(s)`);
+          for (const issue of schemaIssues) {
+            console.log(`  Created: ${issue.url}`);
+          }
+        }
+      } catch (err) {
+        this.log.error("Schema registry sync detection failed", {
+          error: err instanceof Error ? err.message : err,
+        });
+        // Continue — non-critical improvement detection
       }
     } catch (err) {
       console.error(`[${time}] Improvement detection failed: ${err instanceof Error ? err.message : err}`);
