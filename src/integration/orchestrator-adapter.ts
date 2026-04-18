@@ -25,9 +25,15 @@ import { RoutingAccuracyTracker } from "../reviewer/routing-accuracy.js";
 import { CalibrationDriftMonitor } from "../reviewer/calibration-drift.js";
 import { ConflictRecoveryAlertMonitor } from "../reviewer/reroute-conflict-recovery.js";
 import { ScoreCalibrator } from "../reviewer/score-calibrator.js";
+import { RoutingViolationDetector } from "../reviewer/routing-violations.js";
 import type { ReviewerConfig } from "../config.js";
 import type { Notifier } from "../notify.js";
-import type { IStateStore, IScoreOutcomeStore, IVerificationResultStore } from "../state/types.js";
+import type {
+  IStateStore,
+  IScoreOutcomeStore,
+  IVerificationResultStore,
+  ITelegramStateStore,
+} from "../state/types.js";
 
 export interface ReviewerInstances {
   /** Reviews open PRs, manages the merge queue, and auto-rebases stale branches. */
@@ -56,6 +62,15 @@ export interface ReviewerInstances {
    * Undefined when no notifier is provided.
    */
   healthIncidentRouter: HealthIncidentRouter;
+  /**
+   * Scans recent tasks for agent-to-repo routing violations and fires Telegram
+   * alerts when a task is dispatched to an agent that does not own the target
+   * repository.  Call `routingViolationDetector.scan()` once per daemon cycle,
+   * after task dispatch and before verification.
+   * Undefined when the store does not implement ITelegramStateStore
+   * (i.e. lacks `recordRoutingViolation` / `getRoutingViolations`).
+   */
+  routingViolationDetector: RoutingViolationDetector | undefined;
 }
 
 export interface CreateReviewerOptions {
@@ -133,6 +148,19 @@ export function createReviewerInstances(
       ? (store as unknown as IVerificationResultStore)
       : undefined;
 
+  // Wire RoutingViolationDetector if the store implements ITelegramStateStore
+  // (has recordRoutingViolation + getRoutingViolations).  The reviewer's own
+  // StateStore always satisfies this; the orchestrator's StateStore may not yet.
+  const routingViolationDetector =
+    typeof (store as unknown as ITelegramStateStore).recordRoutingViolation === "function" &&
+    typeof (store as unknown as ITelegramStateStore).getRoutingViolations === "function"
+      ? new RoutingViolationDetector(
+          store as unknown as ITelegramStateStore,
+          config,
+          opts.notifier,
+        )
+      : undefined;
+
   return {
     reviewer,
     verifier: new Verifier(store, undefined, verificationResultStore),
@@ -148,5 +176,6 @@ export function createReviewerInstances(
     conflictRecoveryMonitor,
     scoreCalibrator,
     healthIncidentRouter: new HealthIncidentRouter(opts.notifier),
+    routingViolationDetector,
   };
 }
