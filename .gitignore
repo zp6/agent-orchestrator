@@ -3,3 +3,5 @@ dist/
 *.js.map
 .env
 .DS_Store
+.claude/worktrees/
+.claude/scheduled_tasks.lock
