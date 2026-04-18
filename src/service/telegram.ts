@@ -658,6 +658,89 @@ Steps:
     return buildAntibodiesPanel(ctx);
   }
 
+  // Approval queue — list pending borderline tasks awaiting operator decision
+  if (cmd === "queue" || cmd === "/queue") {
+    const entries = ctx.store.getPendingApprovalQueue(15);
+    if (entries.length === 0) {
+      return "✅ No tasks awaiting operator approval.";
+    }
+    const lines = entries.map((e) => {
+      const shortId = e.task_id.slice(0, 8);
+      const pct = (e.score * 100).toFixed(0);
+      const agent = (e.agent_name ?? "?").replace("claude-orchestrator-", "").replace("claude-", "");
+      return `  • \`${shortId}\` ${e.title.slice(0, 50)} — ${pct}% — ${agent}`;
+    });
+    return (
+      `⏳ *Pending Approvals (${entries.length})*\n\n${lines.join("\n")}\n\n` +
+      `Use \`/approve <id>\` to force-approve or \`/reject <id>\` to confirm rejection.`
+    );
+  }
+
+  // /approve <taskId> — operator force-approves a borderline-rejected task
+  if (cmd.startsWith("approve ") || cmd.startsWith("/approve ")) {
+    const shortId = text.trim().split(/\s+/)[1];
+    if (!shortId) return "Usage: /approve <task-id>\nExample: /approve 01KPFBW5";
+
+    const entry = ctx.store.getApprovalQueueEntryByShortId(shortId);
+    if (!entry) {
+      return (
+        `❌ No approval queue entry found for \`${shortId}\`.\n` +
+        `Use \`/queue\` to see pending items.`
+      );
+    }
+    if (entry.status !== "pending") {
+      return `⚠️ Task \`${shortId}\` is already *${entry.status}*.`;
+    }
+
+    // Force-approve: mark task as approved and resolve queue entry
+    ctx.store.updateTask(entry.task_id, { verification_status: "approved" });
+    ctx.store.resolveApprovalQueueEntry(entry.id, "approved", "operator");
+
+    const scoreStr = (entry.score * 100).toFixed(0);
+    ctx.store.addLog({
+      task_id: entry.task_id,
+      direction: "system",
+      content: `Operator force-approved via Telegram (score ${scoreStr}%, bypassing quality threshold).`,
+    });
+
+    return (
+      `✅ Task \`${shortId}\` force-approved by operator.\n` +
+      `*Title:* ${entry.title.slice(0, 80)}\n` +
+      `*Score:* ${scoreStr}% (quality gate bypassed)`
+    );
+  }
+
+  // /reject <taskId> — operator confirms rejection of a borderline task
+  if (cmd.startsWith("reject ") || cmd.startsWith("/reject ")) {
+    const shortId = text.trim().split(/\s+/)[1];
+    if (!shortId) return "Usage: /reject <task-id>\nExample: /reject 01KPFBW5";
+
+    const entry = ctx.store.getApprovalQueueEntryByShortId(shortId);
+    if (!entry) {
+      return (
+        `❌ No approval queue entry found for \`${shortId}\`.\n` +
+        `Use \`/queue\` to see pending items.`
+      );
+    }
+    if (entry.status !== "pending") {
+      return `⚠️ Task \`${shortId}\` is already *${entry.status}*.`;
+    }
+
+    ctx.store.resolveApprovalQueueEntry(entry.id, "rejected", "operator");
+    ctx.store.addLog({
+      task_id: entry.task_id,
+      direction: "system",
+      content: "Operator confirmed rejection via Telegram.",
+    });
+
+    const scoreStr = (entry.score * 100).toFixed(0);
+    return (
+      `❌ Task \`${shortId}\` rejected by operator.\n` +
+      `*Title:* ${entry.title.slice(0, 80)}\n` +
+      `*Score:* ${scoreStr}%`
+    );
+  }
+
   // Help
   // Config — show reload history and current config snapshot
   if (cmd === "config" || cmd === "/config") {
@@ -673,6 +756,9 @@ status — agent status
 health — ping containers
 issues — open issues
 prs — open PRs
+queue — pending operator approvals
+/approve <id> — force-approve borderline task
+/reject <id> — confirm task rejection
 antibodies — failure immunity panel
 config — config reload history & status
 chat <agent> <msg> — talk to agent (persistent)

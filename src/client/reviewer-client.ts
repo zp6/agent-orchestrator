@@ -620,6 +620,55 @@ export class ReviewerClient {
     }
   }
 
+  /**
+   * Generate a one-sentence risk summary for an operator deciding whether to
+   * manually approve a task that failed automated verification.
+   *
+   * The sentence explains the key failure mode in plain language so the
+   * operator can make an informed decision from Telegram alone.
+   * Falls back to `result.notes` on any error (the LLM call is best-effort).
+   */
+  async generateRiskSummary(task: Task, result: VerificationResult): Promise<string> {
+    const dimText = result.dimensions && Object.keys(result.dimensions).length > 0
+      ? Object.entries(result.dimensions)
+          .map(([k, v]) => `${k.replace(/_/g, " ")}: ${(v * 100).toFixed(0)}%`)
+          .join(", ")
+      : "no dimension data";
+
+    const systemPrompt =
+      "You are a quality reviewer for an AI agent orchestrator. " +
+      "Write exactly ONE sentence summarising the key risk or failure mode for an operator " +
+      "considering whether to manually approve a task that failed automated verification. " +
+      "Be specific and actionable — name the concrete gap, not just 'quality is low'. " +
+      "Output only the sentence, no JSON, no preamble, no markdown.";
+
+    const userPrompt =
+      `Task: ${task.title}\n` +
+      `Description: ${(task.description ?? task.title).slice(0, 400)}\n` +
+      `Score: ${(result.score * 100).toFixed(0)}%\n` +
+      `Dimensions: ${dimText}\n` +
+      `Reviewer notes: ${result.notes.slice(0, 300)}\n\n` +
+      "In one sentence, what is the key risk an operator should know when deciding whether to approve this task?";
+
+    try {
+      const { client, model } = createLLMClient(this.config, "verifier");
+      const response = await client.messages.create({
+        model: getLLMModel(this.config, "verifier") ?? model,
+        max_tokens: 150,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userPrompt }],
+      });
+      const text = response.content
+        .filter((b) => b.type === "text")
+        .map((b) => "text" in b ? b.text : "")
+        .join("")
+        .trim();
+      return text || result.notes.slice(0, 200);
+    } catch {
+      return result.notes.slice(0, 200);
+    }
+  }
+
   private parseImprovementResponse(text: string, tasks: Task[]): DetectedImprovement[] {
     const cleaned = text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim();
     try {

@@ -56,6 +56,7 @@ import {
   reviewSupervisorState,
   verifyAndReviseTask,
 } from "./reviewer-ops.js";
+import { queueForApproval } from "./telegram-approval-queue.js";
 import { executeCoordinatedMerge } from "../orchestrator/multi-repo-coordinator.js";
 import { pollVerificationOutcomes } from "../orchestrator/verification-outcome-poller.js";
 
@@ -1654,6 +1655,20 @@ export class Daemon {
 
             if (!result.approved && result.revision) {
               console.log(`  Needs revision: ${result.revision.slice(0, 100)}`);
+            }
+
+            // Approval queue (issue #937): when a task is finally rejected after
+            // all revision attempts, check if the score is in the borderline range
+            // where a human should decide.  If so, enqueue it with rich context
+            // (title, dimensions, PR link, risk summary) and notify the operator
+            // via Telegram.  Best-effort — failures are logged but not fatal.
+            if (!result.approved) {
+              queueForApproval(this.store, this.reviewerClient, task, result).catch((qErr) => {
+                this.log.warn("Approval queue notification failed", {
+                  taskId: task.id,
+                  error: qErr instanceof Error ? qErr.message : String(qErr),
+                });
+              });
             }
 
             // Stigmergy: write a pattern_risk signal on verification failure

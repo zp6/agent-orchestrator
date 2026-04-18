@@ -53,6 +53,46 @@ export interface ConfigReloadRecord {
   triggered_by: ConfigReloadTrigger;
 }
 
+// ── Approval Queue types ──────────────────────────────────────────────────────
+
+/**
+ * A task that failed automated verification but fell in the borderline score
+ * range, queued for human operator review via Telegram /approve or /reject.
+ */
+export interface ApprovalQueueEntry {
+  id: number;
+  /** Full ULID of the task. */
+  task_id: string;
+  /** Human-readable task title. */
+  title: string;
+  /** Agent that produced the work. */
+  agent_name: string | null;
+  /** URL of the open PR associated with the task (if found). */
+  pr_url: string | null;
+  /** Verification score (0–1). */
+  score: number;
+  /** JSON-encoded Record<string, number> of per-dimension scores. */
+  dimensions_json: string | null;
+  /** One-sentence LLM-generated risk summary for the operator. */
+  risk_summary: string | null;
+  /** Queue status: pending (awaiting operator decision) | approved | rejected. */
+  status: "pending" | "approved" | "rejected";
+  created_at: string;
+  resolved_at: string | null;
+  /** Who resolved: 'operator' (Telegram command) | 'system' (auto-resolved). */
+  resolved_by: string | null;
+}
+
+export interface InsertApprovalQueueEntryParams {
+  task_id: string;
+  title: string;
+  agent_name?: string | null;
+  pr_url?: string | null;
+  score: number;
+  dimensions_json?: string | null;
+  risk_summary?: string | null;
+}
+
 /**
  * Thrown by `StateStore.createTask()` when the generated ULID already exists
  * in the tasks table.  Callers can catch this to fire Telegram alerts or
@@ -8703,5 +8743,113 @@ export class StateStore {
       SELECT DISTINCT task_id FROM duplicate_id_incidents
     `).all() as Array<{ task_id: string }>;
     return new Set(rows.map((r) => r.task_id));
+  }
+
+  // ── Approval Queue ─────────────────────────────────────────────────────────
+
+  /**
+   * Lazily create the approval_queue table.
+   * Called before every approval-queue read/write so older deployments get the
+   * table without a manual migration step.
+   */
+  private runApprovalQueueMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS approval_queue (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id      TEXT NOT NULL UNIQUE,
+        title        TEXT NOT NULL,
+        agent_name   TEXT,
+        pr_url       TEXT,
+        score        REAL NOT NULL,
+        dimensions_json TEXT,
+        risk_summary TEXT,
+        status       TEXT NOT NULL DEFAULT 'pending',
+        created_at   TEXT NOT NULL,
+        resolved_at  TEXT,
+        resolved_by  TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_aq_status     ON approval_queue(status);
+      CREATE INDEX IF NOT EXISTS idx_aq_created_at ON approval_queue(created_at);
+      CREATE INDEX IF NOT EXISTS idx_aq_task_id    ON approval_queue(task_id);
+    `);
+  }
+
+  /**
+   * Persist a new entry in the operator approval queue.
+   * Silently ignores duplicate task_id (the entry already exists).
+   */
+  insertApprovalQueueEntry(params: InsertApprovalQueueEntryParams): void {
+    this.runApprovalQueueMigration();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO approval_queue
+        (task_id, title, agent_name, pr_url, score, dimensions_json, risk_summary, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+    `).run(
+      params.task_id,
+      params.title,
+      params.agent_name ?? null,
+      params.pr_url ?? null,
+      params.score,
+      params.dimensions_json ?? null,
+      params.risk_summary ?? null,
+      new Date().toISOString(),
+    );
+  }
+
+  /**
+   * Fetch the approval queue entry for a given full task_id.
+   * Returns null if no entry exists.
+   */
+  getApprovalQueueEntry(taskId: string): ApprovalQueueEntry | null {
+    this.runApprovalQueueMigration();
+    return (
+      this.db.prepare(`
+        SELECT * FROM approval_queue WHERE task_id = ? LIMIT 1
+      `).get(taskId) as ApprovalQueueEntry | undefined
+    ) ?? null;
+  }
+
+  /**
+   * Lookup an approval queue entry by 8-character task ID prefix.
+   * Used by the Telegram /approve and /reject commands.
+   */
+  getApprovalQueueEntryByShortId(shortId: string): ApprovalQueueEntry | null {
+    this.runApprovalQueueMigration();
+    const rows = this.db.prepare(`
+      SELECT * FROM approval_queue
+      WHERE task_id LIKE ? || '%'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).all(shortId) as ApprovalQueueEntry[];
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Return all entries currently in 'pending' state, newest first.
+   */
+  getPendingApprovalQueue(limit = 20): ApprovalQueueEntry[] {
+    this.runApprovalQueueMigration();
+    return this.db.prepare(`
+      SELECT * FROM approval_queue
+      WHERE status = 'pending'
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(limit) as ApprovalQueueEntry[];
+  }
+
+  /**
+   * Mark an approval queue entry as resolved (approved or rejected).
+   *
+   * @param id       Primary key of the entry.
+   * @param status   New status: 'approved' | 'rejected'.
+   * @param resolvedBy  Who resolved it: 'operator' | 'system'.
+   */
+  resolveApprovalQueueEntry(id: number, status: "approved" | "rejected", resolvedBy: string): void {
+    this.runApprovalQueueMigration();
+    this.db.prepare(`
+      UPDATE approval_queue
+      SET status = ?, resolved_at = ?, resolved_by = ?
+      WHERE id = ?
+    `).run(status, new Date().toISOString(), resolvedBy, id);
   }
 }
