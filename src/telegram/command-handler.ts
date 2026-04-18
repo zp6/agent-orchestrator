@@ -26,6 +26,9 @@
  *   /reconcile [hours] → cross-repo reconciliation status: last result per repo with outcome and timestamp (default: all time)
  *   /decisions [n] → last N routing decisions with chosen issue, skipped alternatives, and one-sentence rationale (default 5, max 10)
  *   /suppress <repo> <issue> → suppress Telegram storm alerts for a specific issue (e.g. /suppress rapartlu/agent-proxy 423)
+ *   /review-queue          → list all tasks held for operator review (needs_operator_review) with score and risk tier
+ *   /approve <task-id> [note] → approve a held task with operator override, bypassing the 0.60 floor
+ *   /reject <task-id> [note]  → reject a held task from the operator review queue
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -105,7 +108,10 @@ type CommandName =
   | "backfill-scores"
   | "reconcile"
   | "decisions"
-  | "suppress";
+  | "suppress"
+  | "review-queue"
+  | "approve"
+  | "reject";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -136,6 +142,9 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "reconcile",
   "decisions",
   "suppress",
+  "review-queue",
+  "approve",
+  "reject",
 ]);
 
 interface ParsedCommand {
@@ -404,6 +413,27 @@ async function executeCommand(
         ``,
         `No further dispatch-storm Telegram messages will be sent for this issue until the reviewer restarts.`,
       ].join("\n");
+    }
+
+    case "review-queue":
+      return handleReviewQueue(store);
+
+    case "approve": {
+      const [taskId, ...noteParts] = cmd.args;
+      if (!taskId) {
+        return "⚠️ Usage: `/approve <task-id> [note]`\nExample: `/approve 01KP63B3 Reviewed manually — acceptable for this context`";
+      }
+      const note = noteParts.join(" ").trim() || "Approved by operator via Telegram";
+      return handleOperatorOverride(store, taskId, "approve", note);
+    }
+
+    case "reject": {
+      const [taskId, ...noteParts] = cmd.args;
+      if (!taskId) {
+        return "⚠️ Usage: `/reject <task-id> [note]`\nExample: `/reject 01KP63B3 Needs complete rewrite`";
+      }
+      const note = noteParts.join(" ").trim() || "Rejected by operator via Telegram";
+      return handleOperatorOverride(store, taskId, "reject", note);
     }
   }
 }
@@ -1862,6 +1892,103 @@ function formatAgo(isoTimestamp: string): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+// ── Operator review queue handlers ───────────────────────────────────────
+
+/** Risk tier badge for the /review-queue display. */
+function riskTier(score: number | null | undefined): string {
+  if (score == null) return "❓ unknown";
+  if (score < 0.50) return "🔴 critical";
+  return "🟡 low";
+}
+
+function handleReviewQueue(store: ITelegramStateStore): string {
+  const tasks = store.getTasksInOperatorReview();
+
+  if (tasks.length === 0) {
+    return [
+      `✅ *Operator Review Queue — Empty*`,
+      ``,
+      `No tasks are currently held for operator review.`,
+      `Tasks scoring below 0.60 will appear here when held by the quality floor.`,
+    ].join("\n");
+  }
+
+  const lines: string[] = [
+    `🔍 *Operator Review Queue — ${tasks.length} task${tasks.length === 1 ? "" : "s"} pending*`,
+    ``,
+    `Use \`/approve <id> [note]\` or \`/reject <id> [note]\` to act.`,
+    ``,
+  ];
+
+  for (const task of tasks) {
+    const shortId = task.id.slice(0, 8);
+    const score = task.quality_score != null ? task.quality_score.toFixed(2) : "n/a";
+    const tier = riskTier(task.quality_score);
+    const agent = task.agent_name ?? "unassigned";
+    const title = task.title.slice(0, 50);
+
+    lines.push(`${tier} \`${shortId}\` — *${title}*`);
+    lines.push(`  Score: ${score} · Agent: ${agent}`);
+    if (task.verification_notes) {
+      // Show first line of notes (the hold reason)
+      const firstLine = task.verification_notes.split("\n")[0]?.slice(0, 80) ?? "";
+      if (firstLine) lines.push(`  Note: _${firstLine}_`);
+    }
+    lines.push(``);
+  }
+
+  const criticalCount = tasks.filter((t) => (t.quality_score ?? 0) < 0.50).length;
+  const lowCount = tasks.length - criticalCount;
+
+  lines.push(`_${criticalCount} critical (< 0.50) · ${lowCount} low (0.50–0.59)_`);
+
+  return lines.join("\n");
+}
+
+function handleOperatorOverride(
+  store: ITelegramStateStore,
+  taskIdPrefix: string,
+  decision: "approve" | "reject",
+  note: string,
+): string {
+  // Support short ID prefix lookup: find the full task ID
+  const tasks = store.getTasksInOperatorReview();
+  const match = tasks.find(
+    (t) => t.id === taskIdPrefix || t.id.startsWith(taskIdPrefix),
+  );
+
+  if (!match) {
+    // Check if a task exists at all (not just in review queue)
+    return [
+      `❌ No held task found matching \`${taskIdPrefix}\`.`,
+      ``,
+      `Only tasks in \`needs_operator_review\` status can be acted on.`,
+      `Run \`/review-queue\` to see current held tasks.`,
+    ].join("\n");
+  }
+
+  const applied = store.operatorOverride(match.id, decision, note);
+  if (!applied) {
+    return `❌ Could not apply override to task \`${match.id.slice(0, 8)}\`. Task may no longer be in review queue.`;
+  }
+
+  const emoji = decision === "approve" ? "✅" : "🚫";
+  const label = decision === "approve" ? "Approved" : "Rejected";
+  const score = match.quality_score != null ? match.quality_score.toFixed(2) : "n/a";
+
+  return [
+    `${emoji} *Operator Override — ${label}*`,
+    ``,
+    `Task: \`${match.id.slice(0, 8)}\` — ${match.title.slice(0, 50)}`,
+    `Score: ${score} · Agent: ${match.agent_name ?? "unassigned"}`,
+    `Note: _${note}_`,
+    ``,
+    decision === "approve"
+      ? `Task is now marked as *approved* and will be treated as complete.`
+      : `Task is now marked as *rejected* and will require re-work.`,
+  ].join("\n");
 }
 
 // ── TelegramCommandHandler class ──────────────────────────────────────────

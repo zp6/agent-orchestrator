@@ -124,6 +124,19 @@ function makeStore(
         system_avg_score: null,
         per_agent: [],
       },
+    getTasksInOperatorReview: () => tasks.filter((t) => t.verification_status === "needs_operator_review"),
+    operatorOverride: (taskId: string, decision: "approve" | "reject", operatorNote: string) => {
+      const task = tasks.find((t) => t.id === taskId);
+      if (!task || task.verification_status !== "needs_operator_review") return false;
+      const timestamp = new Date().toISOString();
+      const label = decision === "approve" ? "APPROVED" : "REJECTED";
+      const overrideNote = `[operator-override: ${label} at ${timestamp}] ${operatorNote}`;
+      task.verification_status = decision === "approve" ? "approved" : "rejected";
+      task.verification_notes = task.verification_notes
+        ? `${overrideNote}\n\n${task.verification_notes}`
+        : overrideNote;
+      return true;
+    },
   };
 }
 
@@ -487,5 +500,193 @@ describe("/quality command — live quality health snapshot", () => {
 
     expect(reply).toContain("last 20 tasks per agent");
     expect(reply).toContain("No quality scores recorded yet");
+  });
+});
+
+describe("/review-queue command — operator review queue", () => {
+  const NOW = "2026-04-18T12:00:00.000Z";
+
+  function makeHeldTask(overrides: Partial<Task>): Task {
+    return makeTask({
+      status: "done",
+      verification_status: "needs_operator_review",
+      quality_score: 0.55,
+      verification_notes: "[HELD FOR OPERATOR REVIEW: score 0.55 < 0.60 floor]",
+      created_at: NOW,
+      updated_at: NOW,
+      ...overrides,
+    });
+  }
+
+  it("shows empty queue message when no tasks are held", async () => {
+    const store = makeStore([]);
+    const reply = await runTelegramCommand(store, "/review-queue");
+    expect(reply).toContain("Empty");
+    expect(reply).toContain("No tasks are currently held");
+  });
+
+  it("lists held tasks with score, risk tier badge, and agent", async () => {
+    const tasks = [
+      makeHeldTask({
+        id: "01KPREVIEW00000000000000001",
+        title: "Implement feature X",
+        agent_name: "claude-agent-a",
+        quality_score: 0.48,
+      }),
+      makeHeldTask({
+        id: "01KPREVIEW00000000000000002",
+        title: "Fix the auth bug",
+        agent_name: "claude-agent-b",
+        quality_score: 0.55,
+      }),
+    ];
+    const store = makeStore(tasks);
+    const reply = await runTelegramCommand(store, "/review-queue");
+
+    expect(reply).toContain("2 tasks pending");
+    expect(reply).toContain("01KPREV");
+    expect(reply).toContain("Implement feature X");
+    expect(reply).toContain("Fix the auth bug");
+    expect(reply).toContain("0.48");
+    expect(reply).toContain("0.55");
+    expect(reply).toContain("claude-agent-a");
+    expect(reply).toContain("claude-agent-b");
+    // Risk tier badges
+    expect(reply).toContain("🔴 critical"); // score 0.48 < 0.50
+    expect(reply).toContain("🟡 low");      // score 0.55 is 0.50–0.59
+    // Summary line
+    expect(reply).toContain("1 critical");
+    expect(reply).toContain("1 low");
+  });
+
+  it("instructs operator to use /approve or /reject", async () => {
+    const task = makeHeldTask({ id: "01KPREVIEW00000000000000003" });
+    const store = makeStore([task]);
+    const reply = await runTelegramCommand(store, "/review-queue");
+    expect(reply).toContain("/approve");
+    expect(reply).toContain("/reject");
+  });
+});
+
+describe("/approve command — operator override approve", () => {
+  const NOW = "2026-04-18T12:00:00.000Z";
+
+  function makeHeldTask(overrides: Partial<Task> = {}): Task {
+    return makeTask({
+      id: "01KPAPPROVE000000000000001",
+      status: "done",
+      verification_status: "needs_operator_review",
+      quality_score: 0.52,
+      verification_notes: "[HELD FOR OPERATOR REVIEW]",
+      agent_name: "claude-agent-a",
+      created_at: NOW,
+      updated_at: NOW,
+      ...overrides,
+    });
+  }
+
+  it("shows usage when no task ID is provided", async () => {
+    const store = makeStore([]);
+    const reply = await runTelegramCommand(store, "/approve");
+    expect(reply).toContain("Usage");
+    expect(reply).toContain("/approve");
+    expect(reply).toContain("task-id");
+  });
+
+  it("approves a held task by full ID", async () => {
+    const task = makeHeldTask();
+    const store = makeStore([task]);
+    const reply = await runTelegramCommand(store, "/approve 01KPAPPROVE000000000000001 Looks good for this context");
+
+    expect(reply).toContain("Approved");
+    expect(reply).toContain("01KPAPPR");
+    expect(reply).toContain("0.52");
+    expect(task.verification_status).toBe("approved");
+    expect(task.verification_notes).toContain("operator-override: APPROVED");
+    expect(task.verification_notes).toContain("Looks good for this context");
+  });
+
+  it("approves a held task by short ID prefix", async () => {
+    const task = makeHeldTask();
+    const store = makeStore([task]);
+    const reply = await runTelegramCommand(store, "/approve 01KPAPPR Accepted");
+
+    expect(reply).toContain("Approved");
+    expect(task.verification_status).toBe("approved");
+  });
+
+  it("uses default note when no note is provided", async () => {
+    const task = makeHeldTask();
+    const store = makeStore([task]);
+    await runTelegramCommand(store, "/approve 01KPAPPR");
+    expect(task.verification_notes).toContain("Approved by operator via Telegram");
+  });
+
+  it("returns error when task is not in review queue", async () => {
+    const task = makeTask({
+      id: "01KPAPPROVE000000000000002",
+      status: "done",
+      verification_status: "approved",
+      quality_score: 0.85,
+    });
+    const store = makeStore([task]);
+    const reply = await runTelegramCommand(store, "/approve 01KPAPPROVE000000000000002");
+    expect(reply).toContain("No held task found");
+  });
+});
+
+describe("/reject command — operator override reject", () => {
+  const NOW = "2026-04-18T12:00:00.000Z";
+
+  function makeHeldTask(overrides: Partial<Task> = {}): Task {
+    return makeTask({
+      id: "01KPREJECT0000000000000001",
+      status: "done",
+      verification_status: "needs_operator_review",
+      quality_score: 0.45,
+      verification_notes: "[HELD FOR OPERATOR REVIEW]",
+      agent_name: "claude-agent-b",
+      created_at: NOW,
+      updated_at: NOW,
+      ...overrides,
+    });
+  }
+
+  it("shows usage when no task ID is provided", async () => {
+    const store = makeStore([]);
+    const reply = await runTelegramCommand(store, "/reject");
+    expect(reply).toContain("Usage");
+    expect(reply).toContain("/reject");
+  });
+
+  it("rejects a held task by short ID prefix", async () => {
+    const task = makeHeldTask();
+    const store = makeStore([task]);
+    const reply = await runTelegramCommand(store, "/reject 01KPREJECT Needs complete rewrite");
+
+    expect(reply).toContain("Rejected");
+    expect(reply).toContain("0.45");
+    expect(task.verification_status).toBe("rejected");
+    expect(task.verification_notes).toContain("operator-override: REJECTED");
+    expect(task.verification_notes).toContain("Needs complete rewrite");
+  });
+
+  it("uses default note when no note is provided", async () => {
+    const task = makeHeldTask();
+    const store = makeStore([task]);
+    await runTelegramCommand(store, "/reject 01KPREJECT");
+    expect(task.verification_notes).toContain("Rejected by operator via Telegram");
+  });
+
+  it("returns error when task is not in review queue", async () => {
+    const task = makeTask({
+      id: "01KPREJECT0000000000000002",
+      status: "done",
+      verification_status: "rejected",
+      quality_score: 0.45,
+    });
+    const store = makeStore([task]);
+    const reply = await runTelegramCommand(store, "/reject 01KPREJECT0000000000000002");
+    expect(reply).toContain("No held task found");
   });
 });

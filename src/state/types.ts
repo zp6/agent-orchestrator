@@ -12,7 +12,7 @@ export type TaskStatus =
   | "done"
   | "failed"
   | "escalated";
-export type VerificationStatus = "pending" | "approved" | "rejected" | null;
+export type VerificationStatus = "pending" | "approved" | "rejected" | "needs_operator_review" | null;
 export type TaskType = "implementation" | "research" | "housekeeping";
 
 /**
@@ -1727,4 +1727,17 @@ export interface ITelegramStateStore
   getSLAThresholds(): AgentSLAThreshold[];
   /** Set or update an SLA threshold for one agent. */
   setSLAThreshold(agentName: string, minAvgScore: number, windowTasks: number): void;
+
+  // Operator review queue (tasks held at sub-0.60 quality floor)
+  /**
+   * List all tasks currently in `needs_operator_review` verification status.
+   * Used by `/review-queue` Telegram command.
+   */
+  getTasksInOperatorReview(): Task[];
+  /**
+   * Approve or reject a task held in `needs_operator_review` status.
+   * Returns true if the override was applied, false if the task was not in
+   * `needs_operator_review` status (or does not exist).
+   */
+  operatorOverride(taskId: string, decision: "approve" | "reject", operatorNote: string): boolean;
 }

@@ -2320,6 +2320,70 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
     this.setSystemFlag("quality_sla_thresholds", JSON.stringify(updated));
   }
 
+  // ── Operator review queue ─────────────────────────────────────────────────
+
+  /**
+   * List all tasks currently in `needs_operator_review` verification status,
+   * ordered by updated_at DESC (most recently held first).
+   */
+  getTasksInOperatorReview(): Task[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE verification_status = 'needs_operator_review'
+         ORDER BY updated_at DESC
+         LIMIT 50`,
+      )
+      .all() as Task[];
+    return rows;
+  }
+
+  /**
+   * Apply an operator override to a task held in `needs_operator_review`.
+   *
+   * - `approve`: sets verification_status → 'approved', bypassing the 0.60 floor.
+   * - `reject`:  sets verification_status → 'rejected'.
+   *
+   * Returns true when the override was applied, false when the task was not
+   * in `needs_operator_review` status (or does not exist).
+   */
+  operatorOverride(
+    taskId: string,
+    decision: "approve" | "reject",
+    operatorNote: string,
+  ): boolean {
+    const existing = this.db
+      .prepare("SELECT verification_status, verification_notes, quality_score FROM tasks WHERE id = ?")
+      .get(taskId) as {
+        verification_status: string | null;
+        verification_notes: string | null;
+        quality_score: number | null;
+      } | undefined;
+
+    if (!existing || existing.verification_status !== "needs_operator_review") {
+      return false;
+    }
+
+    const timestamp = new Date().toISOString();
+    const label = decision === "approve" ? "APPROVED" : "REJECTED";
+    const overrideNote = `[operator-override: ${label} at ${timestamp}] ${operatorNote}`;
+
+    const newStatus = decision === "approve" ? "approved" : "rejected";
+    const newNotes = existing.verification_notes
+      ? `${overrideNote}\n\n${existing.verification_notes}`
+      : overrideNote;
+
+    this.db
+      .prepare(
+        `UPDATE tasks
+         SET verification_status = ?, verification_notes = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(newStatus, newNotes, new Date().toISOString(), taskId);
+
+    return true;
+  }
+
   /**
    * Get recent verified quality scores for an agent (for SLA breach detection).
    * Internal helper — not exposed on ITelegramStateStore interface.
