@@ -267,13 +267,20 @@ export function getQualitySystemHealthPayload(
       task.quality_score !== undefined &&
       task.quality_score < floor
     ) {
+      // Prefer the persisted bypass_reason column; fall back to inference from
+      // verification_notes for tasks backfilled before issue #295 was deployed.
+      const persistedBypassReason = task.bypass_reason ?? null;
+      const resolvedBypassReason: BypassReason = persistedBypassReason
+        ? (persistedBypassReason === "operator_override" ? "operator_override" : "marginal_auto")
+        : classifyBypassReason(task.verification_notes);
+
       cycleBypassed.push({
         task_id: task.id,
         task_id_short: task.id.slice(0, 8),
         title: task.title,
         agent_name: task.agent_name ?? null,
         quality_score: task.quality_score,
-        bypass_reason: classifyBypassReason(task.verification_notes),
+        bypass_reason: resolvedBypassReason,
         pr_url: extractPrUrlFromTask(task.result, task.verification_notes),
         bypassed_at: task.updated_at,
       });

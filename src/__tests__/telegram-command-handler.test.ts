@@ -423,6 +423,88 @@ describe("/score command — task quality lookup", () => {
     expect(reply).toContain("/tasks/");
     expect(reply).toContain(TASK_ID);
   });
+
+  it("shows 🔓 bypass badge when task has bypass_reason=operator_override", async () => {
+    const task = makeTask({
+      id: TASK_ID,
+      title: "Operator approved low-score task",
+      status: "done",
+      verification_status: "approved",
+      quality_score: 0.52,
+      bypass_reason: "operator_override",
+    });
+    const store = makeStore([task]);
+
+    const reply = await runTelegramCommand(store, `/score ${TASK_ID}`);
+
+    expect(reply).toContain("🔓");
+    expect(reply).toContain("Bypass");
+    expect(reply).toContain("operator_override");
+  });
+
+  it("shows 🏚️ bypass badge when task has bypass_reason=floor_not_enforced", async () => {
+    const task = makeTask({
+      id: TASK_ID,
+      title: "Historical low-score task",
+      status: "done",
+      verification_status: "approved",
+      quality_score: 0.48,
+      bypass_reason: "floor_not_enforced",
+    });
+    const store = makeStore([task]);
+
+    const reply = await runTelegramCommand(store, `/score ${TASK_ID}`);
+
+    expect(reply).toContain("🏚️");
+    expect(reply).toContain("Bypass");
+    expect(reply).toContain("floor_not_enforced");
+  });
+
+  it("shows bypass badge from verRecord when task.bypass_reason is null but verRecord has it", async () => {
+    const task = makeTask({
+      id: TASK_ID,
+      title: "Task with bypass in ver record",
+      status: "done",
+      verification_status: "approved",
+      quality_score: 0.55,
+      bypass_reason: null,
+    });
+    const verRecord: VerificationResultRecord = {
+      id: 1,
+      task_id: TASK_ID,
+      score: 0.55,
+      first_pass: 0,
+      rejection_reason: null,
+      blocked_reason: null,
+      threshold: 0.80,
+      agent_id: "claude-agent-orchestrator",
+      timestamp: "2026-04-14T12:00:00.000Z",
+      bypass_reason: "operator_override",
+    };
+    const store = makeStore([task], { verificationRecord: verRecord });
+
+    const reply = await runTelegramCommand(store, `/score ${TASK_ID}`);
+
+    expect(reply).toContain("🔓");
+    expect(reply).toContain("operator_override");
+  });
+
+  it("does not show bypass badge when bypass_reason is null on both task and verRecord", async () => {
+    const task = makeTask({
+      id: TASK_ID,
+      title: "Normal approved task",
+      status: "done",
+      verification_status: "approved",
+      quality_score: 0.85,
+      bypass_reason: null,
+    });
+    const store = makeStore([task]);
+
+    const reply = await runTelegramCommand(store, `/score ${TASK_ID}`);
+
+    expect(reply).not.toContain("Bypass");
+    expect(reply).not.toContain("bypass_reason");
+  });
 });
 
 describe("/quality command — live quality health snapshot", () => {

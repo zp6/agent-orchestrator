@@ -57,14 +57,15 @@ function makeStoreFixture() {
     result?: string | null;
     updated_at?: string;
     status?: string;
+    bypass_reason?: string | null;
   }) => {
     const id = `task-${String(++seq).padStart(4, "0")}`;
     writer
       .prepare(
         `INSERT INTO tasks (
            id, title, description, status, agent_name, task_type, source, source_ref,
-           result, verification_status, quality_score, verification_notes, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           result, verification_status, quality_score, verification_notes, bypass_reason, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -79,6 +80,7 @@ function makeStoreFixture() {
         overrides.verification_status ?? null,
         overrides.quality_score ?? null,
         overrides.verification_notes ?? null,
+        overrides.bypass_reason ?? null,
         isoNow(),
         overrides.updated_at ?? isoNow(),
       );
@@ -355,6 +357,49 @@ describe("getQualitySystemHealthPayload — bypass reason classification", () =>
     expect(payload.operator_overrides).toBe(1);
     expect(payload.marginal_auto).toBe(2);
     expect(payload.current_cycle_bypassed).toBe(3);
+  });
+
+  it("prefers bypass_reason column over notes-based inference when column is set", () => {
+    // bypass_reason column says operator_override, but notes say nothing → should use column
+    fixture.insertTask({
+      quality_score: 0.45,
+      verification_status: "approved",
+      verification_notes: "some generic notes without override marker",
+      bypass_reason: "operator_override",
+    });
+
+    const payload = getQualitySystemHealthPayload(fixture.store, { cycleTaskLimit: 5 });
+    expect(payload.operator_overrides).toBe(1);
+    expect(payload.marginal_auto).toBe(0);
+    expect(payload.bypassed_tasks[0]?.bypass_reason).toBe("operator_override");
+  });
+
+  it("falls back to notes-based inference when bypass_reason column is null", () => {
+    // No bypass_reason column, but notes contain operator-override marker
+    fixture.insertTask({
+      quality_score: 0.50,
+      verification_status: "approved",
+      verification_notes: "[operator-override: manually approved]",
+      bypass_reason: null,
+    });
+
+    const payload = getQualitySystemHealthPayload(fixture.store, { cycleTaskLimit: 5 });
+    expect(payload.operator_overrides).toBe(1);
+    expect(payload.bypassed_tasks[0]?.bypass_reason).toBe("operator_override");
+  });
+
+  it("classifies floor_not_enforced bypass_reason column as marginal_auto", () => {
+    fixture.insertTask({
+      quality_score: 0.52,
+      verification_status: "approved",
+      verification_notes: null,
+      bypass_reason: "floor_not_enforced",
+    });
+
+    const payload = getQualitySystemHealthPayload(fixture.store, { cycleTaskLimit: 5 });
+    expect(payload.marginal_auto).toBe(1);
+    expect(payload.operator_overrides).toBe(0);
+    expect(payload.bypassed_tasks[0]?.bypass_reason).toBe("marginal_auto");
   });
 });
 

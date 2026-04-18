@@ -1288,7 +1288,17 @@ function handleQualityTasks(store: ITelegramStateStore, limit: number): string {
     const shortId = task.id.slice(0, 8);
     const title = task.title.length > 50 ? task.title.slice(0, 47) + "..." : task.title;
 
-    lines.push(`${status} \`${shortId}\` ${score} · \`${agent}\` · ${title}`);
+    // Bypass badge for sub-0.60 approved tasks.
+    const isSubFloorApproved =
+      task.verification_status === "approved" &&
+      task.quality_score !== null &&
+      task.quality_score !== undefined &&
+      task.quality_score < 0.60;
+    const bypassBadge = isSubFloorApproved && task.bypass_reason
+      ? ` ${task.bypass_reason === "operator_override" ? "🔓" : "🏚️"}`
+      : "";
+
+    lines.push(`${status} \`${shortId}\` ${score}${bypassBadge} · \`${agent}\` · ${title}`);
   }
 
   // Summary stats
@@ -1634,6 +1644,13 @@ function handleScore(store: ITelegramStateStore, rawId: string): string {
     // Hard-block indicator (already captured in isHardBlock above).
     if (isHardBlock) {
       lines.push(`🚧 *Hard-block:* triggered — score below 0.50 unconditional rejection threshold`);
+    }
+
+    // Bypass reason badge — shown when a sub-0.60 task was approved despite the floor.
+    const bypassReason = task.bypass_reason ?? verRecord?.bypass_reason ?? null;
+    if (bypassReason) {
+      const bypassIcon = bypassReason === "operator_override" ? "🔓" : "🏚️";
+      lines.push(`${bypassIcon} *Bypass:* \`${bypassReason}\``);
     }
   }
 
