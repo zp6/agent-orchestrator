@@ -30,6 +30,7 @@
  *   /approve <task-id> [note] → approve a held task with operator override, bypassing the 0.60 floor
  *   /reject <task-id> [note]  → reject a held task from the operator review queue
  *   /routing-violations [n]   → list the last N agent-to-repo routing violations (default 10)
+ *   /quality-health            → quality system health: bypass rate, sparkline, and bypassed task list
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -59,6 +60,10 @@ import {
   formatDecisionsForTelegram,
 } from "../supervisor-log.js";
 import type { DuplicateDispatchSurgeDetector } from "../reviewer/duplicate-dispatch-surge-detector.js";
+import {
+  getQualitySystemHealthPayload,
+  formatQualitySystemHealthPage,
+} from "../reviewer/quality-system-health.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
 const log = createLogger("telegram-commands");
@@ -113,7 +118,8 @@ type CommandName =
   | "review-queue"
   | "approve"
   | "reject"
-  | "routing-violations";
+  | "routing-violations"
+  | "quality-health";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -148,6 +154,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "approve",
   "reject",
   "routing-violations",
+  "quality-health",
 ]);
 
 interface ParsedCommand {
@@ -444,6 +451,9 @@ async function executeCommand(
       const limit = limitStr ? Math.min(Math.max(parseInt(limitStr, 10) || 10, 1), 50) : 10;
       return handleRoutingViolations(store, limit);
     }
+
+    case "quality-health":
+      return handleQualitySystemHealth(store, dashboardUrl);
   }
 }
 
@@ -2184,6 +2194,20 @@ function handleRoutingViolations(store: ITelegramStateStore, limit: number): str
   }
 
   return lines.join("\n");
+}
+
+// ── Quality system health handler (issue #304) ────────────────────────────
+
+function handleQualitySystemHealth(
+  store: ITelegramStateStore,
+  dashboardUrl?: string,
+): string {
+  const payload = getQualitySystemHealthPayload(store);
+  const page = formatQualitySystemHealthPage(payload);
+  if (dashboardUrl) {
+    return `${page}\n\n[View dashboard](${dashboardUrl}/quality-system-health)`;
+  }
+  return page;
 }
 
 // ── TelegramCommandHandler class ──────────────────────────────────────────

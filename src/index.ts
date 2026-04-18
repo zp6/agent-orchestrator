@@ -393,6 +393,37 @@ export type {
   ConflictRecoveryAlertRow,
 } from "./reviewer/reroute-conflict-recovery.js";
 
+// Quality System Health — `/api/quality-system-health` API payload (issue #304).
+//
+// Surfaces bypass rate trending: how often the 0.60 quality floor is being
+// circumvented. Includes per-cycle banner, 7-day sparkline, and breakdown of
+// bypass reasons (operator_override vs marginal_auto).
+//
+// Mount in the orchestrator or dashboard server:
+//   app.get('/api/quality-system-health', (_req, res) => {
+//     res.json(getQualitySystemHealthPayload(store));
+//   });
+//
+// Telegram `/quality-health` command uses formatQualitySystemHealthPage().
+export {
+  getQualitySystemHealthPayload,
+  formatQualitySystemHealthPage,
+  QualitySystemHealthMonitor,
+  QUALITY_FLOOR,
+  BYPASS_RATE_ALERT_THRESHOLD,
+  DEFAULT_SPARKLINE_DAYS,
+  DEFAULT_CYCLE_TASK_LIMIT,
+} from "./reviewer/quality-system-health.js";
+export type {
+  QualitySystemHealthPayload,
+  QualitySystemHealthOptions,
+  QualitySystemHealthMonitorOptions,
+  BypassedTask,
+  SparklineDay,
+  BypassReason,
+  BypassBand,
+} from "./reviewer/quality-system-health.js";
+
 // CLI smoke test verifier (issue #274)
 export {
   runCLISmokeTest,
