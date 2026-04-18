@@ -267,7 +267,9 @@ export { TelegramCommandHandler } from "./telegram/command-handler.js";
 export type { ReviewerConfig, AgentConfig } from "./config.js";
 
 // State types and SQLite store
-export { StateStore } from "./state/store.js";
+// APPROVAL_SCORE_FLOOR is exported separately so callers can reference the
+// hard floor constant without importing the full StateStore class (issue #266).
+export { StateStore, APPROVAL_SCORE_FLOOR } from "./state/store.js";
 export type {
   IStateStore,
   IScoreOutcomeStore,

@@ -192,7 +192,7 @@ describe("sub-threshold rejection (0.50–0.60) enforcement at store write path"
 
   // ── updateTask invariant ──────────────────────────────────────────────────
 
-  it("updateTask rejects approved status with quality_score of 0.55 (sub-threshold)", () => {
+  it("updateTask downgrades approved status to needs_revision with quality_score of 0.55 (sub-threshold) [issue #266]", () => {
     const raw = store as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } };
     raw.db
       .prepare(
@@ -207,11 +207,13 @@ describe("sub-threshold rejection (0.50–0.60) enforcement at store write path"
     });
 
     const task = store.getTask("T-UPDATE-LOW");
-    expect(task?.verification_status).toBe("rejected");
+    // Issue #266: store layer downgrades to needs_revision (not rejected) so
+    // the task stays in the work queue and is re-dispatched rather than closed.
+    expect(task?.verification_status).toBe("needs_revision");
     expect(task?.quality_score).toBe(0.55);
   });
 
-  it("updateTask rejects approved status with quality_score of 0.38 (hard block)", () => {
+  it("updateTask downgrades approved status to needs_revision with quality_score of 0.38 (hard block) [issue #266]", () => {
     const raw = store as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } };
     raw.db
       .prepare(
@@ -226,7 +228,9 @@ describe("sub-threshold rejection (0.50–0.60) enforcement at store write path"
     });
 
     const task = store.getTask("T-UPDATE-HARD");
-    expect(task?.verification_status).toBe("rejected");
+    // Issue #266: store layer downgrades to needs_revision (not rejected) so
+    // the task stays in the work queue and is re-dispatched rather than closed.
+    expect(task?.verification_status).toBe("needs_revision");
     expect(task?.quality_score).toBe(0.38);
   });
 

@@ -103,15 +103,18 @@ describe("StateStore.updateTask() null-score guard (issue #244)", () => {
     store = new StateStore(":memory:");
   });
 
-  it("writes NULL_SCORE_APPROVED_SENTINEL when approving a task with no score", () => {
+  it("downgrades to needs_revision when approving a task with no score [issue #266]", () => {
+    // Issue #266: when verification_status='approved' is set on a task that has
+    // null quality_score, the store cannot verify the 0.60 floor is met, so it
+    // downgrades to needs_revision rather than silently approving with an unknown
+    // score.  The NULL_SCORE_APPROVED_SENTINEL path (0.75) is still reached for
+    // tasks that have a non-null score already recorded in the DB.
     insertNullScoreTask(store, "01GUARD_APPROVED_NO_SCORE");
 
     store.updateTask("01GUARD_APPROVED_NO_SCORE", { verification_status: "approved" });
 
     const task = store.getTask("01GUARD_APPROVED_NO_SCORE");
-    expect(task?.verification_status).toBe("approved");
-    expect(task?.quality_score).toBe(StateStore.NULL_SCORE_APPROVED_SENTINEL);
-    expect(task?.quality_score).not.toBeNull();
+    expect(task?.verification_status).toBe("needs_revision");
   });
 
   it("writes NULL_SCORE_REJECTED_SENTINEL when rejecting a task with no score", () => {
@@ -181,16 +184,17 @@ describe("StateStore.updateTask() null-score guard (issue #244)", () => {
     expect(store.getVerifiedTasksWithNullScoresCount()).toBe(0);
   });
 
-  it("sentinel is consistent with the score-approval invariant (approved + score >= 0.50)", () => {
+  it("null-score approved task is downgraded to needs_revision (issue #266 floor guard fires first)", () => {
+    // Issue #266: the floor guard in updateTask() fires before the sentinel
+    // logic when a null-score task is approved.  The task is downgraded to
+    // needs_revision so it can be re-dispatched with a proper score.
+    // The sentinel path (approved + existing score >= 0.60) is unaffected.
     insertNullScoreTask(store, "01GUARD_INVARIANT");
 
     store.updateTask("01GUARD_INVARIANT", { verification_status: "approved" });
 
     const task = store.getTask("01GUARD_INVARIANT");
-    // Approved sentinel must be above HARD_BLOCK_THRESHOLD so the invariant
-    // does not immediately flip the task back to rejected
-    expect(task?.verification_status).toBe("approved");
-    expect(task?.quality_score).toBeGreaterThanOrEqual(0.50);
+    expect(task?.verification_status).toBe("needs_revision");
   });
 
   it("handles the case where the task does not exist (no crash)", () => {

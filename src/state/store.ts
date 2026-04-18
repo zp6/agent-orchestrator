@@ -68,6 +68,18 @@ import type {
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
+/**
+ * Hard score floor for task approval (issue #266).
+ *
+ * No task with quality_score < APPROVAL_SCORE_FLOOR can reach
+ * verification_status = 'approved'.  Enforced at the persisting layer in
+ * StateStore.updateTask() so ALL callers are covered regardless of code path.
+ *
+ * Exported as a module-level constant so callers and tests can reference it
+ * without magic numbers and without importing the full StateStore class.
+ */
+export const APPROVAL_SCORE_FLOOR = 0.60;
+
 export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore {
   private db: Database.Database;
 
@@ -568,35 +580,82 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
   static readonly NULL_SCORE_REJECTED_SENTINEL = 0.50;
 
   updateTask(id: string, updates: Partial<Task>): void {
-    // ── Score-approval invariant enforcement (issue #203, #258) ──────────
+    // ── Score-approval invariant enforcement (issue #203, #258, #266) ────
     // Defence-in-depth: prevent any caller from writing an approved task
     // with a quality_score below the acceptance floor (0.60).
     // This catches bugs, race conditions, and external callers that bypass
     // the verifier's own guards.  The floor covers two sub-ranges:
     //   < 0.50 (hard_block_sub50) — fundamentally incomplete work
     //   [0.50, 0.60) (low_score_sub60) — partial work still below acceptance bar
+    //
+    // Issue #266: downgrade to 'needs_revision' (not 'rejected') so the task
+    // stays in the work queue and is re-dispatched rather than permanently
+    // closed.  This is the persisting-layer choke point — ALL callers are
+    // covered here regardless of which code path triggered the write.
     const normalizedUpdates = { ...updates };
     if (
       normalizedUpdates.verification_status === "approved" &&
       normalizedUpdates.quality_score != null &&
       normalizedUpdates.quality_score < StateStore.SUB_THRESHOLD_REJECTION_LIMIT
     ) {
-      normalizedUpdates.verification_status = "rejected";
+      const scoreStr = normalizedUpdates.quality_score.toFixed(2);
+      normalizedUpdates.verification_status = "needs_revision";
+      // Prepend a floor-downgrade note so operators can see the downgrade in
+      // audit logs and the dashboard task list.
+      const floorNote = `[floor-downgrade: score ${scoreStr} < ${StateStore.SUB_THRESHOLD_REJECTION_LIMIT.toFixed(2)}]`;
+      if (normalizedUpdates.verification_notes != null) {
+        normalizedUpdates.verification_notes = `${floorNote} ${normalizedUpdates.verification_notes}`;
+      } else {
+        normalizedUpdates.verification_notes = floorNote;
+      }
     }
 
     // Also handle the case where only quality_score is being updated:
     // if the new score is below the acceptance floor, check the current
-    // verification_status in the DB and reject if currently approved.
+    // verification_status in the DB and downgrade if currently approved.
     if (
       normalizedUpdates.verification_status === undefined &&
       normalizedUpdates.quality_score != null &&
       normalizedUpdates.quality_score < StateStore.SUB_THRESHOLD_REJECTION_LIMIT
     ) {
       const existing = this.db
-        .prepare("SELECT verification_status FROM tasks WHERE id = ?")
-        .get(id) as { verification_status: string | null } | undefined;
+        .prepare("SELECT verification_status, verification_notes FROM tasks WHERE id = ?")
+        .get(id) as { verification_status: string | null; verification_notes: string | null } | undefined;
       if (existing?.verification_status === "approved") {
-        normalizedUpdates.verification_status = "rejected";
+        const scoreStr = normalizedUpdates.quality_score.toFixed(2);
+        normalizedUpdates.verification_status = "needs_revision";
+        const floorNote = `[floor-downgrade: score ${scoreStr} < ${StateStore.SUB_THRESHOLD_REJECTION_LIMIT.toFixed(2)}]`;
+        normalizedUpdates.verification_notes = existing.verification_notes
+          ? `${floorNote} ${existing.verification_notes}`
+          : floorNote;
+      }
+    }
+
+    // ── Null-score approved guard (issue #266) ────────────────────────────
+    // If a caller sets verification_status to 'approved' but supplies no
+    // quality_score AND the task currently has quality_score = NULL, we
+    // cannot verify the floor is met — downgrade to 'needs_revision' so the
+    // task is re-dispatched rather than silently approved with an unknown score.
+    if (
+      normalizedUpdates.verification_status === "approved" &&
+      normalizedUpdates.quality_score == null
+    ) {
+      const existing = this.db
+        .prepare("SELECT quality_score FROM tasks WHERE id = ?")
+        .get(id) as { quality_score: number | null } | undefined;
+      if (existing?.quality_score == null) {
+        normalizedUpdates.verification_status = "needs_revision";
+        const floorNote = `[floor-downgrade: null score cannot verify floor ${StateStore.SUB_THRESHOLD_REJECTION_LIMIT}]`;
+        if (normalizedUpdates.verification_notes != null) {
+          normalizedUpdates.verification_notes = `${floorNote} ${normalizedUpdates.verification_notes}`;
+        } else {
+          normalizedUpdates.verification_notes = floorNote;
+        }
+        console.warn(
+          `[StateStore] updateTask(${id}): 'approved' with no quality_score and ` +
+          `task has null score — downgrading to 'needs_revision'. ` +
+          `Run repairNullScoresForApprovedTasks() to LLM-infer real scores.`,
+        );
       }
     }
 
@@ -615,6 +674,11 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
     // The sentinel values (0.75 approved, 0.50 rejected) are exported as
     // StateStore.NULL_SCORE_APPROVED_SENTINEL / NULL_SCORE_REJECTED_SENTINEL
     // so tests can distinguish defaults from real verifier scores.
+    //
+    // Note: the 'approved' + null-score case is already handled above
+    // (issue #266 guard) and normalizedUpdates.verification_status will have
+    // been changed to 'needs_revision' by this point, so the sentinel branch
+    // for 'approved' below only fires when the task already has a score >= 0.60.
     //
     // ensureScoresPopulated() will NOT refine these defaults (they are no longer
     // null), but repairNullScoresForApprovedTasks() / the /backfill-scores
@@ -2598,7 +2662,7 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
    * contains an 'approved' record whose score would contradict the quality gate.
    * This is the storage-layer equivalent of the verifier's applySubThresholdRejectionGuard().
    */
-  private static readonly SUB_THRESHOLD_REJECTION_LIMIT = 0.60;
+  private static readonly SUB_THRESHOLD_REJECTION_LIMIT = APPROVAL_SCORE_FLOOR;
 
   /**
    * Persist a verification result record after each LLM scoring decision.
