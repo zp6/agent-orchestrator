@@ -3080,4 +3080,87 @@ describe("StateStore", () => {
       expect(stats.find((r) => r.agent_name === "old-agent")).toBeUndefined();
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Per-issue dispatch lock (issue #916)
+  // ---------------------------------------------------------------------------
+
+  describe("dispatch lock", () => {
+    it("acquireDispatchLock writes a lock entry retrievable by getDispatchLock", () => {
+      store.acquireDispatchLock("github", "owner/repo#42", "my-agent", 600_000);
+      const lock = store.getDispatchLock("github", "owner/repo#42");
+      expect(lock).toBeDefined();
+      expect(lock!.source).toBe("github");
+      expect(lock!.source_ref).toBe("owner/repo#42");
+      expect(lock!.agent_name).toBe("my-agent");
+      expect(new Date(lock!.expires_at).getTime()).toBeGreaterThan(Date.now());
+    });
+
+    it("getDispatchLock returns undefined when no lock exists", () => {
+      const lock = store.getDispatchLock("github", "owner/repo#99");
+      expect(lock).toBeUndefined();
+    });
+
+    it("getDispatchLock returns undefined after lock is released", () => {
+      store.acquireDispatchLock("github", "owner/repo#42", "my-agent", 600_000);
+      store.releaseDispatchLock("github", "owner/repo#42");
+      const lock = store.getDispatchLock("github", "owner/repo#42");
+      expect(lock).toBeUndefined();
+    });
+
+    it("acquireDispatchLock is idempotent: second call does not overwrite an active lock", () => {
+      store.acquireDispatchLock("github", "owner/repo#42", "agent-a", 600_000);
+      store.acquireDispatchLock("github", "owner/repo#42", "agent-b", 600_000);
+      const lock = store.getDispatchLock("github", "owner/repo#42");
+      // First lock should still be held by agent-a
+      expect(lock!.agent_name).toBe("agent-a");
+    });
+
+    it("acquireDispatchLock replaces an expired lock with a fresh one", () => {
+      // Write a lock that is already expired
+      const store_db = (store as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } }).db;
+      const pastExpiry = new Date(Date.now() - 1000).toISOString();
+      store_db.prepare(
+        "INSERT INTO dispatch_locks (source, source_ref, agent_name, locked_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+      ).run("github", "owner/repo#42", "old-agent", new Date().toISOString(), pastExpiry);
+
+      // Acquiring a new lock should succeed (expired lock evicted first)
+      store.acquireDispatchLock("github", "owner/repo#42", "new-agent", 600_000);
+      const lock = store.getDispatchLock("github", "owner/repo#42");
+      expect(lock!.agent_name).toBe("new-agent");
+    });
+
+    it("getDispatchLock returns undefined for an expired lock", () => {
+      const store_db = (store as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } }).db;
+      const pastExpiry = new Date(Date.now() - 1000).toISOString();
+      store_db.prepare(
+        "INSERT INTO dispatch_locks (source, source_ref, agent_name, locked_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+      ).run("github", "owner/repo#42", "my-agent", new Date().toISOString(), pastExpiry);
+
+      const lock = store.getDispatchLock("github", "owner/repo#42");
+      expect(lock).toBeUndefined();
+    });
+
+    it("cleanExpiredDispatchLocks removes expired entries and returns count", () => {
+      const store_db = (store as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } }).db;
+      const pastExpiry = new Date(Date.now() - 1000).toISOString();
+      store_db.prepare(
+        "INSERT INTO dispatch_locks (source, source_ref, agent_name, locked_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+      ).run("github", "owner/repo#1", "agent-a", new Date().toISOString(), pastExpiry);
+      store_db.prepare(
+        "INSERT INTO dispatch_locks (source, source_ref, agent_name, locked_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+      ).run("github", "owner/repo#2", "agent-b", new Date().toISOString(), pastExpiry);
+
+      // Also write a non-expired lock that should survive
+      store.acquireDispatchLock("github", "owner/repo#3", "agent-c", 600_000);
+
+      const cleaned = store.cleanExpiredDispatchLocks();
+      expect(cleaned).toBe(2);
+      expect(store.getDispatchLock("github", "owner/repo#3")).toBeDefined();
+    });
+
+    it("DISPATCH_LOCK_TTL_MS static constant equals 10 minutes", () => {
+      expect(StateStore.DISPATCH_LOCK_TTL_MS).toBe(600_000);
+    });
+  });
 });

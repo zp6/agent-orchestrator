@@ -1,7 +1,7 @@
 import { fetchOpenIssues, countOpenPRs, validateGhAuth, type GitHubIssue } from "./github.js";
 import { reportResult } from "./reporters.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
-import type { StateStore } from "../state/store.js";
+import { StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { createLogger } from "../service/logger.js";
 import { scoreIssuePriority } from "../orchestrator/priority-scorer.js";
@@ -378,11 +378,15 @@ export async function dispatchGitHubIssues(
     return count;
   }
 
-  // Evict expired claims at the start of each cycle so stale entries from
-  // crashed agents never permanently block an issue from being dispatched.
+  // Evict expired claims and dispatch locks at the start of each cycle so
+  // stale entries from crashed agents never permanently block an issue.
   const expiredClaims = store.cleanExpiredClaims();
   if (expiredClaims > 0) {
     log.info("Cleaned expired issue claims", { count: expiredClaims });
+  }
+  const expiredLocks = store.cleanExpiredDispatchLocks();
+  if (expiredLocks > 0) {
+    log.info("Cleaned expired dispatch locks", { count: expiredLocks });
   }
 
   for (const [agentName, agent] of Object.entries(config.agents)) {
@@ -438,6 +442,23 @@ export async function dispatchGitHubIssues(
         continue;
       }
 
+      // Per-issue dispatch lock (issue #916): block rapid re-dispatch storms.
+      // Once an issue is dispatched, a lock entry is written to state.db with a
+      // configurable TTL (default 10 min). Any subsequent dispatch attempt for
+      // the same sourceRef within the TTL is skipped here. The lock is released
+      // early when the linked PR is merged or the issue is closed.
+      const dispatchLock = store.getDispatchLock("github", sourceRef);
+      if (dispatchLock) {
+        log.info("Skipping dispatch: per-issue dispatch lock active", {
+          sourceRef,
+          lockedBy: dispatchLock.agent_name,
+          lockedAt: dispatchLock.locked_at,
+          expiresAt: dispatchLock.expires_at,
+        });
+        result.skipped++;
+        continue;
+      }
+
       const validation = runGitHubPreDispatchValidation({
         config,
         store,
@@ -454,9 +475,13 @@ export async function dispatchGitHubIssues(
         });
         if (validation.failureCode === "issue_closed") {
           store.markProcessed("github", sourceRef, `closed-issue-${issue.number}`);
+          // Release dispatch lock: issue is closed, no need to hold the lock
+          store.releaseDispatchLock("github", sourceRef);
         }
         if (validation.failureCode === "merged_pr_exists") {
           store.markProcessed("github", sourceRef, `merged-pr-${validation.blockingPRNumber ?? issue.number}`);
+          // Release dispatch lock: PR merged, issue will be closed shortly
+          store.releaseDispatchLock("github", sourceRef);
         }
         // Pre-dispatch open-PR deduplication (issue #859): when an open or
         // approved PR already exists for this issue, create an "already-in-review"
@@ -590,6 +615,14 @@ export async function dispatchGitHubIssues(
       const controller = new AbortController();
       inFlightDispatches.set(sourceRef, controller);
 
+      // Acquire per-issue dispatch lock (issue #916) before firing the task.
+      // This prevents subsequent daemon cycles from re-dispatching the same
+      // issue while the agent is working (or while the PR is still open).
+      // The lock TTL defaults to 10 minutes; it is released early if the PR
+      // is merged or the issue is closed.
+      const dispatchLockTtl = config.triggers?.dispatch_lock_ttl_ms ?? StateStore.DISPATCH_LOCK_TTL_MS;
+      store.acquireDispatchLock("github", sourceRef, agentName, dispatchLockTtl);
+
       // Fire and forget — don't block the daemon cycle.
       // Pass sourceRepo (not agentName) so the router can detect cross-repo
       // destinations. For issues that target the owning agent the router still
@@ -719,6 +752,23 @@ export async function dispatchIdleAgentBacklog(
         }
       }
 
+      // Per-issue dispatch lock (issue #916) — idle pickup path.
+      // Respect the same lock that the primary dispatchGitHubIssues path writes.
+      // force-reclaim does NOT bypass this lock: even when an agent is long-idle,
+      // rapid re-dispatch of the same locked issue would not help if the agent
+      // is already working on it (or a PR is already open).
+      const idleDispatchLock = store.getDispatchLock("github", sourceRef);
+      if (idleDispatchLock) {
+        log.info("Idle pickup: skipping dispatch — per-issue dispatch lock active", {
+          sourceRef,
+          lockedBy: idleDispatchLock.agent_name,
+          lockedAt: idleDispatchLock.locked_at,
+          expiresAt: idleDispatchLock.expires_at,
+        });
+        result.skipped++;
+        continue;
+      }
+
       const validation = runGitHubPreDispatchValidation({
         config,
         store,
@@ -736,9 +786,11 @@ export async function dispatchIdleAgentBacklog(
         });
         if (validation.failureCode === "issue_closed") {
           store.markProcessed("github", sourceRef, `closed-issue-${issue.number}`);
+          store.releaseDispatchLock("github", sourceRef);
         }
         if (validation.failureCode === "merged_pr_exists") {
           store.markProcessed("github", sourceRef, `merged-pr-${validation.blockingPRNumber ?? issue.number}`);
+          store.releaseDispatchLock("github", sourceRef);
         }
         // Pre-dispatch open-PR deduplication (issue #859) — idle pickup path
         if (
@@ -853,6 +905,10 @@ export async function dispatchIdleAgentBacklog(
 
       const controller = new AbortController();
       inFlightDispatches.set(sourceRef, controller);
+
+      // Acquire per-issue dispatch lock (issue #916) — idle pickup path.
+      const idleDispatchLockTtl = config.triggers?.dispatch_lock_ttl_ms ?? StateStore.DISPATCH_LOCK_TTL_MS;
+      store.acquireDispatchLock("github", sourceRef, agentName, idleDispatchLockTtl);
 
       // Pass sourceRepo instead of agentName so the router can detect cross-repo
       // destinations (same rationale as dispatchGitHubIssues above).

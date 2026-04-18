@@ -494,6 +494,16 @@ export interface TriggersConfig {
   issue_claim_ttl_ms?: number;
 
   /**
+   * How long (ms) a per-issue dispatch lock is held after an issue is
+   * dispatched. Any subsequent dispatch attempt for the same issue within
+   * this window is skipped to prevent rapid re-dispatch storms.
+   * The lock is released early when the linked PR is merged or the issue
+   * is closed.
+   * Defaults to 600000 (10 minutes) when omitted.
+   */
+  dispatch_lock_ttl_ms?: number;
+
+  /**
    * Maximum number of issues the orchestrator can auto-create per repo.
    * Prevents flooding a repo with orchestrator-generated issues.
    * Defaults to 10 when omitted.

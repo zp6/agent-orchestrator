@@ -839,6 +839,27 @@ export interface IssueClaim {
 }
 
 /**
+ * A per-issue dispatch lock record (issue #916).
+ *
+ * Written when an issue is dispatched; prevents rapid re-dispatch storms by
+ * blocking subsequent dispatch attempts for the same sourceRef until the lock
+ * expires (default 10 minutes) or is explicitly released when the PR is merged
+ * or the issue is closed.
+ */
+export interface DispatchLock {
+  /** The trigger source: "github" | "linear" | "slack" */
+  source: string;
+  /** The source ref, e.g. "owner/repo#42" */
+  source_ref: string;
+  /** Agent that triggered the dispatch */
+  agent_name: string;
+  /** ISO timestamp when the lock was acquired */
+  locked_at: string;
+  /** ISO timestamp after which the lock is considered expired */
+  expires_at: string;
+}
+
+/**
  * A single routing decision record.
  * Written at dispatch time; quality_score is filled when the task is verified.
  */
@@ -1334,6 +1355,7 @@ export class StateStore {
     this.runDispatchWasteMigration();
     this.runDispatchValidationMigration();
     this.runIssueClaimsMigration();
+    this.runDispatchLockMigration();
     this.runConfigReloadsMigration();
     this.runIssueCacheMigration();
     this.runLearnedRulesMigration();
@@ -5764,6 +5786,105 @@ export class StateStore {
     }
 
     return cancelled;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-issue dispatch lock (issue #916)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Default TTL for per-issue dispatch locks: 10 minutes.
+   * Configurable via `triggers.dispatch_lock_ttl_ms` in agents.yaml.
+   */
+  static readonly DISPATCH_LOCK_TTL_MS = 600_000;
+
+  private runDispatchLockMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS dispatch_locks (
+        source      TEXT NOT NULL,
+        source_ref  TEXT NOT NULL,
+        agent_name  TEXT NOT NULL,
+        locked_at   TEXT NOT NULL,
+        expires_at  TEXT NOT NULL,
+        PRIMARY KEY (source, source_ref)
+      );
+      CREATE INDEX IF NOT EXISTS idx_dispatch_locks_expires ON dispatch_locks(expires_at);
+    `);
+  }
+
+  /**
+   * Acquire a per-issue dispatch lock for (source, sourceRef).
+   *
+   * Any expired lock for this sourceRef is evicted first so a crashed agent
+   * never permanently blocks an issue. If an active (non-expired) lock already
+   * exists, the INSERT is a no-op and the existing lock is preserved — only
+   * one lock can be held per sourceRef at a time.
+   *
+   * @param ttlMs  How long the lock is valid. Defaults to 10 minutes.
+   */
+  acquireDispatchLock(
+    source: string,
+    sourceRef: string,
+    agentName: string,
+    ttlMs = StateStore.DISPATCH_LOCK_TTL_MS,
+  ): void {
+    const now = new Date();
+    const lockedAt = now.toISOString();
+    const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
+
+    this.db.transaction(() => {
+      // Evict expired lock before inserting so TTL is always enforced
+      this.db
+        .prepare(`DELETE FROM dispatch_locks WHERE source = ? AND source_ref = ? AND expires_at <= ?`)
+        .run(source, sourceRef, now.toISOString());
+
+      // Insert — no-op if an active lock already exists for this sourceRef
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO dispatch_locks (source, source_ref, agent_name, locked_at, expires_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(source, sourceRef, agentName, lockedAt, expiresAt);
+    })();
+  }
+
+  /**
+   * Return the active (non-expired) dispatch lock for a sourceRef, or
+   * undefined if no lock exists or the lock has expired.
+   */
+  getDispatchLock(source: string, sourceRef: string): DispatchLock | undefined {
+    const now = new Date().toISOString();
+    return this.db
+      .prepare(
+        `SELECT * FROM dispatch_locks WHERE source = ? AND source_ref = ? AND expires_at > ?`,
+      )
+      .get(source, sourceRef, now) as DispatchLock | undefined;
+  }
+
+  /**
+   * Release the dispatch lock for (source, sourceRef).
+   *
+   * Called when the associated PR is merged or the issue is closed so the
+   * lock is cleared immediately rather than waiting for the TTL to expire.
+   */
+  releaseDispatchLock(source: string, sourceRef: string): void {
+    this.db
+      .prepare(`DELETE FROM dispatch_locks WHERE source = ? AND source_ref = ?`)
+      .run(source, sourceRef);
+  }
+
+  /**
+   * Delete all expired dispatch locks. Called at the start of each daemon
+   * dispatch cycle to keep the table tidy.
+   *
+   * @returns Number of locks that were evicted.
+   */
+  cleanExpiredDispatchLocks(): number {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(`DELETE FROM dispatch_locks WHERE expires_at <= ?`)
+      .run(now);
+    return result.changes;
   }
 
   // ---------------------------------------------------------------------------

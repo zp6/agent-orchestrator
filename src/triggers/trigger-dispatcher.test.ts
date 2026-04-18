@@ -104,6 +104,11 @@ describe("dispatchGitHubIssues", () => {
       isPRInMergeQueue: vi.fn().mockReturnValue(false),
       isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
       addToPriorityReviewQueue: vi.fn(),
+      // Per-issue dispatch lock methods (added in #916)
+      getDispatchLock: vi.fn().mockReturnValue(undefined),
+      acquireDispatchLock: vi.fn(),
+      releaseDispatchLock: vi.fn(),
+      cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -140,6 +145,70 @@ describe("dispatchGitHubIssues", () => {
     const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
     expect(result.dispatched).toBe(0);
     expect(result.skipped).toBe(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Per-issue dispatch lock (issue #916)
+  // ---------------------------------------------------------------------------
+
+  it("skips dispatch when an active dispatch lock exists for the issue", async () => {
+    // Simulate an active dispatch lock for this sourceRef
+    (mockStore.getDispatchLock as ReturnType<typeof vi.fn>).mockReturnValue({
+      source: "github",
+      source_ref: "owner/my-repo#1",
+      agent_name: "my-agent",
+      locked_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 600_000).toISOString(),
+    });
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Bug", body: "", url: "", labels: [] },
+    ]);
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("acquires a dispatch lock when dispatching an issue", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Bug", body: "Fix it", url: "https://...", labels: [] },
+    ]);
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+    expect(mockStore.acquireDispatchLock).toHaveBeenCalledWith(
+      "github",
+      "owner/my-repo#1",
+      "my-agent",
+      expect.any(Number),
+    );
+  });
+
+  it("releases dispatch lock when PR is merged for the issue", async () => {
+    // Simulate a merged PR blocking dispatch (pre-dispatch validation returns merged_pr_exists)
+    mockCachedGetIssueState.mockReturnValue({ state: "closed", hasOpenPR: false, hasMergedPR: true });
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 1, title: "Bug", body: "", url: "", labels: [] },
+    ]);
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+    expect(result.dispatched).toBe(0);
+    expect(mockStore.releaseDispatchLock).toHaveBeenCalledWith("github", "owner/my-repo#1");
+  });
+
+  it("cleans expired dispatch locks at the start of each cycle", async () => {
+    (mockStore.cleanExpiredDispatchLocks as ReturnType<typeof vi.fn>).mockReturnValue(3);
+    mockFetchIssues.mockReturnValue([]);
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+    expect(mockStore.cleanExpiredDispatchLocks).toHaveBeenCalled();
+  });
+
+  it("allows dispatch after dispatch lock has no entry (no prior dispatch)", async () => {
+    // getDispatchLock returns undefined (default) — dispatch should proceed normally
+    (mockStore.getDispatchLock as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 2, title: "New Issue", body: "Description", url: "https://...", labels: [] },
+    ]);
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+    expect(result.dispatched).toBe(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledOnce();
   });
 
   it("skips agents without github field", async () => {
@@ -274,6 +343,11 @@ describe("pre-dispatch issue state validation", () => {
       isPRInMergeQueue: vi.fn().mockReturnValue(false),
       isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
       addToPriorityReviewQueue: vi.fn(),
+      // Per-issue dispatch lock methods (added in #916)
+      getDispatchLock: vi.fn().mockReturnValue(undefined),
+      acquireDispatchLock: vi.fn(),
+      releaseDispatchLock: vi.fn(),
+      cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -356,6 +430,11 @@ describe("duplicate PR detection before dispatch", () => {
       isPRInMergeQueue: vi.fn().mockReturnValue(false),
       isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
       addToPriorityReviewQueue: vi.fn(),
+      // Per-issue dispatch lock methods (added in #916)
+      getDispatchLock: vi.fn().mockReturnValue(undefined),
+      acquireDispatchLock: vi.fn(),
+      releaseDispatchLock: vi.fn(),
+      cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -573,6 +652,11 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       isPRInMergeQueue: vi.fn().mockReturnValue(false),
       isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
       addToPriorityReviewQueue: vi.fn(),
+      // Per-issue dispatch lock methods (added in #916)
+      getDispatchLock: vi.fn().mockReturnValue(undefined),
+      acquireDispatchLock: vi.fn(),
+      releaseDispatchLock: vi.fn(),
+      cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -693,6 +777,11 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       isPRInMergeQueue: vi.fn().mockReturnValue(false),
       isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
       addToPriorityReviewQueue: vi.fn(),
+      // Per-issue dispatch lock methods (added in #916)
+      getDispatchLock: vi.fn().mockReturnValue(undefined),
+      acquireDispatchLock: vi.fn(),
+      releaseDispatchLock: vi.fn(),
+      cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1033,6 +1122,11 @@ describe("dispatchIdleAgentBacklog", () => {
       isPRInMergeQueue: vi.fn().mockReturnValue(false),
       isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
       addToPriorityReviewQueue: vi.fn(),
+      // Per-issue dispatch lock methods (added in #916)
+      getDispatchLock: vi.fn().mockReturnValue(undefined),
+      acquireDispatchLock: vi.fn(),
+      releaseDispatchLock: vi.fn(),
+      cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1291,6 +1385,11 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       isPRInMergeQueue: vi.fn().mockReturnValue(false),
       isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
       addToPriorityReviewQueue: vi.fn(),
+      // Per-issue dispatch lock methods (added in #916)
+      getDispatchLock: vi.fn().mockReturnValue(undefined),
+      acquireDispatchLock: vi.fn(),
+      releaseDispatchLock: vi.fn(),
+      cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1430,6 +1529,11 @@ describe("in-flight branch detection", () => {
       isPRInMergeQueue: vi.fn().mockReturnValue(false),
       isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
       addToPriorityReviewQueue: vi.fn(),
+      // Per-issue dispatch lock methods (added in #916)
+      getDispatchLock: vi.fn().mockReturnValue(undefined),
+      acquireDispatchLock: vi.fn(),
+      releaseDispatchLock: vi.fn(),
+      cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
 
     vi.mocked(mockStore.hasActiveTask).mockReturnValue(false);
@@ -1480,6 +1584,11 @@ describe("in-flight branch detection", () => {
       isPRInMergeQueue: vi.fn().mockReturnValue(false),
       isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
       addToPriorityReviewQueue: vi.fn(),
+      // Per-issue dispatch lock methods (added in #916)
+      getDispatchLock: vi.fn().mockReturnValue(undefined),
+      acquireDispatchLock: vi.fn(),
+      releaseDispatchLock: vi.fn(),
+      cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
 
     await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1531,6 +1640,11 @@ describe("in-flight branch detection", () => {
       isPRInMergeQueue: vi.fn().mockReturnValue(false),
       isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
       addToPriorityReviewQueue: vi.fn(),
+      // Per-issue dispatch lock methods (added in #916)
+      getDispatchLock: vi.fn().mockReturnValue(undefined),
+      acquireDispatchLock: vi.fn(),
+      releaseDispatchLock: vi.fn(),
+      cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
 
     const result = await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1577,6 +1691,11 @@ describe("in-flight branch detection", () => {
       isPRInMergeQueue: vi.fn().mockReturnValue(false),
       isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
       addToPriorityReviewQueue: vi.fn(),
+      // Per-issue dispatch lock methods (added in #916)
+      getDispatchLock: vi.fn().mockReturnValue(undefined),
+      acquireDispatchLock: vi.fn(),
+      releaseDispatchLock: vi.fn(),
+      cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
 
     await dispatchIdleAgentBacklog(branchConfig, mockStore, mockDispatcher);
@@ -1623,6 +1742,11 @@ describe("approved PR skip logic", () => {
       isPRInMergeQueue: vi.fn().mockReturnValue(false),
       isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
       addToPriorityReviewQueue: vi.fn(),
+      // Per-issue dispatch lock methods (added in #916)
+      getDispatchLock: vi.fn().mockReturnValue(undefined),
+      acquireDispatchLock: vi.fn(),
+      releaseDispatchLock: vi.fn(),
+      cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
