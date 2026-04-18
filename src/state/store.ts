@@ -6715,6 +6715,39 @@ export class StateStore {
     // Column migrations — add missing columns for older tables
     const cols = this.db.prepare("PRAGMA table_info(learned_patterns)").all() as { name: string }[];
     const colNames = new Set(cols.map((c) => c.name));
+    if (!colNames.has("title")) {
+      // Older schema used different column names (trigger_conditions, frequency_count, etc.)
+      // and had no `title` column. Add it with an empty-string default so existing rows
+      // don't violate NOT NULL, then operators can backfill titles manually.
+      this.db.exec("ALTER TABLE learned_patterns ADD COLUMN title TEXT NOT NULL DEFAULT ''");
+    }
+    if (!colNames.has("description")) {
+      this.db.exec("ALTER TABLE learned_patterns ADD COLUMN description TEXT NOT NULL DEFAULT ''");
+    }
+    if (!colNames.has("source")) {
+      this.db.exec("ALTER TABLE learned_patterns ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'");
+    }
+    if (!colNames.has("source_ref")) {
+      this.db.exec("ALTER TABLE learned_patterns ADD COLUMN source_ref TEXT");
+    }
+    if (!colNames.has("agent")) {
+      this.db.exec("ALTER TABLE learned_patterns ADD COLUMN agent TEXT");
+    }
+    if (!colNames.has("repos")) {
+      this.db.exec("ALTER TABLE learned_patterns ADD COLUMN repos TEXT");
+    }
+    if (!colNames.has("confidence")) {
+      this.db.exec("ALTER TABLE learned_patterns ADD COLUMN confidence REAL NOT NULL DEFAULT 0.8");
+    }
+    if (!colNames.has("hit_count")) {
+      this.db.exec("ALTER TABLE learned_patterns ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!colNames.has("first_pass_saves")) {
+      this.db.exec("ALTER TABLE learned_patterns ADD COLUMN first_pass_saves INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!colNames.has("updated_at")) {
+      this.db.exec("ALTER TABLE learned_patterns ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'))");
+    }
     if (!colNames.has("active")) {
       this.db.exec("ALTER TABLE learned_patterns ADD COLUMN active INTEGER NOT NULL DEFAULT 1");
     }

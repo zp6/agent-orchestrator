@@ -78,6 +78,15 @@ vi.mock("./pre-dispatch-validator.js", () => ({
   })),
 }));
 
+// Mock the remote capability check so dispatch() doesn't make real HTTP calls
+// to agent containers (which aren't running in tests). Without this mock the
+// `await runRemoteCapabilityCheck(...)` call introduces extra async ticks
+// before the task reaches "dispatched" status, breaking timing-sensitive tests.
+vi.mock("./capability-enforcer.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./capability-enforcer.js")>();
+  return { ...actual, runRemoteCapabilityCheck: vi.fn().mockResolvedValue(null) };
+});
+
 import { reportEscalation } from "../triggers/reporters.js";
 const mockReportEscalation = vi.mocked(reportEscalation);
 

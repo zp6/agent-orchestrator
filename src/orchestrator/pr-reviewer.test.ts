@@ -1169,7 +1169,9 @@ describe("PRReviewer", () => {
 
       const { execSync: mockExecSync } = await import("node:child_process");
       vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
-        if (typeof cmd === "string" && cmd.includes("git rebase origin/main")) {
+        // Only throw for actual git rebase invocations, not for gh pr comment bodies
+        // that happen to mention "git rebase origin/main" as instructional text.
+        if (typeof cmd === "string" && /^git rebase\b/.test(cmd.trim())) {
           throw new Error("CONFLICT: Merge conflict");
         }
         if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
@@ -1180,7 +1182,9 @@ describe("PRReviewer", () => {
         return "";
       });
 
-      const reviewer = new PRReviewer(config);
+      // Use an isolated in-memory store so prior test runs don't pollute the counter.
+      const store = new StateStore(":memory:");
+      const reviewer = new PRReviewer(config, store);
 
       expect(reviewer.getConflictEscalationCount("owner/repo", 9)).toBe(0);
 
@@ -1189,6 +1193,8 @@ describe("PRReviewer", () => {
 
       await reviewer.reviewPR("owner/repo", 9);
       expect(reviewer.getConflictEscalationCount("owner/repo", 9)).toBe(2);
+
+      store.close();
     });
 
     it("resetConflictEscalation clears the counter", async () => {
@@ -1204,7 +1210,9 @@ describe("PRReviewer", () => {
 
       const { execSync: mockExecSync } = await import("node:child_process");
       vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
-        if (typeof cmd === "string" && cmd.includes("git rebase origin/main")) {
+        // Only throw for actual git rebase invocations, not for gh pr comment bodies
+        // that happen to mention "git rebase origin/main" as instructional text.
+        if (typeof cmd === "string" && /^git rebase\b/.test(cmd.trim())) {
           throw new Error("CONFLICT: Merge conflict");
         }
         if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
@@ -1215,13 +1223,17 @@ describe("PRReviewer", () => {
         return "";
       });
 
-      const reviewer = new PRReviewer(config);
+      // Use an isolated in-memory store so prior test runs don't pollute the counter.
+      const store = new StateStore(":memory:");
+      const reviewer = new PRReviewer(config, store);
       await reviewer.reviewPR("owner/repo", 9);
       await reviewer.reviewPR("owner/repo", 9);
 
       expect(reviewer.getConflictEscalationCount("owner/repo", 9)).toBe(2);
       reviewer.resetConflictEscalation("owner/repo", 9);
       expect(reviewer.getConflictEscalationCount("owner/repo", 9)).toBe(0);
+
+      store.close();
     });
 
     it("autoCloseConflictingPR posts a comment and closes the PR with --delete-branch", async () => {
@@ -1391,7 +1403,7 @@ describe("PRReviewer", () => {
 // ---------------------------------------------------------------------------
 
 import { vi as vi2 } from "vitest";
-import type { StateStore } from "../state/store.js";
+import { StateStore } from "../state/store.js";
 
 describe("sweepApprovedPRsIntoQueue", () => {
   const sweepConfig: OrchestratorConfig = {

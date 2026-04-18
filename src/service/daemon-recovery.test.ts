@@ -80,6 +80,7 @@ const {
     });
     upsertSecretMountStatus = vi.fn();
     getSecretMountStatus = vi.fn(() => []);
+    recordHealthCheckEvent = vi.fn();
   }
 
   class MockDispatcher {
