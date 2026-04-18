@@ -63,9 +63,14 @@ When this container is used for LLM PR reviews:
 - Conflict recovery reroute monitor: track conflict-recovery dispatch rates and alert on spikes
 - Shared security allowlist: example/template file patterns synchronized with security scanner in agent-proxy
 - Schema-consumer impact detection: flag cross-repo schema changes in PR reviews
-- Standup handler: process zero-action standups; retry failed synthesis
+- Standup handler: process zero-action standups; retry failed synthesis; split large batches into child tasks
 - Health recovery: detect and report agent degraded/recovering transitions
 - Supervisor log: queryable decision log for CLI and dashboard consumers
+- Score integrity audit: bucket breakdown and violation list for approved tasks with low scores
+- Duplicate-dispatch surge detector: alert when dispatch volume for a single issue spikes anomalously
+- Pre-dispatch PR existence guard: prevent re-implementation when a PR already exists for an issue
+- Per-verifier threshold auto-adjustment: Phase 2 calibration that adapts `min_score` per verifier instance
+- Per-agent quality coaching: inject agent-specific coaching directives into housekeeping task prompts
 
 **Out of scope (belongs to orchestrator-core):**
 - Daemon loop, state store, dispatching infrastructure
@@ -110,6 +115,12 @@ src/
     issue-age.ts                    — issue age bucketing and severity (0-7d / 7-14d / 30d+)
     issue-creator.ts                — create GitHub issues for detected improvements
     standup-handler.ts              — zero-action standup handling; synthesis retry (up to 2x)
+    standup-batch-splitter.ts       — split large standup batches into prioritized sequential child tasks
+    triage-coaching.ts              — per-agent quality coaching directives injected into housekeeping prompts
+    duplicate-dispatch-surge-detector.ts — detect surge in duplicate dispatches and send Telegram alert
+    pr-existence-guard.ts           — pre-dispatch guard: check if a PR already exists before re-implementing
+    score-integrity.ts              — score integrity audit: bucket breakdown and per-task violation list
+    threshold-adjuster.ts           — per-verifier threshold auto-adjustment (Phase 2 calibration)
   integration/
     orchestrator-adapter.ts         — createReviewerInstances() adapter for orchestrator import
   service/
