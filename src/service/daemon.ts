@@ -31,6 +31,7 @@ import { planSync, executeSync } from "../orchestrator/sync.js";
 import { notifyOperator, clearNotifyRateLimit, setTelegramRateLimitMs } from "./notify.js";
 import { buildHealthPostmortem, renderPostmortemBlock } from "./health-postmortem.js";
 import { setRecencyWindowHours } from "../triggers/duplicate-guard.js";
+import { DuplicateIdDetector, checkDbForDuplicateIds } from "../state/duplicate-id-detector.js";
 import { startTelegramPolling, stopTelegramPolling, pollTelegram } from "./telegram.js";
 import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.js";
 import { maybeRunDailySecurityScan, type SecurityScanState } from "../orchestrator/security-scanner.js";
@@ -305,6 +306,12 @@ export class Daemon {
   /** Reason the daemon is stopping — populated before cleanup() so crash handlers can read it. */
   private stopReason: string | undefined = undefined;
 
+  /**
+   * Tracks task IDs seen in each daemon cycle to detect and alert on duplicates.
+   * See issue #935.
+   */
+  private duplicateIdDetector = new DuplicateIdDetector();
+
   constructor(configPath?: string, pollIntervalMs?: number) {
     this.configPath = configPath;
     this.config = loadConfig(configPath);
@@ -322,6 +329,9 @@ export class Daemon {
     this.cycleCount = this.store.getTotalCycleCount();
     setLLMUsageRecorder(this.store.recordTokenUsage.bind(this.store));
 
+    // Attach state store so duplicate-ID incidents are persisted across restarts.
+    this.duplicateIdDetector.attachStore(this.store);
+
     // Wire up SQLite persistence for the issue-state cache (issue #590).
     // This ensures every fresh GitHub fetch is also written to the
     // issue_state_cache table so the dashboard can filter closed issues
@@ -332,6 +342,9 @@ export class Daemon {
     setRecencyWindowHours(this.config.triggers?.recency_window_hours);
     setTelegramRateLimitMs(this.config.notifications?.telegram_rate_limit_ms);
     this.dispatcher = new Dispatcher(this.config, this.store);
+    // Wire duplicate-ID detector into dispatcher so it can record IDs and
+    // handle collisions with Telegram alerts (issue #935).
+    this.dispatcher.attachDuplicateIdDetector(this.duplicateIdDetector);
 
     this.reviewerClient = new ReviewerClient(this.config);
     this.issueCreator = new IssueCreator(this.config);
@@ -453,6 +466,15 @@ export class Daemon {
     // for agents whose tokens have already propagated, instead of waiting 10
     // cycles (~5 min) for the periodic check.
     await this.checkAuthRecovery();
+
+    // Scan state.db for any pre-existing duplicate task IDs at startup (issue #935).
+    // Fires a Telegram alert if any are found so operators can investigate
+    // before the first cycle begins.
+    try {
+      await checkDbForDuplicateIds(this.store);
+    } catch (err) {
+      this.log.warn("Startup duplicate-ID scan failed", { error: err instanceof Error ? err.message : String(err) });
+    }
 
     // Seed learned rules from CLAUDE.md files (idempotent — skips existing rules)
     try {
@@ -612,6 +634,9 @@ export class Daemon {
     const cycleStartedAt = new Date();
     const time = cycleStartedAt.toLocaleTimeString();
     this.cycleCount++;
+
+    // Reset per-cycle duplicate-ID tracking (issue #935).
+    this.duplicateIdDetector.startCycle();
 
     const cycleId = this.store.recordCycleStart();
     let registeredAgents: Set<string> = new Set();

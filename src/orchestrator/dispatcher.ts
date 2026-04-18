@@ -3,7 +3,8 @@ import { Router, LLM_FALLBACK_THRESHOLD } from "./router.js";
 import { LLMRouter } from "./llm-router.js";
 import { Planner, type Plan } from "./planner.js";
 import { PlanExecutor, type ExecutionResult } from "./executor.js";
-import { StateStore, type Task, type TaskSource, type TaskType, type AgentHealth } from "../state/store.js";
+import { StateStore, type Task, type TaskSource, type TaskType, type AgentHealth, DuplicateTaskIdError } from "../state/store.js";
+import { DuplicateIdDetector } from "../state/duplicate-id-detector.js";
 import { type OrchestratorConfig, getPoolMembers } from "../config/schema.js";
 import { ulid } from "ulid";
 import { createLogger } from "../service/logger.js";
@@ -325,6 +326,8 @@ export class Dispatcher {
   private store: StateStore;
   private planner: Planner;
   private log = createLogger("dispatcher");
+  /** Optional per-cycle duplicate-ID detector injected by the daemon (issue #935). */
+  private duplicateIdDetector: DuplicateIdDetector | null = null;
 
   constructor(
     private config: OrchestratorConfig,
@@ -335,6 +338,16 @@ export class Dispatcher {
     this.router = new Router(config, llmRouter);
     this.store = store;
     this.planner = new Planner(config, store);
+  }
+
+  /**
+   * Attach a `DuplicateIdDetector` so the dispatcher can call `recordId()`
+   * for every newly created task and `handleCollision()` when a
+   * `DuplicateTaskIdError` is thrown by the store.  Call once after
+   * construction.
+   */
+  attachDuplicateIdDetector(detector: DuplicateIdDetector): void {
+    this.duplicateIdDetector = detector;
   }
 
   private compareHealth(a: AgentHealth, b: AgentHealth): number {
@@ -1146,16 +1159,34 @@ export class Dispatcher {
     // Create task — reuse the caller's conversationId when provided (e.g. PR
     // feedback or revision tasks that should resume the agent's prior session).
     const conversationId = options?.conversationId ?? ulid();
-    const task = this.store.createTask({
-      title: options?.title ?? message.slice(0, 100),
-      description: message,
-      source: options?.source ?? "manual",
-      source_ref: options?.sourceRef,
-      agent_name: agentName,
-      task_type: taskType,
-      parent_task_id: options?.parentTaskId,
-      step_id: options?.stepId,
-    });
+    let task: ReturnType<StateStore["createTask"]>;
+    try {
+      task = this.store.createTask({
+        title: options?.title ?? message.slice(0, 100),
+        description: message,
+        source: options?.source ?? "manual",
+        source_ref: options?.sourceRef,
+        agent_name: agentName,
+        task_type: taskType,
+        parent_task_id: options?.parentTaskId,
+        step_id: options?.stepId,
+      });
+    } catch (err) {
+      if (err instanceof DuplicateTaskIdError && this.duplicateIdDetector) {
+        // Fire Telegram alert and persist the incident (issue #935).
+        await this.duplicateIdDetector.handleCollision(
+          err.taskId,
+          err.existingTitle,
+          err.newTitle,
+        );
+      }
+      throw err;
+    }
+
+    // Record the new task ID in the per-cycle duplicate detector (issue #935).
+    if (this.duplicateIdDetector) {
+      await this.duplicateIdDetector.recordId(task.id, task.title);
+    }
 
     // Update to dispatched
     this.store.updateTask(task.id, {

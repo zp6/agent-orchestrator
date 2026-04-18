@@ -5,6 +5,9 @@ import { mkdirSync } from "node:fs";
 import { ulid } from "ulid";
 import { extractIntendedAgent } from "../orchestrator/routing-mismatch-detector.js";
 import type { OrchestratorConfig } from "../config/schema.js";
+import { createLogger } from "../service/logger.js";
+
+const storeLog = createLogger("store");
 
 // ── Daemon lifecycle audit types ──────────────────────────────────────────────
 
@@ -48,6 +51,24 @@ export interface ConfigReloadRecord {
   errors_json: string | null;
   /** What triggered this reload: startup | file-watcher | signal. */
   triggered_by: ConfigReloadTrigger;
+}
+
+/**
+ * Thrown by `StateStore.createTask()` when the generated ULID already exists
+ * in the tasks table.  Callers can catch this to fire Telegram alerts or
+ * record the incident without relying on raw SQLite constraint error messages.
+ */
+export class DuplicateTaskIdError extends Error {
+  constructor(
+    public readonly taskId: string,
+    public readonly existingTitle: string,
+    public readonly newTitle: string,
+  ) {
+    super(
+      `Duplicate task ID "${taskId}": existing task "${existingTitle}" conflicts with new task "${newTitle}"`,
+    );
+    this.name = "DuplicateTaskIdError";
+  }
 }
 
 export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed" | "escalated" | "result_missing" | "superseded";
@@ -1500,25 +1521,75 @@ export class StateStore {
       lineageGroupId = id; // self-assign
     }
 
+    // Collision guard: check for an existing task with the same ID before
+    // attempting the INSERT.  A genuine ULID collision is astronomically
+    // unlikely, but detecting it here means we log at WARN with the conflicting
+    // titles rather than surfacing a cryptic SQLite PRIMARY KEY error upstream.
+    const existing = this.getTask(id);
+    if (existing) {
+      storeLog.warn("Duplicate task ID detected at insertion", {
+        task_id: id,
+        existing_title: existing.title,
+        new_title: params.title,
+      });
+      // Re-throw a typed error so callers (and the duplicate-id-detector) can
+      // react without catching a generic SQLite constraint failure.
+      throw new DuplicateTaskIdError(id, existing.title, params.title);
+    }
+
     const stmt = this.db.prepare(`
       INSERT INTO tasks (id, title, description, source, source_ref, status, agent_name, parent_task_id, step_id, task_type, lineage_group_id, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
     `);
-    stmt.run(
-      id,
-      params.title,
-      params.description ?? null,
-      params.source,
-      params.source_ref ?? null,
-      params.agent_name ?? null,
-      params.parent_task_id ?? null,
-      params.step_id ?? null,
-      params.task_type ?? "implementation",
-      lineageGroupId,
-      now,
-      now,
-    );
+    try {
+      stmt.run(
+        id,
+        params.title,
+        params.description ?? null,
+        params.source,
+        params.source_ref ?? null,
+        params.agent_name ?? null,
+        params.parent_task_id ?? null,
+        params.step_id ?? null,
+        params.task_type ?? "implementation",
+        lineageGroupId,
+        now,
+        now,
+      );
+    } catch (err) {
+      // Catch SQLite PRIMARY KEY violations that can occur in a race between
+      // the pre-check SELECT and the INSERT (extremely rare in single-process
+      // daemon, but defensive).
+      if (err instanceof Error && err.message.includes("UNIQUE constraint failed: tasks.id")) {
+        const conflict = this.getTask(id);
+        storeLog.warn("Duplicate task ID race-condition on INSERT", {
+          task_id: id,
+          existing_title: conflict?.title ?? "<unknown>",
+          new_title: params.title,
+        });
+        throw new DuplicateTaskIdError(id, conflict?.title ?? "<unknown>", params.title);
+      }
+      throw err;
+    }
     return this.getTask(id)!;
+  }
+
+  /**
+   * Return task IDs that appear more than once in the tasks table.
+   *
+   * In a healthy database, the PRIMARY KEY constraint makes this impossible.
+   * This method is exposed for dashboard and startup auditing purposes.
+   *
+   * @returns Array of duplicate task ID strings (empty if DB is healthy).
+   */
+  getDuplicateTaskIds(): string[] {
+    const rows = this.db.prepare(`
+      SELECT id, COUNT(*) AS cnt
+      FROM tasks
+      GROUP BY id
+      HAVING cnt > 1
+    `).all() as Array<{ id: string; cnt: number }>;
+    return rows.map((r) => r.id);
   }
 
   getTask(id: string): Task | undefined {
@@ -8549,5 +8620,88 @@ export class StateStore {
     if (score < 0.8) return "0.7-0.8";
     if (score < 0.9) return "0.8-0.9";
     return "0.9-1.0";
+  }
+
+  // ── Duplicate ID incidents ─────────────────────────────────────────────────
+
+  /**
+   * Lazily create the duplicate_id_incidents table on first use.
+   * Using lazy creation keeps existing DB snapshots compatible without a
+   * full migration pass.
+   */
+  private ensureDuplicateIdIncidentsTable(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS duplicate_id_incidents (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id      TEXT NOT NULL,
+        first_title  TEXT NOT NULL,
+        second_title TEXT NOT NULL,
+        detected_at  TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_dup_id_incidents_task_id
+        ON duplicate_id_incidents(task_id);
+    `);
+  }
+
+  /**
+   * Persist a duplicate-task-ID incident so the CLI and dashboard can surface
+   * a warning icon next to affected task IDs.
+   */
+  recordDuplicateIdIncident(params: {
+    taskId: string;
+    firstTitle: string;
+    secondTitle: string;
+  }): void {
+    this.ensureDuplicateIdIncidentsTable();
+    this.db.prepare(`
+      INSERT INTO duplicate_id_incidents (task_id, first_title, second_title, detected_at)
+      VALUES (?, ?, ?, ?)
+    `).run(params.taskId, params.firstTitle, params.secondTitle, new Date().toISOString());
+  }
+
+  /**
+   * Return all persisted duplicate-ID incidents, most recent first.
+   * Capped at 200 rows so the result set stays bounded.
+   */
+  getDuplicateIdIncidents(): Array<{
+    id: number;
+    taskId: string;
+    firstTitle: string;
+    secondTitle: string;
+    detectedAt: string;
+  }> {
+    this.ensureDuplicateIdIncidentsTable();
+    const rows = this.db.prepare(`
+      SELECT id, task_id, first_title, second_title, detected_at
+      FROM duplicate_id_incidents
+      ORDER BY detected_at DESC
+      LIMIT 200
+    `).all() as Array<{
+      id: number;
+      task_id: string;
+      first_title: string;
+      second_title: string;
+      detected_at: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      taskId: r.task_id,
+      firstTitle: r.first_title,
+      secondTitle: r.second_title,
+      detectedAt: r.detected_at,
+    }));
+  }
+
+  /**
+   * Return the set of task IDs that have had a duplicate-ID incident.
+   * Used by the CLI and dashboard to render a ⚠ warning icon next to
+   * affected tasks.
+   */
+  getFlaggedDuplicateTaskIds(): Set<string> {
+    this.ensureDuplicateIdIncidentsTable();
+    const rows = this.db.prepare(`
+      SELECT DISTINCT task_id FROM duplicate_id_incidents
+    `).all() as Array<{ task_id: string }>;
+    return new Set(rows.map((r) => r.task_id));
   }
 }

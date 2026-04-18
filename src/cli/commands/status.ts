@@ -63,7 +63,7 @@ export function formatRetryState(task: Task): string {
   return "";
 }
 
-function formatTask(task: Task, verbose = false): string {
+function formatTask(task: Task, verbose = false, flaggedDuplicateIds?: Set<string>): string {
   const colorFn = STATUS_COLORS[task.status] ?? chalk.white;
   const status = colorFn(task.status.padEnd(12));
   const agent = task.agent_name ? chalk.cyan(task.agent_name) : chalk.dim("unassigned");
@@ -81,7 +81,12 @@ function formatTask(task: Task, verbose = false): string {
   const retryState = formatRetryState(task);
   const retryBadge = retryState ? chalk.yellow(` ⟳ ${retryState}`) : "";
 
-  let output = `${chalk.dim(task.id.slice(0, 8))} ${status} ${agent.padEnd(30)} ${displayTitle}${retryBadge}`;
+  // Warn if this task ID had a duplicate-ID collision (issue #935).
+  const duplicateBadge = flaggedDuplicateIds?.has(task.id)
+    ? chalk.yellow(" ⚠ duplicate-id")
+    : "";
+
+  let output = `${chalk.dim(task.id.slice(0, 8))} ${status} ${agent.padEnd(30)} ${displayTitle}${retryBadge}${duplicateBadge}`;
 
   if (verbose) {
     output += `\n  ${chalk.dim("Created:")} ${time}`;
@@ -577,6 +582,16 @@ export function registerStatusCommand(program: Command): void {
     .action((taskId?: string, opts?: { agent?: string; state?: string; type?: string; limit?: string; metrics?: boolean; trend?: string | boolean; unverified?: boolean; sourceRef?: string }) => {
       const store = new StateStore();
 
+      // Load flagged duplicate-ID task IDs once for the whole command invocation
+      // so every formatTask() call can show a ⚠ warning icon (issue #935).
+      const flaggedDuplicateIds = (() => {
+        try {
+          return store.getFlaggedDuplicateTaskIds();
+        } catch {
+          return new Set<string>();
+        }
+      })();
+
       // --source-ref: show dedup status and all tasks for a given source ref
       if (opts?.sourceRef) {
         const sourceRef = opts.sourceRef;
@@ -633,7 +648,7 @@ export function registerStatusCommand(program: Command): void {
         } else {
           console.log(chalk.bold(`\nTask history (${tasks.length}):\n`));
           for (const task of tasks) {
-            console.log(formatTask(task));
+            console.log(formatTask(task, false, flaggedDuplicateIds));
           }
         }
         store.close();
@@ -678,7 +693,7 @@ export function registerStatusCommand(program: Command): void {
           store.close();
           process.exit(1);
         }
-        console.log(formatTask(match, true));
+        console.log(formatTask(match, true, flaggedDuplicateIds));
 
         // For pr-feedback tasks, show the full feedback-cycle history for that PR
         if (match.source === "pr-feedback" && match.source_ref) {
@@ -719,7 +734,7 @@ export function registerStatusCommand(program: Command): void {
           } else {
             console.log(chalk.bold(`Unverified Done Tasks (${tasks.length})\n`));
             for (const task of tasks) {
-              console.log(formatTask(task));
+              console.log(formatTask(task, false, flaggedDuplicateIds));
             }
             console.log(chalk.dim(`\n${tasks.length} task(s) pending verification`));
             console.log(chalk.dim("Run `orch improve verify` to verify these tasks."));
@@ -737,7 +752,7 @@ export function registerStatusCommand(program: Command): void {
           } else {
             console.log(chalk.bold("Tasks\n"));
             for (const task of tasks) {
-              console.log(formatTask(task));
+              console.log(formatTask(task, false, flaggedDuplicateIds));
             }
             console.log(chalk.dim(`\n${tasks.length} task(s)`));
           }
