@@ -113,6 +113,17 @@ export interface Task {
    * Null when priority was not set at dispatch time (gate does not fire).
    */
   issue_priority?: number | null;
+  /**
+   * Records why a sub-0.60 task was approved despite the quality floor.
+   *
+   * Well-known values:
+   * - `'operator_override'` — Explicit human approval via `/approve` command
+   * - `'floor_not_enforced'` — Historical approval that slipped through without
+   *   the quality floor gate firing (audit gap, backfilled by issue #295)
+   *
+   * Null when the task was not a sub-0.60 approval or has not been classified.
+   */
+  bypass_reason?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1376,6 +1387,17 @@ export interface VerificationResultRecord {
    * Stored as SQLite INTEGER (0/1/NULL) and mapped to boolean by the dashboard.
    */
   cli_smoke_test_passed?: number | null;
+  /**
+   * Records why a sub-0.60 task was approved despite the quality floor.
+   *
+   * Well-known values:
+   * - `'operator_override'` — Explicit human approval via `/approve` command
+   * - `'floor_not_enforced'` — Historical approval that slipped through without
+   *   the quality floor gate firing (audit gap, backfilled by issue #295)
+   *
+   * Null when the task was not a sub-0.60 approval or has not been classified.
+   */
+  bypass_reason?: string | null;
 }
 
 /**

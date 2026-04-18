@@ -523,6 +523,22 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       CREATE INDEX IF NOT EXISTS idx_reconciliation_events_status
         ON reconciliation_events(status);
     `);
+
+    // Add bypass_reason column to tasks table (idempotent — issue #295).
+    // Records why a sub-0.60 task was approved despite the quality floor.
+    // Well-known values: 'operator_override', 'floor_not_enforced'.
+    try {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN bypass_reason TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+
+    // Add bypass_reason column to verification_results table (idempotent — issue #295).
+    try {
+      this.db.exec("ALTER TABLE verification_results ADD COLUMN bypass_reason TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
   }
 
   // ── Schema access instrumentation ────────────────────────────────────────
@@ -2824,13 +2840,14 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
     this.db
       .prepare(
         `INSERT INTO verification_results
-           (task_id, score, first_pass, rejection_reason, blocked_reason, approval_rationale, threshold, agent_id, timestamp, cli_smoke_test_passed)
+           (task_id, score, first_pass, rejection_reason, blocked_reason, approval_rationale, threshold, agent_id, timestamp, cli_smoke_test_passed, bypass_reason)
          VALUES
-           (@task_id, @score, @first_pass, @rejection_reason, @blocked_reason, @approval_rationale, @threshold, @agent_id, @timestamp, @cli_smoke_test_passed)`,
+           (@task_id, @score, @first_pass, @rejection_reason, @blocked_reason, @approval_rationale, @threshold, @agent_id, @timestamp, @cli_smoke_test_passed, @bypass_reason)`,
       )
       .run({
         ...normalizedRecord,
         cli_smoke_test_passed: normalizedRecord.cli_smoke_test_passed ?? null,
+        bypass_reason: normalizedRecord.bypass_reason ?? null,
       });
   }
 
@@ -2993,6 +3010,9 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
     const cols = this.db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
     const hasApprovalRationale = cols.some((c) => c.name === "approval_rationale");
 
+    // Set bypass_reason when operator approves a sub-0.60 task
+    const bypassReason = decision === "approve" ? `operator_override` : null;
+
     if (hasApprovalRationale) {
       this.db
         .prepare(
@@ -3000,6 +3020,7 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
            SET verification_status = ?,
                verification_notes = ?,
                approval_rationale = ?,
+               bypass_reason = ?,
                updated_at = ?
            WHERE id = ?`,
         )
@@ -3007,6 +3028,7 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
           newStatus,
           newNotes,
           decision === "approve" ? `operator_override: ${operatorNote}` : null,
+          bypassReason,
           timestamp,
           taskId,
         );
@@ -3016,13 +3038,99 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
           `UPDATE tasks
            SET verification_status = ?,
                verification_notes = ?,
+               bypass_reason = ?,
                updated_at = ?
            WHERE id = ?`,
         )
-        .run(newStatus, newNotes, timestamp, taskId);
+        .run(newStatus, newNotes, bypassReason, timestamp, taskId);
     }
 
     return true;
+  }
+
+  // ── Bypass reason backfill (issue #295) ──────────────────────────────────
+
+  /**
+   * Backfill `bypass_reason` for historical sub-0.60 approved tasks.
+   *
+   * Logic:
+   * 1. Query tasks where quality_score < 0.60, verification_status = 'approved',
+   *    and bypass_reason IS NULL.
+   * 2. If verification_notes contains `[operator-override: APPROVED ...]`,
+   *    set bypass_reason = 'operator_override'.
+   * 3. Otherwise set bypass_reason = 'floor_not_enforced'.
+   * 4. Similarly backfill verification_results by joining on task_id.
+   *
+   * Idempotent: only touches rows where bypass_reason IS NULL.
+   *
+   * @returns Summary of rows updated.
+   */
+  backfillBypassReasons(): { tasks_updated: number; verification_results_updated: number } {
+    // Step 1: Backfill tasks with operator-override pattern
+    const operatorOverrideTaskResult = this.db
+      .prepare(
+        `UPDATE tasks
+         SET bypass_reason = 'operator_override',
+             updated_at = datetime('now')
+         WHERE quality_score < 0.60
+           AND verification_status = 'approved'
+           AND bypass_reason IS NULL
+           AND (
+             verification_notes LIKE '%[operator-override:%'
+             OR verification_notes LIKE '%operator_override%'
+           )`,
+      )
+      .run();
+
+    // Step 2: Backfill remaining tasks (no operator-override marker) as floor_not_enforced
+    const floorNotEnforcedTaskResult = this.db
+      .prepare(
+        `UPDATE tasks
+         SET bypass_reason = 'floor_not_enforced',
+             updated_at = datetime('now')
+         WHERE quality_score < 0.60
+           AND verification_status = 'approved'
+           AND bypass_reason IS NULL`,
+      )
+      .run();
+
+    const tasksUpdated = operatorOverrideTaskResult.changes + floorNotEnforcedTaskResult.changes;
+
+    // Step 3: Backfill verification_results where the matching task has operator-override notes
+    const operatorOverrideVrResult = this.db
+      .prepare(
+        `UPDATE verification_results
+         SET bypass_reason = 'operator_override'
+         WHERE score < 0.60
+           AND first_pass = 1
+           AND bypass_reason IS NULL
+           AND task_id IN (
+             SELECT id FROM tasks
+             WHERE verification_notes LIKE '%[operator-override:%'
+                OR verification_notes LIKE '%operator_override%'
+           )`,
+      )
+      .run();
+
+    // Step 4: Backfill remaining verification_results as floor_not_enforced
+    const floorNotEnforcedVrResult = this.db
+      .prepare(
+        `UPDATE verification_results
+         SET bypass_reason = 'floor_not_enforced'
+         WHERE score < 0.60
+           AND first_pass = 1
+           AND bypass_reason IS NULL
+           AND task_id IN (
+             SELECT id FROM tasks
+             WHERE quality_score < 0.60
+               AND verification_status = 'approved'
+           )`,
+      )
+      .run();
+
+    const vrUpdated = operatorOverrideVrResult.changes + floorNotEnforcedVrResult.changes;
+
+    return { tasks_updated: tasksUpdated, verification_results_updated: vrUpdated };
   }
 
   // ── First-pass rate widget (issue #88) ───────────────────────────────────

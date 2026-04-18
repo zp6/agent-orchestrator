@@ -31,6 +31,7 @@
  *   /reject <task-id> [note]  → reject a held task from the operator review queue
  *   /routing-violations [n]   → list the last N agent-to-repo routing violations (default 10)
  *   /quality-health            → quality system health: bypass rate, sparkline, and bypassed task list
+ *   /backfill-bypass-reasons   → backfill bypass_reason for historical sub-0.60 approved tasks (idempotent)
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -119,7 +120,8 @@ type CommandName =
   | "approve"
   | "reject"
   | "routing-violations"
-  | "quality-health";
+  | "quality-health"
+  | "backfill-bypass-reasons";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -155,6 +157,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "reject",
   "routing-violations",
   "quality-health",
+  "backfill-bypass-reasons",
 ]);
 
 interface ParsedCommand {
@@ -454,6 +457,9 @@ async function executeCommand(
 
     case "quality-health":
       return handleQualitySystemHealth(store, dashboardUrl);
+
+    case "backfill-bypass-reasons":
+      return handleBackfillBypassReasons(store);
   }
 }
 
@@ -2208,6 +2214,60 @@ function handleQualitySystemHealth(
     return `${page}\n\n[View dashboard](${dashboardUrl}/quality-system-health)`;
   }
   return page;
+}
+
+// ── Bypass reason backfill handler (issue #295) ─────────────────────────
+
+/**
+ * Handle the /backfill-bypass-reasons command.
+ * Backfills bypass_reason for historical sub-0.60 approved tasks.
+ *
+ * Logic:
+ * - Tasks with `[operator-override: ...]` in verification_notes → 'operator_override'
+ * - Remaining sub-0.60 approved tasks with null bypass_reason → 'floor_not_enforced'
+ * - Similarly backfills verification_results by joining on task_id
+ *
+ * Idempotent: safe to run multiple times — only updates rows with NULL bypass_reason.
+ *
+ * Usage: `/backfill-bypass-reasons`
+ */
+function handleBackfillBypassReasons(store: ITelegramStateStore): string {
+  // Check if the store has the backfill method
+  const storeAny = store as unknown as Record<string, unknown>;
+  if (typeof storeAny.backfillBypassReasons !== "function") {
+    return [
+      `⚠️ *Backfill Bypass Reasons — Not Available*`,
+      ``,
+      `The connected StateStore does not support \`backfillBypassReasons()\`.`,
+      `This command requires the reviewer's own StateStore (not the orchestrator's).`,
+    ].join("\n");
+  }
+
+  const result = (storeAny.backfillBypassReasons as () => { tasks_updated: number; verification_results_updated: number })();
+
+  if (result.tasks_updated === 0 && result.verification_results_updated === 0) {
+    return [
+      `✅ *Backfill Bypass Reasons — No Action Needed*`,
+      ``,
+      `All sub-0.60 approved tasks already have a \`bypass_reason\` set.`,
+      `Nothing to backfill.`,
+    ].join("\n");
+  }
+
+  const lines: string[] = [
+    `✅ *Backfill Bypass Reasons — Complete*`,
+    ``,
+    `📋 **Tasks updated:** ${result.tasks_updated}`,
+    `📋 **Verification results updated:** ${result.verification_results_updated}`,
+    ``,
+    `Bypass reasons classified:`,
+    `  🔓 \`operator_override\` — tasks with \`[operator-override: ...]\` notes`,
+    `  🏚️ \`floor_not_enforced\` — remaining sub-0.60 approved tasks`,
+    ``,
+    `This backfill is idempotent — safe to run again.`,
+  ];
+
+  return lines.join("\n");
 }
 
 // ── TelegramCommandHandler class ──────────────────────────────────────────
