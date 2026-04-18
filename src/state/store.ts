@@ -898,7 +898,7 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
 
     let totalDone = 0;
     let totalScored = 0;
-    const perAgent: ScoreCoverageMetric["per_agent"] = [];
+    const perAgent: NonNullable<ScoreCoverageMetric["per_agent"]> = [];
 
     for (const row of rows) {
       const agentName = row.agent_name ?? "(unassigned)";
@@ -1513,17 +1513,46 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
    * @param days - Look-back window (default: 7).
    * @param warningThreshold - Agents whose rolling_avg falls below this value
    *   have below_threshold: true (default: 0.75).
+   * @param redThreshold - Score below which a point/agent is critical (red band).
+   *   Default: 0.60.
+   * @param yellowThreshold - Score at or above which a point/agent is healthy
+   *   (green band); scores in [redThreshold, yellowThreshold) are yellow.
+   *   Default: 0.75.
+   * @param taskHistoryBaseUrl - Base URL for per-agent task history click-through.
+   *   When provided, each `AgentQualityTrendPoint` includes a `task_history_url`
+   *   of the form `<base>?agent=<name>&date=<YYYY-MM-DD>`.  Pass null to omit.
    */
   getAgentQualityTrend(
     days = 7,
     warningThreshold = 0.75,
+    redThreshold = 0.60,
+    yellowThreshold = 0.75,
+    taskHistoryBaseUrl: string | null = null,
   ): import("./types.js").AgentQualityTrend {
     const lookbackDays = Number.isFinite(days) && days >= 1 ? Math.floor(days) : 7;
     const threshold =
       Number.isFinite(warningThreshold) && warningThreshold >= 0 && warningThreshold <= 1
         ? warningThreshold
         : 0.75;
+    const redThr =
+      Number.isFinite(redThreshold) && redThreshold >= 0 && redThreshold <= 1
+        ? redThreshold
+        : 0.60;
+    const yellowThr =
+      Number.isFinite(yellowThreshold) && yellowThreshold >= 0 && yellowThreshold <= 1
+        ? yellowThreshold
+        : 0.75;
     const offsetArg = `-${lookbackDays - 1} days`;
+
+    /** Derive the colour band for a given avg_score value. */
+    const bandForScore = (
+      score: number | null,
+    ): import("./types.js").SparklineBand => {
+      if (score === null) return null;
+      if (score < redThr) return "red";
+      if (score < yellowThr) return "yellow";
+      return "green";
+    };
 
     const dateCte = `
       WITH RECURSIVE dates(d) AS (
@@ -1592,11 +1621,19 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
           agent_name,
           rolling_avg: rollingAvg,
           below_threshold: rollingAvg !== null && rollingAvg < threshold,
-          days: dayRows.map((r) => ({
-            date: r.date,
-            avg_score: r.avg_score,
-            scored_task_count: r.scored_task_count,
-          })),
+          risk_tier: bandForScore(rollingAvg),
+          days: dayRows.map((r) => {
+            const taskHistoryUrl = taskHistoryBaseUrl
+              ? `${taskHistoryBaseUrl}?agent=${encodeURIComponent(agent_name)}&date=${r.date}`
+              : null;
+            return {
+              date: r.date,
+              avg_score: r.avg_score,
+              scored_task_count: r.scored_task_count,
+              band: bandForScore(r.avg_score),
+              task_history_url: taskHistoryUrl,
+            };
+          }),
         };
       },
     );
@@ -1604,6 +1641,8 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
     return {
       days: lookbackDays,
       warning_threshold: threshold,
+      red_threshold: redThr,
+      yellow_threshold: yellowThr,
       per_agent: perAgent,
       generated_at: new Date().toISOString(),
     };
@@ -2336,52 +2375,6 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       )
       .all() as Task[];
     return rows;
-  }
-
-  /**
-   * Apply an operator override to a task held in `needs_operator_review`.
-   *
-   * - `approve`: sets verification_status → 'approved', bypassing the 0.60 floor.
-   * - `reject`:  sets verification_status → 'rejected'.
-   *
-   * Returns true when the override was applied, false when the task was not
-   * in `needs_operator_review` status (or does not exist).
-   */
-  operatorOverride(
-    taskId: string,
-    decision: "approve" | "reject",
-    operatorNote: string,
-  ): boolean {
-    const existing = this.db
-      .prepare("SELECT verification_status, verification_notes, quality_score FROM tasks WHERE id = ?")
-      .get(taskId) as {
-        verification_status: string | null;
-        verification_notes: string | null;
-        quality_score: number | null;
-      } | undefined;
-
-    if (!existing || existing.verification_status !== "needs_operator_review") {
-      return false;
-    }
-
-    const timestamp = new Date().toISOString();
-    const label = decision === "approve" ? "APPROVED" : "REJECTED";
-    const overrideNote = `[operator-override: ${label} at ${timestamp}] ${operatorNote}`;
-
-    const newStatus = decision === "approve" ? "approved" : "rejected";
-    const newNotes = existing.verification_notes
-      ? `${overrideNote}\n\n${existing.verification_notes}`
-      : overrideNote;
-
-    this.db
-      .prepare(
-        `UPDATE tasks
-         SET verification_status = ?, verification_notes = ?, updated_at = ?
-         WHERE id = ?`,
-      )
-      .run(newStatus, newNotes, new Date().toISOString(), taskId);
-
-    return true;
   }
 
   /**

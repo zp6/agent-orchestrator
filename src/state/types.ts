@@ -303,6 +303,17 @@ export interface DispatchRequest {
 // ── Agent quality trend types ─────────────────────────────────────────────
 
 /**
+ * Colour band for a data point or series in the fleet health sparkline.
+ *
+ * - `"red"`    — avg_score < red_threshold (default 0.60): critical zone
+ * - `"yellow"` — red_threshold ≤ avg_score < yellow_threshold (default 0.75):
+ *                warning zone
+ * - `"green"`  — avg_score ≥ yellow_threshold: healthy
+ * - `null`     — no data on that day (avg_score is null)
+ */
+export type SparklineBand = "red" | "yellow" | "green" | null;
+
+/**
  * One calendar day's average quality score for a single agent.
  * Used to build 7-day sparklines on the dashboard home page.
  */
@@ -316,6 +327,21 @@ export interface AgentQualityTrendPoint {
   avg_score: number | null;
   /** Number of tasks with a quality_score recorded on this day. */
   scored_task_count: number;
+  /**
+   * Colour band for this data point based on the day's avg_score.
+   * "red" < red_threshold ≤ "yellow" < yellow_threshold ≤ "green"; null when no data.
+   * Provided so dashboards can colour individual points without re-implementing
+   * the threshold logic.
+   */
+  band: SparklineBand;
+  /**
+   * URL to per-agent task history filtered to this calendar date.
+   * Pattern: `<task_history_base_url>?agent=<name>&date=<YYYY-MM-DD>`.
+   * Null when no `task_history_base_url` was provided to the payload builder.
+   * Clicking a sparkline point should navigate here so operators can inspect
+   * exactly which tasks drove a score on that day.
+   */
+  task_history_url: string | null;
 }
 
 /**
@@ -335,6 +361,12 @@ export interface AgentQualityTrendSeries {
    * render this agent's sparkline in warning/red colour.
    */
   below_threshold: boolean;
+  /**
+   * Colour band for the agent's rolling average.
+   * Derived from `rolling_avg` against `red_threshold` and `yellow_threshold`.
+   * null when the agent has no scored tasks in the window.
+   */
+  risk_tier: SparklineBand;
   /** Daily data points, one per calendar day in the window, oldest first. */
   days: AgentQualityTrendPoint[];
 }
@@ -351,8 +383,66 @@ export interface AgentQualityTrend {
    * highlighted as a warning. Default: 0.75.
    */
   warning_threshold: number;
+  /**
+   * Score below which a data point or agent is considered critical (red band).
+   * Default: 0.60.
+   */
+  red_threshold: number;
+  /**
+   * Score at or above which a data point or agent is considered healthy (green).
+   * Scores in [red_threshold, yellow_threshold) are yellow (warning).
+   * Default: 0.75 (same as warning_threshold for backward compatibility).
+   */
+  yellow_threshold: number;
   /** Per-agent series, one entry per agent that had any scored tasks in the window. */
   per_agent: AgentQualityTrendSeries[];
+  /** ISO-8601 timestamp when the payload was generated. */
+  generated_at: string;
+}
+
+// ── Fleet health sparkline types ──────────────────────────────────────────
+
+/**
+ * Summary counts of agents across risk tiers in the fleet health view.
+ */
+export interface FleetRiskSummary {
+  /** Agents with rolling_avg < red_threshold (critical). */
+  red: number;
+  /** Agents with red_threshold ≤ rolling_avg < yellow_threshold (warning). */
+  yellow: number;
+  /** Agents with rolling_avg ≥ yellow_threshold (healthy). */
+  green: number;
+  /** Agents present in the window but with no scored tasks. */
+  no_data: number;
+  /** Total agents with at least one scored task in the window. */
+  total_active: number;
+}
+
+/**
+ * Fleet health view wrapping per-agent sparklines with a fleet-level risk
+ * summary. Returned by `getFleetHealthSparklines()`.
+ *
+ * Mount in the orchestrator or dashboard server:
+ *
+ *   app.get('/fleet-health', (_req, res) => res.json(
+ *     getFleetHealthSparklines(store, { task_history_base_url: '/tasks' })
+ *   ));
+ *
+ * Per-agent sparkline points carry `band` and `task_history_url` so the
+ * dashboard can apply colour bands and wire up click-through without any
+ * additional logic.
+ */
+export interface FleetHealthSparklines {
+  /** Look-back window (number of calendar days). */
+  days: number;
+  /** Score below which a point/agent is critical (red). Default: 0.60. */
+  red_threshold: number;
+  /** Score at or above which a point/agent is healthy (green). Default: 0.75. */
+  yellow_threshold: number;
+  /** Fleet-level counts across risk tiers. */
+  fleet_summary: FleetRiskSummary;
+  /** Per-agent sparkline series with band annotations and click-through URLs. */
+  agents: AgentQualityTrendSeries[];
   /** ISO-8601 timestamp when the payload was generated. */
   generated_at: string;
 }
@@ -540,20 +630,36 @@ export interface AgentSLAThreshold {
 export interface ScoreCoverageMetric {
   /** ISO-8601 timestamp when the metric was computed. */
   generated_at: string;
-  /** Minimum task age (minutes) used as the eligibility floor. Default: 5. */
-  min_age_minutes: number;
-  /** Tasks in 'done' status older than min_age_minutes. */
-  total_done: number;
-  /** Done tasks that have a non-null quality_score. */
-  scored_done: number;
-  /** Done tasks that still have quality_score = null. */
-  unscored_done: number;
   /**
    * Fraction of done tasks that are scored (0.0–1.0).
    * 1.0 = full coverage, 0.0 = no tasks scored.
-   * Null when total_done = 0 (no eligible tasks).
+   * Null when total_done_tasks / total_done = 0 (no eligible tasks).
    */
   coverage_pct: number | null;
+  // ── Fields returned by the newer getScoreCoverage (issue #250 revised) ──
+  /** Minimum task age (minutes) used as the eligibility floor. Default: 5. */
+  min_age_minutes?: number;
+  /** Tasks in 'done' status older than min_age_minutes. */
+  total_done?: number;
+  /** Done tasks that have a non-null quality_score. */
+  scored_done?: number;
+  /** Done tasks that still have quality_score = null. */
+  unscored_done?: number;
+  // ── Fields returned by getScoreCoverageMetric (original implementation) ──
+  /** @deprecated Use total_done. Total 'done' tasks older than the grace period. */
+  total_done_tasks?: number;
+  /** @deprecated Use scored_done. Done tasks with a non-null quality_score. */
+  scored_tasks?: number;
+  /** @deprecated Use unscored_done. Done tasks with null quality_score. */
+  unscored_tasks?: number;
+  /** Per-agent breakdown of score coverage (provided by getScoreCoverageMetric). */
+  per_agent?: Array<{
+    agent_name: string;
+    total: number;
+    scored: number;
+    unscored: number;
+    coverage_pct: number | null;
+  }>;
 }
 
 /**
@@ -678,7 +784,13 @@ export interface IStateStore {
    *
    * Only agents that have at least one scored task in the window are included.
    */
-  getAgentQualityTrend(days?: number, warningThreshold?: number): AgentQualityTrend;
+  getAgentQualityTrend(
+    days?: number,
+    warningThreshold?: number,
+    redThreshold?: number,
+    yellowThreshold?: number,
+    taskHistoryBaseUrl?: string | null,
+  ): AgentQualityTrend;
 
   // Routing accuracy feedback
   getRoutingAccuracyStats(days?: number): RoutingAccuracyStats[];
@@ -1646,37 +1758,6 @@ export type ShortCircuitDimension =
   | "no_action_needed"      // already-in-review, zero-action standup, etc.
   | "pre_dispatch_blocked"  // pre-dispatch guard exit (issue closed, auth failure, etc.)
   | "orchestrator_routed";  // orchestrator handled routing without agent work
-
-/**
- * Score coverage metric for the dashboard quality panel.
- *
- * Provides a single percentage representing how many 'done' tasks
- * have a non-null quality_score, enabling operators to spot verification
- * gaps at a glance.
- */
-export interface ScoreCoverageMetric {
-  /** ISO-8601 timestamp when the metric was computed. */
-  generated_at: string;
-  /** Total 'done' tasks older than the grace period (default 5 min). */
-  total_done_tasks: number;
-  /** Done tasks with a non-null quality_score. */
-  scored_tasks: number;
-  /** Done tasks with null quality_score (verification gap). */
-  unscored_tasks: number;
-  /**
-   * scored_tasks / total_done_tasks as a 0–1 fraction.
-   * Null when total_done_tasks is 0.
-   */
-  coverage_pct: number | null;
-  /** Per-agent breakdown of score coverage. */
-  per_agent: Array<{
-    agent_name: string;
-    total: number;
-    scored: number;
-    unscored: number;
-    coverage_pct: number | null;
-  }>;
-}
 
 // ── Reconciliation event types ────────────────────────────────────────────
 

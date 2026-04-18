@@ -47,9 +47,24 @@ export type {
 // Mount in the orchestrator or dashboard server:
 //   app.get('/agent-trends', (_req, res) => res.json(getAgentTrendsApiPayload(store)));
 //
-// Per-agent series includes rolling_avg and below_threshold flag for warning colour.
+// Per-agent series includes rolling_avg, below_threshold flag for warning colour,
+// band per data point ("red"/"yellow"/"green"), and optional task_history_url.
 export { getAgentTrendsApiPayload } from "./reviewer/agent-trends.js";
 export type { AgentTrendsOptions } from "./reviewer/agent-trends.js";
+
+// Fleet health sparklines — `/fleet-health` API payload (issue #286).
+//
+// Wraps per-agent quality sparklines with dual-band coloring (red < 0.60,
+// yellow 0.60–0.74, green ≥ 0.75), click-through task history URLs, and a
+// fleet-level risk summary (count of agents per band).
+//
+// Mount in the orchestrator or dashboard server:
+//   app.get('/fleet-health', (_req, res) => res.json(
+//     getFleetHealthSparklines(store, { task_history_base_url: '/tasks' })
+//   ));
+export { getFleetHealthSparklines, FLEET_RED_THRESHOLD, FLEET_YELLOW_THRESHOLD, FLEET_DEFAULT_DAYS } from "./reviewer/fleet-health-sparklines.js";
+export type { FleetHealthSparklineOptions } from "./reviewer/fleet-health-sparklines.js";
+export type { FleetHealthSparklines, FleetRiskSummary, SparklineBand } from "./state/types.js";
 
 // Quality anomaly feed — `/quality-anomalies` API payload (issue #153).
 //
