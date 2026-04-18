@@ -11,7 +11,7 @@
  *   - Accepts optional Notifier for second-pass escalation alerts
  */
 
-import { createLLMClient } from "../client/llm-client.js";
+import { buildCachedSystemContent, createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type {
   IStateStore,
@@ -1797,7 +1797,7 @@ export class Verifier {
           {
             model: "claude-sonnet-4-6",
             max_tokens: 1024,
-            system: systemPrompt,
+            system: buildCachedSystemContent(systemPrompt),
             messages: [{ role: "user", content: userPrompt }],
           },
           { signal: abortController.signal },
@@ -2237,7 +2237,7 @@ Return valid JSON with "score" (0.0-1.0) and "confidence" ("low", "medium", "hig
       const response = await client.messages.create({
         model: "claude-sonnet-4-6",
         max_tokens: 256,
-        system: inferenceSystemPrompt,
+        system: buildCachedSystemContent(inferenceSystemPrompt),
         messages: [{ role: "user", content: inferencePrompt }],
       });
 

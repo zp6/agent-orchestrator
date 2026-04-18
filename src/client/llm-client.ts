@@ -11,6 +11,21 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 
+/**
+ * Wraps a system prompt string in a cache_control block so Anthropic's
+ * prompt caching feature applies to it. On the first request the prompt is
+ * computed normally; on subsequent requests with the same prompt the cached
+ * version is used, saving ~80–90% of system-prompt input tokens.
+ *
+ * Usage:
+ *   system: buildCachedSystemContent(MY_SYSTEM_PROMPT)
+ */
+export function buildCachedSystemContent(
+  text: string,
+): Anthropic.TextBlockParam[] {
+  return [{ type: "text", text, cache_control: { type: "ephemeral" } }];
+}
+
 let _client: Anthropic | null = null;
 
 /**

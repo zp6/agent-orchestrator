@@ -18,7 +18,7 @@ import { execSync, spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { unlinkSync, readFileSync, writeFileSync } from "node:fs";
-import { createLLMClient } from "../client/llm-client.js";
+import { buildCachedSystemContent, createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
 import type { IStateStore, IStandupHealthStore, MergeQueueEntry, ReviewCategory } from "../state/types.js";
@@ -650,7 +650,7 @@ export class PRReviewer {
           {
             model: "claude-sonnet-4-6",
             max_tokens: 2048,
-            system: SYSTEM_PROMPT,
+            system: buildCachedSystemContent(SYSTEM_PROMPT),
             messages: [{ role: "user", content: prompt }],
           },
           { signal: abortController.signal },
