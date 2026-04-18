@@ -72,8 +72,12 @@ const AGENT_SYNC_EVERY_N_CYCLES = 10; // ~5min at default interval — recover f
 const SELF_UPDATE_EVERY_N_CYCLES = 10; // ~5min — pull + rebuild if behind origin/main, then re-exec
 const CLOSED_ISSUE_CHECK_EVERY_N_CYCLES = 3; // ~15min at default — cancel in-flight tasks for closed issues
 const STALE_ISSUE_AGE_DAYS = 7;
-const STANDUP_MEETING_EVERY_N_CYCLES = 288;  // ~24h at 5min interval
-const BLUESKY_MEETING_EVERY_N_CYCLES = 2016; // ~7 days at 5min interval
+/** Minimum interval between standups (ms). Time-based so restarts don't skip meetings. */
+const STANDUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+/** Minimum interval between blue-sky sessions (ms). */
+const BLUESKY_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+/** Only check meeting schedule every N cycles to avoid querying the DB every cycle. */
+const MEETING_SCHEDULE_CHECK_EVERY_N_CYCLES = 6; // ~30 min
 const ROADMAP_PROPOSAL_EVERY_N_CYCLES = 288; // ~24h at 5min interval
 const SKIP_PATTERN_CHECK_EVERY_N_CYCLES = 288; // ~24h at 5min interval
 const ALREADY_IN_REVIEW_SATURATION_THRESHOLD = 0.30; // Alert when >30% of completed tasks are duplicates
@@ -727,19 +731,29 @@ export class Daemon {
             .catch((err) => { this.log.warn("Pattern learner failed", { error: err instanceof Error ? err.message : String(err) }); }),
         );
       }
-      if (this.cycleCount % STANDUP_MEETING_EVERY_N_CYCLES === 0) {
-        batch4.push(this.runMeeting(time, "standup"));
-        try {
-          const { nudged, boosted } = checkAgedIssues(this.config, this.store);
-          if (nudged.length + boosted.length > 0) {
-            console.log(`[${time}] Aged issues: ${nudged.length} nudged, ${boosted.length} boosted`);
+      // Time-based meeting schedule: check elapsed time since last meeting
+      // rather than cycle modulo, so daemon restarts don't skip meetings.
+      if (this.cycleCount % MEETING_SCHEDULE_CHECK_EVERY_N_CYCLES === 0) {
+        const now = Date.now();
+        const lastStandup = this.store.getLastMeetingTime("standup");
+        const lastBluesky = this.store.getLastMeetingTime("bluesky");
+        const standupElapsed = lastStandup ? now - new Date(lastStandup).getTime() : Infinity;
+        const blueskyElapsed = lastBluesky ? now - new Date(lastBluesky).getTime() : Infinity;
+
+        if (standupElapsed >= STANDUP_INTERVAL_MS) {
+          batch4.push(this.runMeeting(time, "standup"));
+          try {
+            const { nudged, boosted } = checkAgedIssues(this.config, this.store);
+            if (nudged.length + boosted.length > 0) {
+              console.log(`[${time}] Aged issues: ${nudged.length} nudged, ${boosted.length} boosted`);
+            }
+          } catch (err) {
+            this.log.warn("Aged issue check failed", { error: err instanceof Error ? err.message : String(err) });
           }
-        } catch (err) {
-          this.log.warn("Aged issue check failed", { error: err instanceof Error ? err.message : String(err) });
         }
-      }
-      if (this.cycleCount % BLUESKY_MEETING_EVERY_N_CYCLES === 0) {
-        batch4.push(this.runMeeting(time, "bluesky"));
+        if (blueskyElapsed >= BLUESKY_INTERVAL_MS) {
+          batch4.push(this.runMeeting(time, "bluesky"));
+        }
       }
       if (this.cycleCount % ROADMAP_PROPOSAL_EVERY_N_CYCLES === 0) {
         batch4.push(

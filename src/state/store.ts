@@ -2841,6 +2841,17 @@ export class StateStore {
     }>;
   }
 
+  /**
+   * Return the ISO timestamp of the most recent meeting of the given type,
+   * or null if no meeting of that type has ever been recorded.
+   */
+  getLastMeetingTime(type: string): string | null {
+    const row = this.db
+      .prepare("SELECT created_at FROM meetings WHERE type = ? ORDER BY created_at DESC LIMIT 1")
+      .get(type) as { created_at: string } | undefined;
+    return row?.created_at ?? null;
+  }
+
   getMeetingEntries(meetingId: number): Array<{
     round_number: number;
     agent_name: string;
