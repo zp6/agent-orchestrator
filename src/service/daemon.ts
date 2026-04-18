@@ -11,7 +11,7 @@ import { Deployer } from "../orchestrator/deployer.js";
 import { PRReviewer } from "../orchestrator/pr-reviewer.js";
 import { findOrphanBranches, createPRForBranch, deleteStaleOrphanBranches, STALE_BRANCH_BEHIND_THRESHOLD } from "../orchestrator/pr-creator.js";
 import { PRCreationRetryQueue } from "../orchestrator/pr-creation-retry-queue.js";
-import { validateGhAuth } from "../triggers/github.js";
+import { validateGhAuth, countOpenIssues, countOpenPRs } from "../triggers/github.js";
 import { cachedIsIssueOpen, cachedGetIssueState, logCacheMetrics, initIssueCachePersistence } from "../triggers/issue-state-bridge.js";
 import {
   dispatchGitHubIssues,
@@ -3359,7 +3359,32 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
         }
 
         const githubRepo = agent.github!;
+
+        // --- Empty-backlog fast-path ---
+        // Query open issue and PR counts before dispatching. If both are zero,
+        // skip the full housekeeping cycle — there's nothing actionable to do.
+        // Fail open: if either count returns null (GitHub unavailable), proceed
+        // with dispatch so we don't silently drop work.
         const needsBootstrap = needsRoadmapBootstrap(githubRepo);
+        if (!needsBootstrap) {
+          const openIssues = countOpenIssues(githubRepo);
+          const openPRs = countOpenPRs(githubRepo);
+          if (openIssues !== null && openPRs !== null && openIssues === 0 && openPRs === 0) {
+            this.log.info("Skipping backlog triage: empty backlog (0 issues, 0 PRs)", { agentName, githubRepo });
+            console.log(`  ${agentName}: skipped (empty backlog — 0 open issues, 0 open PRs)`);
+            this.store.addSupervisorDecision({
+              action: "dispatch",
+              agent_name: agentName,
+              reason: `[housekeeping] Periodic backlog triage for ${agentName}`,
+              rationale: `Skipped housekeeping dispatch: ${githubRepo} has 0 open issues and 0 open PRs. No actionable work found.`,
+              hard_gates: ["skipped-empty-backlog"],
+              outcome: "skipped",
+            });
+            continue;
+          }
+        }
+        // --- End empty-backlog fast-path ---
+
         const message = needsBootstrap
           ? buildRoadmapBootstrapMessage(agentName, githubRepo)
           : buildHousekeepingMessage(agentName, githubRepo);
