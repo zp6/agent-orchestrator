@@ -3199,6 +3199,68 @@ export class StateStore {
     });
   }
 
+  // ── Already-in-review saturation ─────────────────────────────────────────
+
+  /**
+   * Compute the "already-in-review" saturation ratio over a rolling window.
+   *
+   * Returns the fraction of completed tasks whose `result` begins with
+   * `"already-in-review:"` — i.e. tasks that were skipped because an open PR
+   * was already in flight.  A high ratio (>0.30 by convention) indicates that
+   * dispatch deduplication is failing or that PR throughput is falling behind
+   * the issue intake rate.
+   *
+   * @param windowHours - Rolling look-back window (default 1 hour).
+   */
+  getAlreadyInReviewSaturation(windowHours = 1): {
+    windowHours: number;
+    total: number;
+    alreadyInReview: number;
+    ratio: number;
+    perAgent: Array<{ agent_name: string; total: number; alreadyInReview: number; ratio: number }>;
+  } {
+    const since = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
+
+    const globalRow = this.db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        COALESCE(SUM(CASE WHEN result LIKE 'already-in-review:%' THEN 1 ELSE 0 END), 0) AS alreadyInReview
+      FROM tasks
+      WHERE status = 'done'
+        AND created_at >= ?
+    `).get(since) as { total: number; alreadyInReview: number };
+
+    const perAgentRows = this.db.prepare(`
+      SELECT
+        agent_name,
+        COUNT(*) AS total,
+        COALESCE(SUM(CASE WHEN result LIKE 'already-in-review:%' THEN 1 ELSE 0 END), 0) AS alreadyInReview
+      FROM tasks
+      WHERE status = 'done'
+        AND agent_name IS NOT NULL
+        AND created_at >= ?
+      GROUP BY agent_name
+      ORDER BY alreadyInReview DESC, total DESC
+    `).all(since) as Array<{ agent_name: string; total: number; alreadyInReview: number }>;
+
+    const total = globalRow.total ?? 0;
+    const alreadyInReview = globalRow.alreadyInReview ?? 0;
+    const ratio = total > 0 ? alreadyInReview / total : 0;
+
+    return {
+      windowHours,
+      total,
+      alreadyInReview,
+      ratio,
+      perAgent: perAgentRows.map((r) => ({
+        agent_name: r.agent_name,
+        total: r.total,
+        alreadyInReview: r.alreadyInReview,
+        ratio: r.total > 0 ? r.alreadyInReview / r.total : 0,
+      })),
+    };
+  }
+
   // ── Supervisor memory ────────────────────────────────────────────────────
 
   private runSupervisorMemoryMigration(): void {

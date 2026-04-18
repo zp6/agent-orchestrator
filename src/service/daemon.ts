@@ -73,6 +73,7 @@ const STANDUP_MEETING_EVERY_N_CYCLES = 288;  // ~24h at 5min interval
 const BLUESKY_MEETING_EVERY_N_CYCLES = 2016; // ~7 days at 5min interval
 const ROADMAP_PROPOSAL_EVERY_N_CYCLES = 288; // ~24h at 5min interval
 const SKIP_PATTERN_CHECK_EVERY_N_CYCLES = 288; // ~24h at 5min interval
+const ALREADY_IN_REVIEW_SATURATION_THRESHOLD = 0.30; // Alert when >30% of completed tasks are duplicates
 const PROXY_HEALTH_CHECK_EVERY_N_CYCLES = 3;   // ~15min — check proxy server is reachable
 const CLOSED_ISSUE_FAILURE_CLEANUP_EVERY_N_CYCLES = 60; // ~5h — clear stale failures for closed issues
 
@@ -752,6 +753,37 @@ export class Daemon {
             .then((created) => { if (created > 0) console.log(`[${time}] Skip-pattern aggregator: created ${created} blocker issue(s)`); })
             .catch((err) => { this.log.warn("Skip-pattern check failed", { error: err instanceof Error ? err.message : String(err) }); }),
         );
+      }
+
+      // Already-in-review saturation check — runs every cycle.
+      // Alerts operators when duplicate-detection responses dominate the
+      // 1-hour window (>30%), indicating dispatch dedup is failing or PR
+      // throughput has fallen behind issue intake (issue #918).
+      try {
+        const sat = this.store.getAlreadyInReviewSaturation(1);
+        if (sat.total >= 5 && sat.ratio > ALREADY_IN_REVIEW_SATURATION_THRESHOLD) {
+          const pct = Math.round(sat.ratio * 100);
+          this.log.warn("High already-in-review saturation", {
+            ratio: sat.ratio,
+            alreadyInReview: sat.alreadyInReview,
+            total: sat.total,
+          });
+          console.warn(
+            `[${time}] ⚠  Already-in-review saturation: ${pct}% (${sat.alreadyInReview}/${sat.total} tasks in last hour)`,
+          );
+          await notifyOperator(
+            "⚠️ High Already-in-Review Saturation",
+            `${pct}% of tasks completed in the last hour (${sat.alreadyInReview}/${sat.total}) were ` +
+            `"already-in-review" dedup responses — exceeds the ${Math.round(ALREADY_IN_REVIEW_SATURATION_THRESHOLD * 100)}% threshold.\n\n` +
+            `Top agents:\n${sat.perAgent.slice(0, 5).map((a) => `• ${a.agent_name}: ${Math.round(a.ratio * 100)}% (${a.alreadyInReview}/${a.total})`).join("\n")}\n\n` +
+            `Check dispatch dedup logic or PR throughput — run \`orch review-saturation\` for details.`,
+            "warning",
+            "already-in-review-saturation",
+          );
+          this.store.incrementStat("already_in_review_saturation_alerts");
+        }
+      } catch (err) {
+        this.log.warn("Already-in-review saturation check failed", { error: err instanceof Error ? err.message : String(err) });
       }
 
       // Verification outcome poller — runs every cycle; resolves pending
