@@ -11,6 +11,7 @@
  *   - Accepts optional Notifier for second-pass escalation alerts
  */
 
+import { execSync } from "node:child_process";
 import { buildCachedSystemContent, createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type {
@@ -231,6 +232,69 @@ const TRIAGE_FIELD_WEIGHTS: Record<string, number> = {
   priority_reordering: 0.25,
   outcome_summary: 0.25,
 };
+
+/**
+ * File patterns that identify "triage-only" concerns (documentation, admin files).
+ * A PR mixing these files with feature files is considered bundled work.
+ */
+const TRIAGE_FILE_PATTERNS = [
+  /^CLAUDE\.md$/i,
+  /^README\.md$/i,
+  /^README\.[a-z]+\.md$/i,
+  /^ROADMAP\.md$/i,
+  /^CHANGELOG\.md$/i,
+  /^CHANGES\.md$/i,
+  /^CONTRIBUTING\.md$/i,
+  /^LICENSE$/i,
+  /^docs\//i,
+  /^\.github\//i, // GitHub workflows, but not source code config
+];
+
+/**
+ * File patterns that identify "feature" concerns (implementation code).
+ * A PR mixing these files with triage-only files is considered bundled work.
+ */
+const FEATURE_FILE_PATTERNS = [
+  /^src\//i,
+  /^lib\//i,
+  /^dist\//i,
+  /\.test\.(ts|js|tsx|jsx)$/i,
+  /\.spec\.(ts|js|tsx|jsx)$/i,
+  /^package\.json$/i,
+  /^package-lock\.json$/i,
+  /^yarn\.lock$/i,
+  /^tsconfig.*\.json$/i,
+  /^vite\.config\./i,
+  /^webpack\.config\./i,
+  /^jest\.config\./i,
+  /\.eslintrc/i,
+  /^\.prettierrc/i,
+  /^babel\.config\./i,
+];
+
+/**
+ * Categorizes a file path by concern: triage-only, feature, or neutral.
+ */
+function categorizeFile(filePath: string): "triage" | "feature" | "neutral" {
+  const lower = filePath.toLowerCase();
+
+  // Check triage patterns first
+  for (const pattern of TRIAGE_FILE_PATTERNS) {
+    if (pattern.test(lower)) {
+      return "triage";
+    }
+  }
+
+  // Check feature patterns
+  for (const pattern of FEATURE_FILE_PATTERNS) {
+    if (pattern.test(lower)) {
+      return "feature";
+    }
+  }
+
+  // Everything else is neutral (e.g., .gitignore, type defs, example files)
+  return "neutral";
+}
 
 const TRIAGE_SYSTEM_PROMPT = `You are a quality reviewer for housekeeping and backlog triage tasks produced by an AI agent. Given a triage task description and the agent's output, assess the quality of the triage work.
 
@@ -678,6 +742,137 @@ export class Verifier {
       missingFields,
       passes: score >= TRIAGE_SCHEMA_COMPLIANCE_THRESHOLD,
     };
+  }
+
+  /**
+   * Extracts changed file paths from a git diff.
+   * Supports both full git diff format and patch format.
+   *
+   * @param diff - Raw diff string
+   * @returns Array of changed file paths
+   */
+  private extractChangedFilesFromDiff(diff: string): string[] {
+    const files = new Set<string>();
+
+    // Primary: git diff headers
+    for (const match of diff.matchAll(/^diff --git a\/(.+) b\/.+$/gm)) {
+      files.add(match[1]);
+    }
+
+    // Fallback: +++ b/<path> lines (patch format without git headers)
+    if (files.size === 0) {
+      for (const match of diff.matchAll(/^\+\+\+ b\/(.+)$/gm)) {
+        const path = match[1];
+        if (path !== "/dev/null") files.add(path);
+      }
+    }
+
+    return [...files];
+  }
+
+  /**
+   * Checks for bundled work in a PR by analyzing which files were changed.
+   * A PR is considered bundled if it contains both triage-only files (docs, CLAUDE.md)
+   * and feature files (src/, implementation configs) in the same PR.
+   *
+   * @param changedFiles - Array of file paths changed in the PR
+   * @returns Object containing:
+   *   - bundled: true if the PR mixes triage and feature files
+   *   - triageFiles: files categorized as triage-only
+   *   - featureFiles: files categorized as feature implementation
+   *   - violationType: describes the bundling type if bundled is true
+   */
+  checkBundlingCompliance(changedFiles: string[]): {
+    bundled: boolean;
+    triageFiles: string[];
+    featureFiles: string[];
+    violationType: string;
+  } {
+    const triageFiles: string[] = [];
+    const featureFiles: string[] = [];
+
+    for (const file of changedFiles) {
+      const category = categorizeFile(file);
+      if (category === "triage") {
+        triageFiles.push(file);
+      } else if (category === "feature") {
+        featureFiles.push(file);
+      }
+      // neutral files are ignored for bundling purposes
+    }
+
+    const bundled = triageFiles.length > 0 && featureFiles.length > 0;
+    const violationType = bundled ? "Mixed triage and feature files" : "Single concern";
+
+    return { bundled, triageFiles, featureFiles, violationType };
+  }
+
+  /**
+   * Extracts a PR reference from task result text.
+   * Looks for patterns like "PR #123", "https://github.com/.../pull/123", etc.
+   *
+   * @param result - Raw task result string
+   * @returns Object with repo and prNumber, or null if not found
+   */
+  private extractPRReferenceFromResult(
+    result: string,
+  ): { repo: string; prNumber: number } | null {
+    if (!result) return null;
+
+    // Pattern 1: "PR #123" or "PR#123"
+    const simpleMatch = result.match(/PR\s*#(\d+)/i);
+    if (simpleMatch) {
+      const prNumber = parseInt(simpleMatch[1]!, 10);
+      // PR number found but repo is unknown — caller will use source_ref or context
+      return { repo: "", prNumber };
+    }
+
+    // Pattern 2: "https://github.com/owner/repo/pull/123"
+    const urlMatch = result.match(/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/i);
+    if (urlMatch) {
+      const repo = urlMatch[1]!;
+      const prNumber = parseInt(urlMatch[2]!, 10);
+      return { repo, prNumber };
+    }
+
+    // Pattern 3: "rapartlu/some-repo PR #123" or similar
+    const repoPatternMatch = result.match(/([\w-]+\/[\w-]+)\s+PR\s*#(\d+)/i);
+    if (repoPatternMatch) {
+      const repo = repoPatternMatch[1]!;
+      const prNumber = parseInt(repoPatternMatch[2]!, 10);
+      return { repo, prNumber };
+    }
+
+    return null;
+  }
+
+  /**
+   * Fetches the PR diff from GitHub using the gh CLI.
+   * Returns the full diff as a string for bundling analysis.
+   *
+   * @param repo - GitHub repo in format "owner/repo"
+   * @param prNumber - Pull request number
+   * @returns Diff as string, or null if fetch fails
+   */
+  private fetchPRDiffForBundlingCheck(repo: string, prNumber: number): string | null {
+    if (!repo || !prNumber) return null;
+
+    try {
+      const diff = execSync(`gh pr diff ${prNumber} --repo ${repo}`, {
+        encoding: "utf-8",
+        timeout: 30000,
+        maxBuffer: 10 * 1024 * 1024, // 10 MB max diff size
+      }).toString();
+      return diff;
+    } catch (error) {
+      // Log but don't fail — bundling check is opportunistic
+      this.log.warn("Failed to fetch PR diff for bundling check", {
+        repo,
+        prNumber,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
   }
 
   /**
@@ -1170,6 +1365,81 @@ export class Verifier {
         );
 
         return failResult;
+      }
+
+      // ── Bundling detection (issue #433) ───────────────────────────────────
+      // After schema passes, check if the PR mixes feature files with triage files.
+      // This prevents close-and-redo cycles where agents bundle unrelated concerns.
+      const prRef = this.extractPRReferenceFromResult(task.result ?? "");
+      if (prRef && prRef.prNumber > 0) {
+        // Determine the repo: use extracted repo, or infer from task source_ref/context.
+        // source_ref may be in the form "owner/repo#123" — strip the issue number first
+        // by splitting on "#" before splitting on "/" to extract "owner/repo".
+        let inferredRepo = "";
+        if (typeof task.source_ref === "string") {
+          const withoutIssue = task.source_ref.split("#")[0] ?? "";
+          const segments = withoutIssue.split("/").filter(Boolean);
+          if (segments.length === 2) {
+            inferredRepo = segments.join("/");
+          }
+        }
+        const repo = prRef.repo || inferredRepo;
+
+        if (repo) {
+          const diff = this.fetchPRDiffForBundlingCheck(repo, prRef.prNumber);
+          if (diff) {
+            // Extract changed files from diff using the same approach as schema-impact.ts
+            const changedFiles = this.extractChangedFilesFromDiff(diff);
+            const bundlingResult = this.checkBundlingCompliance(changedFiles);
+
+            if (bundlingResult.bundled) {
+              const triageList = bundlingResult.triageFiles.map((f) => `  - \`${f}\``).join("\n");
+              const featureList = bundlingResult.featureFiles.map((f) => `  - \`${f}\``).join("\n");
+              const revision = [
+                `Bundled work detected in PR #${prRef.prNumber} — split into separate PRs.`,
+                ``,
+                `Feature implementation files (should be in a separate PR):`,
+                featureList,
+                ``,
+                `Triage/documentation files (should be in a separate PR):`,
+                triageList,
+                ``,
+                `To fix:`,
+                `1. Close this PR`,
+                `2. Create one PR with ONLY the feature files`,
+                `3. Create a second PR with ONLY the triage files`,
+                `4. Ensure each PR body includes "Closes #<issue>" to link to the originating issue`,
+              ].join("\n");
+
+              const failResult: VerificationResult = {
+                approved: false,
+                score: 0.0,
+                notes: `Bundled work detected: PR mixes ${bundlingResult.triageFiles.length} triage file(s) with ${bundlingResult.featureFiles.length} feature file(s)`,
+                revision,
+                explanation: `The PR bundles unrelated work: feature implementation and triage/documentation changes should be in separate PRs.`,
+              };
+
+              this.store.updateTask(taskId, {
+                verification_status: "rejected",
+                quality_score: 0.0,
+                verification_notes: failResult.notes,
+                quality_explanation: failResult.explanation ?? null,
+              });
+
+              this.recordVerificationResult(
+                taskId,
+                task.agent_name ?? "unknown",
+                0.0,
+                false,
+                failResult.explanation,
+                undefined,
+                undefined,
+              );
+
+              return failResult;
+            }
+          }
+        }
       }
     }
 

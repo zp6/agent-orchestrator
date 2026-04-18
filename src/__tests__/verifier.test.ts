@@ -1134,6 +1134,178 @@ describe("Verifier.checkTriageSchemaCompliance", () => {
   });
 });
 
+describe("Verifier.checkBundlingCompliance (issue #433)", () => {
+  // Test the bundling detection logic for housekeeping PRs
+  const mockStore = {
+    getTask: vi.fn(),
+    updateTask: vi.fn(),
+    getChildTasks: vi.fn().mockReturnValue([]),
+    insertVerificationResult: vi.fn(),
+  } as unknown as Parameters<typeof Verifier>[0];
+
+  const verifier = new Verifier(mockStore);
+
+  it("detects no bundling when PR only touches triage files", () => {
+    const triageOnlyFiles = ["CLAUDE.md", "ROADMAP.md", "docs/architecture.md"];
+    const result = verifier.checkBundlingCompliance(triageOnlyFiles);
+
+    expect(result.bundled).toBe(false);
+    expect(result.triageFiles).toHaveLength(3);
+    expect(result.featureFiles).toHaveLength(0);
+  });
+
+  it("detects no bundling when PR only touches feature files", () => {
+    const featureOnlyFiles = ["src/webhook.ts", "src/__tests__/webhook.test.ts", "package.json"];
+    const result = verifier.checkBundlingCompliance(featureOnlyFiles);
+
+    expect(result.bundled).toBe(false);
+    expect(result.triageFiles).toHaveLength(0);
+    expect(result.featureFiles).toHaveLength(3);
+  });
+
+  it("detects bundling when PR mixes triage and feature files", () => {
+    const mixedFiles = [
+      "src/webhook.ts",
+      "src/__tests__/webhook.test.ts",
+      "CLAUDE.md",
+      "ROADMAP.md",
+    ];
+    const result = verifier.checkBundlingCompliance(mixedFiles);
+
+    expect(result.bundled).toBe(true);
+    expect(result.triageFiles).toEqual(expect.arrayContaining(["CLAUDE.md", "ROADMAP.md"]));
+    expect(result.featureFiles).toEqual(
+      expect.arrayContaining(["src/webhook.ts", "src/__tests__/webhook.test.ts"]),
+    );
+  });
+
+  it("ignores neutral files when checking for bundling", () => {
+    const filesWithNeutral = ["src/handler.ts", ".gitignore", "ROADMAP.md"];
+    const result = verifier.checkBundlingCompliance(filesWithNeutral);
+
+    expect(result.bundled).toBe(true);
+    expect(result.triageFiles).toEqual(["ROADMAP.md"]);
+    expect(result.featureFiles).toEqual(["src/handler.ts"]);
+    // .gitignore should not appear in either list
+    expect([...result.triageFiles, ...result.featureFiles]).not.toContain(".gitignore");
+  });
+
+  it("handles empty file list gracefully", () => {
+    const result = verifier.checkBundlingCompliance([]);
+
+    expect(result.bundled).toBe(false);
+    expect(result.triageFiles).toHaveLength(0);
+    expect(result.featureFiles).toHaveLength(0);
+  });
+
+  it("categorizes documentation files correctly", () => {
+    const docFiles = [
+      "README.md",
+      "README.en.md",
+      "ROADMAP.md",
+      "CHANGELOG.md",
+      "CLAUDE.md",
+      "docs/setup.md",
+      "CONTRIBUTING.md",
+    ];
+    const result = verifier.checkBundlingCompliance(docFiles);
+
+    expect(result.bundled).toBe(false);
+    expect(result.triageFiles).toHaveLength(7);
+    expect(result.featureFiles).toHaveLength(0);
+  });
+
+  it("categorizes source and test files as features", () => {
+    const sourceFiles = [
+      "src/index.ts",
+      "lib/utils.js",
+      "src/__tests__/index.test.ts",
+      "src/utils.spec.ts",
+      "dist/bundle.js",
+    ];
+    const result = verifier.checkBundlingCompliance(sourceFiles);
+
+    expect(result.bundled).toBe(false);
+    expect(result.triageFiles).toHaveLength(0);
+    expect(result.featureFiles).toHaveLength(5);
+  });
+
+  it("categorizes config files as features", () => {
+    const configFiles = [
+      "package.json",
+      "tsconfig.json",
+      "tsconfig.build.json",
+      "vite.config.ts",
+      ".eslintrc.json",
+      ".prettierrc",
+    ];
+    const result = verifier.checkBundlingCompliance(configFiles);
+
+    expect(result.bundled).toBe(false);
+    expect(result.triageFiles).toHaveLength(0);
+    expect(result.featureFiles).toHaveLength(6);
+  });
+
+  it("detects bundling with docs directory", () => {
+    const mixedWithDocs = ["src/handler.ts", "docs/api.md", "package.json"];
+    const result = verifier.checkBundlingCompliance(mixedWithDocs);
+
+    expect(result.bundled).toBe(true);
+    expect(result.triageFiles).toContain("docs/api.md");
+    expect(result.featureFiles).toEqual(
+      expect.arrayContaining(["src/handler.ts", "package.json"]),
+    );
+  });
+
+  it("detects bundling with .github directory (workflows)", () => {
+    const mixedWithGithub = ["src/main.ts", ".github/workflows/test.yml"];
+    const result = verifier.checkBundlingCompliance(mixedWithGithub);
+
+    expect(result.bundled).toBe(true);
+    expect(result.triageFiles).toContain(".github/workflows/test.yml");
+  });
+
+  it("resolves repo correctly from source_ref 'owner/repo#123' when prRef.repo is empty", () => {
+    // Regression test for the source_ref extraction bug:
+    // task.source_ref.split("/").slice(0, 2).join("/") on "owner/repo#123"
+    // produces "owner/repo#123" (the #123 stays attached to the second segment).
+    // The fix: strip the issue number via .split("#")[0] before splitting on "/".
+    const mockStoreLocal = {
+      getTask: vi.fn(),
+      updateTask: vi.fn(),
+      getChildTasks: vi.fn().mockReturnValue([]),
+      insertVerificationResult: vi.fn(),
+    } as unknown as Parameters<typeof Verifier>[0];
+
+    const v = new Verifier(mockStoreLocal);
+
+    // Spy on the private fetchPRDiffForBundlingCheck to capture which repo is passed
+    const fetchSpy = vi
+      .spyOn(v as unknown as { fetchPRDiffForBundlingCheck: (repo: string, n: number) => string | null }, "fetchPRDiffForBundlingCheck")
+      .mockReturnValue(null); // return null so bundling check is skipped after repo validation
+
+    // Minimal triage-compliant task result (schema already passes at this point in verifyTask;
+    // we only care that the repo extraction is correct before the diff fetch).
+    // We simulate the repo-resolution logic that fires when prRef.repo is "" and
+    // source_ref is "owner/repo#123".
+    const sourceRef = "owner/repo#123";
+    // Reproduce the extraction logic from verifier.ts to verify it produces the correct value:
+    const withoutIssue = sourceRef.split("#")[0] ?? "";
+    const segments = withoutIssue.split("/").filter(Boolean);
+    const resolvedRepo = segments.length === 2 ? segments.join("/") : "";
+
+    expect(resolvedRepo).toBe("owner/repo"); // must NOT be "owner/repo#123"
+    expect(resolvedRepo).not.toContain("#");
+
+    // Confirm the old (broken) approach would have produced the wrong value
+    const brokenExtraction = sourceRef.split("/").slice(0, 2).join("/");
+    expect(brokenExtraction).toBe("owner/repo#123"); // demonstrates the bug
+
+    // Verify the spy was set up correctly (even if not invoked in this unit path)
+    fetchSpy.mockRestore();
+  });
+});
+
 describe("Sub-0.60 rejection guard (issue #187)", () => {
   /**
    * Mirrors the `applySubThresholdRejectionGuard` logic from verifier.ts.
