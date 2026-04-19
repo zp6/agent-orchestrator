@@ -46,6 +46,7 @@ import {
   type CapabilityEnforcementReroute,
   type AgentScopeGuardReroute,
 } from "./capability-enforcer.js";
+import { checkAndRebaseBeforeDispatch } from "./proactive-rebase-scheduler.js";
 
 /**
  * Walk the parent_task_id chain upward from `taskId` (or a parent task id) and
@@ -1121,6 +1122,41 @@ export class Dispatcher {
         }
       }
     }
+    // Proactive rebase pre-dispatch (issue #995): if a branch already exists
+    // for the target issue, check whether it is stale (behind origin/main) and
+    // auto-rebase it before the agent begins work.  This prevents merge cascade
+    // failures that occur when an agent pushes commits on top of a stale base.
+    // Non-blocking: errors and skips are logged but never abort the dispatch.
+    if (options?.sourceRef && taskType !== "research") {
+      const rebaseRepo = extractRepoFromSourceRef(options.sourceRef);
+      if (rebaseRepo) {
+        checkAndRebaseBeforeDispatch(rebaseRepo, options.sourceRef, this.config, this.store)
+          .then((result) => {
+            if (result && result.outcome === "rebased") {
+              this.log.info("Pre-dispatch proactive rebase: branch rebased onto main", {
+                repo: result.repo,
+                branch: result.branch,
+                sourceRef: options.sourceRef,
+                commitsBehind: result.commitsBehind,
+              });
+            } else if (result && result.outcome === "conflict") {
+              this.log.warn("Pre-dispatch proactive rebase: conflict detected — agent must resolve manually", {
+                repo: result.repo,
+                branch: result.branch,
+                sourceRef: options.sourceRef,
+                commitsBehind: result.commitsBehind,
+              });
+            }
+          })
+          .catch((err) => {
+            this.log.warn("Pre-dispatch proactive rebase: check failed (non-fatal)", {
+              sourceRef: options.sourceRef,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+      }
+    }
+
     // Idempotency guard (issue #469): prevent the same source_ref from being
     // dispatched to multiple agents simultaneously.  The trigger layer already
     // checks this via inFlightDispatches + checkDuplicate, but direct callers

@@ -48,6 +48,7 @@ import { detectHealthIncidentIssues } from "../orchestrator/health-incident-dete
 import { runIterationBudgetAlerts } from "../orchestrator/iteration-budget-alert.js";
 import { runSkipPatternCheck } from "../orchestrator/skip-pattern-aggregator.js";
 import { learnPatterns } from "../orchestrator/pattern-learner.js";
+import { runScheduledRebases } from "../orchestrator/proactive-rebase-scheduler.js";
 import { buildConflictRedispatchMessage } from "../orchestrator/conflict-redispatch.js";
 import {
   type GateResult,
@@ -88,6 +89,7 @@ const ALREADY_IN_REVIEW_SATURATION_THRESHOLD = 0.30; // Alert when >30% of compl
 const DISPATCH_BLOCK_RATE_THRESHOLD = 0.10; // 10% default
 const PROXY_HEALTH_CHECK_EVERY_N_CYCLES = 3;   // ~15min — check proxy server is reachable
 const CLOSED_ISSUE_FAILURE_CLEANUP_EVERY_N_CYCLES = 60; // ~5h — clear stale failures for closed issues
+const PROACTIVE_REBASE_EVERY_N_CYCLES = 3; // ~15min — proactively rebase stale branches
 
 /**
  * Maximum time a single poll cycle is allowed to run before the watchdog
@@ -757,6 +759,9 @@ export class Daemon {
 
       if (this.cycleCount % ORPHAN_PR_CHECK_EVERY_N_CYCLES === 0) {
         batch4.push(this.createOrphanPRs(time));
+      }
+      if (this.cycleCount % PROACTIVE_REBASE_EVERY_N_CYCLES === 0) {
+        batch4.push(this.runProactiveRebases(time));
       }
       if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
         batch4.push(this.detectImprovements(time));
@@ -2986,6 +2991,44 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
       }
     } catch (err) {
       console.error(`[${time}] Orphan branch check failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  /**
+   * Periodic proactive rebase scan.
+   *
+   * Finds all PR-associated branches across agent repos that are behind
+   * origin/main and rebases those within the safe threshold.  This runs
+   * every PROACTIVE_REBASE_EVERY_N_CYCLES (~15 min) to prevent stale-branch
+   * lag from accumulating into merge conflicts.
+   */
+  private async runProactiveRebases(time: string): Promise<void> {
+    try {
+      const results = await runScheduledRebases(this.config, this.store);
+      const rebased = results.filter((r) => r.outcome === "rebased");
+      const conflicts = results.filter((r) => r.outcome === "conflict");
+      const errors = results.filter((r) => r.outcome === "error");
+
+      if (rebased.length > 0) {
+        console.log(`[${time}] Proactive rebase: rebased ${rebased.length} branch(es) onto main`);
+        this.log.info("Proactive rebase scan complete", {
+          rebased: rebased.length,
+          conflicts: conflicts.length,
+          errors: errors.length,
+          branches: rebased.map((r) => `${r.repo}/${r.branch}`),
+        });
+      }
+
+      if (conflicts.length > 0) {
+        this.log.warn("Proactive rebase scan: branches with unresolvable conflicts", {
+          count: conflicts.length,
+          branches: conflicts.map((r) => `${r.repo}/${r.branch} (${r.commitsBehind} behind)`),
+        });
+      }
+    } catch (err) {
+      this.log.warn("Proactive rebase scan failed (non-fatal)", {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

@@ -1513,6 +1513,7 @@ export class StateStore {
     this.runVerificationOutcomesMigration();
     this.runInFlightReservationsMigration();
     this.runDispatchBlocksMigration();
+    this.runProactiveRebaseLogMigration();
   }
 
   private runPhase2Migration(): void {
@@ -9096,5 +9097,89 @@ export class StateStore {
       avg_block_rate_pct: avgRate,
       trend,
     };
+  }
+
+  // ── Proactive Rebase Log ──────────────────────────────────────────────────
+
+  private runProactiveRebaseLogMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS proactive_rebase_log (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo           TEXT    NOT NULL,
+        branch         TEXT    NOT NULL,
+        source_ref     TEXT,
+        commits_behind INTEGER NOT NULL,
+        outcome        TEXT    NOT NULL,
+        detail         TEXT    NOT NULL,
+        timestamp      TEXT    NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_proactive_rebase_log_repo      ON proactive_rebase_log(repo);
+      CREATE INDEX IF NOT EXISTS idx_proactive_rebase_log_branch    ON proactive_rebase_log(branch);
+      CREATE INDEX IF NOT EXISTS idx_proactive_rebase_log_outcome   ON proactive_rebase_log(outcome);
+      CREATE INDEX IF NOT EXISTS idx_proactive_rebase_log_timestamp ON proactive_rebase_log(timestamp);
+    `);
+  }
+
+  /**
+   * Record a single proactive-rebase attempt.
+   *
+   * @param params.repo          GitHub repo slug (e.g. "owner/repo")
+   * @param params.branch        Branch name
+   * @param params.sourceRef     Source issue ref if triggered pre-dispatch (nullable)
+   * @param params.commitsBehind How far behind origin/main the branch was
+   * @param params.outcome       "rebased" | "conflict" | "skipped" | "error"
+   * @param params.detail        Human-readable description
+   */
+  recordProactiveRebase(params: {
+    repo: string;
+    branch: string;
+    sourceRef: string | null;
+    commitsBehind: number;
+    outcome: string;
+    detail: string;
+  }): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO proactive_rebase_log
+        (repo, branch, source_ref, commits_behind, outcome, detail, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      params.repo,
+      params.branch,
+      params.sourceRef ?? null,
+      params.commitsBehind,
+      params.outcome,
+      params.detail,
+      now,
+    );
+  }
+
+  /**
+   * Return the most recent proactive-rebase log entries, newest-first.
+   *
+   * @param limit  Maximum number of rows to return (default 50).
+   */
+  getRecentProactiveRebases(limit = 50): Array<{
+    id: number;
+    repo: string;
+    branch: string;
+    source_ref: string | null;
+    commits_behind: number;
+    outcome: string;
+    detail: string;
+    timestamp: string;
+  }> {
+    return this.db
+      .prepare("SELECT * FROM proactive_rebase_log ORDER BY timestamp DESC LIMIT ?")
+      .all(limit) as Array<{
+        id: number;
+        repo: string;
+        branch: string;
+        source_ref: string | null;
+        commits_behind: number;
+        outcome: string;
+        detail: string;
+        timestamp: string;
+      }>;
   }
 }
