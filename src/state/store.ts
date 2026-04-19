@@ -1291,6 +1291,59 @@ export interface SignalActivityEvent {
   context: string | null;
 }
 
+// ── Dispatch Block tracking (issue #976) ─────────────────────────────────────
+
+/**
+ * A single dispatch block event — recorded each time the pre-dispatch guard
+ * prevents a dispatch because an open or approved PR already exists for the issue.
+ */
+export interface DispatchBlock {
+  id: number;
+  /** Issue source ref, e.g. "rapartlu/agent-orchestrator#976" */
+  source_ref: string;
+  /** Agent the dispatch would have gone to */
+  agent_name: string | null;
+  /** Human-readable reason for the block */
+  reason: string;
+  /** Machine-readable block code, e.g. "open_pr_exists" | "approved_pr_waiting" */
+  block_code: string;
+  /** Number of the PR that caused the block */
+  blocking_pr_number: number | null;
+  /** ISO timestamp when the block was recorded */
+  timestamp: string;
+}
+
+/** Per-day dispatch block rate metrics */
+export interface DispatchBlockDay {
+  /** ISO date string: 'YYYY-MM-DD' */
+  date: string;
+  /** Number of dispatches blocked due to already-in-review guard */
+  blocked: number;
+  /** Total dispatch attempts that day (blocked + actual) */
+  total: number;
+  /** Block rate as a percentage (0–100), null if no attempts */
+  block_rate_pct: number | null;
+}
+
+/**
+ * Aggregated dispatch block metrics over a rolling N-day window.
+ * Surfaces how many dispatches were wasted because an open PR already existed.
+ */
+export interface DispatchBlockMetrics {
+  /** Rolling window in days */
+  days: number;
+  /** Per-day breakdown */
+  daily: DispatchBlockDay[];
+  /** Total blocks in the window */
+  total_blocked: number;
+  /** Total dispatches (blocked + actual) in the window */
+  total_dispatches: number;
+  /** Average block rate (0–100), null if no data */
+  avg_block_rate_pct: number | null;
+  /** Linear trend: "improving" | "worsening" | "stable" | "insufficient_data" */
+  trend: "improving" | "worsening" | "stable" | "insufficient_data";
+}
+
 /**
  * SQL WHERE clauses that exclude infrastructure/transient failures from
  * retry-budget counts.  Centralised so all consumers stay in sync when
@@ -1459,6 +1512,7 @@ export class StateStore {
     this.runStagingValidationsMigration();
     this.runVerificationOutcomesMigration();
     this.runInFlightReservationsMigration();
+    this.runDispatchBlocksMigration();
   }
 
   private runPhase2Migration(): void {
@@ -8899,5 +8953,148 @@ export class StateStore {
       SET status = ?, resolved_at = ?, resolved_by = ?
       WHERE id = ?
     `).run(status, new Date().toISOString(), resolvedBy, id);
+  }
+
+  // ── Dispatch Block tracking (issue #976) ─────────────────────────────────────
+
+  private runDispatchBlocksMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS dispatch_blocks (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_ref          TEXT    NOT NULL,
+        agent_name          TEXT,
+        reason              TEXT    NOT NULL,
+        block_code          TEXT    NOT NULL DEFAULT 'unknown',
+        blocking_pr_number  INTEGER,
+        timestamp           TEXT    NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_dispatch_blocks_timestamp  ON dispatch_blocks(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_dispatch_blocks_source_ref ON dispatch_blocks(source_ref);
+      CREATE INDEX IF NOT EXISTS idx_dispatch_blocks_block_code ON dispatch_blocks(block_code);
+    `);
+  }
+
+  /**
+   * Persist a single dispatch-block event to state.db.
+   *
+   * Called by the pre-dispatch guard whenever a dispatch is blocked because an
+   * open or approved PR already exists for the target issue.
+   *
+   * @param params.sourceRef       Issue ref, e.g. "rapartlu/agent-orchestrator#976"
+   * @param params.agentName       Agent the dispatch would have gone to
+   * @param params.reason          Human-readable block reason
+   * @param params.blockCode       Machine code: "open_pr_exists" | "approved_pr_waiting"
+   * @param params.blockingPRNumber PR number that caused the block
+   */
+  recordDispatchBlock(params: {
+    sourceRef: string;
+    agentName?: string;
+    reason: string;
+    blockCode: string;
+    blockingPRNumber?: number;
+  }): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO dispatch_blocks
+          (source_ref, agent_name, reason, block_code, blocking_pr_number, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        params.sourceRef,
+        params.agentName ?? null,
+        params.reason,
+        params.blockCode,
+        params.blockingPRNumber ?? null,
+        now,
+      );
+  }
+
+  /**
+   * Return per-day dispatch block rate metrics over a rolling window.
+   *
+   * Block rate = blocked / (blocked + actual_dispatches).
+   * Actual dispatches are approximated from top-level task counts.
+   *
+   * @param days Rolling window in days (e.g. 7 or 30).
+   */
+  getDispatchBlockMetrics(days = 7): DispatchBlockMetrics {
+    // Per-day blocked counts from dispatch_blocks table
+    const blockRows = this.db
+      .prepare(
+        `SELECT
+           date(timestamp)  AS date,
+           COUNT(*)         AS blocked
+         FROM dispatch_blocks
+         WHERE date(timestamp) >= date('now', ? || ' days')
+         GROUP BY date(timestamp)
+         ORDER BY date(timestamp) ASC`,
+      )
+      .all(`-${days}`) as Array<{ date: string; blocked: number }>;
+
+    // Per-day dispatched task counts (top-level tasks created in window)
+    const dispatchRows = this.db
+      .prepare(
+        `SELECT
+           date(created_at)  AS date,
+           COUNT(*)          AS dispatched
+         FROM tasks
+         WHERE parent_task_id IS NULL
+           AND date(created_at) >= date('now', ? || ' days')
+         GROUP BY date(created_at)
+         ORDER BY date(created_at) ASC`,
+      )
+      .all(`-${days}`) as Array<{ date: string; dispatched: number }>;
+
+    const dispatchByDate = new Map<string, number>();
+    for (const r of dispatchRows) {
+      dispatchByDate.set(r.date, r.dispatched);
+    }
+
+    const daily: DispatchBlockDay[] = blockRows.map((r) => {
+      const actual = dispatchByDate.get(r.date) ?? 0;
+      const total = r.blocked + actual;
+      return {
+        date: r.date,
+        blocked: r.blocked,
+        total,
+        block_rate_pct: total > 0 ? (r.blocked / total) * 100 : null,
+      };
+    });
+
+    const totalBlocked = daily.reduce((s, d) => s + d.blocked, 0);
+    const totalDispatches = daily.reduce((s, d) => s + d.total, 0);
+    const rates = daily.map((d) => d.block_rate_pct).filter((v): v is number => v !== null);
+    const avgRate = rates.length > 0 ? rates.reduce((a, b) => a + b, 0) / rates.length : null;
+
+    // Linear trend via least-squares slope
+    let trend: DispatchBlockMetrics["trend"] = "insufficient_data";
+    if (rates.length >= 3) {
+      const n = rates.length;
+      const sumX = (n * (n - 1)) / 2;
+      const sumX2 = rates.reduce((s, _, i) => s + i * i, 0);
+      const sumY = rates.reduce((a, b) => a + b, 0);
+      const sumXY = rates.reduce((s, v, i) => s + i * v, 0);
+      const denom = n * sumX2 - sumX * sumX;
+      if (denom !== 0) {
+        const slope = (n * sumXY - sumX * sumY) / denom;
+        if (Math.abs(slope) < 0.5) {
+          trend = "stable";
+        } else if (slope > 0) {
+          trend = "worsening";
+        } else {
+          trend = "improving";
+        }
+      }
+    }
+
+    return {
+      days,
+      daily,
+      total_blocked: totalBlocked,
+      total_dispatches: totalDispatches,
+      avg_block_rate_pct: avgRate,
+      trend,
+    };
   }
 }

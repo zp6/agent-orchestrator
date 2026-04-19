@@ -59,6 +59,8 @@ import {
 import { queueForApproval } from "./telegram-approval-queue.js";
 import { executeCoordinatedMerge } from "../orchestrator/multi-repo-coordinator.js";
 import { pollVerificationOutcomes } from "../orchestrator/verification-outcome-poller.js";
+import { startMetricsServer, DEFAULT_METRICS_PORT } from "./metrics-server.js";
+import type { Server } from "node:http";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const QUALITY_SLA_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
@@ -81,6 +83,8 @@ const MEETING_SCHEDULE_CHECK_EVERY_N_CYCLES = 6; // ~30 min
 const ROADMAP_PROPOSAL_EVERY_N_CYCLES = 288; // ~24h at 5min interval
 const SKIP_PATTERN_CHECK_EVERY_N_CYCLES = 288; // ~24h at 5min interval
 const ALREADY_IN_REVIEW_SATURATION_THRESHOLD = 0.30; // Alert when >30% of completed tasks are duplicates
+/** Alert when the 7-day rolling dispatch block rate exceeds this fraction (issue #976). */
+const DISPATCH_BLOCK_RATE_THRESHOLD = 0.10; // 10% default
 const PROXY_HEALTH_CHECK_EVERY_N_CYCLES = 3;   // ~15min — check proxy server is reachable
 const CLOSED_ISSUE_FAILURE_CLEANUP_EVERY_N_CYCLES = 60; // ~5h — clear stale failures for closed issues
 
@@ -305,6 +309,9 @@ export class Daemon {
   /** Watches agents.yaml for changes and triggers hot-reload. */
   private configWatcher: ConfigWatcher | null = null;
 
+  /** Metrics HTTP server started on daemon startup (issue #976). */
+  private metricsServer: Server | null = null;
+
   /** Wall-clock timestamp (ms) when the daemon was last started — used to compute uptime. */
   private startedAt = 0;
 
@@ -456,6 +463,19 @@ export class Daemon {
     if (linearTeams.length) console.log(`Linear: ${linearTeams.join(", ")}`);
     if (slackChannels.length) console.log(`Slack: ${slackChannels.join(", ")}`);
     console.log();
+
+    // Start the metrics HTTP server so the dashboard can poll dispatch
+    // efficiency data (issue #976).  Best-effort: failure must not block
+    // the daemon loop.
+    try {
+      const metricsPort = DEFAULT_METRICS_PORT;
+      this.metricsServer = startMetricsServer(this.store, metricsPort);
+      console.log(`Metrics server: http://127.0.0.1:${metricsPort}/dispatch-efficiency`);
+    } catch (err) {
+      this.log.warn("Failed to start metrics server", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     // Ensure all agents from agents.yaml are registered with the proxy.
     // Force token refresh on startup — proxy loses credentials on restart.
@@ -849,6 +869,49 @@ export class Daemon {
         }
       } catch (err) {
         this.log.warn("Already-in-review saturation check failed", { error: err instanceof Error ? err.message : String(err) });
+      }
+
+      // Dispatch block rate check (issue #976): alert when the 7-day rolling
+      // block rate exceeds the configurable threshold (default 10%).
+      // This complements the already-in-review saturation check (above, 1h window)
+      // with a longer trend signal that is more resistant to transient spikes.
+      try {
+        const blockMetrics = this.store.getDispatchBlockMetrics(7);
+        const blockRatePct = blockMetrics.avg_block_rate_pct;
+        const threshold = DISPATCH_BLOCK_RATE_THRESHOLD * 100;
+        if (
+          blockRatePct !== null &&
+          blockMetrics.total_dispatches >= 5 &&
+          blockRatePct > threshold
+        ) {
+          const trendLabel = blockMetrics.trend === "worsening"
+            ? " (trend: ↑ worsening)" : blockMetrics.trend === "improving"
+            ? " (trend: ↓ improving)" : "";
+          this.log.warn("High dispatch block rate", {
+            block_rate_pct: blockRatePct,
+            total_blocked: blockMetrics.total_blocked,
+            total_dispatches: blockMetrics.total_dispatches,
+            trend: blockMetrics.trend,
+          });
+          console.warn(
+            `[${time}] ⚠  Dispatch block rate: ${blockRatePct.toFixed(1)}% over 7 days ` +
+            `(${blockMetrics.total_blocked} blocked / ${blockMetrics.total_dispatches} total)${trendLabel}`,
+          );
+          await notifyOperator(
+            "⚠️ High Dispatch Block Rate",
+            `${blockRatePct.toFixed(1)}% of dispatches in the last 7 days were blocked by the ` +
+            `already-in-review guard (${blockMetrics.total_blocked}/${blockMetrics.total_dispatches}) — ` +
+            `exceeds the ${threshold.toFixed(0)}% threshold${trendLabel}.\n\n` +
+            `This suggests the orchestrator is over-dispatching — re-triggering issues that already ` +
+            `have open PRs. Consider reviewing dispatch frequency or de-duplicating triggers.\n\n` +
+            `Run \`orch dispatch-efficiency\` for a day-by-day breakdown.`,
+            "warning",
+            "dispatch-block-rate-threshold",
+          );
+          this.store.incrementStat("dispatch_block_rate_alerts");
+        }
+      } catch (err) {
+        this.log.warn("Dispatch block rate check failed", { error: err instanceof Error ? err.message : String(err) });
       }
 
       // Verification outcome poller — runs every cycle; resolves pending
@@ -3581,6 +3644,11 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
     if (this.configWatcher) {
       this.configWatcher.stop();
       this.configWatcher = null;
+    }
+    // Close the metrics HTTP server (issue #976)
+    if (this.metricsServer) {
+      this.metricsServer.close();
+      this.metricsServer = null;
     }
     removePid();
 

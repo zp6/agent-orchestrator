@@ -538,6 +538,28 @@ export async function dispatchGitHubIssues(
             failureCode: validation.failureCode,
             repo: issue.repo,
           });
+
+          // Dispatch efficiency tracking (issue #976): persist a block event
+          // so operators can measure how many dispatches are wasted on issues
+          // that already have open PRs.
+          try {
+            const resolution = validation.failureCode === "approved_pr_waiting"
+              ? `Approved PR #${validation.blockingPRNumber} is awaiting merge`
+              : `Open PR #${validation.blockingPRNumber} is already in review`;
+            store.recordDispatchBlock({
+              sourceRef,
+              agentName,
+              reason: `Pre-dispatch guard blocked: ${resolution}`,
+              blockCode: validation.failureCode,
+              blockingPRNumber: validation.blockingPRNumber,
+            });
+          } catch (blockErr) {
+            log.warn("Failed to record dispatch block event", {
+              sourceRef,
+              error: blockErr instanceof Error ? blockErr.message : String(blockErr),
+            });
+          }
+
           // Priority review fast-lane (issue #871): route open PRs blocking dispatch
           // to the priority review queue so they get reviewed in the current cycle
           // rather than waiting for the next general open-PR sweep.
