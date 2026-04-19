@@ -17,6 +17,12 @@
  *     3. source_ref pointing to a repo other than the agent's own github repo
  *        (cross-repo implementation work)
  *
+ * • `review-only`  – the agent may only receive PR-review, verification, and
+ *   supervision tasks.  Implementation tasks (same detection logic as
+ *   `research-only`) are blocked and rerouted to the repo's home agent.
+ *   This tag is used by `claude-orchestrator-reviewer` to prevent
+ *   implementation work from being dispatched to the review/verify fleet.
+ *
  * Rerouting
  * ─────────
  * When a violation is detected the enforcer walks the agent registry and picks
@@ -134,10 +140,13 @@ export function checkCapabilityEnforcement(params: {
   if (!agent) return null;
 
   const tags = agent.capability_tags ?? [];
-  if (!tags.includes("research-only")) return null;
+  const isResearchOnly = tags.includes("research-only");
+  const isReviewOnly = tags.includes("review-only");
+
+  if (!isResearchOnly && !isReviewOnly) return null;
 
   if (!isImplementationTask(taskType, title, sourceRef, agent.github)) {
-    // Task is genuinely research work — no enforcement needed.
+    // Task is genuinely research/review work — no enforcement needed.
     return null;
   }
 
@@ -148,8 +157,9 @@ export function checkCapabilityEnforcement(params: {
     return null;
   }
 
+  const tagLabel = isReviewOnly ? "review-only" : "research-only";
   const redirectReason =
-    `Agent "${agentName}" is tagged research-only but received an implementation task` +
+    `Agent "${agentName}" is tagged ${tagLabel} but received an implementation task` +
     (title ? ` ("${title}")` : "") +
     `. Rerouted to "${substitute}".`;
 
@@ -265,11 +275,11 @@ function findImplementationAgent(
     }
   }
 
-  // 2. First non-research-only agent
+  // 2. First non-restricted agent (neither research-only nor review-only)
   for (const [name, a] of Object.entries(config.agents)) {
     if (name === blockedAgent) continue;
     const tags = a.capability_tags ?? [];
-    if (!tags.includes("research-only")) return name;
+    if (!tags.includes("research-only") && !tags.includes("review-only")) return name;
   }
 
   // No valid substitute found — return null so callers can fall back gracefully

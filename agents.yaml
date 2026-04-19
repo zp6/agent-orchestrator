@@ -155,6 +155,7 @@ agents:
     pool: "reviewer"
     description: "PR reviewer, verifier, supervisor (Claude). Also serves as LLM backend."
     capabilities: ["typescript", "llm", "review", "verification"]
+    capability_tags: ["review-only"]
     github: "rapartlu/agent-reviewer"
     owns_topics: ["review", "verification", "supervisor", "improvement", "escalation", "telegram", "quality"]
     # Housekeeping fires at cycle modulo 10 → second slot in each 5h window (~:50min offset)

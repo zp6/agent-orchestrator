@@ -162,3 +162,107 @@ describe("checkCapabilityEnforcement", () => {
     expect(result!.toAgent).toBe("claude-impl-agent");
   });
 });
+
+// ── review-only tag enforcement ────────────────────────────────────────────
+
+describe("checkCapabilityEnforcement — review-only", () => {
+  it("returns null for a review-only agent receiving a non-implementation task", () => {
+    const config = makeConfig({
+      "claude-reviewer-agent": {
+        github: "rapartlu/agent-reviewer",
+        capability_tags: ["review-only"],
+      },
+      "claude-impl-agent": { github: "rapartlu/agent-orchestrator" },
+    });
+    const result = checkCapabilityEnforcement({
+      config,
+      agentName: "claude-reviewer-agent",
+      taskType: "research",
+      sourceRef: "rapartlu/agent-reviewer#10",
+    });
+    expect(result).toBeNull();
+  });
+
+  it("reroutes implementation task away from review-only agent", () => {
+    const config = makeConfig({
+      "claude-reviewer-agent": {
+        github: "rapartlu/agent-reviewer",
+        capability_tags: ["review-only"],
+      },
+      "claude-impl-agent": { github: "rapartlu/agent-orchestrator" },
+    });
+    const result = checkCapabilityEnforcement({
+      config,
+      agentName: "claude-reviewer-agent",
+      taskType: "implementation",
+      title: "[Orchestrator] Add dispatch guard",
+      sourceRef: "rapartlu/agent-orchestrator#973",
+    });
+    expect(result).not.toBeNull();
+    expect(result!.blockedAgent).toBe("claude-reviewer-agent");
+    expect(result!.toAgent).toBe("claude-impl-agent");
+    expect(result!.redirectReason).toContain("review-only");
+  });
+
+  it("routes to exact repo-match agent when one is available", () => {
+    const config = makeConfig({
+      "claude-reviewer-agent": {
+        github: "rapartlu/agent-reviewer",
+        capability_tags: ["review-only"],
+      },
+      "claude-dashboard-agent": { github: "rapartlu/agent-dashboard" },
+      "claude-orchestrator-agent": { github: "rapartlu/agent-orchestrator" },
+    });
+    const result = checkCapabilityEnforcement({
+      config,
+      agentName: "claude-reviewer-agent",
+      taskType: "implementation",
+      sourceRef: "rapartlu/agent-dashboard#416",
+    });
+    expect(result!.toAgent).toBe("claude-dashboard-agent");
+  });
+
+  it("does not select another review-only or research-only agent as substitute", () => {
+    const config = makeConfig({
+      "claude-reviewer-agent": {
+        github: "rapartlu/agent-reviewer",
+        capability_tags: ["review-only"],
+      },
+      "claude-research-agent": {
+        github: "rapartlu/research-agent",
+        capability_tags: ["research-only"],
+      },
+      "claude-impl-agent": { github: "rapartlu/agent-orchestrator" },
+    });
+    const result = checkCapabilityEnforcement({
+      config,
+      agentName: "claude-reviewer-agent",
+      taskType: "implementation",
+      sourceRef: "rapartlu/agent-orchestrator#973",
+    });
+    expect(result!.toAgent).toBe("claude-impl-agent");
+    expect(result!.toAgent).not.toBe("claude-research-agent");
+  });
+
+  it("falls back gracefully and returns null when no substitute is available", () => {
+    const config = makeConfig({
+      "claude-reviewer-agent": {
+        github: "rapartlu/agent-reviewer",
+        capability_tags: ["review-only"],
+      },
+      // All other agents are also restricted
+      "claude-research-agent": {
+        github: "rapartlu/research-agent",
+        capability_tags: ["research-only"],
+      },
+    });
+    const result = checkCapabilityEnforcement({
+      config,
+      agentName: "claude-reviewer-agent",
+      taskType: "implementation",
+      sourceRef: "rapartlu/agent-orchestrator#973",
+    });
+    // No valid substitute → enforcer allows dispatch to avoid deadlock
+    expect(result).toBeNull();
+  });
+});
