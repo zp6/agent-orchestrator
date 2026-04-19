@@ -35,6 +35,38 @@ function makeTempStore() {
   return { store, dir };
 }
 
+/**
+ * Insert a minimal tasks row so FK constraints on semantic_task_memory
+ * are satisfied (issue #366).  Uses INSERT OR IGNORE so repeated calls with
+ * the same taskId are safe.
+ */
+function ensureTaskExists(
+  store: StateStore,
+  taskId: string,
+): void {
+  const db = (store as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } }).db;
+  db.prepare(
+    `INSERT OR IGNORE INTO tasks
+       (id, title, status, task_type, created_at, updated_at)
+     VALUES (?, ?, 'done', 'implementation', datetime('now'), datetime('now'))`,
+  ).run(taskId, `Task ${taskId}`);
+}
+
+/**
+ * Wrapper around store.recordMemoryEntry that first ensures the parent
+ * tasks row exists (issue #366 FK enforcement).
+ */
+function recordEntry(
+  store: StateStore,
+  topic: string,
+  taskId: string,
+  confidence: number,
+  outcome: "success" | "failure" | "partial",
+): void {
+  ensureTaskExists(store, taskId);
+  store.recordMemoryEntry(topic, taskId, confidence, outcome);
+}
+
 function makeNotifierSpy(): { notifier: Notifier; sends: string[] } {
   const sends: string[] = [];
   const notifier: Notifier = {
@@ -66,7 +98,7 @@ describe("StateStore semantic memory", () => {
 
   describe("recordMemoryEntry", () => {
     it("inserts a new entry", () => {
-      store.recordMemoryEntry("authentication", "task-001", 0.85, "success");
+      recordEntry(store, "authentication", "task-001", 0.85, "success");
       const entries = store.expandMemoryTopic("authentication");
       expect(entries).toHaveLength(1);
       expect(entries[0]?.topic).toBe("authentication");
@@ -76,8 +108,8 @@ describe("StateStore semantic memory", () => {
     });
 
     it("upserts when (topic, task_id) already exists", () => {
-      store.recordMemoryEntry("authentication", "task-001", 0.50, "failure");
-      store.recordMemoryEntry("authentication", "task-001", 0.90, "success");
+      recordEntry(store, "authentication", "task-001", 0.50, "failure");
+      recordEntry(store, "authentication", "task-001", 0.90, "success");
       const entries = store.expandMemoryTopic("authentication");
       expect(entries).toHaveLength(1);
       expect(entries[0]?.confidence).toBe(0.90);
@@ -85,14 +117,14 @@ describe("StateStore semantic memory", () => {
     });
 
     it("normalises topic to lowercase", () => {
-      store.recordMemoryEntry("  Authentication  ", "task-001", 0.75, "partial");
+      recordEntry(store, "  Authentication  ", "task-001", 0.75, "partial");
       const entries = store.expandMemoryTopic("authentication");
       expect(entries).toHaveLength(1);
     });
 
     it("allows same topic with different task IDs", () => {
-      store.recordMemoryEntry("auth", "task-001", 0.80, "success");
-      store.recordMemoryEntry("auth", "task-002", 0.60, "failure");
+      recordEntry(store, "auth", "task-001", 0.80, "success");
+      recordEntry(store, "auth", "task-002", 0.60, "failure");
       const entries = store.expandMemoryTopic("auth");
       expect(entries).toHaveLength(2);
     });
@@ -101,11 +133,11 @@ describe("StateStore semantic memory", () => {
   describe("getTopMemoryTopics", () => {
     it("returns topics ordered by query count descending", () => {
       // Topic A: 3 entries
-      store.recordMemoryEntry("topic-a", "t1", 0.80, "success");
-      store.recordMemoryEntry("topic-a", "t2", 0.70, "success");
-      store.recordMemoryEntry("topic-a", "t3", 0.90, "success");
+      recordEntry(store, "topic-a", "t1", 0.80, "success");
+      recordEntry(store, "topic-a", "t2", 0.70, "success");
+      recordEntry(store, "topic-a", "t3", 0.90, "success");
       // Topic B: 1 entry
-      store.recordMemoryEntry("topic-b", "t4", 0.60, "failure");
+      recordEntry(store, "topic-b", "t4", 0.60, "failure");
 
       const since = new Date(Date.now() - 24 * 3600_000).toISOString();
       const topics = store.getTopMemoryTopics(5, since);
@@ -115,7 +147,7 @@ describe("StateStore semantic memory", () => {
     });
 
     it("filters by sinceIso window", () => {
-      store.recordMemoryEntry("old-topic", "t1", 0.80, "success");
+      recordEntry(store, "old-topic", "t1", 0.80, "success");
       // sinceIso = far future → nothing qualifies
       const future = new Date(Date.now() + 10 * 3600_000).toISOString();
       const topics = store.getTopMemoryTopics(5, future);
@@ -124,7 +156,7 @@ describe("StateStore semantic memory", () => {
 
     it("includes example_task_ids (up to 5)", () => {
       for (let i = 0; i < 7; i++) {
-        store.recordMemoryEntry("big-topic", `task-${i}`, 0.75, "partial");
+        recordEntry(store, "big-topic", `task-${i}`, 0.75, "partial");
       }
       const since = new Date(Date.now() - 3600_000).toISOString();
       const topics = store.getTopMemoryTopics(1, since);
@@ -134,9 +166,9 @@ describe("StateStore semantic memory", () => {
 
   describe("getRepeatedAttemptTopics", () => {
     it("returns topics with 2+ entries", () => {
-      store.recordMemoryEntry("repeated", "t1", 0.50, "failure");
-      store.recordMemoryEntry("repeated", "t2", 0.65, "partial");
-      store.recordMemoryEntry("single", "t3", 0.90, "success");
+      recordEntry(store, "repeated", "t1", 0.50, "failure");
+      recordEntry(store, "repeated", "t2", 0.65, "partial");
+      recordEntry(store, "single", "t3", 0.90, "success");
 
       const topics = store.getRepeatedAttemptTopics(5);
       expect(topics.map((t) => t.topic)).toContain("repeated");
@@ -144,18 +176,18 @@ describe("StateStore semantic memory", () => {
     });
 
     it("records best_score as the maximum confidence", () => {
-      store.recordMemoryEntry("rep", "t1", 0.40, "failure");
-      store.recordMemoryEntry("rep", "t2", 0.68, "partial");
+      recordEntry(store, "rep", "t1", 0.40, "failure");
+      recordEntry(store, "rep", "t2", 0.68, "partial");
       const topics = store.getRepeatedAttemptTopics(1);
       expect(topics[0]?.best_score).toBeCloseTo(0.68, 2);
     });
 
     it("orders by attempt_count descending", () => {
-      store.recordMemoryEntry("two-attempts", "t1", 0.50, "failure");
-      store.recordMemoryEntry("two-attempts", "t2", 0.55, "failure");
-      store.recordMemoryEntry("three-attempts", "ta", 0.40, "failure");
-      store.recordMemoryEntry("three-attempts", "tb", 0.45, "failure");
-      store.recordMemoryEntry("three-attempts", "tc", 0.50, "failure");
+      recordEntry(store, "two-attempts", "t1", 0.50, "failure");
+      recordEntry(store, "two-attempts", "t2", 0.55, "failure");
+      recordEntry(store, "three-attempts", "ta", 0.40, "failure");
+      recordEntry(store, "three-attempts", "tb", 0.45, "failure");
+      recordEntry(store, "three-attempts", "tc", 0.50, "failure");
 
       const topics = store.getRepeatedAttemptTopics(5);
       expect(topics[0]?.topic).toBe("three-attempts");
@@ -165,9 +197,9 @@ describe("StateStore semantic memory", () => {
 
   describe("getLowConfidenceTopics", () => {
     it("returns topics where all entries are below threshold", () => {
-      store.recordMemoryEntry("low-conf", "t1", 0.40, "failure");
-      store.recordMemoryEntry("low-conf", "t2", 0.55, "partial");
-      store.recordMemoryEntry("high-conf", "t3", 0.90, "success");
+      recordEntry(store, "low-conf", "t1", 0.40, "failure");
+      recordEntry(store, "low-conf", "t2", 0.55, "partial");
+      recordEntry(store, "high-conf", "t3", 0.90, "success");
 
       const topics = store.getLowConfidenceTopics(LOW_CONFIDENCE_THRESHOLD, 5);
       expect(topics.map((t) => t.topic)).toContain("low-conf");
@@ -175,16 +207,16 @@ describe("StateStore semantic memory", () => {
     });
 
     it("excludes topics where even ONE entry meets the threshold", () => {
-      store.recordMemoryEntry("mixed", "t1", 0.40, "failure");
-      store.recordMemoryEntry("mixed", "t2", 0.80, "success"); // above threshold
+      recordEntry(store, "mixed", "t1", 0.40, "failure");
+      recordEntry(store, "mixed", "t2", 0.80, "success"); // above threshold
 
       const topics = store.getLowConfidenceTopics(LOW_CONFIDENCE_THRESHOLD, 5);
       expect(topics.map((t) => t.topic)).not.toContain("mixed");
     });
 
     it("orders worst-first (lowest max_score first)", () => {
-      store.recordMemoryEntry("very-bad", "t1", 0.20, "failure");
-      store.recordMemoryEntry("bad", "t2", 0.60, "failure");
+      recordEntry(store, "very-bad", "t1", 0.20, "failure");
+      recordEntry(store, "bad", "t2", 0.60, "failure");
 
       const topics = store.getLowConfidenceTopics(LOW_CONFIDENCE_THRESHOLD, 5);
       expect(topics[0]?.topic).toBe("very-bad");
@@ -193,8 +225,8 @@ describe("StateStore semantic memory", () => {
 
   describe("expandMemoryTopic", () => {
     it("returns exact match entries ordered by recorded_at DESC", () => {
-      store.recordMemoryEntry("deploy", "t1", 0.70, "partial");
-      store.recordMemoryEntry("deploy", "t2", 0.85, "success");
+      recordEntry(store, "deploy", "t1", 0.70, "partial");
+      recordEntry(store, "deploy", "t2", 0.85, "success");
 
       const entries = store.expandMemoryTopic("deploy");
       expect(entries.length).toBe(2);
@@ -209,7 +241,7 @@ describe("StateStore semantic memory", () => {
     });
 
     it("handles FTS5 fallback for partial topic match", () => {
-      store.recordMemoryEntry("database migration", "t1", 0.75, "success");
+      recordEntry(store, "database migration", "t1", 0.75, "success");
 
       // Exact match on sub-word
       const entries = store.expandMemoryTopic("database migration");
@@ -234,14 +266,14 @@ describe("buildMemoryDigest", () => {
 
   it("produces a report with all three sections", () => {
     // Top queried: add one topic with multiple entries
-    store.recordMemoryEntry("auth", "t1", 0.85, "success");
-    store.recordMemoryEntry("auth", "t2", 0.78, "success");
+    recordEntry(store, "auth", "t1", 0.85, "success");
+    recordEntry(store, "auth", "t2", 0.78, "success");
 
     // Repeated: already covered by auth (2+ entries)
 
     // Low confidence: below threshold
-    store.recordMemoryEntry("flaky-feature", "t3", 0.40, "failure");
-    store.recordMemoryEntry("flaky-feature", "t4", 0.55, "failure");
+    recordEntry(store, "flaky-feature", "t3", 0.40, "failure");
+    recordEntry(store, "flaky-feature", "t4", 0.55, "failure");
 
     const report = buildMemoryDigest(store);
 

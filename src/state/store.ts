@@ -93,7 +93,12 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
 
   constructor(dbPath: string = process.env.STATE_DB_PATH ?? "state.db") {
     this.db = new Database(dbPath);
+    // Enable WAL mode for concurrent read performance.
     this.db.pragma("journal_mode = WAL");
+    // Enable FK enforcement so child-before-parent INSERTs throw immediately
+    // instead of silently succeeding and leaving orphaned rows (issue #366).
+    // MUST be set before migrate() runs any INSERT statements.
+    this.db.pragma("foreign_keys = ON");
     this.migrate();
   }
 
@@ -191,7 +196,11 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
         ON llm_call_events (call_type, created_at DESC);
     `);
 
-    // Create PR outcome records table for score calibration (idempotent)
+    // Create PR outcome records table for score calibration (idempotent).
+    // Parent-before-child INSERT order required: tasks row must exist before
+    // inserting a pr_outcome_records row referencing the same task_id.
+    // The FOREIGN KEY constraint enforces this on new databases; existing
+    // databases are validated at startup via runStartupIntegrityCheck() (issue #366).
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS pr_outcome_records (
         id TEXT PRIMARY KEY,
@@ -203,7 +212,8 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
         repo TEXT NOT NULL,
         pr_number INTEGER NOT NULL,
         outcome TEXT NOT NULL,
-        recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+        recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (task_id) REFERENCES tasks (id)
       );
 
       CREATE INDEX IF NOT EXISTS idx_pr_outcome_records_agent_type_bucket
@@ -400,6 +410,8 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
 
     // Verification results table (idempotent — issue #120).
     // Records every scoring decision for calibration drift and first-pass rate monitoring.
+    // Parent-before-child INSERT order required: tasks row must exist before
+    // inserting a verification_results row referencing the same task_id (issue #366).
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS verification_results (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -409,7 +421,8 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
         rejection_reason TEXT,
         threshold        REAL NOT NULL,
         agent_id         TEXT NOT NULL,
-        timestamp        TEXT NOT NULL
+        timestamp        TEXT NOT NULL,
+        FOREIGN KEY (task_id) REFERENCES tasks (id)
       );
 
       CREATE INDEX IF NOT EXISTS idx_verification_results_agent_id_timestamp
@@ -549,6 +562,8 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
 
     // Semantic task memory table (idempotent — issue #369).
     // Stores knowledge entries indexed by normalised topic label.
+    // Parent-before-child INSERT order required: tasks row must exist before
+    // inserting a semantic_task_memory row referencing the same task_id (issue #366).
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS semantic_task_memory (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -557,7 +572,8 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
         confidence  REAL NOT NULL,
         outcome     TEXT NOT NULL DEFAULT 'partial',
         recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
-        UNIQUE (topic, task_id)
+        UNIQUE (topic, task_id),
+        FOREIGN KEY (task_id) REFERENCES tasks (id)
       );
 
       CREATE INDEX IF NOT EXISTS idx_semantic_task_memory_topic
@@ -3967,5 +3983,55 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
         created_at: r.created_at,
       };
     });
+  }
+
+  // ── Startup integrity check (issue #366) ────────────────────────────────
+
+  /**
+   * Run PRAGMA integrity_check and PRAGMA foreign_key_check against the open
+   * database.  Call this once at container start after constructing StateStore.
+   *
+   * Results are logged to console; if a `notifier` is provided (e.g. the
+   * Telegram notifier), any failures are also sent as an alert message.
+   *
+   * @param notifier  Optional object with a `send(msg: string): void` method
+   *                  (e.g. TelegramNotifier) for out-of-band alerting.
+   */
+  runStartupIntegrityCheck(notifier?: { send(msg: string): void }): void {
+    // PRAGMA integrity_check returns one row per problem found, or a single
+    // row with value 'ok' when the database is healthy.
+    const integrityRows = this.db.pragma("integrity_check") as Array<{ integrity_check: string }>;
+    const integrityFailed = integrityRows.some((r) => r.integrity_check !== "ok");
+    if (integrityFailed) {
+      const msg =
+        `[state.db] integrity_check FAILED:\n` +
+        integrityRows.map((r) => r.integrity_check).join("\n");
+      console.error(msg);
+      notifier?.send(msg);
+    }
+
+    // PRAGMA foreign_key_check returns one row per orphaned child row.
+    // An empty result means all FK relationships are satisfied.
+    const fkRows = this.db.pragma("foreign_key_check") as Array<Record<string, unknown>>;
+    if (fkRows.length > 0) {
+      const msg =
+        `[state.db] foreign_key_check found ${fkRows.length} violation(s):\n` +
+        JSON.stringify(fkRows, null, 2);
+      console.error(msg);
+      notifier?.send(msg);
+    }
+
+    if (!integrityFailed && fkRows.length === 0) {
+      console.log("[state.db] startup integrity check: OK");
+    }
+  }
+
+  /**
+   * Close the underlying SQLite connection.
+   *
+   * Call this at the end of tests or CLI commands to release file handles.
+   */
+  close(): void {
+    this.db.close();
   }
 }

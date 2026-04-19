@@ -33,6 +33,23 @@ function insertDoneTask(
     .run(taskId, `Task ${taskId}`, "Test task", "agent-a", scoreText, now, now);
 }
 
+/**
+ * Insert a minimal tasks row so FK constraints on child tables (e.g.
+ * verification_results) are satisfied (issue #366).
+ * Uses INSERT OR IGNORE so calling with the same taskId multiple times is safe.
+ */
+function ensureTaskExists(store: StateStore, taskId: string): void {
+  const raw = store as unknown as RawDB;
+  const now = "2026-04-07T12:00:00.000Z";
+  raw.db
+    .prepare(
+      `INSERT OR IGNORE INTO tasks
+         (id, title, status, task_type, created_at, updated_at)
+       VALUES (?, ?, 'done', 'implementation', ?, ?)`,
+    )
+    .run(taskId, `Task ${taskId}`, now, now);
+}
+
 describe("hard-block enforcement", () => {
   let store: StateStore;
 
@@ -68,6 +85,7 @@ describe("hard-block enforcement", () => {
   });
 
   it("normalizes direct verification result inserts below the hard-block threshold", () => {
+    ensureTaskExists(store, "T-LOW");
     store.insertVerificationResult({
       task_id: "T-LOW",
       score: 0.10,
@@ -97,6 +115,7 @@ describe("sub-threshold rejection (0.50–0.60) enforcement at store write path"
   // ── insertVerificationResult normalization ────────────────────────────────
 
   it("score of 0.50 with first_pass=1 is normalised to first_pass=0 (low_score_sub60)", () => {
+    ensureTaskExists(store, "T-SUB60-BOUNDARY");
     store.insertVerificationResult({
       task_id: "T-SUB60-BOUNDARY",
       score: 0.50,
@@ -116,6 +135,7 @@ describe("sub-threshold rejection (0.50–0.60) enforcement at store write path"
   });
 
   it("score of 0.55 with first_pass=1 is normalised to first_pass=0 (low_score_sub60)", () => {
+    ensureTaskExists(store, "T-SUB60-MID");
     store.insertVerificationResult({
       task_id: "T-SUB60-MID",
       score: 0.55,
@@ -135,6 +155,7 @@ describe("sub-threshold rejection (0.50–0.60) enforcement at store write path"
   });
 
   it("score of 0.59 with first_pass=1 is normalised to first_pass=0 (just below floor)", () => {
+    ensureTaskExists(store, "T-SUB60-NEAR");
     store.insertVerificationResult({
       task_id: "T-SUB60-NEAR",
       score: 0.59,
@@ -154,6 +175,7 @@ describe("sub-threshold rejection (0.50–0.60) enforcement at store write path"
   });
 
   it("score of 0.60 with first_pass=1 is stored as-is (exactly at floor)", () => {
+    ensureTaskExists(store, "T-AT-FLOOR");
     store.insertVerificationResult({
       task_id: "T-AT-FLOOR",
       score: 0.60,
@@ -173,6 +195,7 @@ describe("sub-threshold rejection (0.50–0.60) enforcement at store write path"
   });
 
   it("score of 0.38 is still normalised as hard_block_sub50 (not low_score_sub60)", () => {
+    ensureTaskExists(store, "T-HARD-BLOCK");
     store.insertVerificationResult({
       task_id: "T-HARD-BLOCK",
       score: 0.38,
@@ -257,6 +280,7 @@ describe("sub-threshold rejection (0.50–0.60) enforcement at store write path"
   // ── getApprovedBelowThreshold audit query ─────────────────────────────────
 
   it("getApprovedBelowThreshold returns empty array when no low-score approved records exist", () => {
+    ensureTaskExists(store, "T-GOOD");
     store.insertVerificationResult({
       task_id: "T-GOOD",
       score: 0.85,
@@ -275,6 +299,7 @@ describe("sub-threshold rejection (0.50–0.60) enforcement at store write path"
 
   it("getApprovedBelowThreshold returns empty array because sub-threshold writes are normalised to rejected", () => {
     // Even though we try to insert an approved record at 0.55, the store normalises it to rejected.
+    ensureTaskExists(store, "T-NORM");
     store.insertVerificationResult({
       task_id: "T-NORM",
       score: 0.55,
@@ -293,6 +318,7 @@ describe("sub-threshold rejection (0.50–0.60) enforcement at store write path"
   });
 
   it("getApprovedBelowThreshold returns empty array when only above-threshold approved records exist", () => {
+    ensureTaskExists(store, "T-ABOVE");
     store.insertVerificationResult({
       task_id: "T-ABOVE",
       score: 0.75,

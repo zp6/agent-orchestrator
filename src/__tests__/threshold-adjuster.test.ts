@@ -23,6 +23,25 @@ import type { PROutcome } from "../state/types.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+type RawDB = {
+  db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } };
+};
+
+/**
+ * Insert a minimal tasks row so FK constraints on pr_outcome_records are
+ * satisfied (issue #366). Uses INSERT OR IGNORE so repeated calls are safe.
+ */
+function ensureTaskExists(store: StateStore, taskId: string): void {
+  const raw = store as unknown as RawDB;
+  raw.db
+    .prepare(
+      `INSERT OR IGNORE INTO tasks
+         (id, title, status, task_type, created_at, updated_at)
+       VALUES (?, ?, 'done', 'implementation', datetime('now'), datetime('now'))`,
+    )
+    .run(taskId, `Task ${taskId}`);
+}
+
 function seedOutcomes(
   store: StateStore,
   agentName: string,
@@ -32,8 +51,11 @@ function seedOutcomes(
   count: number,
 ): void {
   for (let i = 0; i < count; i++) {
+    const taskId = `task-${Math.random().toString(36).slice(2)}`;
+    // Parent task row must exist before the child pr_outcome_records row (issue #366).
+    ensureTaskExists(store, taskId);
     store.recordPROutcome({
-      task_id: `task-${Math.random().toString(36).slice(2)}`,
+      task_id: taskId,
       agent_name: agentName,
       task_type: taskType,
       quality_score: qualityScore,

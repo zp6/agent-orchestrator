@@ -31,16 +31,22 @@ function insertVerificationResult(
   const ts = opts.timestamp ?? new Date().toISOString();
   const score = opts.score ?? (opts.firstPass === 1 ? 0.85 : 0.65);
 
-  // Insert a matching task row so the drill-down JOIN resolves task_type
-  if (opts.taskType) {
-    raw.db
-      .prepare(
-        `INSERT OR IGNORE INTO tasks
-           (id, title, status, agent_name, task_type, created_at, updated_at)
-         VALUES (?, ?, 'done', ?, ?, ?, ?)`,
-      )
-      .run(opts.taskId, `task-${opts.taskId}`, opts.agentId, opts.taskType, ts, ts);
-  }
+  // Insert a matching task row so the FK constraint on verification_results
+  // is satisfied (issue #366) and the drill-down JOIN resolves task_type.
+  raw.db
+    .prepare(
+      `INSERT OR IGNORE INTO tasks
+         (id, title, status, agent_name, task_type, created_at, updated_at)
+       VALUES (?, ?, 'done', ?, ?, ?, ?)`,
+    )
+    .run(
+      opts.taskId,
+      `task-${opts.taskId}`,
+      opts.agentId,
+      opts.taskType ?? "implementation",
+      ts,
+      ts,
+    );
 
   raw.db
     .prepare(
@@ -232,14 +238,20 @@ describe("StateStore.getFirstPassRateWidget", () => {
     });
 
     it("uses 'unknown' task_type when task row is missing", () => {
-      // Insert verification without a corresponding task row
-      (store as unknown as RawDB).db
+      // This test verifies that the drill-down query falls back to 'unknown'
+      // when no corresponding tasks row exists.  We briefly disable FK
+      // enforcement to insert the orphaned row (simulating a pre-#366 state),
+      // then re-enable it so the rest of the suite stays strict (issue #366).
+      const db = (store as unknown as RawDB).db;
+      db.prepare("PRAGMA foreign_keys = OFF").run();
+      db
         .prepare(
           `INSERT INTO verification_results
              (task_id, score, first_pass, rejection_reason, threshold, agent_id, timestamp)
            VALUES ('NOTASK', 0.9, 1, NULL, 0.80, 'agent-x', ?)`,
         )
         .run(new Date().toISOString());
+      db.prepare("PRAGMA foreign_keys = ON").run();
 
       const widget = store.getFirstPassRateWidget();
       const row = widget.drill_down.find(
