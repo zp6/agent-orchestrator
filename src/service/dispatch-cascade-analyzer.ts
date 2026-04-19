@@ -215,15 +215,15 @@ No new follow-up tasks will be dispatched until this cascade is resolved.
     let current = this.getTask(taskId);
     while (current && current.parent_task_id) {
       // If the parent we're about to follow is a node we've already visited,
-      // we have a circular parent_task_id chain.  Stop here and treat
-      // `current` as the root so we still build a partial cascade tree.
+      // we have a circular parent_task_id chain — return null so the caller
+      // (analyzeCascade) treats this cascade as unanalyzable and fails open.
       if (seen.has(current.parent_task_id)) {
-        log.warn("Cycle detected in parent_task_id chain — stopping walk", {
+        log.warn("Cycle detected in parent_task_id chain — aborting root walk", {
           task_id: taskId,
           cycle_at: current.parent_task_id,
           visited_count: seen.size,
         });
-        break;
+        return null;
       }
       seen.add(current.id);
       const parent = this.getTask(current.parent_task_id);

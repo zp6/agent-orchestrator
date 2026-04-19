@@ -81,39 +81,37 @@ describe("findRootTask", () => {
     expect(cascade!.root_task_id).toBe("solo");
   });
 
-  it("breaks on circular parent reference (A → B → A) without hanging", () => {
+  it("returns null on circular parent reference (A → B → A) without hanging", () => {
     // A's parent is B, B's parent is A — a cycle
     const a = makeTask({ id: "a", parent_task_id: "b" });
     const b = makeTask({ id: "b", parent_task_id: "a" });
     const store = makeStore([a, b]);
 
     const analyzer = new DispatchCascadeAnalyzer(store as never, {});
-    // Must not hang — should break and use one of the cycle nodes as root
+    // Must not hang — findRootTask detects the cycle and returns null,
+    // causing analyzeCascade to return null (fail-open: dispatch is allowed).
     const cascade = analyzer.analyzeCascade("a");
 
-    // Cascade should be non-null because findRootTask breaks instead of returning null
-    expect(cascade).not.toBeNull();
-    // The root should be one of the cycle members (whichever we stopped at)
-    expect(["a", "b"]).toContain(cascade!.root_task_id);
+    // Cycle → findRootTask returns null → analyzeCascade returns null
+    expect(cascade).toBeNull();
+
+    // Fail-open: canDispatchFollowUp should allow dispatch when cascade is null
+    const result = analyzer.canDispatchFollowUp("a");
+    expect(result.allowed).toBe(true);
   });
 
-  it("breaks on self-referencing parent (A → A)", () => {
+  it("returns null on self-referencing parent (A → A)", () => {
     const a = makeTask({ id: "a", parent_task_id: "a" });
     const store = makeStore([a]);
 
     const analyzer = new DispatchCascadeAnalyzer(store as never, {});
     const cascade = analyzer.analyzeCascade("a");
 
-    // Self-referencing: parent_task_id="a" is already in seen (current.id was added)
-    // Actually current.id won't be in seen on first iteration because seen.add happens
-    // after the check. Let me trace: seen={}, current=A, parent_task_id="a",
-    // seen.has("a")=false, seen.add("a"), getTask("a")=A, current=A again.
-    // Next iteration: seen={"a"}, current=A, parent_task_id="a", seen.has("a")=true → break.
-    // So we get a result (not null) but it's safe — no infinite loop.
-    expect(cascade).not.toBeNull();
+    // Self-referencing: seen.add("a") then seen.has("a") → return null
+    expect(cascade).toBeNull();
   });
 
-  it("breaks on long cycle (A → B → C → A)", () => {
+  it("returns null on long cycle (A → B → C → A)", () => {
     const a = makeTask({ id: "a", parent_task_id: "b" });
     const b = makeTask({ id: "b", parent_task_id: "c" });
     const c = makeTask({ id: "c", parent_task_id: "a" });
@@ -122,7 +120,8 @@ describe("findRootTask", () => {
     const analyzer = new DispatchCascadeAnalyzer(store as never, {});
     const cascade = analyzer.analyzeCascade("a");
 
-    expect(cascade).not.toBeNull();
+    // Cycle detected → null (fail-open)
+    expect(cascade).toBeNull();
   });
 });
 
