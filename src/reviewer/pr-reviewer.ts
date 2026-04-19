@@ -40,6 +40,10 @@ import {
   type GitHubIssue,
 } from "./standup-handler.js";
 import { categoriseReviewComment } from "./pr-iteration-metrics.js";
+import {
+  checkPRScope,
+  formatScopeViolationComment,
+} from "./pr-scope-checker.js";
 
 export interface PRInfo {
   number: number;
@@ -633,6 +637,30 @@ export class PRReviewer {
     const diffWarning = diffTruncated
       ? `\n\n> ⚠️ **TRUNCATED DIFF WARNING**: The full diff is ${Math.round(diffSize / 1024)} KB but only the first ~${Math.round(truncatedDiff.length / 1024)} KB is shown here. Your review is INCOMPLETE — you have not seen all the changes. Factor this into your decision: note in your comment which files/areas you could not review, and consider escalating if the unseen portion looks significant based on file names or context.`
       : "";
+
+    // ── PR scope pre-flight (issue #358) ─────────────────────────────────
+    // Run BEFORE the LLM review so we save the round-trip cost for bundled PRs.
+    // Uses the full diff (not truncated) for reliable file extraction.
+    const scopeResult = checkPRScope(pr.body, pr.diff);
+    if (scopeResult.violation) {
+      this.log.warn("PR scope pre-flight blocked — bundled PR detected", {
+        repo,
+        prNumber,
+        violation_type: scopeResult.violation_type,
+        closes_refs: scopeResult.closes_refs,
+        feature_groups: scopeResult.feature_groups.map((g) => g.label),
+        reason: scopeResult.reason,
+      });
+      const result: PRReviewResult = {
+        decision: "request-changes",
+        comment: formatScopeViolationComment(scopeResult, prNumber),
+        reason: `PR scope violation (${scopeResult.violation_type}): ${scopeResult.reason}`,
+        redispatchCategory: "quality-revision",
+        severity: "minor",
+      };
+      await this.executeDecision(repo, prNumber, result);
+      return result;
+    }
 
     // ── LLM review ────────────────────────────────────────────────────────
     const client = createLLMClient();

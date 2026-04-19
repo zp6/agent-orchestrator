@@ -19,6 +19,21 @@
 export { PRReviewer, enforceChecklist, validateClosesReferences, isExampleOrTemplateFile, isPlaceholderCredential } from "./reviewer/pr-reviewer.js";
 export type { PRInfo, PRReviewResult, RedispatchCategory, ConflictStats, CrossRepoCloseIssue } from "./reviewer/pr-reviewer.js";
 
+// PR scope pre-flight check (issue #358) — detects bundled / multi-issue PRs
+// before the LLM review round is triggered.
+export {
+  checkPRScope,
+  formatScopeViolationComment,
+  extractClosesRefs,
+  extractFilesFromDiff,
+} from "./reviewer/pr-scope-checker.js";
+export type {
+  PRScopeCheckResult,
+  PRScopeViolationType,
+  FeatureGroup,
+  PRScopeCheckerOptions,
+} from "./reviewer/pr-scope-checker.js";
+
 // Schema-consumer impact detection
 export {
   detectSchemaChanges,
