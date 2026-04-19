@@ -32,6 +32,7 @@
  *   /routing-violations [n]   → list the last N agent-to-repo routing violations (default 10)
  *   /quality-health            → quality system health: bypass rate, sparkline, and bypassed task list
  *   /backfill-bypass-reasons   → backfill bypass_reason for historical sub-0.60 approved tasks (idempotent)
+ *   /low-score [threshold] [limit] → approved tasks with quality score below threshold (default 0.75), with dimension breakdown
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -65,6 +66,11 @@ import {
   getQualitySystemHealthPayload,
   formatQualitySystemHealthPage,
 } from "../reviewer/quality-system-health.js";
+import {
+  getLowScoreApprovedFeed,
+  formatLowScoreFeedForTelegram,
+  LOW_SCORE_FEED_THRESHOLD,
+} from "../reviewer/low-score-feed.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
 const log = createLogger("telegram-commands");
@@ -121,7 +127,8 @@ type CommandName =
   | "reject"
   | "routing-violations"
   | "quality-health"
-  | "backfill-bypass-reasons";
+  | "backfill-bypass-reasons"
+  | "low-score";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -158,6 +165,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "routing-violations",
   "quality-health",
   "backfill-bypass-reasons",
+  "low-score",
 ]);
 
 interface ParsedCommand {
@@ -460,6 +468,23 @@ async function executeCommand(
 
     case "backfill-bypass-reasons":
       return handleBackfillBypassReasons(store);
+
+    case "low-score": {
+      // /low-score [threshold] [limit]
+      // threshold: score ceiling (default 0.75), limit: max entries (default 10)
+      const thresholdArg = cmd.args[0]?.trim();
+      const limitArg = cmd.args[1]?.trim();
+
+      const threshold = thresholdArg
+        ? Math.min(Math.max(parseFloat(thresholdArg) || LOW_SCORE_FEED_THRESHOLD, 0.01), 1.0)
+        : LOW_SCORE_FEED_THRESHOLD;
+
+      const limit = limitArg
+        ? Math.min(Math.max(parseInt(limitArg, 10) || 50, 1), 100)
+        : 50;
+
+      return handleLowScoreFeed(store, threshold, limit, dashboardUrl);
+    }
   }
 }
 
@@ -2231,6 +2256,30 @@ function handleQualitySystemHealth(
     return `${page}\n\n[View dashboard](${dashboardUrl}/quality-system-health)`;
   }
   return page;
+}
+
+// ── Low-score approved feed handler (issue #278) ─────────────────────────────
+
+/**
+ * Handle the `/low-score [threshold] [limit]` command.
+ *
+ * Lists approved tasks with quality scores below `threshold` (default 0.75),
+ * showing the score, per-dimension breakdown, and agent so operators can
+ * audit risky approvals before they cause downstream issues.
+ *
+ * Usage:
+ *   /low-score             — threshold 0.75, up to 10 tasks shown
+ *   /low-score 0.65        — threshold 0.65
+ *   /low-score 0.75 20     — threshold 0.75, show up to 20 tasks
+ */
+function handleLowScoreFeed(
+  store: ITelegramStateStore,
+  threshold: number,
+  limit: number,
+  dashboardUrl?: string,
+): string {
+  const feed = getLowScoreApprovedFeed(store, { threshold, limit });
+  return formatLowScoreFeedForTelegram(feed, 10, dashboardUrl);
 }
 
 // ── Bypass reason backfill handler (issue #295) ─────────────────────────

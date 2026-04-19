@@ -918,6 +918,26 @@ export interface IStateStore {
   operatorOverride(taskId: string, decision: "approve" | "reject", operatorNote: string): boolean;
 }
 
+// ── Low-score approved feed store interface (issue #278) ──────────────────────
+
+/**
+ * Minimal store interface required by the low-score approved feed module.
+ *
+ * Satisfied by `StateStore`. Extracted so the feed builder can be unit-tested
+ * with a lightweight stub.
+ */
+export interface ILowScoreFeedStore {
+  /**
+   * Return approved tasks whose quality_score is non-null and strictly less
+   * than `threshold`, ordered by quality_score ascending (riskiest first),
+   * then by updated_at descending within each score tier.
+   *
+   * @param threshold - Score ceiling (exclusive). Default: 0.75.
+   * @param limit     - Maximum rows to return. Default: 50.
+   */
+  getLowScoreApprovedTasks(threshold?: number, limit?: number): Task[];
+}
+
 // ── Score calibration types ───────────────────────────────────────────────
 
 /**
@@ -1824,7 +1844,8 @@ export interface ITelegramStateStore
     IStandupHealthStore,
     IVerificationResultStore,
     ISecretsHealthStore,
-    IFirstPassRateStore {
+    IFirstPassRateStore,
+    ILowScoreFeedStore {
   // System flags (pause/resume, operator overrides)
   getSystemFlag(key: string): string | null;
   setSystemFlag(key: string, value: string): void;

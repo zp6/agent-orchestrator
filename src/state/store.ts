@@ -66,6 +66,7 @@ import type {
   VerifierAlertState,
   IThresholdAdjustmentStore,
   RoutingViolation,
+  ILowScoreFeedStore,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -81,7 +82,7 @@ import { ulid } from "../util/ulid.js";
  */
 export const APPROVAL_SCORE_FLOOR = 0.60;
 
-export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore {
+export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore {
   private db: Database.Database;
 
   constructor(dbPath: string = process.env.STATE_DB_PATH ?? "state.db") {
@@ -972,6 +973,33 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
          LIMIT ?`,
       )
       .all(limit) as Task[];
+  }
+
+  /**
+   * Return approved tasks whose quality_score is non-null and strictly less
+   * than `threshold`, ordered by quality_score ascending (lowest / riskiest
+   * first), then by updated_at descending within each score tier.
+   *
+   * Issue #278: feeds the low-score approved dashboard panel and the
+   * `/low-score` Telegram command so operators can audit marginal approvals.
+   *
+   * @param threshold - Score ceiling (exclusive). Default: 0.75.
+   * @param limit     - Maximum rows to return. Default: 50.
+   */
+  getLowScoreApprovedTasks(threshold: number = 0.75, limit: number = 50): Task[] {
+    const safeThreshold = Number.isFinite(threshold) && threshold > 0 ? threshold : 0.75;
+    const safeLimit = Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : 50;
+
+    return this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE verification_status = 'approved'
+           AND quality_score IS NOT NULL
+           AND quality_score < ?
+         ORDER BY quality_score ASC, updated_at DESC
+         LIMIT ?`,
+      )
+      .all(safeThreshold, safeLimit) as Task[];
   }
 
   /**

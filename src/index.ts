@@ -315,6 +315,7 @@ export type { ReviewerConfig, AgentConfig } from "./config.js";
 // APPROVAL_SCORE_FLOOR is exported separately so callers can reference the
 // hard floor constant without importing the full StateStore class (issue #266).
 export { StateStore, APPROVAL_SCORE_FLOOR } from "./state/store.js";
+export type { ILowScoreFeedStore } from "./state/types.js";
 export type {
   IStateStore,
   IScoreOutcomeStore,
@@ -397,6 +398,34 @@ export type {
   ConflictRecoveryAlertPayload,
   ConflictRecoveryAlertRow,
 } from "./reviewer/reroute-conflict-recovery.js";
+
+// Low-score approved task feed — `/api/low-score-approved` API payload (issue #278).
+//
+// Surfaces approved tasks with quality_score < 0.75 (configurable) so operators
+// can audit marginal approvals before they cause downstream issues.
+// Each entry includes score, per-dimension breakdown, agent, and PR link.
+//
+// Mount in the orchestrator or dashboard server:
+//   app.get('/api/low-score-approved', (req, res) => {
+//     res.json(getLowScoreApprovedFeed(store, {
+//       threshold: req.query.threshold ? Number(req.query.threshold) : undefined,
+//       limit: req.query.limit ? Number(req.query.limit) : undefined,
+//     }));
+//   });
+//
+// Telegram `/low-score [threshold] [limit]` command uses formatLowScoreFeedForTelegram().
+export {
+  getLowScoreApprovedFeed,
+  formatLowScoreFeedForTelegram,
+  LOW_SCORE_FEED_THRESHOLD,
+  LOW_SCORE_FEED_DEFAULT_LIMIT,
+} from "./reviewer/low-score-feed.js";
+export type {
+  LowScoreFeed,
+  LowScoreFeedEntry,
+  LowScoreFeedOptions,
+  LowScoreFeedAgentSummary,
+} from "./reviewer/low-score-feed.js";
 
 // Quality System Health — `/api/quality-system-health` API payload (issue #304).
 //
