@@ -28,6 +28,7 @@ import { ScoreCalibrator } from "../reviewer/score-calibrator.js";
 import { RoutingViolationDetector } from "../reviewer/routing-violations.js";
 import { PreDispatchCapabilityEnforcer } from "../reviewer/pre-dispatch-capability-enforcer.js";
 import { LowScoreApprovalAlerter } from "../reviewer/low-score-approval-alerter.js";
+import { QualityFloorBypassDetector } from "../reviewer/quality-floor-bypass-detector.js";
 import type { ReviewerConfig } from "../config.js";
 import type { Notifier } from "../notify.js";
 import type {
@@ -100,6 +101,19 @@ export interface ReviewerInstances {
    * Undefined when no notifier is provided.
    */
   lowScoreApprovalAlerter: LowScoreApprovalAlerter | undefined;
+  /**
+   * Hard quality floor bypass detector (issue #367).
+   * Fires a Telegram alert whenever a task with quality_score < 0.80 is approved
+   * without an explicit bypass_reason === 'operator_override' in the audit trail.
+   * The 0.80 threshold is deliberately higher than the hard floor (0.60) to catch
+   * "soft bypass" approvals.
+   *
+   * Call `bypassDetector.checkAndAlert(result, task)` after each verification
+   * that results in approval — it deduplicates per task and no-ops when the
+   * notifier is unconfigured.
+   * Undefined when no notifier is provided.
+   */
+  bypassDetector: QualityFloorBypassDetector | undefined;
 }
 
 export interface CreateReviewerOptions {
@@ -197,6 +211,18 @@ export function createReviewerInstances(
     ? new LowScoreApprovalAlerter(opts.notifier, { scoreThreshold: 0.60 })
     : undefined;
 
+  // Create QualityFloorBypassDetector if notifier is provided (issue #367).
+  // Fires a Telegram alert when a task is approved with score < 0.80 without an
+  // explicit operator_override bypass_reason.  Caller should invoke
+  // bypassDetector.checkAndAlert(result, task) after each approved verification.
+  const bypassDetector = opts.notifier
+    ? new QualityFloorBypassDetector(opts.notifier, {
+        dashboardBaseUrl: config.dashboard_url
+          ? config.dashboard_url.replace(/\/$/, "")
+          : undefined,
+      })
+    : undefined;
+
   return {
     reviewer,
     verifier: new Verifier(store, undefined, verificationResultStore),
@@ -215,5 +241,6 @@ export function createReviewerInstances(
     routingViolationDetector,
     preDispatchEnforcer: new PreDispatchCapabilityEnforcer(config, opts.notifier),
     lowScoreApprovalAlerter,
+    bypassDetector,
   };
 }

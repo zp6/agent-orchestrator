@@ -528,6 +528,33 @@ export type {
   LowScoreApprovalAlerterOptions,
 } from "./reviewer/low-score-approval-alerter.js";
 
+// Quality floor bypass detector — Telegram alerts for soft-bypass approvals (issue #367).
+//
+// Fires a high-urgency Telegram alert whenever a task is approved with
+// quality_score < 0.80 but WITHOUT an explicit bypass_reason='operator_override'
+// in the audit trail.  Catches "soft bypass" approvals where the system didn't
+// hard-block (0.60 floor not triggered) but the score is still below the target floor.
+//
+// Integration (via ReviewerInstances in orchestrator-adapter):
+//   const { bypassDetector } = createReviewerInstances(config, store, { notifier });
+//   await bypassDetector?.checkAndAlert(verificationResult, task);
+//
+// Direct usage:
+//   import { QualityFloorBypassDetector } from 'claude-orchestrator-reviewer';
+//
+//   const detector = new QualityFloorBypassDetector(notifier, {
+//     threshold: 0.80,
+//     dashboardBaseUrl: 'https://dashboard.example.com',
+//   });
+//   await detector.checkAndAlert(verificationResult, task);
+export {
+  QualityFloorBypassDetector,
+  QUALITY_FLOOR_THRESHOLD,
+} from "./reviewer/quality-floor-bypass-detector.js";
+export type {
+  BypassDetectorConfig,
+} from "./reviewer/quality-floor-bypass-detector.js";
+
 // Quality System Health — `/api/quality-system-health` API payload (issue #304).
 //
 // Surfaces bypass rate trending: how often the 0.60 quality floor is being
