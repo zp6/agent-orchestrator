@@ -436,6 +436,30 @@ export type {
   CLISmokeTestResult,
 } from "./reviewer/cli-smoke-test.js";
 
+// Capability check — `/capability-check` endpoint handler (issue #325).
+//
+// The reviewer agent is implementation-ineligible: it only accepts review,
+// verification, supervision, improvement-detection, and own-repo tasks.
+// Implementation tasks for foreign repos are rejected so the orchestrator
+// reroutes them to the repo's home agent.
+//
+// Mount in the agent's HTTP server:
+//   app.get('/capability-check', (req, res) => res.json(handleCapabilityCheck(req.query)));
+//
+// Or use evaluateCapability() directly for local enforcement.
+export {
+  evaluateCapability,
+  handleCapabilityCheck,
+  parseCapabilityCheckQuery,
+  REVIEWER_REPO,
+  ALLOWED_TASK_TYPES,
+  ALLOWED_SOURCES,
+} from "./reviewer/capability-check.js";
+export type {
+  CapabilityCheckRequest,
+  CapabilityCheckResult,
+} from "./reviewer/capability-check.js";
+
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
 
