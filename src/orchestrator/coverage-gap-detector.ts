@@ -81,8 +81,9 @@ export function suggestNewAgent(
   const relatedGaps = candidateGaps.filter((g) => g.topic === primaryTopic);
   const totalFrequency = relatedGaps.reduce((sum, g) => sum + g.frequency, 0);
 
-  // Need significant frequency to justify a new agent
-  if (totalFrequency < 5) return null;
+  // Need significant frequency to justify a new agent — must be a genuinely
+  // recurring theme, not just a common word that slipped through the stoplist.
+  if (totalFrequency < 30) return null;
 
   // Check no existing agent already owns this topic
   for (const agent of Object.values(config.agents)) {
@@ -130,6 +131,7 @@ function detectUnownedTopics(
 
   const topicCounts = new Map<string, number>();
   const commonWords = new Set([
+    // English stopwords
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
     "have", "has", "had", "do", "does", "did", "will", "would", "could",
     "should", "may", "might", "shall", "can", "to", "of", "in", "for",
@@ -138,9 +140,51 @@ function detectUnownedTopics(
     "and", "but", "or", "not", "no", "so", "if", "then", "than",
     "that", "this", "these", "those", "it", "its", "all", "each",
     "every", "both", "few", "more", "most", "other", "some", "such",
+    "also", "just", "only", "already", "still", "when", "where", "which",
+    "what", "how", "your", "they", "their", "there", "here", "very",
+    "well", "been", "being", "over", "under", "any", "same", "need",
+    // Dev action words
     "new", "old", "add", "fix", "update", "remove", "change", "make",
     "get", "set", "use", "run", "test", "check", "create", "delete",
-    "agent", "orchestrator", "task", "issue", "pr", "review", "deploy",
+    "ensure", "implement", "move", "show", "handle", "track", "send",
+    "pass", "call", "return", "start", "stop", "skip", "allow", "block",
+    "apply", "load", "save", "read", "write", "parse", "build", "match",
+    // Orchestrator domain words (appear in nearly every task)
+    "agent", "orchestrator", "task", "issue", "review", "deploy",
+    "repo", "github", "branch", "merge", "commit", "push", "pull",
+    "dispatch", "dispatcher", "daemon", "cycle", "store", "state",
+    "config", "proxy", "docker", "container", "session",
+    "reviewer", "verifier", "supervisor", "dashboard",
+    "coordinated", "coordination", "closes", "issues", "open",
+    "rapartlu", "claude", "claude-agent", "claude-orchestrator",
+    "failed", "error", "timeout", "retry", "status", "result",
+    "table", "column", "query", "schema", "migration",
+    "file", "path", "function", "method", "class", "type", "interface",
+    "true", "false", "null", "undefined", "string", "number",
+    "http", "port", "endpoint", "route", "request", "response",
+    // More domain words from task descriptions
+    "title", "body", "description", "content", "text", "message", "label",
+    "follow", "cross", "score", "quality", "auto", "automatically",
+    "feedback", "pattern", "learned", "active", "pending", "done",
+    "tasks", "items", "action", "item", "list", "count", "total",
+    "data", "value", "field", "record", "entry", "node", "line",
+    "source", "target", "owner", "pool", "model", "prompt", "token",
+    "cycle", "batch", "queue", "rate", "limit", "threshold",
+    "based", "specific", "current", "recent", "existing", "missing",
+    "support", "added", "updated", "ensure", "properly", "correctly",
+    "when", "after", "before", "instead", "between", "across",
+    "first", "last", "next", "only", "already", "still",
+    "using", "used", "like", "include", "including", "required",
+    "does", "doesn", "didn", "isn", "aren", "wasn", "shouldn",
+    "refs", "stash", "origin", "main", "head", "diff", "patch",
+    "labels", "comment", "comments", "close", "closed", "merged",
+    // Structural words from task/coordination descriptions
+    "implementation", "changes", "housekeeping", "order", "identified",
+    "affected", "created", "severity", "part", "https", "sibling",
+    "parent", "child", "linked", "related", "original", "expected",
+    "revision", "triage", "periodic", "backlog", "bootstrap",
+    "detected", "proposed", "suggested", "recommended", "resolved",
+    "verify", "validate", "confirm", "complete", "completed",
   ]);
 
   for (const task of recentTasks) {
@@ -154,10 +198,11 @@ function detectUnownedTopics(
     }
   }
 
-  // Flag topics appearing 3+ times with no owner
+  // Flag topics appearing 20+ times with no owner (high threshold to filter noise
+  // in a fleet doing 500+ tasks/day — low-frequency words aren't real gaps)
   const gaps: CoverageGap[] = [];
   for (const [topic, count] of topicCounts) {
-    if (count >= 3) {
+    if (count >= 20) {
       gaps.push({
         type: "unowned_topic",
         topic,
