@@ -1996,14 +1996,44 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
         quality_score: 1.0,
       }),
     );
-    // Should mark as processed
+    // Should mark as processed using the real task ID (not a synthetic string)
+    // so the processed_triggers.task_id FK constraint is satisfied.
     expect(mockStore.markProcessed).toHaveBeenCalledWith(
       "github",
       "owner/my-repo#42",
-      "already-in-review-pr-99",
+      "task-already-in-review",
     );
     // Should NOT dispatch to agent
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("passes real task.id to markProcessed (not synthetic string) to satisfy FK constraint", async () => {
+    // Regression test for issue #1003:
+    // markProcessed() previously received "already-in-review-pr-N", which is not
+    // a real tasks.id and violates the processed_triggers.task_id FK constraint
+    // (REFERENCES tasks.id). The fix: pass the id returned from createTask().
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 441, title: "Cross-repo issue", body: "body", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 445, title: "Blocking PR", url: "https://github.com/owner/my-repo/pull/445", state: "open", isDraft: false },
+    ]);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // markProcessed must be called with the task ID returned by createTask(),
+    // NOT with a synthetic "already-in-review-pr-N" string.
+    expect(mockStore.markProcessed).toHaveBeenCalledWith(
+      "github",
+      "owner/my-repo#441",
+      "task-already-in-review",  // real task.id from the mocked createTask()
+    );
+    // The synthetic string must NOT be used — it would violate the FK constraint
+    expect(mockStore.markProcessed).not.toHaveBeenCalledWith(
+      "github",
+      "owner/my-repo#441",
+      "already-in-review-pr-445",
+    );
   });
 
   it("creates already-in-review task when approved PR is waiting", async () => {

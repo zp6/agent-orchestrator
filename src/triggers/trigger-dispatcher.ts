@@ -86,7 +86,11 @@ function recordAlreadyInReviewTask(
       verification_notes: "Auto-approved: dispatch skipped because open PR already exists for this issue.",
     });
 
-    store.markProcessed("github", sourceRef, `already-in-review-pr-${blockingPRNumber}`);
+    // Use the real task.id so the processed_triggers.task_id FK constraint
+    // (REFERENCES tasks.id) is satisfied.  Passing a synthetic string like
+    // "already-in-review-pr-N" caused "FOREIGN KEY constraint failed" because
+    // that string has no matching row in the tasks table.
+    store.markProcessed("github", sourceRef, task.id);
 
     log.info("Recorded already-in-review task for issue with existing PR", {
       taskId: task.id,
