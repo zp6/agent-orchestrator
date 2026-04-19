@@ -427,6 +427,29 @@ export type {
   LowScoreFeedAgentSummary,
 } from "./reviewer/low-score-feed.js";
 
+// Low-score approval real-time alerter — Telegram notifications (issue #331).
+//
+// Sends immediate Telegram push alerts when a task is approved with
+// score < 0.70, including score, dimension breakdown, and approval rationale.
+// Helps operators catch risky approvals before they're merged.
+//
+// Integration (via ReviewerInstances in orchestrator-adapter):
+//   const { lowScoreApprovalAlerter } = createReviewerInstances(config, store, { notifier });
+//   await lowScoreApprovalAlerter?.checkAndAlert(verificationResult, task);
+//
+// Direct usage:
+//   import { LowScoreApprovalAlerter } from 'claude-orchestrator-reviewer';
+//
+//   const alerter = new LowScoreApprovalAlerter(notifier, { scoreThreshold: 0.70 });
+//   await alerter.checkAndAlert(verificationResult, task);
+export {
+  LowScoreApprovalAlerter,
+  LOW_SCORE_APPROVAL_ALERT_THRESHOLD,
+} from "./reviewer/low-score-approval-alerter.js";
+export type {
+  LowScoreApprovalAlerterOptions,
+} from "./reviewer/low-score-approval-alerter.js";
+
 // Quality System Health — `/api/quality-system-health` API payload (issue #304).
 //
 // Surfaces bypass rate trending: how often the 0.60 quality floor is being

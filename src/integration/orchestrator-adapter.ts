@@ -27,6 +27,7 @@ import { ConflictRecoveryAlertMonitor } from "../reviewer/reroute-conflict-recov
 import { ScoreCalibrator } from "../reviewer/score-calibrator.js";
 import { RoutingViolationDetector } from "../reviewer/routing-violations.js";
 import { PreDispatchCapabilityEnforcer } from "../reviewer/pre-dispatch-capability-enforcer.js";
+import { LowScoreApprovalAlerter } from "../reviewer/low-score-approval-alerter.js";
 import type { ReviewerConfig } from "../config.js";
 import type { Notifier } from "../notify.js";
 import type {
@@ -91,6 +92,14 @@ export interface ReviewerInstances {
    *   if (!r.allowed) resolvedAgent = r.reroute_to ?? fallback;
    */
   preDispatchEnforcer: PreDispatchCapabilityEnforcer;
+  /**
+   * Real-time alerter for low-score approvals (issue #331).
+   * Sends Telegram notifications when a task is approved with score < 0.70.
+   * Call `lowScoreApprovalAlerter.checkAndAlert(result, task)` after verification
+   * completes and the result is approved.
+   * Undefined when no notifier is provided.
+   */
+  lowScoreApprovalAlerter: LowScoreApprovalAlerter | undefined;
 }
 
 export interface CreateReviewerOptions {
@@ -181,6 +190,12 @@ export function createReviewerInstances(
         )
       : undefined;
 
+  // Create LowScoreApprovalAlerter if notifier is provided.
+  // The alerter sends real-time Telegram notifications for low-score approvals.
+  const lowScoreApprovalAlerter = opts.notifier
+    ? new LowScoreApprovalAlerter(opts.notifier, { scoreThreshold: 0.70 })
+    : undefined;
+
   return {
     reviewer,
     verifier: new Verifier(store, undefined, verificationResultStore),
@@ -198,5 +213,6 @@ export function createReviewerInstances(
     healthIncidentRouter: new HealthIncidentRouter(opts.notifier),
     routingViolationDetector,
     preDispatchEnforcer: new PreDispatchCapabilityEnforcer(config, opts.notifier),
+    lowScoreApprovalAlerter,
   };
 }
