@@ -17,6 +17,7 @@ import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore } from "../state/store.js";
 import { createLogger } from "../service/logger.js";
 import { notifyOperator } from "../service/notify.js";
+import { openRegressionIssue } from "./post-merge-regression-detector.js";
 
 const log = createLogger("staging-validator");
 
@@ -169,6 +170,18 @@ async function handleFailedValidation(
     ).catch(() => {});
     return;
   }
+
+  // Open a regression issue BEFORE reverting so operators can track the failure
+  // even if the revert step itself throws.
+  openRegressionIssue({ repo, prNumber, mergeSha, testOutput }).then((issue) => {
+    if (issue) {
+      log.info("Regression issue created", { repo, prNumber, issueUrl: issue.url, failingTests: issue.failingTests.length });
+    }
+  }).catch((err) => {
+    log.warn("Failed to open regression issue (non-fatal)", {
+      repo, prNumber, error: err instanceof Error ? err.message : String(err),
+    });
+  });
 
   // Revert via gh CLI
   log.warn("Reverting merge due to test failure", { repo, prNumber, sha: mergeSha });
