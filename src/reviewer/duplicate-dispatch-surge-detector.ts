@@ -56,6 +56,22 @@ export interface SurgeEvent {
   prUrl?: string | null;
   /** When the event occurred. */
   timestamp: Date;
+  /**
+   * True when the duplicate was detected across two different agents working
+   * on the same issue simultaneously (cross-agent collision, issue #336).
+   * False / undefined for same-agent re-dispatch duplicates (PR already exists).
+   */
+  isCrossAgent?: boolean;
+  /**
+   * The agent that was already in-flight when this event was recorded.
+   * Only populated when `isCrossAgent === true`.
+   */
+  conflictingAgent?: string;
+  /**
+   * The agent that was blocked by the guard.
+   * Populated for cross-agent events; may be undefined for legacy same-agent events.
+   */
+  agentName?: string;
 }
 
 export interface SurgeAlertConfig {
@@ -100,6 +116,13 @@ export class DuplicateDispatchSurgeDetector {
    */
   private suppressedIssues = new Set<string>();
 
+  /**
+   * Running count of cross-agent collision events recorded since detector start.
+   * Separated from same-agent surges so the dashboard can display them independently.
+   * (issue #336)
+   */
+  private crossAgentCollisionCount = 0;
+
   private readonly surgeThreshold: number;
   private readonly windowMs: number;
   private readonly cooldownMs: number;
@@ -111,19 +134,44 @@ export class DuplicateDispatchSurgeDetector {
   }
 
   /**
-   * Record an "already-in-review" guard event.
+   * Record an "already-in-review" or "already-in-flight" guard event.
    *
-   * If this call pushes the count of events for the same issue within the
-   * rolling window to ≥ `surgeThreshold`, and we are not in a cooldown
-   * period for that issue, and the issue is not suppressed, fires a
-   * Telegram alert.
+   * Cross-agent events (`isCrossAgent === true`, issue #336) increment the
+   * `crossAgentCollisionCount` and trigger an immediate single-event alert
+   * without waiting for the surge threshold, because even one cross-agent
+   * collision is operationally significant.
+   *
+   * Same-agent events (default) fire when the rolling window count reaches
+   * `surgeThreshold`, with per-issue cooldown logic to prevent alert fatigue.
    *
    * This method never throws — alert failures are logged and swallowed.
    */
   async recordEvent(event: SurgeEvent): Promise<void> {
     this.events.push(event);
 
-    // Only trigger per-issue surge logic when we have a concrete issueRef.
+    // ── Cross-agent collision path (issue #336) ──────────────────────────────
+    // Track separately and alert immediately (no threshold gate).
+    if (event.isCrossAgent) {
+      this.crossAgentCollisionCount += 1;
+
+      if (!event.issueRef) return;
+
+      const issueKey = makeIssueKey(event.repo, event.issueRef) + ":cross-agent";
+      if (!this.suppressedIssues.has(issueKey) && !this.isInCooldownForIssue(issueKey, event.timestamp)) {
+        this.lastAlertAtPerIssue.set(issueKey, event.timestamp);
+        try {
+          await this.sendCrossAgentAlert(event);
+        } catch (err) {
+          log.error("Failed to send cross-agent collision surge alert", {
+            issueKey,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      return;
+    }
+
+    // ── Same-agent surge path ────────────────────────────────────────────────
     if (!event.issueRef) {
       return;
     }
@@ -164,6 +212,31 @@ export class DuplicateDispatchSurgeDetector {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /**
+   * Return the total count of cross-agent collision events recorded since
+   * this detector instance was created.
+   *
+   * Used by the dashboard "multi-agent collision" metric (issue #336).
+   * A non-zero value indicates the cross-agent in-flight guard has fired
+   * and is actively preventing duplicate work.
+   */
+  getCrossAgentCollisionCount(): number {
+    return this.crossAgentCollisionCount;
+  }
+
+  /**
+   * Return cross-agent collision events within the given rolling window.
+   * Useful for building the dashboard "multi-agent collision" time series.
+   *
+   * @param now - Reference time.  Defaults to current time.
+   */
+  getCrossAgentWindowEvents(now: Date = new Date()): SurgeEvent[] {
+    const cutoff = now.getTime() - this.windowMs;
+    return this.events.filter(
+      (e) => e.isCrossAgent === true && e.timestamp.getTime() >= cutoff,
+    );
   }
 
   /**
@@ -303,6 +376,48 @@ export class DuplicateDispatchSurgeDetector {
       ``,
       `Consider suppressing this trigger: \`${suppressCmd}\``,
     );
+
+    return lines.join("\n");
+  }
+
+  /**
+   * Send a cross-agent collision alert via Telegram (issue #336).
+   * These alerts fire immediately on first event — no surge threshold required.
+   */
+  private async sendCrossAgentAlert(event: SurgeEvent): Promise<void> {
+    const message = this.buildCrossAgentAlertMessage(event);
+    log.info("Sending cross-agent collision alert", {
+      repo: event.repo,
+      issueRef: event.issueRef,
+      agentName: event.agentName,
+      conflictingAgent: event.conflictingAgent,
+      crossAgentCollisionCount: this.crossAgentCollisionCount,
+    });
+    await this.sendTelegram(message);
+  }
+
+  /**
+   * Build the Telegram message for a cross-agent collision event.
+   * Distinguishes itself from the same-agent surge alert with different emoji
+   * and messaging.
+   */
+  private buildCrossAgentAlertMessage(event: SurgeEvent): string {
+    const repoShort = event.repo.split("/")[1] ?? event.repo;
+    const issueRef = event.issueRef ?? "(unknown issue)";
+    const issueNum = issueRef.replace(/^#/, "");
+    const blockedAgent = event.agentName ?? "unknown";
+    const conflictingAgent = event.conflictingAgent ?? "another agent";
+    const suppressCmd = `/suppress ${event.repo} ${issueNum}`;
+
+    const lines: string[] = [
+      `🔁 Multi-agent collision: issue ${issueRef} (${repoShort}) is already in-flight.`,
+      `Blocked agent: ${blockedAgent}`,
+      `In-flight agent: ${conflictingAgent}`,
+      `Total cross-agent collisions this session: ${this.crossAgentCollisionCount}`,
+      ``,
+      `Dispatch to ${blockedAgent} was skipped — ${conflictingAgent} will resolve this issue first.`,
+      `To suppress: \`${suppressCmd}\``,
+    ];
 
     return lines.join("\n");
   }

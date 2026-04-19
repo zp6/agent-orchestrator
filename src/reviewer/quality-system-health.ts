@@ -106,6 +106,15 @@ export interface QualitySystemHealthPayload {
   operator_overrides: number;
   /** Marginal-auto sub-category count. */
   marginal_auto: number;
+  /**
+   * Number of unique issues that had active tasks from more than one agent
+   * within the last 48 hours (multi-agent collision metric, issue #336).
+   *
+   * A non-zero value means the cross-agent in-flight guard fired at least once
+   * and prevented duplicate work from competing agents. Zero means the fleet is
+   * operating without cross-agent dispatch conflicts.
+   */
+  multi_agent_collisions: number;
   /** 7-day (or N-day) bypass rate sparkline, oldest → newest. */
   sparkline: SparklineDay[];
   /** Detail list of bypassed tasks in the current cycle (most recent first). */
@@ -354,6 +363,17 @@ export function getQualitySystemHealthPayload(
     currentCycleBypassRate !== null &&
     currentCycleBypassRate >= alertThreshold;
 
+  // ── Multi-agent collision metric (issue #336) ─────────────────────────────
+  // Count unique issues with tasks from multiple agents in the last 48 hours.
+  // Fail-open: if the store doesn't implement the method yet, default to 0.
+  let multiAgentCollisions = 0;
+  try {
+    multiAgentCollisions = store.getMultiAgentCollisionCount(48);
+  } catch {
+    // Store implementation may not yet have this method — safe to default.
+    multiAgentCollisions = 0;
+  }
+
   return {
     banner,
     current_cycle_bypass_rate: currentCycleBypassRate,
@@ -361,6 +381,7 @@ export function getQualitySystemHealthPayload(
     current_cycle_total: cycleTotal,
     operator_overrides: operatorOverrides,
     marginal_auto: marginalAuto,
+    multi_agent_collisions: multiAgentCollisions,
     sparkline,
     bypassed_tasks: cycleBypassed,
     alert_active: alertActive,
@@ -400,6 +421,17 @@ export function formatQualitySystemHealthPage(
     lines.push(`*Below-floor approvals (< ${floorPct}% score):* ${payload.current_cycle_bypassed}/${payload.current_cycle_total}`);
     lines.push(`  • Operator overrides: ${payload.operator_overrides}`);
     lines.push(`  • Marginal auto-approved: ${payload.marginal_auto}`);
+    lines.push(``);
+  }
+
+  // ── Multi-agent collision metric (issue #336) ────────────────────────────
+  {
+    const collisionIcon = payload.multi_agent_collisions > 0 ? "⚠️" : "✅";
+    const collisionLabel =
+      payload.multi_agent_collisions === 0
+        ? "No multi-agent collisions (last 48h)"
+        : `${payload.multi_agent_collisions} multi-agent collision(s) detected (last 48h)`;
+    lines.push(`*Multi-agent collisions:* ${collisionIcon} ${collisionLabel}`);
     lines.push(``);
   }
 

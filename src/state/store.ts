@@ -976,6 +976,56 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
   }
 
   /**
+   * Return all in-flight tasks for a given source_ref (issue #336).
+   *
+   * "In-flight" = status ∈ { pending, planning, dispatched, in_progress }.
+   * Used by CrossAgentInflightGuard to detect cross-agent dispatch conflicts.
+   *
+   * @param sourceRef - Exact match on source_ref column.
+   */
+  getInFlightTasksForIssue(sourceRef: string): Task[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE source_ref = ?
+           AND status IN ('pending', 'planning', 'dispatched', 'in_progress')
+         ORDER BY created_at DESC`,
+      )
+      .all(sourceRef) as Task[];
+  }
+
+  /**
+   * Count unique source_refs that have tasks from multiple distinct agents
+   * within the given look-back window (issue #336).
+   *
+   * A non-zero result means multiple agents were or are working on the same
+   * GitHub issue simultaneously — exactly the condition the cross-agent guard
+   * prevents when firing prospectively.
+   *
+   * @param windowHours - Look-back window in hours.  Default: 48.
+   */
+  getMultiAgentCollisionCount(windowHours: number = 48): number {
+    const safeHours = Number.isFinite(windowHours) && windowHours > 0 ? Math.floor(windowHours) : 48;
+
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS cnt FROM (
+           SELECT source_ref
+           FROM tasks
+           WHERE source_ref IS NOT NULL
+             AND source_ref != ''
+             AND updated_at >= datetime('now', ? || ' hours')
+           GROUP BY source_ref
+           HAVING COUNT(DISTINCT COALESCE(agent_name, '')) > 1
+             AND COUNT(DISTINCT CASE WHEN agent_name IS NOT NULL THEN agent_name END) > 1
+         )`,
+      )
+      .get(`-${safeHours}`) as { cnt: number } | undefined;
+
+    return row?.cnt ?? 0;
+  }
+
+  /**
    * Return approved tasks whose quality_score is non-null and strictly less
    * than `threshold`, ordered by quality_score ascending (lowest / riskiest
    * first), then by updated_at descending within each score tier.

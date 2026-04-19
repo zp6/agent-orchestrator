@@ -254,6 +254,20 @@ export type {
   SurgeAlertConfig,
 } from "./reviewer/duplicate-dispatch-surge-detector.js";
 
+// Cross-agent in-flight duplicate dispatch guard (issue #336) — blocks dispatch when
+// another agent already has an active task for the same GitHub issue, preventing
+// competing agents from implementing the same feature simultaneously.
+export {
+  CrossAgentInflightGuard,
+  IN_FLIGHT_STATUSES,
+  extractIssueNumberFromInflightRef,
+} from "./reviewer/cross-agent-inflight-guard.js";
+export type {
+  InFlightCheckRequest,
+  InFlightCheckResult,
+  InFlightStatus,
+} from "./reviewer/cross-agent-inflight-guard.js";
+
 // Semantic duplicate guard (issue #275) — pre-dispatch token-overlap similarity
 // check to detect when two open issues describe the same feature, preventing
 // double-implementation cost and merge conflicts from competing PRs.

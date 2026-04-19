@@ -821,6 +821,31 @@ export interface IStateStore {
    */
   getRecentVerifiedTasks(limit?: number): Task[];
 
+  /**
+   * Return all in-flight tasks for a given source_ref (issue reference).
+   *
+   * "In-flight" means status ∈ { pending, planning, dispatched, in_progress }.
+   * Used by the cross-agent in-flight guard (issue #336) to detect when another
+   * agent is already working on the same issue before dispatching a new task.
+   *
+   * @param sourceRef - Exact source_ref string, e.g. "owner/repo#123".
+   * @returns Tasks in an active (non-terminal) status for that issue ref.
+   */
+  getInFlightTasksForIssue(sourceRef: string): Task[];
+
+  /**
+   * Count the number of unique GitHub issues that have had active tasks
+   * assigned to more than one different agent within the given time window.
+   *
+   * A non-zero count means the cross-agent dispatch guard would have (or did)
+   * fire for those issues.  Used by the dashboard "multi-agent collision" metric
+   * (issue #336).
+   *
+   * @param windowHours - Look-back window in hours.  Default: 48.
+   * @returns Count of source_refs with tasks from multiple distinct agents.
+   */
+  getMultiAgentCollisionCount(windowHours?: number): number;
+
   // Agent health (reads from orchestrator's agent_health table)
   getAgentHealthBatch(agentNames: string[]): AgentHealth[];
 
