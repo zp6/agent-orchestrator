@@ -41,8 +41,10 @@ import {
 } from "./pre-dispatch-validator.js";
 import {
   checkCapabilityEnforcement,
+  checkAgentScopeGuard,
   runRemoteCapabilityCheck,
   type CapabilityEnforcementReroute,
+  type AgentScopeGuardReroute,
 } from "./capability-enforcer.js";
 
 /**
@@ -572,7 +574,7 @@ export class Dispatcher {
     // Resolve agent
     let agentName = options?.agentName;
     let routeReason = "Explicitly specified";
-    let routeMethod: "deterministic" | "llm" | "explicit" | "capability-enforcement" = "explicit";
+    let routeMethod: "deterministic" | "llm" | "explicit" | "agent-scope-guard" | "capability-enforcement" = "explicit";
     let routeConfidence: number | null = null;
     let capabilityReroute: CapabilityEnforcementReroute | null = null;
 
@@ -766,11 +768,46 @@ export class Dispatcher {
       agentName = selected;
     }
 
+    // Agent-scope guard (issue #974): pre-dispatch validation that rejects
+    // implementation tasks to agents whose allowed_types don't include it.
+    // This runs BEFORE capability tag enforcement so routing violations are
+    // caught without consuming agent budget or pre-flight resources.
+    const taskTypeForCap = options?.taskType ?? "implementation";
+    let scopeGuardReroute: AgentScopeGuardReroute | null = null;
+    scopeGuardReroute = checkAgentScopeGuard({
+      config: this.config,
+      agentName,
+      taskType: taskTypeForCap,
+      title: options?.title,
+      sourceRef: options?.sourceRef,
+    });
+    if (scopeGuardReroute) {
+      this.log.warn("Agent-scope guard: task type not in allowed_types — rerouting", {
+        blockedAgent: scopeGuardReroute.blockedAgent,
+        toAgent: scopeGuardReroute.toAgent,
+        taskType: scopeGuardReroute.rejectedType,
+        allowedTypes: scopeGuardReroute.allowedTypes,
+        sourceRef: options?.sourceRef,
+      });
+      agentName = scopeGuardReroute.toAgent;
+      routeMethod = "agent-scope-guard";
+      routeReason = scopeGuardReroute.redirectReason;
+      // Notify the operator so the routing violation is surfaced in Telegram.
+      await notifyOperator(
+        "Agent-scope guard: task type not allowed for agent",
+        `Agent \`${scopeGuardReroute.blockedAgent}\` has allowed_types: [${scopeGuardReroute.allowedTypes.join(", ")}]\n` +
+          `but received task type \`${scopeGuardReroute.rejectedType}\`.\n` +
+          `Rerouted to \`${scopeGuardReroute.toAgent}\`.\n` +
+          (options?.title ? `Task: "${options.title}"\n` : "") +
+          (options?.sourceRef ? `Source: ${options.sourceRef}` : ""),
+        "warning",
+        `agent-scope-guard:${scopeGuardReroute.blockedAgent}:${scopeGuardReroute.rejectedType}`,
+      );
+    }
+
     // Capability tag enforcement (issue #817): block research-only agents from
     // receiving implementation tasks and reroute to the correct agent instead.
-    // This runs before all other pre-flight checks so no budget/auth resources
-    // are consumed by a mis-routed task.
-    const taskTypeForCap = options?.taskType ?? "implementation";
+    // This runs after the agent-scope guard so we don't double-reroute.
     capabilityReroute = checkCapabilityEnforcement({
       config: this.config,
       agentName,

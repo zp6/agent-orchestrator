@@ -203,6 +203,28 @@ export interface AgentConfig {
    *       - research-only
    */
   capability_tags?: string[];
+  /**
+   * Explicit allowlist of task types this agent may receive.
+   * When omitted, the agent may receive any task type (legacy behaviour).
+   * When set, the dispatcher will reject tasks whose type is not in this list
+   * and reroute to a suitable agent instead.
+   *
+   * Recognised task types:
+   *   - "implementation" — code changes, feature work, bug fixes
+   *   - "research" — investigation, feasibility analysis, documentation
+   *   - "housekeeping" — backlog triage, sync, maintenance
+   *   - "facilitation" — meetings, standups, team coordination
+   *
+   * Example (in agents.yaml):
+   *   claude-orchestrator-reviewer:
+   *     allowed_types:
+   *       - housekeeping
+   *       - facilitation
+   *
+   * Note: This guard runs at dispatch time, before any pre-flight checks,
+   * so it prevents routing errors without consuming agent budget (issue #974).
+   */
+  allowed_types?: string[];
 }
 
 export interface VerificationConfig {

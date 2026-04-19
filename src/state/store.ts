@@ -6783,10 +6783,10 @@ export class StateStore {
     taskId: string;
     agentChosen: string;
     taskType: string;
-    routeMethod: "deterministic" | "llm" | "explicit" | "capability-enforcement";
+    routeMethod: "deterministic" | "llm" | "explicit" | "agent-scope-guard" | "capability-enforcement";
     routeConfidence: number | null;
     sourceRef?: string;
-    /** Populated when a capability-enforcement reroute overrode the initial agent selection. */
+    /** Populated when a capability-enforcement or agent-scope-guard reroute overrode the initial agent selection. */
     redirectReason?: string;
   }): void {
     const now = new Date().toISOString();

@@ -1,21 +1,28 @@
 /**
- * Capability tag enforcement for the dispatcher.
+ * Capability enforcement for the dispatcher.
  *
- * Certain agents carry declarative `capability_tags` in agents.yaml that
- * constrain which task types they may receive.  The dispatcher calls
- * `checkCapabilityEnforcement()` after initial agent selection and before
- * any pre-flight checks.  When a mismatch is detected the function returns a
- * reroute descriptor; when no violation exists it returns null.
+ * Two enforcement layers:
  *
- * Currently recognised tags
- * ─────────────────────────
- * • `research-only`  – the agent may only receive tasks of type "research".
- *   Implementation tasks are identified by:
- *     1. taskType === "implementation" (default for almost all GitHub-sourced tasks)
- *     2. task title matching an orchestrator-work pattern (e.g. "[Orchestrator]",
- *        "[orchestrator dashboard]", "[orchestrator reviewer]")
- *     3. source_ref pointing to a repo other than the agent's own github repo
- *        (cross-repo implementation work)
+ * 1. **Capability tags** (issue #817)
+ *    Certain agents carry declarative `capability_tags` in agents.yaml that
+ *    constrain which task types they may receive. The dispatcher calls
+ *    `checkCapabilityEnforcement()` after initial agent selection and before
+ *    any pre-flight checks. When a mismatch is detected the function returns a
+ *    reroute descriptor; when no violation exists it returns null.
+ *
+ *    Currently recognised tags:
+ *    • `research-only` – the agent may only receive tasks of type "research".
+ *      Implementation tasks are identified by:
+ *        1. taskType === "implementation"
+ *        2. task title matching an orchestrator-work pattern
+ *        3. source_ref pointing to a repo other than the agent's own github repo
+ *
+ * 2. **Agent-scope guard** (issue #974)
+ *    Agents can declare explicit `allowed_types` in agents.yaml to restrict
+ *    which task types they handle. The dispatcher calls `checkAgentScopeGuard()`
+ *    BEFORE `checkCapabilityEnforcement()` to reject dispatch if the task_type
+ *    is not in the allowed_types list. This prevents routing errors without
+ *    consuming agent budget.
  *
  * • `review-only`  – the agent may only receive PR-review, verification, and
  *   supervision tasks.  Implementation tasks (same detection logic as
@@ -26,9 +33,8 @@
  * Rerouting
  * ─────────
  * When a violation is detected the enforcer walks the agent registry and picks
- * the best-fit implementation agent: the one whose `github` field matches the
- * source_ref repo, or, failing that, the highest-confidence match from the
- * deterministic router.
+ * the best-fit agent: the one whose `github` field matches the source_ref repo,
+ * or, failing that, the highest-confidence match from the deterministic router.
  */
 
 import type { OrchestratorConfig } from "../config/schema.js";
@@ -300,5 +306,146 @@ function findImplementationAgent(
 
   // No valid substitute found — return null so callers can fall back gracefully
   log.warn("No valid implementation agent found for reroute", { blockedAgent, sourceRef });
+  return null;
+}
+
+// ── Agent-scope guard (pre-dispatch allowed_types check) ─────────────────────
+
+export interface AgentScopeGuardReroute {
+  /** The original agent that was selected before the guard check. */
+  blockedAgent: string;
+  /** The substitute agent that should receive the task instead. */
+  toAgent: string;
+  /** Human-readable reason recorded in the routing decisions log. */
+  redirectReason: string;
+  /** The task_type that was rejected. */
+  rejectedType: string;
+  /** The allowed types for the blocked agent. */
+  allowedTypes: string[];
+}
+
+/**
+ * Check whether the selected agent's allowed_types permits the given task.
+ *
+ * This guard runs BEFORE `checkCapabilityEnforcement()` so that routing
+ * violations are caught at dispatch time without consuming agent budget.
+ *
+ * Returns an `AgentScopeGuardReroute` descriptor when the agent must be
+ * bypassed, or `null` when no violation is detected or the agent has no
+ * allowed_types constraint.
+ *
+ * Issue #974: "Pre-dispatch agent-scope guard in orchestrator"
+ */
+export function checkAgentScopeGuard(params: {
+  config: OrchestratorConfig;
+  agentName: string;
+  taskType: string;
+  title?: string;
+  sourceRef?: string;
+}): AgentScopeGuardReroute | null {
+  const { config, agentName, taskType, title, sourceRef } = params;
+  const agent = config.agents[agentName];
+  if (!agent) return null;
+
+  // No allowed_types constraint — permit any task type (legacy behaviour)
+  const allowedTypes = agent.allowed_types ?? [];
+  if (allowedTypes.length === 0) return null;
+
+  // Check if the task type is in the allowed list
+  if (allowedTypes.includes(taskType)) {
+    return null; // Type is allowed — no violation
+  }
+
+  // Violation detected: task type not in allowed_types.
+  // Find the best substitute agent that CAN handle this task type.
+  const substitute = findAgentByAllowedType(config, taskType, agentName);
+  if (!substitute) {
+    log.warn(
+      "Agent-scope violation detected but no suitable substitute agent available — allowing dispatch to original",
+      { agentName, taskType, allowedTypes, sourceRef }
+    );
+    return null;
+  }
+
+  const redirectReason =
+    `Agent "${agentName}" has allowed_types: [${allowedTypes.join(", ")}] but received task type "${taskType}"` +
+    (title ? ` ("${title}")` : "") +
+    `. Rerouted to "${substitute}".`;
+
+  log.warn("Agent-scope guard: task type not in allowed_types — rerouting", {
+    blockedAgent: agentName,
+    toAgent: substitute,
+    taskType,
+    allowedTypes,
+    sourceRef,
+  });
+
+  return {
+    blockedAgent: agentName,
+    toAgent: substitute,
+    redirectReason,
+    rejectedType: taskType,
+    allowedTypes,
+  };
+}
+
+/**
+ * Find the best agent that allows the given task_type.
+ *
+ * Priority:
+ * 1. The agent whose `github` field matches the source_ref repo AND whose
+ *    allowed_types includes the taskType (or has no allowed_types constraint).
+ * 2. The first agent whose allowed_types includes the taskType.
+ * 3. The first agent with no allowed_types constraint (handles any type).
+ * 4. null if no suitable agent is found.
+ */
+function findAgentByAllowedType(
+  config: OrchestratorConfig,
+  taskType: string,
+  blockedAgent: string,
+  sourceRef?: string,
+): string | null {
+  // Extract owner/repo from "owner/repo#N"
+  let targetRepo: string | undefined;
+  if (sourceRef) {
+    const hashIdx = sourceRef.lastIndexOf("#");
+    if (hashIdx > 0) targetRepo = sourceRef.slice(0, hashIdx);
+  }
+
+  // 1. Exact repo match + allowed type + no research-only constraint
+  if (targetRepo) {
+    for (const [name, a] of Object.entries(config.agents)) {
+      if (name === blockedAgent) continue;
+      if (a.github !== targetRepo) continue;
+
+      const tags = a.capability_tags ?? [];
+      if (tags.includes("research-only")) continue; // Skip research-only agents
+
+      const allowedTypes = a.allowed_types ?? [];
+      if (allowedTypes.length === 0 || allowedTypes.includes(taskType)) {
+        return name;
+      }
+    }
+  }
+
+  // 2. Any agent whose allowed_types includes this taskType
+  for (const [name, a] of Object.entries(config.agents)) {
+    if (name === blockedAgent) continue;
+    const allowedTypes = a.allowed_types ?? [];
+    if (allowedTypes.includes(taskType)) return name;
+  }
+
+  // 3. Any agent with no allowed_types constraint (handles anything)
+  for (const [name, a] of Object.entries(config.agents)) {
+    if (name === blockedAgent) continue;
+    const allowedTypes = a.allowed_types ?? [];
+    if (allowedTypes.length === 0) {
+      const tags = a.capability_tags ?? [];
+      // Skip research-only agents unless they handle all types
+      if (!tags.includes("research-only")) return name;
+    }
+  }
+
+  log.warn("No valid agent found for task type", { blockedAgent, taskType, sourceRef });
   return null;
 }
