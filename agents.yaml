@@ -138,6 +138,8 @@ agents:
     github: "rapartlu/agent-orchestrator"
     owns_topics: ["orchestrator", "daemon", "routing", "dispatcher", "planner", "deployer", "state", "triggers", "sync"]
     auto_reroute_rejection_threshold: 4
+    # Housekeeping fires at cycle modulo 0 → first slot in each 5h window (~:00)
+    housekeeping_offset_cycles: 0
     docker:
       port: 3472
       api_key: "cheese"
@@ -155,6 +157,8 @@ agents:
     capabilities: ["typescript", "llm", "review", "verification"]
     github: "rapartlu/agent-reviewer"
     owns_topics: ["review", "verification", "supervisor", "improvement", "escalation", "telegram", "quality"]
+    # Housekeeping fires at cycle modulo 10 → second slot in each 5h window (~:50min offset)
+    housekeeping_offset_cycles: 10
     docker:
       port: 3474
       api_key: "cheese"
@@ -172,6 +176,8 @@ agents:
     capabilities: ["typescript", "html", "css", "express", "dashboard"]
     github: "rapartlu/agent-dashboard"
     owns_topics: ["dashboard", "cli", "status", "health", "metrics", "activity", "ui", "escalation-ui"]
+    # Housekeeping fires at cycle modulo 20 → third slot in each 5h window (~:100min offset)
+    housekeeping_offset_cycles: 20
     docker:
       port: 3473
       api_key: "cheese"
@@ -203,6 +209,8 @@ agents:
     capabilities: ["research", "web-search", "documentation", "analysis"]
     github: "rapartlu/research-agent"
     owns_topics: ["research", "investigation", "comparison", "evaluation", "exploration", "temporal", "architecture"]
+    # Housekeeping fires at cycle modulo 30 → fourth slot in each 5h window (~:150min offset)
+    housekeeping_offset_cycles: 30
     docker:
       port: 3478
       api_key: "cheese"
@@ -220,6 +228,8 @@ agents:
     capabilities: ["typescript", "docker", "proxy", "api", "infrastructure"]
     github: "rapartlu/agent-proxy"
     owns_topics: ["proxy", "docker", "container", "infrastructure", "auth", "ssh"]
+    # Housekeeping fires at cycle modulo 40 → fifth slot in each 5h window (~:200min offset)
+    housekeeping_offset_cycles: 40
     docker:
       port: 3471
       api_key: "cheese"
@@ -236,6 +246,8 @@ agents:
     capabilities: ["facilitation", "synthesis", "coordination"]
     github: "rapartlu/meeting-facilitator-agent"
     owns_topics: ["facilitation", "meetings", "coordination"]
+    # Housekeeping fires at cycle modulo 50 → sixth slot in each 5h window (~:250min offset)
+    housekeeping_offset_cycles: 50
     docker:
       port: 3485
       api_key: "cheese"

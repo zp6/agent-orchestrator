@@ -166,6 +166,27 @@ export interface AgentConfig {
    */
   borrow?: BorrowConfig;
   /**
+   * Stagger offset (in cycles) for periodic housekeeping dispatches.
+   * Housekeeping fires every BACKLOG_TRIAGE_EVERY_N_CYCLES cycles. Setting a
+   * non-zero offset shifts when this agent's housekeeping fires within that
+   * window — i.e. it fires when `cycleCount % BACKLOG_TRIAGE_EVERY_N_CYCLES === housekeeping_offset_cycles`.
+   *
+   * This prevents all agents from running housekeeping simultaneously, which
+   * creates dispatch spikes that compete with live feature work.
+   *
+   * Recommended assignments (60-cycle window, 5-min cycles → 1 agent/10 cycles):
+   *   claude-agent-orchestrator:      0  (fires at cycle 0, 60, 120, …)
+   *   claude-orchestrator-reviewer:  10  (fires at cycle 10, 70, 130, …)
+   *   claude-orchestrator-dashboard: 20  (fires at cycle 20, 80, 140, …)
+   *   claude-research-agent:         30  (fires at cycle 30, 90, 150, …)
+   *   claude-proxy:                  40  (fires at cycle 40, 100, 160, …)
+   *   meeting-facilitator-agent:     50  (fires at cycle 50, 110, 170, …)
+   *
+   * Defaults to 0 when omitted (legacy behaviour — fires with the orchestrator).
+   * Must be in [0, BACKLOG_TRIAGE_EVERY_N_CYCLES).
+   */
+  housekeeping_offset_cycles?: number;
+  /**
    * Optional capability tags that constrain which task types this agent may
    * receive.  Tags are enforced by the dispatcher before each dispatch.
    *

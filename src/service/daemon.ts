@@ -787,8 +787,14 @@ export class Daemon {
         this.cleanupStaleIssues(time);
         this.reapStaleOrchestratorIssues(time);
       }
+      // triageBacklogs is called every cycle; internally it filters to only the
+      // agents whose housekeeping_offset_cycles is due this cycle, so at most one
+      // agent fires per cycle and the overall load is evenly spread across the
+      // BACKLOG_TRIAGE_EVERY_N_CYCLES window.  See AgentConfig.housekeeping_offset_cycles.
+      batch4.push(this.triageBacklogs(time));
       if (this.cycleCount % BACKLOG_TRIAGE_EVERY_N_CYCLES === 0) {
-        batch4.push(this.triageBacklogs(time));
+        // Proactive scan remains tied to cycle 0 of each window — it's cheap and
+        // covers repo-wide signals rather than per-agent housekeeping.
         try {
           const filed = runProactiveScan(this.config, this.store);
           if (filed > 0) console.log(`[${time}] Proactive scan: filed ${filed} issue(s)`);
@@ -3438,11 +3444,21 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
   }
 
   private async triageBacklogs(time: string): Promise<void> {
-    const agents = Object.entries(this.config.agents).filter(([, a]) => a.github);
+    const allAgents = Object.entries(this.config.agents).filter(([, a]) => a.github);
+    if (allAgents.length === 0) return;
+
+    // Filter to only agents whose housekeeping offset is due this cycle.
+    // Each agent fires when: cycleCount % BACKLOG_TRIAGE_EVERY_N_CYCLES === housekeeping_offset_cycles
+    // This staggers dispatches across the window so agents don't all fire simultaneously.
+    const agents = allAgents.filter(([, agent]) => {
+      const offset = (agent.housekeeping_offset_cycles ?? 0) % BACKLOG_TRIAGE_EVERY_N_CYCLES;
+      return this.cycleCount % BACKLOG_TRIAGE_EVERY_N_CYCLES === offset;
+    });
+
     if (agents.length === 0) return;
 
-    console.log(`[${time}] Backlog triage: dispatching housekeeping to ${agents.length} agent(s)`);
-    this.log.info("Starting backlog triage cycle", { agentCount: agents.length });
+    console.log(`[${time}] Backlog triage: dispatching housekeeping to ${agents.length} of ${allAgents.length} agent(s) (cycle ${this.cycleCount})`);
+    this.log.info("Starting backlog triage cycle", { agentCount: agents.length, totalAgents: allAgents.length, cycle: this.cycleCount });
 
     for (const [agentName, agent] of agents) {
       try {
