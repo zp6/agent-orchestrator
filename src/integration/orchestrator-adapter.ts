@@ -26,6 +26,7 @@ import { CalibrationDriftMonitor } from "../reviewer/calibration-drift.js";
 import { ConflictRecoveryAlertMonitor } from "../reviewer/reroute-conflict-recovery.js";
 import { ScoreCalibrator } from "../reviewer/score-calibrator.js";
 import { RoutingViolationDetector } from "../reviewer/routing-violations.js";
+import { PreDispatchCapabilityEnforcer } from "../reviewer/pre-dispatch-capability-enforcer.js";
 import type { ReviewerConfig } from "../config.js";
 import type { Notifier } from "../notify.js";
 import type {
@@ -71,6 +72,25 @@ export interface ReviewerInstances {
    * (i.e. lacks `recordRoutingViolation` / `getRoutingViolations`).
    */
   routingViolationDetector: RoutingViolationDetector | undefined;
+  /**
+   * Pre-dispatch capability enforcer for the reviewer agent (issue #330).
+   * Intercepts tasks BEFORE they are sent to `claude-orchestrator-reviewer`
+   * and blocks any task that contains authorship keywords (implement, create PR,
+   * write, build) targeting a foreign repo.  When a task is blocked, returns
+   * the correct reroute target and fires a Telegram alert.
+   *
+   * Call `preDispatchEnforcer.check()` in the dispatcher, just before sending
+   * a task to the reviewer agent:
+   *
+   *   const r = await instances.preDispatchEnforcer.check({
+   *     task_title: task.title,
+   *     task_type: task.task_type ?? "implementation",
+   *     source_ref: task.source_ref,
+   *     target_agent: resolvedAgent,
+   *   });
+   *   if (!r.allowed) resolvedAgent = r.reroute_to ?? fallback;
+   */
+  preDispatchEnforcer: PreDispatchCapabilityEnforcer;
 }
 
 export interface CreateReviewerOptions {
@@ -177,5 +197,6 @@ export function createReviewerInstances(
     scoreCalibrator,
     healthIncidentRouter: new HealthIncidentRouter(opts.notifier),
     routingViolationDetector,
+    preDispatchEnforcer: new PreDispatchCapabilityEnforcer(config, opts.notifier),
   };
 }

@@ -494,6 +494,40 @@ export type {
   CapabilityCheckResult,
 } from "./reviewer/capability-check.js";
 
+// Pre-dispatch capability enforcer — routing boundary gate (issue #330).
+//
+// Intercepts tasks before they are sent to claude-orchestrator-reviewer and
+// blocks any task that contains authorship keywords (implement, create PR,
+// write, build) targeting a foreign repo.  Returns the correct reroute target
+// and fires a Telegram alert with the original vs. corrected routing so
+// operators can track boundary violations.
+//
+// Usage (in the orchestrator dispatcher, before sending to the reviewer):
+//
+//   const enforcer = new PreDispatchCapabilityEnforcer(config, notifier);
+//   const result = await enforcer.check({
+//     task_title: task.title,
+//     task_type: task.task_type ?? "implementation",
+//     source_ref: task.source_ref,
+//     target_agent: resolvedAgent,
+//   });
+//   if (!result.allowed) {
+//     const corrected = result.reroute_to ?? fallbackAgent;
+//     // dispatch to corrected instead
+//   }
+export {
+  PreDispatchCapabilityEnforcer,
+  shouldBlock,
+  findAuthorshipKeyword,
+  extractRepoFromRef,
+  REVIEWER_AGENT_NAME,
+  AUTHORSHIP_KEYWORDS,
+} from "./reviewer/pre-dispatch-capability-enforcer.js";
+export type {
+  PreDispatchCheckRequest,
+  PreDispatchCheckResult,
+} from "./reviewer/pre-dispatch-capability-enforcer.js";
+
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
 
