@@ -158,6 +158,27 @@ Example and template files routinely contain intentional placeholder text that l
 
 3. **Only flag values that look like real, leaked credentials:** high-entropy random strings (20+ chars of mixed alphanumeric), values matching known API key formats (e.g. 'sk-...', 'ghp_...', 'AKIA...'), or values that appear to be copy-pasted real tokens based on their structure. When in doubt, approve.
 
+SHELL INJECTION DETECTION RULES:
+Template literals in exec/spawn calls are NOT automatically a security issue. Only flag shell injection when ALL THREE conditions are met simultaneously:
+
+1. The interpolated value is externally controlled -- it comes from: user input, an HTTP request parameter, a GitHub API response field (branch name, PR title, commit message, author name, label, etc.), a file path from disk, or environment variable set by an untrusted source. Internally-defined constants, TypeScript enum values, hardcoded strings, numeric IDs, and boolean flags are NOT externally controlled.
+
+2. The value is passed to a shell interpreter unescaped -- specifically: passed to exec(), execSync(), or child_process.exec() which interprets its argument through /bin/sh. Using spawn() or spawnSync() with an array of arguments (not a shell string) is safe regardless of escaping, because no shell is invoked.
+
+3. No sanitization is applied -- the value is NOT wrapped in shellEscape(), shell-quote, shlex.quote(), or equivalent escaping. If shellEscape(value) wraps the interpolated variable, the call is safe.
+
+SAFE patterns -- do NOT flag these:
+- execSync with numeric prNumber or repo from internal config (numbers and internal state cannot be injected)
+- execSync where the interpolated variable is wrapped in shellEscape()
+- spawn('git', ['checkout', branch]) -- array form, no shell interpolation
+- exec calls where all interpolated values are numbers, booleans, or string constants defined in the same file
+
+GENUINELY BLOCKING -- flag with severity "critical", category "security":
+- exec or execSync where a branch name, PR title, commit message, author name, or other GitHub API string is interpolated WITHOUT shellEscape()
+- Any exec call taking direct HTTP request body fields (req.body.*, request.params.*, query.*) without escaping
+
+When in doubt about whether a value is externally controlled, APPROVE and note the concern as a non-blocking suggestion. Do not block a PR based on the mere presence of template literals in exec calls.
+
 Respond with ONLY a JSON object (no markdown, no code fences):
 {
   "decision": "approve|request-changes|escalate",
@@ -637,7 +658,12 @@ export class PRReviewer {
       });
     }
 
-    const prompt = `## PR #${pr.number}: ${pr.title}\n**Repo:** ${pr.repo}\n**Author:** ${pr.author}\n**Branch:** ${pr.branch}\n**Files changed:** ${pr.files_changed}${diffWarning}${schemaNotice}\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${truncatedDiff}\n\`\`\``;
+    // Static shell injection pre-scan: annotate risky exec() interpolations so
+    // the LLM has per-line context. Returns null when no risky lines exist
+    // (the common case), keeping the prompt clean when everything is safe.
+    const shellInjectionNotice = annotateShellInjectionRisks(truncatedDiff);
+
+    const prompt = `## PR #${pr.number}: ${pr.title}\n**Repo:** ${pr.repo}\n**Author:** ${pr.author}\n**Branch:** ${pr.branch}\n**Files changed:** ${pr.files_changed}${diffWarning}${schemaNotice}${shellInjectionNotice ?? ""}\n\n### Description\n${pr.body}\n\n### Diff\n\`\`\`diff\n${truncatedDiff}\n\`\`\``;
 
     const LLM_TIMEOUT_MS = 5 * 60 * 1000;
     const abortController = new AbortController();
@@ -2146,6 +2172,114 @@ export function isExampleOrTemplateFile(filePath: string, content?: string): boo
  * Placeholders are values that instruct the user to replace them — they carry
  * no secret entropy and are safe to commit.
  */
+/**
+ * Shell injection risk classification for a single interpolated expression.
+ *
+ * Called by annotateShellInjectionRisks() to classify each `${...}` inside
+ * an exec/execSync call found in a diff.
+ *
+ * @param expr   The raw text inside `${...}`, e.g. "branch", "shellEscape(repo)", "req.body.name"
+ * @returns      "safe" | "escaped" | "risky"
+ */
+export function classifyShellInjectionRisk(
+  expr: string,
+): "safe" | "escaped" | "risky" {
+  const e = expr.trim();
+
+  // Already wrapped in an escape helper — safe
+  if (/shellEscape\(|shlex\.quote\(|shell-quote|escapeShell\(|shellescape\(/.test(e)) {
+    return "escaped";
+  }
+
+  // spawn() with array args doesn't use a shell — safe
+  // (handled at call-site detection level, not expression level)
+
+  // Pure numeric/boolean literals or expressions — safe
+  if (/^\d+$/.test(e) || e === "true" || e === "false") return "safe";
+
+  // Number-typed variable names that conventionally hold IDs — safe
+  if (/^(prNumber|issueNumber|taskId|id|count|limit|offset|page|index|num|port)$/.test(e)) {
+    return "safe";
+  }
+
+  // Internal config fields that are controlled by the system — safe
+  if (
+    /^(repo|this\.repo|config\.(repo|branch)|REPO|BASE_BRANCH|DEFAULT_BRANCH)$/.test(e)
+  ) {
+    return "safe";
+  }
+
+  // Externally-sourced fields that are commonly exploitable without escaping
+  const externalPatterns =
+    /\b(req\.|request\.|body\.|params\.|query\.|headers\.|userInput|userName|authorName|prTitle|commitMessage|label|refName|tagName|branchName)\b/;
+  if (externalPatterns.test(e)) return "risky";
+
+  // GitHub API response fields commonly containing attacker-controlled data
+  const githubApiFields = /^(branch|ref|head|base|sha|title|name|login|email|body)$/;
+  if (githubApiFields.test(e)) return "risky";
+
+  // Default: unknown — treat as safe to avoid false positives
+  return "safe";
+}
+
+/**
+ * Scan a diff for exec/execSync calls that interpolate variables into shell
+ * strings, and return an annotation notice if genuinely risky patterns are
+ * found.
+ *
+ * Returns null when no exec calls with template literals are present, or when
+ * all detected patterns are safe. Returns a notice string when one or more
+ * lines look risky — the notice is injected into the review prompt so the LLM
+ * has per-line context rather than just the general system prompt rules.
+ *
+ * SAFE patterns generate no annotation (to avoid cluttering the prompt with
+ * noise). Only risky patterns generate an annotation.
+ */
+export function annotateShellInjectionRisks(diff: string): string | null {
+  const lines = diff.split("\n");
+  const risky: Array<{ line: number; code: string; exprs: string[] }> = [];
+
+  // Matches exec/execSync with a backtick template literal argument
+  const execPattern = /\bexec(?:Sync)?\s*\(\s*`([^`]*)`/;
+  // Extract ${...} expressions from a template literal
+  const interpolationPattern = /\$\{([^}]+)\}/g;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // Only look at added/modified lines in the diff
+    if (!line.startsWith("+")) continue;
+
+    const execMatch = execPattern.exec(line);
+    if (!execMatch) continue;
+
+    const template = execMatch[1];
+    const riskyExprs: string[] = [];
+    let m: RegExpExecArray | null;
+    interpolationPattern.lastIndex = 0;
+    while ((m = interpolationPattern.exec(template)) !== null) {
+      const expr = m[1];
+      if (classifyShellInjectionRisk(expr) === "risky") {
+        riskyExprs.push(expr);
+      }
+    }
+
+    if (riskyExprs.length > 0) {
+      risky.push({ line: i + 1, code: line.slice(1).trim(), exprs: riskyExprs });
+    }
+  }
+
+  if (risky.length === 0) return null;
+
+  const items = risky
+    .map(
+      (r) =>
+        `- Line ~${r.line}: \`${r.code.slice(0, 120)}\`\n  ⚠️ Unescaped external expression(s): ${r.exprs.map((e) => `\`${e}\``).join(", ")} — wrap with \`shellEscape()\` or use spawn() array form`,
+    )
+    .join("\n");
+
+  return `\n\n> **🔍 Shell Injection Pre-Scan** — The following added lines interpolate potentially externally-controlled values into exec/execSync shell strings without visible escaping. Review carefully:\n${items}`;
+}
+
 export function isPlaceholderCredential(value: string): boolean {
   const v = value.trim();
 

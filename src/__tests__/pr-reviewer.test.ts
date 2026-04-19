@@ -6,6 +6,8 @@ import {
   validateClosesReferences,
   isExampleOrTemplateFile,
   isPlaceholderCredential,
+  classifyShellInjectionRisk,
+  annotateShellInjectionRisks,
   PRReviewer,
 } from "../reviewer/pr-reviewer.js";
 import type { ConflictStats, RedispatchCategory, PRReviewResult } from "../reviewer/pr-reviewer.js";
@@ -529,5 +531,113 @@ describe("isPlaceholderCredential", () => {
 
   it("does not match a short but real-looking value", () => {
     expect(isPlaceholderCredential("prod-secret-abc123")).toBe(false);
+  });
+});
+
+describe("classifyShellInjectionRisk", () => {
+  // Safe: already wrapped in escape helper
+  it("returns 'escaped' when shellEscape() wraps the expression", () => {
+    expect(classifyShellInjectionRisk("shellEscape(repo)")).toBe("escaped");
+    expect(classifyShellInjectionRisk("shellEscape(branch)")).toBe("escaped");
+  });
+
+  it("returns 'escaped' for other escape helpers", () => {
+    expect(classifyShellInjectionRisk("escapeShell(value)")).toBe("escaped");
+  });
+
+  // Safe: pure numbers or booleans
+  it("returns 'safe' for numeric literals", () => {
+    expect(classifyShellInjectionRisk("42")).toBe("safe");
+    expect(classifyShellInjectionRisk("0")).toBe("safe");
+  });
+
+  it("returns 'safe' for boolean literals", () => {
+    expect(classifyShellInjectionRisk("true")).toBe("safe");
+    expect(classifyShellInjectionRisk("false")).toBe("safe");
+  });
+
+  // Safe: well-known internal ID variable names
+  it("returns 'safe' for conventional numeric ID variables", () => {
+    expect(classifyShellInjectionRisk("prNumber")).toBe("safe");
+    expect(classifyShellInjectionRisk("issueNumber")).toBe("safe");
+    expect(classifyShellInjectionRisk("id")).toBe("safe");
+  });
+
+  // Safe: internal config variables
+  it("returns 'safe' for internal repo/config references", () => {
+    expect(classifyShellInjectionRisk("repo")).toBe("safe");
+    expect(classifyShellInjectionRisk("this.repo")).toBe("safe");
+  });
+
+  // Risky: request/body fields
+  it("returns 'risky' for HTTP request fields", () => {
+    expect(classifyShellInjectionRisk("req.body.branch")).toBe("risky");
+    expect(classifyShellInjectionRisk("request.params.name")).toBe("risky");
+  });
+
+  // Risky: GitHub API response fields that are externally controlled
+  it("returns 'risky' for bare branch/title/name variables", () => {
+    expect(classifyShellInjectionRisk("branch")).toBe("risky");
+    expect(classifyShellInjectionRisk("title")).toBe("risky");
+    expect(classifyShellInjectionRisk("name")).toBe("risky");
+    expect(classifyShellInjectionRisk("login")).toBe("risky");
+  });
+
+  // Risky: explicit external data labels
+  it("returns 'risky' for userInput-style variable names", () => {
+    expect(classifyShellInjectionRisk("userInput")).toBe("risky");
+    expect(classifyShellInjectionRisk("authorName")).toBe("risky");
+    expect(classifyShellInjectionRisk("prTitle")).toBe("risky");
+    expect(classifyShellInjectionRisk("commitMessage")).toBe("risky");
+  });
+
+  // Unknown but not risky — default to safe to avoid false positives
+  it("returns 'safe' for unknown variables (defaults to safe)", () => {
+    expect(classifyShellInjectionRisk("someLocalVar")).toBe("safe");
+    expect(classifyShellInjectionRisk("result.data")).toBe("safe");
+  });
+});
+
+describe("annotateShellInjectionRisks", () => {
+  it("returns null for a diff with no exec calls", () => {
+    const diff = `+const x = 1;\n+console.log(x);\n`;
+    expect(annotateShellInjectionRisks(diff)).toBeNull();
+  });
+
+  it("returns null when exec uses only safe interpolations (numeric prNumber)", () => {
+    const diff = `+execSync(\`gh pr view \${prNumber} --repo myorg/myrepo\`);\n`;
+    expect(annotateShellInjectionRisks(diff)).toBeNull();
+  });
+
+  it("returns null when exec uses shellEscape() for external values", () => {
+    const diff = `+execSync(\`gh issue list --repo \${shellEscape(repo)}\`);\n`;
+    expect(annotateShellInjectionRisks(diff)).toBeNull();
+  });
+
+  it("returns a notice when exec interpolates a risky bare 'branch' variable", () => {
+    const diff = `+execSync(\`git checkout \${branch}\`);\n`;
+    const result = annotateShellInjectionRisks(diff);
+    expect(result).not.toBeNull();
+    expect(result).toContain("Shell Injection Pre-Scan");
+    expect(result).toContain("branch");
+  });
+
+  it("returns a notice when exec interpolates req.body fields", () => {
+    const diff = `+execSync(\`git checkout \${req.body.branch}\`);\n`;
+    const result = annotateShellInjectionRisks(diff);
+    expect(result).not.toBeNull();
+    expect(result).toContain("req.body.branch");
+  });
+
+  it("ignores removed lines (starting with -) even when they contain risky patterns", () => {
+    const diff = `-execSync(\`git checkout \${branch}\`);\n+execSync(\`git checkout \${shellEscape(branch)}\`);\n`;
+    // Only the removed line is risky; the added line is safe
+    expect(annotateShellInjectionRisks(diff)).toBeNull();
+  });
+
+  it("returns null for spawn() calls even with external-looking variable names", () => {
+    // spawn() with array args is not detected by the exec pattern — no annotation
+    const diff = `+spawn('git', ['checkout', branch]);\n`;
+    expect(annotateShellInjectionRisks(diff)).toBeNull();
   });
 });
