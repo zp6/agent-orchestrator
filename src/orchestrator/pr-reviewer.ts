@@ -17,6 +17,7 @@ import {
 } from "./learned-patterns.js";
 import { fetchOpenPRFiles } from "./conflict-risk.js";
 import { checkSchemaContractDrift, extractChangedFiles } from "./schema-impact.js";
+import { TRIAGE_HOUSEKEEPING_SCHEMA, TRIAGE_CROSS_REPO_SCHEMA } from "./verifier.js";
 
 export interface PRInfo {
   number: number;
@@ -32,6 +33,9 @@ export interface PRInfo {
 
 export type { PRReviewResult } from "../client/reviewer-client.js";
 import type { PRReviewResult } from "../client/reviewer-client.js";
+
+// Re-export triage schemas for convenient access by callers
+export { TRIAGE_HOUSEKEEPING_SCHEMA, TRIAGE_CROSS_REPO_SCHEMA } from "./verifier.js";
 
 export class PRReviewer {
   private log = createLogger("pr-reviewer");
@@ -238,6 +242,64 @@ Please add this block to your PR description and try again.`,
       }
 
       this.log.info("Housekeeping PR JSON schema valid", { repo, prNumber, title: pr.title });
+    }
+
+    // Cross-repo triage PR metadata validation: must include JSON schema with cross-repo findings
+    if (this.isCrossRepoTriagePR(pr)) {
+      const validation = this.validateCrossRepoTriageJsonSchema(pr.body);
+      if (!validation.valid) {
+        this.log.warn("Cross-repo triage PR missing JSON schema", {
+          repo,
+          prNumber,
+          title: pr.title,
+          error: validation.error,
+        });
+
+        // Request changes with actionable feedback including example schema
+        const exampleSchema = JSON.stringify({
+          source_repo: "rapartlu/agent-orchestrator",
+          target_repo: "rapartlu/agent-reviewer",
+          issues_reviewed: 12,
+          routing_corrections: [
+            {
+              issue_number: 325,
+              old_routing: "agent-orchestrator",
+              new_routing: "agent-reviewer",
+              reason: "Reviewer agent handles verification logic, not orchestrator"
+            }
+          ],
+          outcome_summary: "Triaged 12 issues across agent-reviewer. Corrected 3 routing mismatches where issues were incorrectly filed against orchestrator but belong in reviewer."
+        }, null, 2);
+
+        const result: PRReviewResult = {
+          decision: "request-changes",
+          comment: `**[Cross-Repo Triage PR] Missing required JSON metadata block**
+
+Your PR body must include a JSON metadata block with the cross-repo triage findings. This allows structured downstream processing and enables the verifier to audit cross-repo triage quality.
+
+**Required fields:**
+- \`source_repo\` (string) — repo where the triage agent is based (e.g. 'rapartlu/agent-orchestrator')
+- \`target_repo\` (string) — repo(s) being triaged (e.g. 'rapartlu/agent-reviewer')
+- \`issues_reviewed\` (number or array) — count of issues examined, or array of issue numbers
+- \`routing_corrections\` (array) — routing decisions made, with { issue_number, old_routing, new_routing, reason }
+- \`outcome_summary\` (string) — summary of triage findings and routing corrections (1–3 sentences)
+
+**Example:**
+\`\`\`json
+${exampleSchema}
+\`\`\`
+
+**Error:** ${validation.error}
+
+Please add this block to your PR description and try again.`,
+          reason: `Cross-repo triage PR missing JSON metadata schema: ${validation.error}`,
+        };
+
+        await this.executeDecision(repo, prNumber, result, undefined, pr);
+        return result;
+      }
+
+      this.log.info("Cross-repo triage PR JSON schema valid", { repo, prNumber, title: pr.title });
     }
 
     // Escalate after too many review rounds instead of endlessly requesting changes.
@@ -739,6 +801,47 @@ Please add this block to your PR description and try again.`,
   }
 
   /**
+   * Detect if a PR is a cross-repo triage PR (triage spanning multiple agent repos).
+   * Cross-repo triage PRs must include a mandatory cross-repo triage JSON schema.
+   */
+  private isCrossRepoTriagePR(pr: PRInfo): boolean {
+    // Title patterns for cross-repo triage
+    const crossRepoPatterns = [
+      /cross-repo\s+triage/i,
+      /\[cross-repo-triage\]/i,
+      /cross-repo\s+follow-?up/i,
+    ];
+
+    if (crossRepoPatterns.some(pattern => pattern.test(pr.title))) {
+      return true;
+    }
+
+    // Also detect by presence of cross-repo triage schema fields in the PR body
+    // (some agents may not label the PR explicitly but include the schema)
+    try {
+      const jsonBlockMatch = pr.body.match(/```json\s*([\s\S]*?)```/);
+      if (jsonBlockMatch) {
+        const jsonStr = jsonBlockMatch[1].trim();
+        const jsonObj = JSON.parse(jsonStr);
+        if (typeof jsonObj === 'object' && jsonObj !== null && !Array.isArray(jsonObj)) {
+          const obj = jsonObj as Record<string, unknown>;
+          // If the JSON contains cross-repo triage schema fields, treat as cross-repo triage
+          const hasSourceRepo = 'source_repo' in obj;
+          const hasTargetRepo = 'target_repo' in obj;
+          const hasRoutingCorrections = 'routing_corrections' in obj;
+          if (hasSourceRepo || hasTargetRepo || hasRoutingCorrections) {
+            return true;
+          }
+        }
+      }
+    } catch {
+      // Best-effort: if we can't parse the JSON, fall back to title patterns only
+    }
+
+    return false;
+  }
+
+  /**
    * Validate that a housekeeping PR body includes the mandatory JSON metadata schema.
    * Returns { valid: true } if valid, { valid: false, error: string } if invalid.
    */
@@ -810,6 +913,92 @@ Please add this block to your PR description and try again.`,
       return {
         valid: false,
         error: "Field 'priority_reordering' must be an array"
+      };
+    }
+
+    return { valid: true };
+  }
+
+  /**
+   * Validate that a cross-repo triage PR body includes the mandatory JSON metadata schema.
+   * Returns { valid: true } if valid, { valid: false, error: string } if invalid.
+   */
+  private validateCrossRepoTriageJsonSchema(body: string): { valid: boolean; error?: string } {
+    // Extract JSON from markdown code block: ```json ... ```
+    const jsonBlockMatch = body.match(/```json\s*([\s\S]*?)```/);
+    if (!jsonBlockMatch) {
+      return {
+        valid: false,
+        error: "Missing JSON metadata block in PR description"
+      };
+    }
+
+    const jsonStr = jsonBlockMatch[1].trim();
+    let jsonObj: unknown;
+    try {
+      jsonObj = JSON.parse(jsonStr);
+    } catch (err) {
+      return {
+        valid: false,
+        error: `Invalid JSON in metadata block: ${err instanceof Error ? err.message : "parse error"}`
+      };
+    }
+
+    // Validate it's an object
+    if (typeof jsonObj !== 'object' || jsonObj === null || Array.isArray(jsonObj)) {
+      return {
+        valid: false,
+        error: "JSON metadata block must be an object (not an array or primitive)"
+      };
+    }
+
+    // Check required fields
+    const obj = jsonObj as Record<string, unknown>;
+    const requiredFields = TRIAGE_CROSS_REPO_SCHEMA.required_fields;
+    const missingFields = requiredFields.filter(field => !(field in obj));
+
+    if (missingFields.length > 0) {
+      return {
+        valid: false,
+        error: `Missing required fields in JSON metadata: ${missingFields.join(', ')}`
+      };
+    }
+
+    // Validate field types
+    if (typeof obj.source_repo !== 'string' || obj.source_repo.trim().length === 0) {
+      return {
+        valid: false,
+        error: "Field 'source_repo' must be a non-empty string (e.g. 'rapartlu/agent-orchestrator')"
+      };
+    }
+
+    if (typeof obj.target_repo !== 'string' || obj.target_repo.trim().length === 0) {
+      return {
+        valid: false,
+        error: "Field 'target_repo' must be a non-empty string (e.g. 'rapartlu/agent-reviewer')"
+      };
+    }
+
+    // issues_reviewed can be a number or an array
+    if (typeof obj.issues_reviewed !== 'number' && !Array.isArray(obj.issues_reviewed)) {
+      return {
+        valid: false,
+        error: "Field 'issues_reviewed' must be a number or an array of issue numbers"
+      };
+    }
+
+    // routing_corrections must be an array (null is not valid, use [] for empty)
+    if (obj.routing_corrections !== undefined && (obj.routing_corrections === null || !Array.isArray(obj.routing_corrections))) {
+      return {
+        valid: false,
+        error: "Field 'routing_corrections' must be an array"
+      };
+    }
+
+    if (typeof obj.outcome_summary !== 'string' || obj.outcome_summary.trim().length === 0) {
+      return {
+        valid: false,
+        error: "Field 'outcome_summary' must be a non-empty string"
       };
     }
 
