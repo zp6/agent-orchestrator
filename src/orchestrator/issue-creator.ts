@@ -9,11 +9,31 @@ export interface CreatedIssue {
   url: string;
 }
 
+export interface DeferredFollowUp {
+  agentName: string;
+  improvement: DetectedImprovement;
+  reason: "cap_reached" | "repo_at_capacity";
+}
+
+export interface CreateAcrossReposResult {
+  created: CreatedIssue[];
+  deferred: DeferredFollowUp[];
+  capReached: boolean;
+}
+
 /**
  * Default max open issues the orchestrator can auto-create per repo.
  * Configurable via `triggers.max_open_orchestrator_issues` in agents.yaml.
  */
 const MAX_OPEN_ORCHESTRATOR_ISSUES = 10;
+
+/**
+ * Default maximum number of cross-repo issues created per improvement detection cycle.
+ * Items beyond this cap are returned as deferred so they can be posted as PR comments
+ * instead of flooding the dispatch queue.
+ * Configurable via `triggers.max_cross_repo_issues_per_cycle` in agents.yaml.
+ */
+const DEFAULT_CROSS_REPO_CAP = 3;
 
 /** Minimum word-overlap Jaccard similarity to consider two issue titles duplicates. */
 const DEDUP_SIMILARITY_THRESHOLD = 0.4;
@@ -176,6 +196,147 @@ export class IssueCreator {
     }
 
     return created;
+  }
+
+  /**
+   * Like `createAcrossRepos` but enforces a total cross-repo cap per cycle.
+   *
+   * Once `cap` issues have been created across all repos for this improvement,
+   * remaining agents are returned in `result.deferred` so the caller can post
+   * them as PR comments (via `postDeferredFollowUps`) rather than creating
+   * additional issues that would crowd the dispatch queue.
+   *
+   * @param improvement  The improvement to file across repos.
+   * @param extraLabels  Additional labels to attach to created issues.
+   * @param cap          Max issues to create (default: `triggers.max_cross_repo_issues_per_cycle` or 3).
+   */
+  createAcrossReposWithCap(
+    improvement: DetectedImprovement,
+    extraLabels: string[] = [],
+    cap?: number,
+  ): CreateAcrossReposResult {
+    const effectiveCap = cap
+      ?? (this.config.triggers as Record<string, unknown> | undefined)?.max_cross_repo_issues_per_cycle as number | undefined
+      ?? DEFAULT_CROSS_REPO_CAP;
+
+    const created: CreatedIssue[] = [];
+    const deferred: DeferredFollowUp[] = [];
+
+    for (const agentName of improvement.affected_agents) {
+      // If we've hit the cycle cap, defer remaining agents
+      if (created.length >= effectiveCap) {
+        deferred.push({ agentName, improvement, reason: "cap_reached" });
+        continue;
+      }
+
+      const agent = this.config.agents[agentName];
+      if (!agent?.github) continue;
+
+      // Per-repo throttle: skip if repo already has too many open orchestrator issues
+      const openCount = this.getOpenOrchestratorIssueCount(agent.github);
+      const maxIssues = this.config.triggers?.max_open_orchestrator_issues ?? MAX_OPEN_ORCHESTRATOR_ISSUES;
+      if (openCount >= maxIssues) {
+        this.log.warn("Deferring issue creation: repo at capacity", {
+          repo: agent.github, openCount, threshold: maxIssues,
+        });
+        deferred.push({ agentName, improvement, reason: "repo_at_capacity" });
+        continue;
+      }
+
+      const candidateTitle = `[Orchestrator] ${improvement.title}`;
+
+      if (this.isDuplicate(agent.github, candidateTitle)) {
+        continue;
+      }
+
+      const body = this.formatIssueBody(improvement, agentName);
+
+      for (const label of extraLabels) {
+        this.ensureLabel(agent.github, label);
+      }
+
+      try {
+        const issue = this.createIssue(
+          agent.github,
+          candidateTitle,
+          body,
+          ["orchestrator", ...extraLabels],
+        );
+        created.push(issue);
+      } catch {
+        // Continue creating issues for other repos
+      }
+    }
+
+    return { created, deferred, capReached: deferred.some((d) => d.reason === "cap_reached") };
+  }
+
+  /**
+   * Post deferred follow-up improvements as a comment on a source PR.
+   *
+   * When `createAcrossReposWithCap` defers items due to the cross-repo cap,
+   * call this method to surface them as a PR comment so they are visible to
+   * reviewers and can be actioned in a later daemon cycle without creating
+   * new issues immediately.
+   *
+   * If `sourceRepo` or `prNumber` are not available, the deferred items are
+   * logged to the console instead.
+   *
+   * @param sourceRepo  GitHub repo slug (e.g. "owner/repo"), or null.
+   * @param prNumber    PR number to comment on, or null.
+   * @param deferred    Items returned by `createAcrossReposWithCap`.
+   */
+  postDeferredFollowUps(
+    sourceRepo: string | null,
+    prNumber: number | null,
+    deferred: DeferredFollowUp[],
+  ): void {
+    if (deferred.length === 0) return;
+
+    if (!sourceRepo || !prNumber) {
+      this.log.info("Deferred follow-ups (no source PR available):", {
+        count: deferred.length,
+        items: deferred.map((d) => `${d.agentName}: ${d.improvement.title} [${d.reason}]`),
+      });
+      return;
+    }
+
+    const lines: string[] = [
+      "## Deferred Cross-Repo Follow-Ups",
+      "",
+      "The orchestrator reached its cross-repo issue cap for this cycle. " +
+        "The following improvements could not be filed as issues yet. " +
+        "They will be retried in a future cycle or can be actioned manually:",
+      "",
+    ];
+
+    for (const item of deferred) {
+      const severity = item.improvement.severity;
+      const reason = item.reason === "cap_reached" ? "cycle cap reached" : "repo at capacity";
+      lines.push(`- **[${severity}]** \`${item.agentName}\`: ${item.improvement.title} *(${reason})*`);
+    }
+
+    lines.push("", "*Posted by claude-agent-orchestrator — deferred items will be retried next cycle.*");
+
+    const body = lines.join("\n");
+
+    try {
+      execSync(
+        `gh pr comment ${prNumber} --repo ${shellEscape(sourceRepo)} --body ${shellEscape(body)}`,
+        { encoding: "utf-8", timeout: 30000 },
+      );
+      this.log.info("Posted deferred follow-ups as PR comment", {
+        repo: sourceRepo,
+        prNumber,
+        count: deferred.length,
+      });
+    } catch (err) {
+      this.log.warn("Failed to post deferred follow-ups PR comment", {
+        repo: sourceRepo,
+        prNumber,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**

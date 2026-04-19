@@ -6,7 +6,7 @@ import { setLLMUsageRecorder } from "../client/llm-client.js";
 import { ReviewerClient, type SupervisorDecision } from "../client/reviewer-client.js";
 import { Dispatcher, MAX_RETRIES, TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS, extractRepoFromSourceRef } from "../orchestrator/dispatcher.js";
 import { ResearchLinker } from "../orchestrator/research-linker.js";
-import { IssueCreator } from "../orchestrator/issue-creator.js";
+import { IssueCreator, type DeferredFollowUp } from "../orchestrator/issue-creator.js";
 import { SchemaRegistrySyncDetector } from "../orchestrator/schema-registry-sync.js";
 import { Deployer } from "../orchestrator/deployer.js";
 import { PRReviewer } from "../orchestrator/pr-reviewer.js";
@@ -1974,9 +1974,18 @@ export class Daemon {
 
       console.log(`[${time}] Detected ${improvements.length} improvement(s)`);
       for (const imp of improvements) {
-        const created = this.issueCreator.createAcrossRepos(imp);
-        for (const issue of created) {
+        const result = this.issueCreator.createAcrossReposWithCap(imp);
+        for (const issue of result.created) {
           console.log(`  Created: ${issue.url}`);
+        }
+        if (result.capReached && result.deferred.length > 0) {
+          const sourcePR = this.findSourcePRFromTasks(imp.evidence.map((e) => e.taskId), recent);
+          this.issueCreator.postDeferredFollowUps(
+            sourcePR?.repo ?? null,
+            sourcePR?.prNumber ?? null,
+            result.deferred,
+          );
+          console.log(`  [improvements] Deferred ${result.deferred.length} follow-up(s) (cap reached)`);
         }
       }
 
@@ -2003,6 +2012,29 @@ export class Daemon {
     } catch (err) {
       console.error(`[${time}] Improvement detection failed: ${err instanceof Error ? err.message : err}`);
     }
+  }
+
+  /**
+   * Attempt to identify the source PR for a set of evidence task IDs by looking
+   * up each task in the provided collection and parsing its source_ref.
+   *
+   * source_ref format: "owner/repo#<number>"
+   *
+   * Returns the first match found, or null if none of the tasks have a PR source_ref.
+   */
+  private findSourcePRFromTasks(
+    taskIds: string[],
+    tasks: { id: string; source_ref: string | null }[],
+  ): { repo: string; prNumber: number } | null {
+    for (const taskId of taskIds) {
+      const task = tasks.find((t) => t.id === taskId);
+      if (!task?.source_ref) continue;
+      const m = task.source_ref.match(/^([^#]+)#(\d+)$/);
+      if (m) {
+        return { repo: m[1], prNumber: parseInt(m[2], 10) };
+      }
+    }
+    return null;
   }
 
   /**
@@ -2096,11 +2128,20 @@ export class Daemon {
       if (improvements.length === 0) return;
 
       console.log(`[${time}] Iteration-cost detector: ${improvements.length} agent(s) above threshold`);
+      const iterationDeferred: DeferredFollowUp[] = [];
       for (const imp of improvements) {
-        const created = this.issueCreator.createAcrossRepos(imp, ["iteration-cost-triggered"]);
-        for (const issue of created) {
+        const result = this.issueCreator.createAcrossReposWithCap(imp, ["iteration-cost-triggered"]);
+        for (const issue of result.created) {
           console.log(`  [iteration-cost] Created: ${issue.url}`);
         }
+        if (result.deferred.length > 0) {
+          iterationDeferred.push(...result.deferred);
+        }
+      }
+      if (iterationDeferred.length > 0) {
+        // No source PR available for iteration-cost improvements; log only
+        this.issueCreator.postDeferredFollowUps(null, null, iterationDeferred);
+        console.log(`  [iteration-cost] Deferred ${iterationDeferred.length} follow-up(s)`);
       }
     } catch (err) {
       console.error(
@@ -2123,11 +2164,20 @@ export class Daemon {
       if (improvements.length === 0) return;
 
       console.log(`[${time}] Health incident detector: ${improvements.length} issue(s) detected`);
+      const healthDeferred: DeferredFollowUp[] = [];
       for (const imp of improvements) {
-        const created = this.issueCreator.createAcrossRepos(imp, ["health-incident-triggered"]);
-        for (const issue of created) {
+        const result = this.issueCreator.createAcrossReposWithCap(imp, ["health-incident-triggered"]);
+        for (const issue of result.created) {
           console.log(`  [health-incident] Created: ${issue.url}`);
         }
+        if (result.deferred.length > 0) {
+          healthDeferred.push(...result.deferred);
+        }
+      }
+      if (healthDeferred.length > 0) {
+        // No source PR available for health-incident improvements; log only
+        this.issueCreator.postDeferredFollowUps(null, null, healthDeferred);
+        console.log(`  [health-incident] Deferred ${healthDeferred.length} follow-up(s)`);
       }
     } catch (err) {
       console.error(
