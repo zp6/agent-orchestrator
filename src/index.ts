@@ -595,6 +595,42 @@ export type {
   CapabilityCheckResult,
 } from "./reviewer/capability-check.js";
 
+// Semantic Task Memory — daily digest + /memory Telegram command (issue #369).
+//
+// The MemoryDigestScheduler fires a Telegram summary once per day at 09:00 UTC
+// (configurable) covering:
+//   1. Top 5 most-queried topics in the memory index over the past 7 days.
+//   2. Top 3 topics re-attempted 2+ times (memory not preventing repeated work).
+//   3. Topics where all attempts scored below 0.70 (persistent low-confidence areas).
+//
+// Operators can expand any topic via `/memory expand <topic>`.
+//
+// Wire into the daemon poll cycle:
+//   const scheduler = new MemoryDigestScheduler(store, notifier);
+//   // In each poll cycle:
+//   await scheduler.maybeFireDigest();
+//
+// Record task outcomes into the memory index:
+//   store.recordMemoryEntry("authentication", taskId, 0.82, "success");
+export {
+  MemoryDigestScheduler,
+  buildMemoryDigest,
+  formatMemoryDigest,
+  LOW_CONFIDENCE_THRESHOLD,
+  DIGEST_LOOKBACK_DAYS,
+  DIGEST_TOP_QUERIED_LIMIT,
+  DIGEST_REPEATED_LIMIT,
+  DIGEST_LOW_CONFIDENCE_LIMIT,
+} from "./reviewer/memory-digest.js";
+export type {
+  ISemanticMemoryStore,
+  MemoryEntry,
+  TopQueriedTopic,
+  RepeatedAttemptTopic,
+  LowConfidenceTopic,
+  SemanticMemoryDigestReport,
+} from "./state/types.js";
+
 // Pre-dispatch capability enforcer — routing boundary gate (issue #330).
 //
 // Intercepts tasks before they are sent to claude-orchestrator-reviewer and

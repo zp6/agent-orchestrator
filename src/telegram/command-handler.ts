@@ -33,6 +33,7 @@
  *   /quality-health            → quality system health: bypass rate, sparkline, and bypassed task list
  *   /backfill-bypass-reasons   → backfill bypass_reason for historical sub-0.60 approved tasks (idempotent)
  *   /low-score [threshold] [limit] → approved tasks with quality score below threshold (default 0.75), with dimension breakdown
+ *   /memory [expand <topic>|digest] → semantic task memory digest or full topic expansion
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -71,6 +72,11 @@ import {
   formatLowScoreFeedForTelegram,
   LOW_SCORE_FEED_THRESHOLD,
 } from "../reviewer/low-score-feed.js";
+import type { ISemanticMemoryStore } from "../state/types.js";
+import {
+  buildMemoryDigest,
+  formatMemoryDigest,
+} from "../reviewer/memory-digest.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
 const log = createLogger("telegram-commands");
@@ -128,7 +134,8 @@ type CommandName =
   | "routing-violations"
   | "quality-health"
   | "backfill-bypass-reasons"
-  | "low-score";
+  | "low-score"
+  | "memory";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -166,6 +173,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "quality-health",
   "backfill-bypass-reasons",
   "low-score",
+  "memory",
 ]);
 
 interface ParsedCommand {
@@ -484,6 +492,33 @@ async function executeCommand(
         : 50;
 
       return handleLowScoreFeed(store, threshold, limit, dashboardUrl);
+    }
+
+    case "memory": {
+      // /memory expand <topic>  — show full indexed entries for a topic
+      // /memory                 — show a fresh digest snapshot
+      const [subCommand, ...topicParts] = cmd.args;
+
+      if (!subCommand || subCommand.toLowerCase() === "digest") {
+        // Render a fresh digest on demand
+        return handleMemoryDigest(store);
+      }
+
+      if (subCommand.toLowerCase() === "expand") {
+        const topic = topicParts.join(" ").trim();
+        if (!topic) {
+          return [
+            `⚠️ *Usage:* \`/memory expand <topic>\``,
+            ``,
+            `Example: \`/memory expand authentication\``,
+          ].join("\n");
+        }
+        return handleMemoryExpand(store, topic);
+      }
+
+      // Treat any unrecognised subcommand as a topic expand
+      const fallbackTopic = [subCommand, ...topicParts].join(" ").trim();
+      return handleMemoryExpand(store, fallbackTopic);
     }
   }
 }
@@ -2332,6 +2367,77 @@ function handleBackfillBypassReasons(store: ITelegramStateStore): string {
     ``,
     `This backfill is idempotent — safe to run again.`,
   ];
+
+  return lines.join("\n");
+}
+
+// ── Semantic Task Memory handlers (issue #369) ────────────────────────────
+
+/**
+ * Handle `/memory` (no args) or `/memory digest` — render a fresh digest snapshot.
+ *
+ * Calls buildMemoryDigest() so operators get an on-demand view without waiting
+ * for the next scheduled 09:00 UTC send.
+ */
+function handleMemoryDigest(store: ITelegramStateStore): string {
+  const memoryStore = store as unknown as ISemanticMemoryStore;
+  if (
+    typeof memoryStore.getTopMemoryTopics !== "function" ||
+    typeof memoryStore.getRepeatedAttemptTopics !== "function" ||
+    typeof memoryStore.getLowConfidenceTopics !== "function"
+  ) {
+    return [
+      `⚠️ *Semantic Memory — Not Available*`,
+      ``,
+      `The connected StateStore does not support semantic task memory queries.`,
+      `This command requires the reviewer's own StateStore.`,
+    ].join("\n");
+  }
+
+  const report = buildMemoryDigest(memoryStore);
+  return formatMemoryDigest(report);
+}
+
+/**
+ * Handle `/memory expand <topic>` — return all indexed entries for a topic.
+ *
+ * Uses FTS5 for fuzzy matching when no exact topic entry exists.
+ */
+function handleMemoryExpand(store: ITelegramStateStore, topic: string): string {
+  const memoryStore = store as unknown as ISemanticMemoryStore;
+  if (typeof memoryStore.expandMemoryTopic !== "function") {
+    return [
+      `⚠️ *Semantic Memory — Not Available*`,
+      ``,
+      `The connected StateStore does not support \`expandMemoryTopic()\`.`,
+    ].join("\n");
+  }
+
+  const entries = memoryStore.expandMemoryTopic(topic, 15);
+
+  if (entries.length === 0) {
+    return [
+      `🔍 *Memory Expand: \`${topic}\`*`,
+      ``,
+      `No entries found matching that topic.`,
+      ``,
+      `_Use \`/memory\` to see the digest and discover available topics._`,
+    ].join("\n");
+  }
+
+  const lines: string[] = [
+    `🧠 *Memory Expand: \`${topic}\`* (${entries.length} entr${entries.length !== 1 ? "ies" : "y"})`,
+    ``,
+  ];
+
+  for (const e of entries) {
+    const outcomeIcon = e.outcome === "success" ? "✅" : e.outcome === "failure" ? "❌" : "🟡";
+    const pct = (e.confidence * 100).toFixed(0);
+    const date = e.recorded_at.slice(0, 10);
+    lines.push(
+      `${outcomeIcon} \`${e.task_id.slice(0, 8)}\` — ${pct}% confidence · ${e.outcome} · ${date}`,
+    );
+  }
 
   return lines.join("\n");
 }

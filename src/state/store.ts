@@ -68,6 +68,11 @@ import type {
   RoutingViolation,
   ILowScoreFeedStore,
   IScoreViolationsStore,
+  ISemanticMemoryStore,
+  MemoryEntry,
+  TopQueriedTopic,
+  RepeatedAttemptTopic,
+  LowConfidenceTopic,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -83,7 +88,7 @@ import { ulid } from "../util/ulid.js";
  */
 export const APPROVAL_SCORE_FLOOR = 0.60;
 
-export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore {
+export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, ISemanticMemoryStore {
   private db: Database.Database;
 
   constructor(dbPath: string = process.env.STATE_DB_PATH ?? "state.db") {
@@ -541,6 +546,61 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
     } catch {
       // Column already exists — ignore
     }
+
+    // Semantic task memory table (idempotent — issue #369).
+    // Stores knowledge entries indexed by normalised topic label.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS semantic_task_memory (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        topic       TEXT NOT NULL,
+        task_id     TEXT NOT NULL,
+        confidence  REAL NOT NULL,
+        outcome     TEXT NOT NULL DEFAULT 'partial',
+        recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (topic, task_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_semantic_task_memory_topic
+        ON semantic_task_memory (topic);
+
+      CREATE INDEX IF NOT EXISTS idx_semantic_task_memory_recorded_at
+        ON semantic_task_memory (recorded_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_semantic_task_memory_confidence
+        ON semantic_task_memory (confidence);
+    `);
+
+    // FTS5 virtual table for full-text search on topic names (idempotent — issue #369).
+    // content='semantic_task_memory' keeps the FTS index in sync with the base table
+    // via the triggers below.
+    this.db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS semantic_task_memory_fts
+        USING fts5(
+          topic,
+          content='semantic_task_memory',
+          content_rowid='id'
+        );
+
+      CREATE TRIGGER IF NOT EXISTS semantic_task_memory_ai
+        AFTER INSERT ON semantic_task_memory BEGIN
+          INSERT INTO semantic_task_memory_fts (rowid, topic)
+            VALUES (new.id, new.topic);
+        END;
+
+      CREATE TRIGGER IF NOT EXISTS semantic_task_memory_au
+        AFTER UPDATE ON semantic_task_memory BEGIN
+          INSERT INTO semantic_task_memory_fts (semantic_task_memory_fts, rowid, topic)
+            VALUES ('delete', old.id, old.topic);
+          INSERT INTO semantic_task_memory_fts (rowid, topic)
+            VALUES (new.id, new.topic);
+        END;
+
+      CREATE TRIGGER IF NOT EXISTS semantic_task_memory_ad
+        AFTER DELETE ON semantic_task_memory BEGIN
+          INSERT INTO semantic_task_memory_fts (semantic_task_memory_fts, rowid, topic)
+            VALUES ('delete', old.id, old.topic);
+        END;
+    `);
   }
 
   // ── Schema access instrumentation ────────────────────────────────────────
@@ -3690,6 +3750,177 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       if (ao !== bo) return ao - bo;
       return b.created_at.localeCompare(a.created_at);
     });
+  }
+
+  // ── Semantic Task Memory (issue #369) ──────────────────────────────────────
+
+  /**
+   * Upsert a memory entry for a (topic, task_id) pair.
+   * If a row already exists for the pair, confidence and outcome are overwritten.
+   */
+  recordMemoryEntry(
+    topic: string,
+    taskId: string,
+    confidence: number,
+    outcome: "success" | "failure" | "partial",
+  ): void {
+    const normalisedTopic = topic.trim().toLowerCase();
+    this.db
+      .prepare(
+        `INSERT INTO semantic_task_memory (topic, task_id, confidence, outcome)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(topic, task_id) DO UPDATE SET
+           confidence  = excluded.confidence,
+           outcome     = excluded.outcome,
+           recorded_at = datetime('now')`,
+      )
+      .run(normalisedTopic, taskId, confidence, outcome);
+  }
+
+  /**
+   * Return the top N topics with the most recorded entries since `sinceIso`.
+   * Each row includes average confidence and up to 5 example task IDs.
+   */
+  getTopMemoryTopics(limit: number, sinceIso: string): TopQueriedTopic[] {
+    const rows = this.db
+      .prepare(
+        `SELECT topic,
+                COUNT(*)          AS query_count,
+                AVG(confidence)   AS avg_confidence,
+                GROUP_CONCAT(task_id, '|') AS task_ids_concat
+         FROM   semantic_task_memory
+         WHERE  datetime(recorded_at) >= datetime(?)
+         GROUP  BY topic
+         ORDER  BY query_count DESC
+         LIMIT  ?`,
+      )
+      .all(sinceIso, limit) as Array<{
+      topic: string;
+      query_count: number;
+      avg_confidence: number;
+      task_ids_concat: string | null;
+    }>;
+
+    return rows.map((r) => ({
+      topic: r.topic,
+      query_count: r.query_count,
+      avg_confidence: r.avg_confidence ?? 0,
+      example_task_ids: r.task_ids_concat
+        ? r.task_ids_concat.split("|").slice(0, 5)
+        : [],
+    }));
+  }
+
+  /**
+   * Return the top N topics that have 2+ distinct task entries, ordered by
+   * attempt_count descending.
+   */
+  getRepeatedAttemptTopics(limit: number): RepeatedAttemptTopic[] {
+    const rows = this.db
+      .prepare(
+        `SELECT topic,
+                COUNT(*)      AS attempt_count,
+                MAX(confidence) AS best_score,
+                GROUP_CONCAT(task_id, '|') AS task_ids_concat
+         FROM   semantic_task_memory
+         GROUP  BY topic
+         HAVING COUNT(*) >= 2
+         ORDER  BY attempt_count DESC
+         LIMIT  ?`,
+      )
+      .all(limit) as Array<{
+      topic: string;
+      attempt_count: number;
+      best_score: number;
+      task_ids_concat: string | null;
+    }>;
+
+    return rows.map((r) => ({
+      topic: r.topic,
+      attempt_count: r.attempt_count,
+      best_score: r.best_score ?? 0,
+      task_ids: r.task_ids_concat ? r.task_ids_concat.split("|") : [],
+    }));
+  }
+
+  /**
+   * Return topics where every attempt scored below `threshold`, ordered by
+   * max_score ascending (worst first).
+   */
+  getLowConfidenceTopics(threshold: number, limit: number): LowConfidenceTopic[] {
+    const rows = this.db
+      .prepare(
+        `SELECT topic,
+                COUNT(*)      AS attempt_count,
+                MAX(confidence) AS max_score,
+                GROUP_CONCAT(task_id, '|') AS task_ids_concat
+         FROM   semantic_task_memory
+         GROUP  BY topic
+         HAVING MAX(confidence) < ?
+         ORDER  BY max_score ASC
+         LIMIT  ?`,
+      )
+      .all(threshold, limit) as Array<{
+      topic: string;
+      attempt_count: number;
+      max_score: number;
+      task_ids_concat: string | null;
+    }>;
+
+    return rows.map((r) => ({
+      topic: r.topic,
+      attempt_count: r.attempt_count,
+      max_score: r.max_score ?? 0,
+      task_ids: r.task_ids_concat ? r.task_ids_concat.split("|") : [],
+    }));
+  }
+
+  /**
+   * Return all memory entries for a given topic, ordered by recorded_at DESC.
+   * Uses the FTS5 index for fuzzy matching when an exact match returns 0 rows.
+   */
+  expandMemoryTopic(topic: string, limit = 20): MemoryEntry[] {
+    const normalisedTopic = topic.trim().toLowerCase();
+
+    // Try exact match first
+    const exactRows = this.db
+      .prepare(
+        `SELECT id, topic, task_id, confidence, outcome, recorded_at
+         FROM   semantic_task_memory
+         WHERE  topic = ?
+         ORDER  BY recorded_at DESC
+         LIMIT  ?`,
+      )
+      .all(normalisedTopic, limit) as MemoryEntry[];
+
+    if (exactRows.length > 0) return exactRows;
+
+    // Fall back to FTS5 match (prefix search with wildcard)
+    const ftsQuery = normalisedTopic
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((w) => `${w}*`)
+      .join(" ");
+
+    if (!ftsQuery) return [];
+
+    try {
+      const ftsRows = this.db
+        .prepare(
+          `SELECT m.id, m.topic, m.task_id, m.confidence, m.outcome, m.recorded_at
+           FROM   semantic_task_memory m
+           JOIN   semantic_task_memory_fts f ON f.rowid = m.id
+           WHERE  semantic_task_memory_fts MATCH ?
+           ORDER  BY m.recorded_at DESC
+           LIMIT  ?`,
+        )
+        .all(ftsQuery, limit) as MemoryEntry[];
+
+      return ftsRows;
+    } catch {
+      // FTS match error (e.g. invalid query) — return empty
+      return [];
+    }
   }
 
   /**

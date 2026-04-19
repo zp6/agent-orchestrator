@@ -19,6 +19,8 @@
 
 import { createLogger } from "./service/logger.js";
 import { formatDurationShort } from "./health-recovery.js";
+import type { SemanticMemoryDigestReport } from "./state/types.js";
+import { formatMemoryDigest } from "./reviewer/memory-digest.js";
 
 const log = createLogger("notify");
 
@@ -53,6 +55,12 @@ export interface Notifier {
    * one notification per incident.
    */
   healthRecovery(agentName: string, degradedForMs: number, confirmationCycles?: number): Promise<void>;
+  /**
+   * Send the daily semantic memory digest.
+   * Formats the three sections (top queried, repeated attempts, low confidence)
+   * and sends as a single Markdown message.
+   */
+  memoryDigest(report: SemanticMemoryDigestReport): Promise<void>;
   /** Returns true if the notifier is configured (has bot token + chat ID). */
   isConfigured(): boolean;
 }
@@ -227,6 +235,11 @@ export function createNotifier(
         `*Confirmation:* ${confirmationCycles} consecutive healthy checks`,
       ].join("\n");
 
+      await this.send(text);
+    },
+
+    async memoryDigest(report: SemanticMemoryDigestReport): Promise<void> {
+      const text = formatMemoryDigest(report);
       await this.send(text);
     },
 

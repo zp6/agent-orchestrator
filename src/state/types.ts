@@ -1958,3 +1958,125 @@ export interface RoutingViolation {
   /** Optional task title for display. */
   task_title?: string | null;
 }
+
+// ── Semantic Task Memory types (issue #369) ───────────────────────────────
+
+/**
+ * A single entry in the semantic task memory index.
+ * Records the outcome (confidence/score) of a task under a normalised topic label.
+ */
+export interface MemoryEntry {
+  /** Auto-increment row ID. */
+  id: number;
+  /** Normalised topic label (lower-cased, whitespace-trimmed). */
+  topic: string;
+  /** The task whose outcome is recorded. */
+  task_id: string;
+  /** Quality/confidence score for this attempt, 0–1. */
+  confidence: number;
+  /** Outcome classification derived from the score or verification_status. */
+  outcome: "success" | "failure" | "partial";
+  /** ISO-8601 timestamp of when this entry was recorded. */
+  recorded_at: string;
+}
+
+/**
+ * Aggregated row for "top queried topics" in the daily digest.
+ * Derived by counting MemoryEntry rows per topic in a given time window.
+ */
+export interface TopQueriedTopic {
+  topic: string;
+  query_count: number;
+  avg_confidence: number;
+  /** Up to 5 representative task IDs. */
+  example_task_ids: string[];
+}
+
+/**
+ * Aggregated row for "topics with repeated attempts" in the daily digest.
+ * Surfaced when the same topic has 2+ recorded entries, indicating the memory
+ * did not prevent repeated work.
+ */
+export interface RepeatedAttemptTopic {
+  topic: string;
+  attempt_count: number;
+  /** Best (highest) confidence score across all attempts. */
+  best_score: number;
+  task_ids: string[];
+}
+
+/**
+ * Aggregated row for "persistent low-confidence areas" in the daily digest.
+ * Surfaced when ALL recorded attempts for a topic scored below the threshold.
+ */
+export interface LowConfidenceTopic {
+  topic: string;
+  attempt_count: number;
+  /** Highest score seen (all still below threshold). */
+  max_score: number;
+  task_ids: string[];
+}
+
+/**
+ * The full report produced by the daily memory digest.
+ */
+export interface SemanticMemoryDigestReport {
+  /** ISO-8601 timestamp when this report was generated. */
+  generated_at: string;
+  top_queried_topics: TopQueriedTopic[];
+  repeated_attempt_topics: RepeatedAttemptTopic[];
+  low_confidence_topics: LowConfidenceTopic[];
+}
+
+/**
+ * State-store interface for semantic task memory operations.
+ * Implemented by StateStore; consumed by MemoryDigestScheduler.
+ */
+export interface ISemanticMemoryStore {
+  /**
+   * Upsert a memory entry for a topic / task pair.
+   * If an entry for (topic, task_id) already exists, the confidence and outcome
+   * are overwritten with the new values.
+   *
+   * @param topic       Normalised topic label (will be lower-cased + trimmed).
+   * @param taskId      Task ID contributing to this entry.
+   * @param confidence  Quality/confidence score (0–1).
+   * @param outcome     Coarse outcome classification.
+   */
+  recordMemoryEntry(
+    topic: string,
+    taskId: string,
+    confidence: number,
+    outcome: "success" | "failure" | "partial",
+  ): void;
+
+  /**
+   * Return the top N most-queried topics since `sinceIso` (ISO-8601 date string).
+   * "Queried" is approximated as "has the most memory entries recorded".
+   */
+  getTopMemoryTopics(limit: number, sinceIso: string): TopQueriedTopic[];
+
+  /**
+   * Return the top N topics that have 2+ distinct task entries recorded,
+   * ordered by attempt_count descending.
+   */
+  getRepeatedAttemptTopics(limit: number): RepeatedAttemptTopic[];
+
+  /**
+   * Return topics where every recorded attempt had a confidence score below
+   * `threshold`, ordered by max_score ascending (worst first).
+   *
+   * @param threshold  e.g. 0.70
+   * @param limit      max rows to return
+   */
+  getLowConfidenceTopics(threshold: number, limit: number): LowConfidenceTopic[];
+
+  /**
+   * Return all memory entries for a given topic (FTS match or exact match),
+   * ordered by recorded_at descending.  Used by `/memory expand <topic>`.
+   *
+   * @param topic  Topic string (will be lower-cased + trimmed).
+   * @param limit  max rows to return (default 20)
+   */
+  expandMemoryTopic(topic: string, limit?: number): MemoryEntry[];
+}
