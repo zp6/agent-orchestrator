@@ -1534,6 +1534,7 @@ export class StateStore {
     this.runInFlightReservationsMigration();
     this.runDispatchBlocksMigration();
     this.runProactiveRebaseLogMigration();
+    this.runSemanticMemoryMigration();
   }
 
   private runPhase2Migration(): void {
@@ -9297,4 +9298,275 @@ export class StateStore {
         timestamp: string;
       }>;
   }
+
+  // ── Semantic Task Memory (issue #1011) ────────────────────────────────────
+
+  /**
+   * Create the FTS5 virtual table for semantic task memory.
+   *
+   * Uses a content-less (external content) FTS5 table that stores copies of
+   * the indexed text fields.  Tasks are indexed when they reach
+   * verification_status="approved" with a quality_score above threshold.
+   *
+   * The table is populated lazily by `indexApprovedTasksIntoMemory()`, which
+   * is called once during migration and again whenever new tasks are verified.
+   */
+  private runSemanticMemoryMigration(): void {
+    // FTS5 virtual table — stores indexed text for full-text search
+    this.db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS semantic_memory USING fts5(
+        task_id UNINDEXED,
+        title,
+        description,
+        result_excerpt,
+        verification_notes,
+        agent_name UNINDEXED,
+        source_ref UNINDEXED,
+        quality_score UNINDEXED,
+        task_type UNINDEXED,
+        tokenize='porter unicode61'
+      );
+    `);
+
+    // Tracking table: records which tasks have been indexed and when,
+    // so we can incrementally index only new approved tasks.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS semantic_memory_indexed (
+        task_id TEXT PRIMARY KEY,
+        indexed_at TEXT NOT NULL
+      );
+    `);
+
+    // Backfill: index any approved tasks not yet in the FTS5 table.
+    this.indexApprovedTasksIntoMemory();
+  }
+
+  /**
+   * Scan for approved tasks with quality_score >= threshold that haven't yet
+   * been indexed into semantic_memory, and insert them.
+   *
+   * Called once at startup (via migration) and may be called periodically
+   * to pick up newly verified tasks.
+   *
+   * @param minScore  Minimum quality score to index (default 0.80).
+   * @param excerptChars  Max chars to store from result field (default 400).
+   */
+  indexApprovedTasksIntoMemory(minScore = 0.80, excerptChars = 400): number {
+    // Check that required columns exist (defensive: old DBs may lack them)
+    const columns = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+    const colNames = new Set(columns.map((c) => c.name));
+    if (!colNames.has("verification_status") || !colNames.has("quality_score")) {
+      return 0;
+    }
+
+    const hasTaskType = colNames.has("task_type");
+    const taskTypeCol = hasTaskType ? "task_type" : "'implementation' AS task_type";
+
+    // Find approved tasks not yet indexed
+    const rows = this.db.prepare(`
+      SELECT t.id, t.title, t.description, t.result, t.verification_notes,
+             t.agent_name, t.source_ref, t.quality_score, ${taskTypeCol}
+      FROM tasks t
+      LEFT JOIN semantic_memory_indexed smi ON smi.task_id = t.id
+      WHERE t.verification_status = 'approved'
+        AND t.quality_score >= ?
+        AND t.result IS NOT NULL
+        AND length(t.result) > 50
+        AND smi.task_id IS NULL
+      ORDER BY t.updated_at DESC
+      LIMIT 500
+    `).all(minScore) as Array<{
+      id: string;
+      title: string;
+      description: string | null;
+      result: string | null;
+      verification_notes: string | null;
+      agent_name: string | null;
+      source_ref: string | null;
+      quality_score: number;
+      task_type: string;
+    }>;
+
+    if (rows.length === 0) return 0;
+
+    const now = new Date().toISOString();
+
+    const insertFts = this.db.prepare(`
+      INSERT INTO semantic_memory
+        (task_id, title, description, result_excerpt, verification_notes,
+         agent_name, source_ref, quality_score, task_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const insertTracking = this.db.prepare(`
+      INSERT OR IGNORE INTO semantic_memory_indexed (task_id, indexed_at) VALUES (?, ?)
+    `);
+
+    const txn = this.db.transaction(() => {
+      for (const row of rows) {
+        const excerpt = row.result
+          ? row.result.slice(0, excerptChars)
+          : null;
+
+        insertFts.run(
+          row.id,
+          row.title,
+          row.description ?? "",
+          excerpt ?? "",
+          row.verification_notes ?? "",
+          row.agent_name ?? "",
+          row.source_ref ?? "",
+          row.quality_score,
+          row.task_type,
+        );
+        insertTracking.run(row.id, now);
+      }
+    });
+
+    txn();
+    return rows.length;
+  }
+
+  /**
+   * Query semantic memory for tasks most similar to the given text.
+   *
+   * Uses FTS5 BM25 ranking to find past approved tasks whose title,
+   * description, result, or reviewer notes match keywords from the query.
+   *
+   * @param queryText     The dispatch message or task title to match against.
+   * @param topK          Number of results to return (default 3).
+   * @param excludeTaskId Task ID to exclude from results (the current task).
+   * @returns Array of matching tasks, sorted by relevance (most similar first).
+   */
+  querySemanticMemory(
+    queryText: string,
+    topK = 3,
+    excludeTaskId?: string,
+  ): Array<{
+    taskId: string;
+    title: string;
+    sourceRef: string | null;
+    qualityScore: number;
+    reviewerNotes: string | null;
+    resultExcerpt: string | null;
+  }> {
+    // Build FTS5 query: extract significant keywords from the input text.
+    // FTS5 uses implicit AND for space-separated terms, so we extract
+    // meaningful words (>3 chars, not stopwords) and join with OR for
+    // broader matching.
+    const ftsQuery = buildFts5Query(queryText);
+    if (!ftsQuery) return [];
+
+    try {
+      const rows = this.db.prepare(`
+        SELECT
+          task_id,
+          title,
+          source_ref,
+          CAST(quality_score AS REAL) AS quality_score,
+          verification_notes,
+          result_excerpt,
+          rank
+        FROM semantic_memory
+        WHERE semantic_memory MATCH ?
+        ORDER BY rank
+        LIMIT ?
+      `).all(ftsQuery, topK + (excludeTaskId ? 1 : 0)) as Array<{
+        task_id: string;
+        title: string;
+        source_ref: string;
+        quality_score: number;
+        verification_notes: string;
+        result_excerpt: string;
+        rank: number;
+      }>;
+
+      return rows
+        .filter((r) => r.task_id !== excludeTaskId)
+        .slice(0, topK)
+        .map((r) => ({
+          taskId: r.task_id,
+          title: r.title,
+          sourceRef: r.source_ref || null,
+          qualityScore: r.quality_score,
+          reviewerNotes: r.verification_notes || null,
+          resultExcerpt: r.result_excerpt || null,
+        }));
+    } catch {
+      // FTS5 query syntax errors are non-fatal — return empty matches.
+      return [];
+    }
+  }
+
+  /**
+   * Return the count of tasks currently indexed in semantic memory.
+   */
+  getSemanticMemorySize(): number {
+    try {
+      const row = this.db.prepare(
+        "SELECT COUNT(*) AS cnt FROM semantic_memory_indexed",
+      ).get() as { cnt: number } | undefined;
+      return row?.cnt ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+}
+
+// ── FTS5 query builder ────────────────────────────────────────────────────────
+
+/**
+ * Common English stopwords to exclude from FTS5 queries.
+ * Keeps the query focused on semantically meaningful terms.
+ */
+const STOPWORDS = new Set([
+  "the", "and", "for", "that", "this", "with", "from", "are", "was", "were",
+  "been", "being", "have", "has", "had", "having", "does", "did", "doing",
+  "will", "would", "could", "should", "may", "might", "shall", "can",
+  "not", "but", "its", "you", "your", "they", "them", "their", "what",
+  "which", "when", "where", "how", "all", "each", "every", "both",
+  "into", "over", "after", "before", "between", "under", "again",
+  "then", "than", "also", "just", "about", "only", "very", "too",
+  "here", "there", "some", "any", "such", "more", "most", "other",
+  "one", "two", "three", "use", "using", "used",
+]);
+
+/**
+ * Build a FTS5 MATCH query from free-form text.
+ *
+ * Strategy:
+ * 1. Strip markdown/code/URLs
+ * 2. Extract words >3 chars, excluding stopwords
+ * 3. Deduplicate and limit to 12 terms (FTS5 performance guardrail)
+ * 4. Join with OR for broad matching (BM25 handles ranking)
+ *
+ * Returns null if no usable terms remain.
+ */
+function buildFts5Query(text: string): string | null {
+  // Strip markdown formatting, URLs, code blocks
+  const cleaned = text
+    .replace(/```[\s\S]*?```/g, " ")       // code blocks
+    .replace(/`[^`]+`/g, " ")              // inline code
+    .replace(/https?:\/\/\S+/g, " ")       // URLs
+    .replace(/[#*_\[\](){}|>~]/g, " ")     // markdown chars
+    .replace(/[^a-zA-Z0-9\s-]/g, " ")      // non-alphanumeric
+    .toLowerCase();
+
+  const words = cleaned
+    .split(/\s+/)
+    .filter((w) => w.length > 3 && !STOPWORDS.has(w))
+    .map((w) => w.replace(/[^a-z0-9]/g, ""))
+    .filter((w) => w.length > 3);
+
+  // Deduplicate
+  const unique = [...new Set(words)];
+  if (unique.length === 0) return null;
+
+  // Limit to 12 terms for performance; pick from the start (title/description
+  // tend to appear first in dispatch messages and carry the most meaning).
+  const terms = unique.slice(0, 12);
+
+  // FTS5 query: terms joined with OR for broad matching
+  // Wrap each term in quotes to prevent FTS5 syntax interpretation
+  return terms.map((t) => `"${t}"`).join(" OR ");
 }

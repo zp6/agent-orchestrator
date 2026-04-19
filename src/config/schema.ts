@@ -676,6 +676,43 @@ export interface TaskTypeDefinition {
   dimensions?: string[];
 }
 
+/**
+ * Semantic task memory configuration (issue #1011).
+ *
+ * Controls the FTS5-based knowledge store that indexes completed, high-quality
+ * tasks and retrieves semantically similar past successes at dispatch time.
+ *
+ * Example agents.yaml:
+ *
+ *   semantic_memory:
+ *     enabled: true
+ *     min_quality_score: 0.80
+ *     top_k: 3
+ *     max_result_excerpt_chars: 400
+ */
+export interface SemanticMemoryConfig {
+  /**
+   * Whether semantic memory retrieval is active. Default: true.
+   * When disabled the FTS5 index still gets built (so enabling is instant)
+   * but dispatch does not query it.
+   */
+  enabled?: boolean;
+  /**
+   * Minimum quality_score an approved task must have to be indexed.
+   * Default: 0.80 — only proven successes enter the knowledge store.
+   */
+  min_quality_score?: number;
+  /**
+   * Number of semantically similar past tasks to retrieve. Default: 3.
+   */
+  top_k?: number;
+  /**
+   * Maximum characters to include from a matched task's result field.
+   * Default: 400. Set lower to reduce context window consumption.
+   */
+  max_result_excerpt_chars?: number;
+}
+
 export interface OrchestratorConfig {
   proxy: ProxyConfig;
   llm?: LLMConfig;
@@ -704,6 +741,8 @@ export interface OrchestratorConfig {
   deploy?: DeployConfig;
   dispatch?: DispatchConfig;
   dashboard?: DashboardConfig;
+  /** Semantic task memory (issue #1011): FTS5-based knowledge store. */
+  semantic_memory?: SemanticMemoryConfig;
   agents: Record<string, AgentConfig>;
 }
 

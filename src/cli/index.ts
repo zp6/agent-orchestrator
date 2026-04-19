@@ -45,6 +45,7 @@ import { registerSkipBlockersCommand } from "./commands/skip-blockers.js";
 import { registerFollowupChainsCommand } from "./commands/followup-chains.js";
 import { registerRoutingMismatchesCommand } from "./commands/routing-mismatches.js";
 import { registerReviewSaturationCommand } from "./commands/review-saturation.js";
+import { registerMemoryCommand } from "./commands/memory.js";
 
 const program = new Command();
 
@@ -99,5 +100,6 @@ registerAgentGapsCommand(program);
 registerSkipBlockersCommand(program);
 registerFollowupChainsCommand(program);
 registerReviewSaturationCommand(program);
+registerMemoryCommand(program);
 
 program.parse();

@@ -47,6 +47,7 @@ import {
   type AgentScopeGuardReroute,
 } from "./capability-enforcer.js";
 import { checkAndRebaseBeforeDispatch } from "./proactive-rebase-scheduler.js";
+import { buildSemanticMemoryBlock } from "./semantic-memory.js";
 
 /**
  * Walk the parent_task_id chain upward from `taskId` (or a parent task id) and
@@ -1310,6 +1311,38 @@ export class Dispatcher {
           priorAttemptCount: priorAttempts.length,
         });
         messageToSend = messageToSend + rejectionBlock;
+      }
+    }
+
+    // Inject semantic task memory: past approved tasks similar to this one
+    // (issue #1011). Retrieves top-K matches from the FTS5 index and injects
+    // distilled patterns so the agent starts from proven approaches.
+    const semanticMemoryEnabled = this.config.semantic_memory?.enabled !== false;
+    if (semanticMemoryEnabled) {
+      const topK = this.config.semantic_memory?.top_k ?? 3;
+      const excerptChars = this.config.semantic_memory?.max_result_excerpt_chars ?? 400;
+
+      // Re-index any newly approved tasks before querying
+      const minScore = this.config.semantic_memory?.min_quality_score ?? 0.80;
+      this.store.indexApprovedTasksIntoMemory(minScore, excerptChars);
+
+      const matches = this.store.querySemanticMemory(message, topK, task.id);
+      const semanticBlock = buildSemanticMemoryBlock(matches);
+      if (semanticBlock) {
+        this.log.info("Injecting semantic memory into dispatch", {
+          taskId: task.id,
+          agentName,
+          matchCount: matches.length,
+          matchTaskIds: matches.map((m) => m.taskId),
+          matchScores: matches.map((m) => m.qualityScore.toFixed(2)),
+        });
+        messageToSend = messageToSend + semanticBlock;
+        this.store.addLog({
+          task_id: task.id,
+          direction: "system",
+          agent_name: agentName,
+          content: `[semantic-memory] Attached ${matches.length} past success(es): ${matches.map((m) => `${m.taskId}(${m.qualityScore.toFixed(2)})`).join(", ")}`,
+        });
       }
     }
 
