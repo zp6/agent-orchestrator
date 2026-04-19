@@ -57,6 +57,53 @@ describe("isImplementationTask", () => {
       isImplementationTask("research", undefined, "rapartlu/research-agent#5", "rapartlu/research-agent"),
     ).toBe(false);
   });
+
+  // ── Issue #985: code-authorship keyword detection ─────────────────────────
+
+  it("returns true when title contains 'implement' (pattern match)", () => {
+    expect(isImplementationTask("research", "Implement the new dispatch guard")).toBe(true);
+  });
+
+  it("returns true when title contains 'create PR' (case insensitive)", () => {
+    expect(isImplementationTask("research", "Create PR for routing boundary enforcement")).toBe(true);
+  });
+
+  it("returns true when title contains 'write tests'", () => {
+    expect(isImplementationTask("research", "Write tests for the dispatcher module")).toBe(true);
+  });
+
+  it("returns true when title contains 'write code'", () => {
+    expect(isImplementationTask("research", "Write code for the new capability enforcer")).toBe(true);
+  });
+
+  it("returns true when title contains 'build the' (keyword match)", () => {
+    expect(isImplementationTask("research", "Build the new standup pipeline")).toBe(true);
+  });
+
+  it("returns true when title contains 'build a feature' (pattern match)", () => {
+    expect(isImplementationTask("research", "Build a feature for conflict recovery")).toBe(true);
+  });
+
+  it("returns true when title contains 'build and deploy'", () => {
+    expect(isImplementationTask("research", "Build and deploy the auth middleware")).toBe(true);
+  });
+
+  it("returns true when title contains 'write a handler'", () => {
+    expect(isImplementationTask("research", "Write a handler for Telegram commands")).toBe(true);
+  });
+
+  it("returns true when title contains 'write a migration'", () => {
+    expect(isImplementationTask("research", "Write a migration for state.db schema")).toBe(true);
+  });
+
+  it("returns false for research-flavored titles without code-authorship signals", () => {
+    expect(isImplementationTask("research", "Research feasibility of conflict recovery reroute")).toBe(false);
+  });
+
+  it("returns false for 'write up research findings' — non-code write usage", () => {
+    // The keyword 'write code' should not fire for generic writing tasks
+    expect(isImplementationTask("research", "Write up research findings and summarise")).toBe(false);
+  });
 });
 
 describe("checkCapabilityEnforcement", () => {
@@ -264,5 +311,116 @@ describe("checkCapabilityEnforcement — review-only", () => {
     });
     // No valid substitute → enforcer allows dispatch to avoid deadlock
     expect(result).toBeNull();
+  });
+});
+
+// ── Issue #985: claude-orchestrator-reviewer boundary enforcement ──────────
+// These tests mirror real-world misroutes observed in tasks 01KPHX1B, 01KPHWS8,
+// 01KPHWEJ, 01KPHW9R where the reviewer agent was dispatched code-authorship work.
+
+describe("checkCapabilityEnforcement — reviewer agent code-authorship guard (issue #985)", () => {
+  const makeReviewerConfig = (extraAgents: Record<string, { github?: string; capability_tags?: string[] }> = {}) =>
+    makeConfig({
+      "claude-orchestrator-reviewer": {
+        github: "rapartlu/agent-reviewer",
+        capability_tags: ["review-only"],
+      },
+      "claude-agent-orchestrator": {
+        github: "rapartlu/agent-orchestrator",
+      },
+      ...extraAgents,
+    });
+
+  it("blocks 'implement' task dispatched to reviewer", () => {
+    const config = makeReviewerConfig();
+    const result = checkCapabilityEnforcement({
+      config,
+      agentName: "claude-orchestrator-reviewer",
+      taskType: "research",
+      title: "Implement the new dispatch guard for reviewer routing",
+      sourceRef: "rapartlu/agent-orchestrator#985",
+    });
+    expect(result).not.toBeNull();
+    expect(result!.blockedAgent).toBe("claude-orchestrator-reviewer");
+    expect(result!.toAgent).toBe("claude-agent-orchestrator");
+  });
+
+  it("blocks 'create PR' task dispatched to reviewer", () => {
+    const config = makeReviewerConfig();
+    const result = checkCapabilityEnforcement({
+      config,
+      agentName: "claude-orchestrator-reviewer",
+      taskType: "research",
+      title: "Create PR for issue #985 routing boundary enforcement",
+      sourceRef: "rapartlu/agent-orchestrator#985",
+    });
+    expect(result).not.toBeNull();
+    expect(result!.blockedAgent).toBe("claude-orchestrator-reviewer");
+  });
+
+  it("blocks 'write tests' task dispatched to reviewer", () => {
+    const config = makeReviewerConfig();
+    const result = checkCapabilityEnforcement({
+      config,
+      agentName: "claude-orchestrator-reviewer",
+      taskType: "research",
+      title: "Write tests for the capability enforcer module",
+      sourceRef: "rapartlu/agent-orchestrator#985",
+    });
+    expect(result).not.toBeNull();
+    expect(result!.blockedAgent).toBe("claude-orchestrator-reviewer");
+  });
+
+  it("blocks 'build a feature' task dispatched to reviewer", () => {
+    const config = makeReviewerConfig();
+    const result = checkCapabilityEnforcement({
+      config,
+      agentName: "claude-orchestrator-reviewer",
+      taskType: "research",
+      title: "Build a feature for Telegram routing alerts",
+      sourceRef: "rapartlu/agent-orchestrator#985",
+    });
+    expect(result).not.toBeNull();
+    expect(result!.blockedAgent).toBe("claude-orchestrator-reviewer");
+  });
+
+  it("blocks explicit implementation taskType dispatched to reviewer", () => {
+    const config = makeReviewerConfig();
+    const result = checkCapabilityEnforcement({
+      config,
+      agentName: "claude-orchestrator-reviewer",
+      taskType: "implementation",
+      title: "[Orchestrator] Add supervisor log query endpoint",
+      sourceRef: "rapartlu/agent-orchestrator#977",
+    });
+    expect(result).not.toBeNull();
+    expect(result!.blockedAgent).toBe("claude-orchestrator-reviewer");
+    expect(result!.redirectReason).toContain("review-only");
+  });
+
+  it("allows genuine review task to pass through to reviewer", () => {
+    const config = makeReviewerConfig();
+    const result = checkCapabilityEnforcement({
+      config,
+      agentName: "claude-orchestrator-reviewer",
+      taskType: "research",
+      title: "Review the PR for issue #984",
+      // sourceRef points to its own repo — not a cross-repo implementation task
+      sourceRef: "rapartlu/agent-reviewer#200",
+    });
+    expect(result).toBeNull();
+  });
+
+  it("routes to exact repo-match implementation agent when available", () => {
+    const config = makeReviewerConfig({
+      "claude-orchestrator-dashboard": { github: "rapartlu/agent-dashboard" },
+    });
+    const result = checkCapabilityEnforcement({
+      config,
+      agentName: "claude-orchestrator-reviewer",
+      taskType: "implementation",
+      sourceRef: "rapartlu/agent-dashboard#424",
+    });
+    expect(result!.toAgent).toBe("claude-orchestrator-dashboard");
   });
 });

@@ -779,8 +779,16 @@ export class Dispatcher {
       sourceRef: options?.sourceRef,
     });
     if (capabilityReroute) {
-      this.log.warn("Capability enforcement: rerouting implementation task away from research-only agent", {
+      const blockedAgentCfg = this.config.agents[capabilityReroute.blockedAgent];
+      const blockedTags = blockedAgentCfg?.capability_tags ?? [];
+      const blockedTagLabel = blockedTags.includes("review-only")
+        ? "review-only"
+        : blockedTags.includes("research-only")
+          ? "research-only"
+          : "restricted";
+      this.log.warn("Capability enforcement: rerouting implementation task away from restricted agent", {
         blockedAgent: capabilityReroute.blockedAgent,
+        blockedTag: blockedTagLabel,
         toAgent: capabilityReroute.toAgent,
         reason: capabilityReroute.redirectReason,
         sourceRef: options?.sourceRef,
@@ -789,12 +797,15 @@ export class Dispatcher {
       routeMethod = "capability-enforcement";
       routeReason = capabilityReroute.redirectReason;
       // Notify the operator so the misconfigured routing is surfaced in Telegram.
+      // Message clearly shows original → corrected routing for easy triage.
       await notifyOperator(
-        "Capability enforcement: research-only agent received implementation task",
-        `Rerouted task from \`${capabilityReroute.blockedAgent}\` (research-only) ` +
-          `to \`${capabilityReroute.toAgent}\`.\n` +
-          (options?.title ? `Task: "${options.title}"\n` : "") +
-          (options?.sourceRef ? `Source: ${options.sourceRef}` : ""),
+        `Capability enforcement: ${blockedTagLabel} agent received implementation task`,
+        `*Routing corrected automatically*\n` +
+          `• Original agent: \`${capabilityReroute.blockedAgent}\` (${blockedTagLabel})\n` +
+          `• Corrected agent: \`${capabilityReroute.toAgent}\`\n` +
+          (options?.title ? `• Task: "${options.title}"\n` : "") +
+          (options?.sourceRef ? `• Source: ${options.sourceRef}\n` : "") +
+          `\nReason: ${capabilityReroute.redirectReason}`,
         "warning",
         `capability-enforcement:${capabilityReroute.blockedAgent}:${options?.sourceRef ?? ""}`,
       );
@@ -838,10 +849,12 @@ export class Dispatcher {
         capabilityReroute = remoteCapCheck;
         await notifyOperator(
           "Runtime capability check: agent rejected task via /capability-check",
-          `Agent \`${remoteCapCheck.blockedAgent}\` rejected the task at runtime.\n` +
-            `Rerouted to \`${remoteCapCheck.toAgent}\`.\n` +
-            (options?.title ? `Task: "${options.title}"\n` : "") +
-            (options?.sourceRef ? `Source: ${options.sourceRef}` : ""),
+          `*Routing corrected automatically (remote check)*\n` +
+            `• Original agent: \`${remoteCapCheck.blockedAgent}\`\n` +
+            `• Corrected agent: \`${remoteCapCheck.toAgent}\`\n` +
+            (options?.title ? `• Task: "${options.title}"\n` : "") +
+            (options?.sourceRef ? `• Source: ${options.sourceRef}\n` : "") +
+            `\nReason: ${remoteCapCheck.redirectReason}`,
           "warning",
           `remote-cap-check:${remoteCapCheck.blockedAgent}:${options?.sourceRef ?? ""}`,
         );

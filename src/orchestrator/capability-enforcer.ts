@@ -51,12 +51,22 @@ const IMPLEMENTATION_TITLE_PATTERNS: RegExp[] = [
   /follow-up from #\d+/i,
   // Implementation work keywords appearing as the primary task label
   /^create\s+(route|endpoint|api|panel|widget|component)/i,
+  // Code-authorship signals: verbs that unambiguously indicate writing/building code
+  /\bcreate\s+pr\b/i,
+  /\bopen\s+pr\b/i,
+  /\bwrite\s+(a\s+)?(test|spec|function|class|module|script|migration|handler|hook|middleware|service|component)/i,
+  /\bbuild\s+(a\s+)?(feature|api|endpoint|service|pipeline|integration|connector|plugin|tool)/i,
+  /\bimplement\b/i,
 ];
 
 /**
  * Keyword fragments that, when found in a task title, strongly suggest
- * implementation work unsuitable for research-only agents.
+ * implementation work unsuitable for research-only or review-only agents.
  * Used as a secondary check when title patterns do not match.
+ *
+ * These are intentionally conservative — generic words like "write" and
+ * "build" are handled by the richer regex patterns above to avoid false
+ * positives on titles such as "Write up research findings".
  */
 const IMPLEMENTATION_TITLE_KEYWORDS: string[] = [
   "routes",
@@ -68,6 +78,12 @@ const IMPLEMENTATION_TITLE_KEYWORDS: string[] = [
   "docker",
   "pr create",
   "open pr",
+  "create pr",
+  "write code",
+  "write tests",
+  "write the code",
+  "build and",
+  "build the",
 ];
 
 /**
