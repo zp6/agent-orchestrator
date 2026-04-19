@@ -93,8 +93,8 @@ export interface ReviewerInstances {
    */
   preDispatchEnforcer: PreDispatchCapabilityEnforcer;
   /**
-   * Real-time alerter for low-score approvals (issue #331).
-   * Sends Telegram notifications when a task is approved with score < 0.70.
+   * Real-time alerter for low-score approvals (issue #331, #346).
+   * Sends Telegram notifications when a task is approved with score < 0.60 (the quality floor).
    * Call `lowScoreApprovalAlerter.checkAndAlert(result, task)` after verification
    * completes and the result is approved.
    * Undefined when no notifier is provided.
@@ -191,9 +191,10 @@ export function createReviewerInstances(
       : undefined;
 
   // Create LowScoreApprovalAlerter if notifier is provided.
-  // The alerter sends real-time Telegram notifications for low-score approvals.
+  // The alerter sends real-time Telegram notifications for low-score approvals
+  // below the quality floor (0.60).
   const lowScoreApprovalAlerter = opts.notifier
-    ? new LowScoreApprovalAlerter(opts.notifier, { scoreThreshold: 0.70 })
+    ? new LowScoreApprovalAlerter(opts.notifier, { scoreThreshold: 0.60 })
     : undefined;
 
   return {
