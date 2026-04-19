@@ -1683,6 +1683,148 @@ export class Dispatcher {
   }
 
   /**
+   * Dispatch a coordination group child task that was pre-created by
+   * createCoordinationGroup() but never sent to an agent (issue #1000).
+   *
+   * createCoordinationGroup() writes task records to the DB in "pending" status
+   * expecting the daemon to dispatch them, but no dispatch path existed.
+   * This method fills that gap: it takes an existing pending task, sends its
+   * description to the assigned agent, and advances the coordination group when
+   * complete — without creating a duplicate task record.
+   *
+   * On failure the task is marked "failed" and scheduled for retry via the
+   * existing processRetries path (next_retry_at is set so processRetries picks
+   * it up automatically in the next daemon cycle).
+   */
+  async dispatchCoordinationChild(task: Task): Promise<void> {
+    const agentName = task.agent_name;
+
+    if (!agentName) {
+      this.log.warn("dispatchCoordinationChild: task has no agent_name", { taskId: task.id });
+      this.store.updateTask(task.id, {
+        status: "failed",
+        result: "Coordination dispatch failed: no agent_name on child task",
+      });
+      return;
+    }
+
+    if (!this.config.agents[agentName]) {
+      this.log.warn("dispatchCoordinationChild: agent not in registry", {
+        taskId: task.id,
+        agentName,
+      });
+      this.store.updateTask(task.id, {
+        status: "failed",
+        result: `Coordination dispatch failed: agent "${agentName}" is not in the registered agent registry`,
+      });
+      return;
+    }
+
+    const conversationId = ulid();
+    const message = task.description ?? task.title;
+    const repoHeader = buildTargetRepoHeader(task.source_ref);
+    const messageToSend = repoHeader ? `${repoHeader}\n${message}` : message;
+
+    // Mark dispatched before the network call so watchdog timers can track age.
+    this.store.updateTask(task.id, {
+      status: "dispatched",
+      conversation_id: conversationId,
+    });
+    this.store.addLog({
+      task_id: task.id,
+      direction: "to_agent",
+      agent_name: agentName,
+      content: messageToSend,
+    });
+
+    const provider = this.config.agents[agentName]?.provider ?? "claude";
+    const modelRoute = routeModel(provider, message, {
+      taskType: "implementation",
+      sourceRef: task.source_ref ?? undefined,
+    });
+
+    this.log.info("Dispatching coordination child task", {
+      taskId: task.id,
+      agentName,
+      model: modelRoute.model,
+      tier: modelRoute.tier,
+      sourceRef: task.source_ref,
+    });
+
+    try {
+      const response = await this.client.send(agentName, messageToSend, {
+        conversationId,
+        taskType: "implementation",
+        model: modelRoute.model,
+      });
+
+      this.store.addLog({
+        task_id: task.id,
+        direction: "from_agent",
+        agent_name: agentName,
+        content: response.content,
+        tokens_in: response.usage.input_tokens,
+        tokens_out: response.usage.output_tokens,
+      });
+      this.store.recordTokenUsage(
+        provider,
+        agentName,
+        response.usage.input_tokens,
+        response.usage.output_tokens,
+        response.usage.cache_read_input_tokens ?? 0,
+        response.usage.cache_creation_input_tokens ?? 0,
+      );
+
+      this.log.info("Coordination child task completed", {
+        taskId: task.id,
+        agentName,
+        tokensIn: response.usage.input_tokens,
+        tokensOut: response.usage.output_tokens,
+      });
+      this.store.updateTask(task.id, { status: "done", result: response.content });
+      this.store.recordAgentSuccess(agentName);
+
+      // Advance the coordination group: when all siblings are done this
+      // transitions the group from "in_progress" → "ready_to_merge", then
+      // driveCoordinatedMerges handles the ordered merge in a later cycle.
+      try {
+        await checkAndAdvanceCoordination(task.id, this.store, this.config);
+      } catch (advErr) {
+        this.log.error("checkAndAdvanceCoordination failed after coordination child completed (non-fatal)", {
+          taskId: task.id,
+          error: advErr instanceof Error ? advErr.message : String(advErr),
+        });
+      }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      this.log.error("Coordination child dispatch failed", {
+        taskId: task.id,
+        agentName,
+        error: errorMsg,
+      });
+      this.store.recordAgentFailure(agentName, errorMsg);
+
+      // Schedule for retry so the daemon's processRetries picks it up.
+      const retryCount = (task.retry_count ?? 0) + 1;
+      const retryDelays = this.config.dispatch?.retry_delays_ms ?? RETRY_DELAYS_MS;
+      const willRetry = retryCount <= MAX_RETRIES;
+      const nextRetryAt = willRetry
+        ? new Date(
+            Date.now() +
+              (retryDelays[retryCount - 1] ?? retryDelays[retryDelays.length - 1]!),
+          ).toISOString()
+        : null;
+
+      this.store.updateTask(task.id, {
+        status: "failed",
+        result: errorMsg,
+        retry_count: retryCount,
+        next_retry_at: nextRetryAt,
+      });
+    }
+  }
+
+  /**
    * Retry an existing failed task. Resets the task status and re-sends the
    * original message to the agent without creating a new task record.
    */

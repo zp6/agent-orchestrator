@@ -729,6 +729,7 @@ export class Daemon {
       await this.runBatch("dispatch+verify", [
         this.dispatchTriggers(time, registeredAgents),
         this.verifyCompleted(time),
+        this.dispatchPendingCoordinationGroups(time),
       ]);
 
       // ── Sequential: depends on dispatch/verify results ────────────────
@@ -3272,6 +3273,109 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
       }
     } catch (err) {
       console.error(`[${time}] Auto-merge sweep failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  /**
+   * Dispatch child tasks for coordination groups still in "pending" status.
+   *
+   * createCoordinationGroup() writes task records to the DB in "pending" status
+   * but never sends them to agents (issue #1000 root cause).  This method
+   * detects those undispatched groups and fires each child task via
+   * dispatcher.dispatchCoordinationChild(), which reuses the existing task
+   * record rather than creating a duplicate.
+   *
+   * Runs in the dispatch batch every cycle.  Each child dispatch is
+   * fire-and-forget so the daemon cycle is not blocked on agent I/O.
+   * Groups are advanced to "in_progress" immediately so subsequent cycles
+   * don't re-dispatch already-running children.
+   */
+  private async dispatchPendingCoordinationGroups(time: string): Promise<void> {
+    let groups: Array<{
+      id: string;
+      childTaskIds: Record<string, string>;
+    }>;
+    try {
+      groups = this.store.getCoordinationGroupsByStatus("pending");
+    } catch {
+      // Table may not exist on older deployments — fail silently.
+      return;
+    }
+
+    if (groups.length === 0) return;
+
+    console.log(
+      `[${time}] Coordination: ${groups.length} pending group(s) — dispatching child tasks`,
+    );
+
+    for (const group of groups) {
+      const childEntries = Object.entries(group.childTaskIds);
+      let anyDispatched = false;
+
+      for (const [repo, childTaskId] of childEntries) {
+        const childTask = this.store.getTask(childTaskId);
+
+        if (!childTask) {
+          this.log.warn("Coordination child task not found in store", {
+            groupId: group.id,
+            repo,
+            childTaskId,
+          });
+          continue;
+        }
+
+        if (childTask.status !== "pending") {
+          // Already dispatched or completed in a prior cycle — skip.
+          continue;
+        }
+
+        if (childTask.agent_name && this.store.hasActiveTask(childTask.agent_name)) {
+          this.log.info("Coordination child dispatch deferred: agent busy", {
+            groupId: group.id,
+            childTaskId,
+            agentName: childTask.agent_name,
+          });
+          continue;
+        }
+
+        // Fire-and-forget: dispatchCoordinationChild manages state transitions
+        // (dispatched → done | failed) and schedules retries on failure.
+        // We must NOT await here — the agent call can take several minutes and
+        // blocking would stall the entire daemon cycle.
+        this.dispatcher.dispatchCoordinationChild(childTask).then(() => {
+          this.log.info("Coordination child dispatch promise resolved", {
+            groupId: group.id,
+            childTaskId,
+            repo,
+          });
+        }).catch((err) => {
+          this.log.error("dispatchCoordinationChild threw unexpectedly", {
+            groupId: group.id,
+            childTaskId,
+            repo,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+
+        anyDispatched = true;
+        this.log.info("Coordination child task dispatched", {
+          groupId: group.id,
+          childTaskId,
+          repo,
+          agentName: childTask.agent_name,
+        });
+      }
+
+      // Advance the group so we don't re-dispatch on the next cycle.
+      // If all agents were busy (anyDispatched = false) leave it pending
+      // so it is retried in the next daemon cycle.
+      if (anyDispatched) {
+        this.store.updateCoordinationGroup(group.id, { status: "in_progress" });
+        console.log(
+          `[${time}] Coordination group ${group.id.slice(0, 8)} → in_progress` +
+          ` (${childEntries.length} child task(s) dispatched)`,
+        );
+      }
     }
   }
 
