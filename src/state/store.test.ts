@@ -3,19 +3,27 @@ import { StateStore } from "./store.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 
 describe("StateStore", () => {
   let store: StateStore;
   let dbPath: string;
 
   beforeEach(() => {
-    dbPath = join(tmpdir(), `orch-test-${Date.now()}.db`);
+    // Use randomUUID() instead of Date.now() to prevent path collisions when
+    // consecutive tests execute within the same millisecond.
+    dbPath = join(tmpdir(), `orch-test-${randomUUID()}.db`);
     store = new StateStore(dbPath);
   });
 
   afterEach(() => {
     store.close();
-    try { unlinkSync(dbPath); } catch {}
+    // Remove the main DB file plus SQLite WAL/SHM companion files so that a
+    // subsequent test opening the same path (theoretically) cannot replay
+    // stale WAL data from a previous test run.
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try { unlinkSync(dbPath + suffix); } catch {}
+    }
   });
 
   describe("createTask", () => {
