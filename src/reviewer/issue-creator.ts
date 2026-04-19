@@ -18,6 +18,42 @@ export interface CreatedIssue {
   url: string;
 }
 
+/**
+ * A follow-up that was not created as an issue because the cross-repo cap
+ * was reached. These are posted as comments on the source PR instead.
+ */
+export interface DeferredFollowUp {
+  repo: string;
+  agentName: string;
+  title: string;
+  body: string;
+}
+
+export interface CreateAcrossReposResult {
+  /** Issues that were actually created on GitHub. */
+  created: CreatedIssue[];
+  /** Follow-ups deferred because the cross-repo cap was reached. */
+  deferred: DeferredFollowUp[];
+  /** True when at least one follow-up was deferred due to the cap. */
+  capReached: boolean;
+}
+
+export interface CreateAcrossReposOptions {
+  /**
+   * Maximum number of cross-repo issues to create per call.
+   * When the cap is reached, remaining follow-ups are returned as `deferred`
+   * items that should be posted as comments on the source PR.
+   *
+   * Set to 0 for unlimited (legacy behavior). Default: 1.
+   */
+  maxCrossRepoIssues?: number;
+  /** Extra labels to add beyond the default "orchestrator" label. */
+  extraLabels?: string[];
+}
+
+/** Default cap: a single PR review can spawn at most 1 cross-repo issue. */
+export const DEFAULT_MAX_CROSS_REPO_ISSUES = 1;
+
 const MAX_OPEN_ORCHESTRATOR_ISSUES = 10;
 
 /** Minimum word-overlap Jaccard similarity to consider two issue titles duplicates. */
@@ -135,8 +171,44 @@ export class IssueCreator {
     return false;
   }
 
-  createAcrossRepos(improvement: DetectedImprovement): CreatedIssue[] {
+  /**
+   * Create issues across repos for a detected improvement, respecting the
+   * cross-repo follow-up cap.
+   *
+   * When `maxCrossRepoIssues` is reached, remaining follow-ups are returned
+   * in `result.deferred` so the caller can post them as comments on the
+   * source PR via `postDeferredFollowUps()`.
+   *
+   * For backward compatibility, the method also returns just the created
+   * issues array when called without options (legacy callers).
+   */
+  createAcrossRepos(
+    improvement: DetectedImprovement,
+    optsOrLabels?: CreateAcrossReposOptions | string[],
+  ): CreatedIssue[] {
+    const result = this.createAcrossReposWithCap(improvement, optsOrLabels);
+    return result.created;
+  }
+
+  /**
+   * Full-result variant that returns both created issues and deferred follow-ups.
+   * Callers that need to handle the cap should use this method.
+   */
+  createAcrossReposWithCap(
+    improvement: DetectedImprovement,
+    optsOrLabels?: CreateAcrossReposOptions | string[],
+  ): CreateAcrossReposResult {
+    // Backward compat: accept string[] as extraLabels (legacy signature)
+    const opts: CreateAcrossReposOptions = Array.isArray(optsOrLabels)
+      ? { extraLabels: optsOrLabels }
+      : (optsOrLabels ?? {});
+
+    const maxCrossRepo = opts.maxCrossRepoIssues ?? DEFAULT_MAX_CROSS_REPO_ISSUES;
+    const labels = ["orchestrator", ...(opts.extraLabels ?? [])];
+
     const created: CreatedIssue[] = [];
+    const deferred: DeferredFollowUp[] = [];
+    let crossRepoCount = 0;
 
     for (const agentName of improvement.affected_agents) {
       const agent = this.config.agents[agentName];
@@ -161,15 +233,95 @@ export class IssueCreator {
 
       const body = this.formatIssueBody(improvement, agentName);
 
+      // Check cross-repo cap (0 = unlimited)
+      if (maxCrossRepo > 0 && crossRepoCount >= maxCrossRepo) {
+        this.log.info("Cross-repo follow-up cap reached — deferring issue", {
+          repo: agent.github,
+          agentName,
+          title: candidateTitle,
+          crossRepoCount,
+          maxCrossRepo,
+        });
+        deferred.push({ repo: agent.github, agentName, title: candidateTitle, body });
+        continue;
+      }
+
       try {
-        const issue = this.createIssue(agent.github, candidateTitle, body);
+        const issue = this.createIssue(agent.github, candidateTitle, body, labels);
         created.push(issue);
+        crossRepoCount++;
       } catch {
         // Continue creating issues for other repos
       }
     }
 
-    return created;
+    const capReached = deferred.length > 0;
+    if (capReached) {
+      this.log.warn("Cross-repo follow-up cap reached", {
+        created: created.length,
+        deferred: deferred.length,
+        maxCrossRepo,
+      });
+    }
+
+    return { created, deferred, capReached };
+  }
+
+  /**
+   * Post deferred follow-ups as a comment on the source PR so the concerns
+   * are not lost. Called by the daemon after `createAcrossReposWithCap()` when
+   * `result.capReached` is true.
+   *
+   * @param prRepo  The repo that owns the source PR (e.g. "rapartlu/agent-reviewer")
+   * @param prNumber  The PR number that triggered the improvement detection
+   * @param deferred  The deferred follow-ups from `createAcrossReposWithCap()`
+   */
+  postDeferredFollowUps(prRepo: string, prNumber: number, deferred: DeferredFollowUp[]): void {
+    if (deferred.length === 0) return;
+
+    const lines: string[] = [
+      `### ⏳ Follow-up cap reached — ${deferred.length} deferred concern${deferred.length > 1 ? "s" : ""}`,
+      "",
+      "The improvement detector identified additional cross-repo concerns from this PR review, " +
+        "but the per-cycle follow-up cap (1 issue per PR review) was reached. " +
+        "These will be picked up in the next review cycle:",
+      "",
+    ];
+
+    for (const d of deferred) {
+      lines.push(`#### ${d.title}`);
+      lines.push(`**Repo:** \`${d.repo}\` · **Agent:** \`${d.agentName}\``);
+      lines.push("");
+      // Include a condensed version of the body (description only, skip evidence/footer)
+      const descMatch = d.body.match(/### Description\n\n([\s\S]*?)(?:\n###|\n---)/);
+      if (descMatch) {
+        lines.push(descMatch[1].trim());
+      }
+      lines.push("");
+    }
+
+    lines.push("---");
+    lines.push("*Deferred by cross-repo follow-up cap. These concerns will be filed as issues in the next cycle.*");
+
+    const comment = lines.join("\n");
+
+    try {
+      execSync(
+        `gh pr comment ${prNumber} --repo ${shellEscape(prRepo)} --body ${shellEscape(comment)}`,
+        { encoding: "utf-8", timeout: 15000 },
+      );
+      this.log.info("Posted deferred follow-ups as PR comment", {
+        prRepo,
+        prNumber,
+        deferredCount: deferred.length,
+      });
+    } catch (err) {
+      this.log.error("Failed to post deferred follow-ups comment", {
+        prRepo,
+        prNumber,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /** @internal Exposed for testing; prefer createAcrossRepos in production code. */

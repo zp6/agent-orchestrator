@@ -291,8 +291,13 @@ export type { GitHubIssue } from "./reviewer/standup-handler.js";
 export { PRIterationMetrics, categoriseReviewComment, formatIterationReport } from "./reviewer/pr-iteration-metrics.js";
 export type { PRIterationStorePort } from "./reviewer/pr-iteration-metrics.js";
 
-export { IssueCreator } from "./reviewer/issue-creator.js";
-export type { CreatedIssue } from "./reviewer/issue-creator.js";
+export { IssueCreator, DEFAULT_MAX_CROSS_REPO_ISSUES } from "./reviewer/issue-creator.js";
+export type {
+  CreatedIssue,
+  DeferredFollowUp,
+  CreateAcrossReposResult,
+  CreateAcrossReposOptions,
+} from "./reviewer/issue-creator.js";
 
 // Telegram notifications
 export { createNotifier } from "./notify.js";
