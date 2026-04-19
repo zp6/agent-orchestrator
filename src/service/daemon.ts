@@ -42,6 +42,7 @@ import { checkAgedIssues } from "../orchestrator/issue-age-monitor.js";
 import { runProactiveScan } from "../orchestrator/proactive-scanner.js";
 import { validateMergedPR } from "../orchestrator/staging-validator.js";
 import { proposeAndFileRoadmapItems } from "../orchestrator/roadmap-proposer.js";
+import { autoMarkCompletedKeyResults, maybeRefreshGoals } from "../orchestrator/goals.js";
 import { detectHighIterationAgents } from "../orchestrator/iteration-cost-detector.js";
 import { detectHealthIncidentIssues } from "../orchestrator/health-incident-detector.js";
 import { runIterationBudgetAlerts } from "../orchestrator/iteration-budget-alert.js";
@@ -798,6 +799,21 @@ export class Daemon {
           proposeAndFileRoadmapItems(this.config, this.store)
             .then((filed) => { if (filed > 0) console.log(`[${time}] Roadmap proposer: filed ${filed} proposal(s)`); })
             .catch((err) => { this.log.warn("Roadmap proposal failed", { error: err instanceof Error ? err.message : String(err) }); }),
+        );
+
+        // Auto-mark completed key results based on metrics
+        try {
+          const marked = autoMarkCompletedKeyResults(this.store, this.config.orchestrator_dir);
+          if (marked > 0) console.log(`[${time}] Goals: auto-marked ${marked} key result(s) as done`);
+        } catch (err) {
+          this.log.warn("Goal auto-mark failed", { error: err instanceof Error ? err.message : String(err) });
+        }
+
+        // Check if goals need refreshing (most KRs done or month rolled over)
+        batch4.push(
+          maybeRefreshGoals(this.config, this.store)
+            .then((refreshed) => { if (refreshed) console.log(`[${time}] Goals: refreshed goals.yaml with new targets`); })
+            .catch((err) => { this.log.warn("Goal refresh failed", { error: err instanceof Error ? err.message : String(err) }); }),
         );
       }
       if (this.cycleCount % RESEARCH_LINK_EVERY_N_CYCLES === 0) {

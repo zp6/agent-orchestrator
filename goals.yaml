@@ -1,49 +1,42 @@
-# Monthly goals — ambitious targets that give the fleet direction.
-# The supervisor, roadmap proposer, and priority scorer use these
-# to align work. Progress tracked via key results and Telegram reports.
-
-month: "2026-05"
-
+month: 2026-05
 goals:
-  - id: "parallel-execution"
-    title: "Parallel subtask execution for complex issues"
-    target: "3 multi-subtask issues completed end-to-end"
+  - id: parallel-execution
+    title: Parallel subtask execution for complex issues
+    target: 3 multi-subtask issues completed end-to-end
     owner: orchestrator
     key_results:
-      - description: "Planner produces parallel subtask plans"
-      - description: "Dispatcher creates and tracks parent/child task trees"
-      - description: "At least one 4-agent parallel execution completes"
-
-  - id: "first-pass-quality"
-    title: "80% first-pass verification rate"
-    target: "first_pass_rate >= 0.8 over rolling 7 days"
+      - description: Planner produces parallel subtask plans
+      - description: Dispatcher creates and tracks parent/child task trees
+      - description: At least one 4-agent parallel execution completes
+  - id: first-pass-quality
+    title: 80% first-pass verification rate
+    target: first_pass_rate >= 0.8 over rolling 7 days
     owner: system
     key_results:
-      - description: "Cross-task learning active on all repos"
-      - description: "Verification calibration reduces false rejections"
-      - description: "Smart model routing sends complex tasks to Opus"
-        done: true  # shipped in PR #614
-      - description: "Robust verification parser handles all LLM formats"
-        done: true  # shipped in PR #574
-        metric: "first_pass_rate >= 0.8"
-
-  - id: "autonomous-cycle"
-    title: "50 issues completed with zero operator intervention"
-    target: "tasks_completed >= 50 with no manual merge or escalation"
+      - description: Cross-task learning active on all repos
+      - description: Verification calibration reduces false rejections
+      - description: Smart model routing sends complex tasks to Opus
+        done: true
+      - description: Robust verification parser handles all LLM formats
+        done: true
+        metric: first_pass_rate >= 0.8
+  - id: autonomous-cycle
+    title: 50 issues completed with zero operator intervention
+    target: tasks_completed >= 50 with no manual merge or escalation
     owner: system
     key_results:
-      - description: "Auto-merge for PRs passing review + CI"
-      - description: "Escalation rate below 5%"
-        metric: "escalation_rate < 0.05"
-      - description: "Provider rate limit failover works end-to-end"
-        done: true  # shipped in PR #563
-
-  - id: "cost-efficiency"
-    title: "Cut token spend 50% via smart routing and caching"
-    target: "Same throughput at half the token cost"
+      - description: Auto-merge for PRs passing review + CI
+      - description: Escalation rate below 5%
+        metric: escalation_rate < 0.05
+        done: true
+      - description: Provider rate limit failover works end-to-end
+        done: true
+  - id: cost-efficiency
+    title: Cut token spend 50% via smart routing and caching
+    target: Same throughput at half the token cost
     owner: system
     key_results:
-      - description: "Smart model routing active (light/standard/heavy tiers)"
-        done: true  # shipped in PR #614
-      - description: "Codex prompt caching or session reuse reduces input tokens"
-      - description: "Token usage dashboard shows per-tier cost breakdown"
+      - description: Smart model routing active (light/standard/heavy tiers)
+        done: true
+      - description: Codex prompt caching or session reuse reduces input tokens
+      - description: Token usage dashboard shows per-tier cost breakdown
