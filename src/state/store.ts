@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
-import { ulid } from "ulid";
+import { generateId } from "../utils/ulid.js";
 import { extractIntendedAgent } from "../orchestrator/routing-mismatch-detector.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { createLogger } from "../service/logger.js";
@@ -1542,7 +1542,7 @@ export class StateStore {
     lineage_group_id?: string | null;
   }): Task {
     const now = new Date().toISOString();
-    const id = ulid();
+    const id = generateId();
 
     // Resolve lineage_group_id:
     // 1. Explicit value from caller (e.g. cross-repo follow-up inheriting lineage)
