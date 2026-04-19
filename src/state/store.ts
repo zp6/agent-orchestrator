@@ -67,6 +67,7 @@ import type {
   IThresholdAdjustmentStore,
   RoutingViolation,
   ILowScoreFeedStore,
+  IScoreViolationsStore,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -82,7 +83,7 @@ import { ulid } from "../util/ulid.js";
  */
 export const APPROVAL_SCORE_FLOOR = 0.60;
 
-export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore {
+export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore {
   private db: Database.Database;
 
   constructor(dbPath: string = process.env.STATE_DB_PATH ?? "state.db") {
@@ -1050,6 +1051,34 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
          LIMIT ?`,
       )
       .all(safeThreshold, safeLimit) as Task[];
+  }
+
+  /**
+   * Return approved tasks below a quality threshold within a rolling time window.
+   *
+   * Issue #356: feeds the score-bypass violation report page, which lists all
+   * tasks approved below min_score in a rolling window, grouped by agent.
+   *
+   * @param threshold - Score ceiling (exclusive). Default: 0.80.
+   * @param days      - Lookback window in days. Default: 7.
+   * @param limit     - Maximum rows to return. Default: 100.
+   */
+  getScoreViolationTasks(threshold: number = 0.80, days: number = 7, limit: number = 100): Task[] {
+    const safeThreshold = Number.isFinite(threshold) && threshold > 0 ? threshold : 0.80;
+    const safeDays = Number.isFinite(days) && days >= 1 ? Math.floor(days) : 7;
+    const safeLimit = Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : 100;
+
+    return this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE verification_status = 'approved'
+           AND quality_score IS NOT NULL
+           AND quality_score < ?
+           AND updated_at >= datetime('now', ? || ' days')
+         ORDER BY quality_score ASC, updated_at DESC
+         LIMIT ?`,
+      )
+      .all(safeThreshold, `-${safeDays}`, safeLimit) as Task[];
   }
 
   /**

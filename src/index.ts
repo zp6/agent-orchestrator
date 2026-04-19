@@ -470,6 +470,41 @@ export type {
   LowScoreFeedAgentSummary,
 } from "./reviewer/low-score-feed.js";
 
+// Score-bypass violation report — `/api/score-violations` API payload (issue #356).
+//
+// Lists all tasks approved below a configurable threshold (default 0.80) in a
+// rolling window, grouped by agent, with score, dimension breakdown,
+// marginal_reason badge, and score bucket classification.
+//
+// Mount in the orchestrator or dashboard server:
+//   import { getScoreViolationsPayload } from 'claude-orchestrator-reviewer';
+//
+//   app.get('/api/score-violations', (req, res) => {
+//     res.json(getScoreViolationsPayload(store, {
+//       threshold: req.query.threshold ? Number(req.query.threshold) : undefined,
+//       days: req.query.days ? Number(req.query.days) : undefined,
+//       agent: req.query.agent as string | undefined,
+//     }));
+//   });
+//
+// Telegram command uses formatScoreViolationsForTelegram().
+export {
+  getScoreViolationsPayload,
+  formatScoreViolationsForTelegram,
+  SCORE_VIOLATIONS_DEFAULT_THRESHOLD,
+  SCORE_VIOLATIONS_DEFAULT_DAYS,
+  SCORE_VIOLATIONS_DEFAULT_LIMIT,
+  SCORE_BUCKETS as VIOLATION_SCORE_BUCKETS,
+} from "./reviewer/score-violations.js";
+export type {
+  ScoreViolationsPayload,
+  ScoreViolationEntry,
+  ScoreViolationAgentSummary,
+  ScoreViolationsOptions,
+  ScoreBucketSummary,
+  ScoreBucket,
+} from "./reviewer/score-violations.js";
+
 // Low-score approval real-time alerter — Telegram notifications (issue #331).
 //
 // Sends immediate Telegram push alerts when a task is approved with

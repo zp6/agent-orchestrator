@@ -963,6 +963,25 @@ export interface ILowScoreFeedStore {
   getLowScoreApprovedTasks(threshold?: number, limit?: number): Task[];
 }
 
+/**
+ * Store interface for the score-bypass violation report (issue #356).
+ *
+ * Satisfied by `StateStore`. Extracted so the report builder can be
+ * unit-tested with a lightweight stub.
+ */
+export interface IScoreViolationsStore {
+  /**
+   * Return approved tasks whose quality_score is non-null and strictly less
+   * than `threshold`, created within the last `days` days, ordered by
+   * quality_score ascending (worst first).
+   *
+   * @param threshold - Score ceiling (exclusive). Default: 0.80.
+   * @param days      - Lookback window in days. Default: 7.
+   * @param limit     - Maximum rows to return. Default: 100.
+   */
+  getScoreViolationTasks(threshold?: number, days?: number, limit?: number): Task[];
+}
+
 // ── Score calibration types ───────────────────────────────────────────────
 
 /**
@@ -1870,7 +1889,8 @@ export interface ITelegramStateStore
     IVerificationResultStore,
     ISecretsHealthStore,
     IFirstPassRateStore,
-    ILowScoreFeedStore {
+    ILowScoreFeedStore,
+    IScoreViolationsStore {
   // System flags (pause/resume, operator overrides)
   getSystemFlag(key: string): string | null;
   setSystemFlag(key: string, value: string): void;
