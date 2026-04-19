@@ -116,8 +116,8 @@ describe("countOpenPRs", () => {
 describe("findExistingPRsForIssue", () => {
   // execSync is called twice: once for open PRs, once for merged PRs
   function mockPRCalls(
-    openPRs: Array<{ number: number; title: string; url: string; isDraft: boolean; body: string | null }>,
-    mergedPRs: Array<{ number: number; title: string; url: string; body: string | null }>,
+    openPRs: Array<{ number: number; title: string; url: string; isDraft: boolean; body: string | null; headRefName?: string }>,
+    mergedPRs: Array<{ number: number; title: string; url: string; body: string | null; headRefName?: string }>,
   ): void {
     mockExecSync
       .mockReturnValueOnce(JSON.stringify(openPRs))
@@ -126,7 +126,7 @@ describe("findExistingPRsForIssue", () => {
 
   it("returns empty array when no PRs reference the issue", () => {
     mockPRCalls(
-      [{ number: 10, title: "Unrelated PR", url: "https://github.com/owner/repo/pull/10", isDraft: false, body: "This does something else" }],
+      [{ number: 10, title: "Unrelated PR", url: "https://github.com/owner/repo/pull/10", isDraft: false, body: "This does something else", headRefName: "unrelated" }],
       [],
     );
     const prs = findExistingPRsForIssue("owner/repo", 42);
@@ -135,7 +135,7 @@ describe("findExistingPRsForIssue", () => {
 
   it("detects an open PR with 'Closes #N' in the body", () => {
     mockPRCalls(
-      [{ number: 5, title: "Fix the bug", url: "https://github.com/owner/repo/pull/5", isDraft: false, body: "Closes #42\nFixed the issue." }],
+      [{ number: 5, title: "Fix the bug", url: "https://github.com/owner/repo/pull/5", isDraft: false, body: "Closes #42\nFixed the issue.", headRefName: "fix-something" }],
       [],
     );
     const prs = findExistingPRsForIssue("owner/repo", 42);
@@ -145,7 +145,7 @@ describe("findExistingPRsForIssue", () => {
 
   it("detects a draft PR with 'Closes #N' in the body", () => {
     mockPRCalls(
-      [{ number: 7, title: "WIP fix", url: "https://github.com/owner/repo/pull/7", isDraft: true, body: "Work in progress\n\nCloses #42" }],
+      [{ number: 7, title: "WIP fix", url: "https://github.com/owner/repo/pull/7", isDraft: true, body: "Work in progress\n\nCloses #42", headRefName: "wip-fix" }],
       [],
     );
     const prs = findExistingPRsForIssue("owner/repo", 42);
@@ -156,7 +156,7 @@ describe("findExistingPRsForIssue", () => {
   it("detects a merged PR with 'Fixes #N' in the body", () => {
     mockPRCalls(
       [],
-      [{ number: 3, title: "Merged fix", url: "https://github.com/owner/repo/pull/3", body: "Fixes #42 by refactoring." }],
+      [{ number: 3, title: "Merged fix", url: "https://github.com/owner/repo/pull/3", body: "Fixes #42 by refactoring.", headRefName: "merged-fix" }],
     );
     const prs = findExistingPRsForIssue("owner/repo", 42);
     expect(prs).toHaveLength(1);
@@ -174,16 +174,44 @@ describe("findExistingPRsForIssue", () => {
     ];
     for (const body of bodies) {
       mockExecSync
-        .mockReturnValueOnce(JSON.stringify([{ number: 1, title: "PR", url: "url", isDraft: false, body }]))
+        .mockReturnValueOnce(JSON.stringify([{ number: 1, title: "PR", url: "url", isDraft: false, body, headRefName: "unrelated" }]))
         .mockReturnValueOnce("[]");
       const prs = findExistingPRsForIssue("owner/repo", 42);
       expect(prs).toHaveLength(1);
     }
   });
 
-  it("does NOT match a PR that only mentions the issue without a closing keyword", () => {
+  it("DOES match a PR with a matching branch name even without a closing keyword (fixes issue #959)", () => {
     mockPRCalls(
-      [{ number: 8, title: "Related work", url: "url", isDraft: false, body: "See issue #42 for context. Does not close it." }],
+      [{ number: 8, title: "Research findings", url: "url", isDraft: false, body: "Research findings from issue investigation.", headRefName: "42-research-findings" }],
+      [],
+    );
+    const prs = findExistingPRsForIssue("owner/repo", 42);
+    expect(prs).toHaveLength(1);
+    expect(prs[0]).toMatchObject({ number: 8, state: "open" });
+  });
+
+  it("matches branch patterns like 'issue-N-*'", () => {
+    mockPRCalls(
+      [{ number: 9, title: "Issue fix", url: "url", isDraft: false, body: "Some work.", headRefName: "issue-42-fix-something" }],
+      [],
+    );
+    const prs = findExistingPRsForIssue("owner/repo", 42);
+    expect(prs).toHaveLength(1);
+  });
+
+  it("matches branch patterns like 'issue_N_*'", () => {
+    mockPRCalls(
+      [{ number: 10, title: "Issue fix", url: "url", isDraft: false, body: "Some work.", headRefName: "issue_42_feature" }],
+      [],
+    );
+    const prs = findExistingPRsForIssue("owner/repo", 42);
+    expect(prs).toHaveLength(1);
+  });
+
+  it("does NOT match a PR that only mentions the issue without a closing keyword or matching branch", () => {
+    mockPRCalls(
+      [{ number: 8, title: "Related work", url: "url", isDraft: false, body: "See issue #42 for context. Does not close it.", headRefName: "unrelated-branch" }],
       [],
     );
     const prs = findExistingPRsForIssue("owner/repo", 42);
@@ -192,7 +220,7 @@ describe("findExistingPRsForIssue", () => {
 
   it("does NOT match a different issue number (e.g. #420 vs #42)", () => {
     mockPRCalls(
-      [{ number: 9, title: "Other fix", url: "url", isDraft: false, body: "Closes #420" }],
+      [{ number: 9, title: "Other fix", url: "url", isDraft: false, body: "Closes #420", headRefName: "420-fix" }],
       [],
     );
     const prs = findExistingPRsForIssue("owner/repo", 42);
@@ -201,8 +229,8 @@ describe("findExistingPRsForIssue", () => {
 
   it("returns both open and merged PRs when both exist", () => {
     mockPRCalls(
-      [{ number: 5, title: "Open PR", url: "url1", isDraft: false, body: "Closes #42" }],
-      [{ number: 3, title: "Merged PR", url: "url2", body: "Fixes #42" }],
+      [{ number: 5, title: "Open PR", url: "url1", isDraft: false, body: "Closes #42", headRefName: "fix-open" }],
+      [{ number: 3, title: "Merged PR", url: "url2", body: "Fixes #42", headRefName: "fix-merged" }],
     );
     const prs = findExistingPRsForIssue("owner/repo", 42);
     expect(prs).toHaveLength(2);
@@ -235,11 +263,21 @@ describe("findExistingPRsForIssue", () => {
 
   it("handles null PR body gracefully", () => {
     mockPRCalls(
-      [{ number: 11, title: "No body", url: "url", isDraft: false, body: null }],
+      [{ number: 11, title: "No body", url: "url", isDraft: false, body: null, headRefName: "unrelated-branch" }],
       [],
     );
     const prs = findExistingPRsForIssue("owner/repo", 42);
     expect(prs).toHaveLength(0);
+  });
+
+  it("detects PR with null body but matching branch name", () => {
+    mockPRCalls(
+      [{ number: 12, title: "No body but matching branch", url: "url", isDraft: false, body: null, headRefName: "42-feature" }],
+      [],
+    );
+    const prs = findExistingPRsForIssue("owner/repo", 42);
+    expect(prs).toHaveLength(1);
+    expect(prs[0]).toMatchObject({ number: 12, state: "open" });
   });
 });
 

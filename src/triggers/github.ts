@@ -85,10 +85,16 @@ export interface LinkedPR {
 }
 
 /**
- * Find open or recently-merged PRs that close a given issue number.
+ * Find open or recently-merged PRs that are linked to a given issue number.
  *
- * Searches PR bodies for closing keywords ("closes #N", "fixes #N",
- * "resolves #N", and their variants) to identify PRs linked to the issue.
+ * Uses two detection strategies to identify linked PRs:
+ * 1. **Closing keywords**: PRs with "closes #N", "fixes #N", "resolves #N", etc. in body
+ * 2. **Branch-name matching**: PRs whose branch name follows the pattern "issue-N-*", "N-*"
+ *    (e.g., "94-research-findings" for issue #94)
+ *
+ * The branch-name strategy catches PRs created by agents (e.g., research-agent) that
+ * don't explicitly add closing keywords to the PR body but follow a predictable
+ * branch naming convention. This prevents "already-in-review" wasted dispatches (issue #959).
  *
  * Returns an empty array on any error (fail-open: the caller proceeds with
  * dispatch rather than silently dropping work when the check fails).
@@ -99,10 +105,16 @@ export function findExistingPRsForIssue(repo: string, issueNumber: number): Link
     "i",
   );
 
+  // Match branches that belong to this issue: issue-N-*, issue_N_*, N-*, N_*
+  // This pattern is consistent with findApprovedPRForIssue and findBranchForIssue
+  const branchPattern = new RegExp(
+    `(?:^|[-/])issue[-_]${issueNumber}(?:[-_/]|$)|^${issueNumber}[-_]`,
+  );
+
   try {
     // Fetch open (including draft) PRs
     const openRaw = execSync(
-      `gh api "repos/${repo}/pulls?state=open&per_page=100" --jq '[.[] | {number, title, url: .html_url, isDraft: .draft, body: .body}]'`,
+      `gh api "repos/${repo}/pulls?state=open&per_page=100" --jq '[.[] | {number, title, url: .html_url, isDraft: .draft, body: .body, headRefName: .head.ref}]'`,
       { encoding: "utf-8", timeout: 30000 },
     );
     const openPRs = (
@@ -112,9 +124,10 @@ export function findExistingPRsForIssue(repo: string, issueNumber: number): Link
         url: string;
         isDraft: boolean;
         body: string | null;
+        headRefName: string;
       }>
     )
-      .filter((pr) => closingPattern.test(pr.body ?? ""))
+      .filter((pr) => closingPattern.test(pr.body ?? "") || branchPattern.test(pr.headRefName))
       .map((pr) => ({
         number: pr.number,
         title: pr.title,
@@ -125,7 +138,7 @@ export function findExistingPRsForIssue(repo: string, issueNumber: number): Link
 
     // Fetch recently merged PRs (last 30 closed PRs that were merged)
     const mergedRaw = execSync(
-      `gh api "repos/${repo}/pulls?state=closed&per_page=30" --jq '[.[] | select(.merged_at != null) | {number, title, url: .html_url, body: .body}]'`,
+      `gh api "repos/${repo}/pulls?state=closed&per_page=30" --jq '[.[] | select(.merged_at != null) | {number, title, url: .html_url, body: .body, headRefName: .head.ref}]'`,
       { encoding: "utf-8", timeout: 30000 },
     );
     const mergedPRs = (
@@ -134,9 +147,10 @@ export function findExistingPRsForIssue(repo: string, issueNumber: number): Link
         title: string;
         url: string;
         body: string | null;
+        headRefName: string;
       }>
     )
-      .filter((pr) => closingPattern.test(pr.body ?? ""))
+      .filter((pr) => closingPattern.test(pr.body ?? "") || branchPattern.test(pr.headRefName))
       .map((pr) => ({
         number: pr.number,
         title: pr.title,
