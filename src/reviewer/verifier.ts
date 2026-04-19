@@ -28,6 +28,12 @@ import {
   runSmokeTestsForTask,
   SMOKE_TEST_SCORE_PENALTY,
 } from "./cli-smoke-test.js";
+import {
+  applyMetaQualityGateToResult,
+  matchedMetaQualityKeyword,
+  sendMetaQualityAlert,
+  META_QUALITY_FLOOR,
+} from "./meta-quality-gate.js";
 
 /**
  * Per-dimension quality scores for verification results.
@@ -133,6 +139,19 @@ export interface VerificationResult {
    * human resolution via `/resolve` in the Telegram bot.
    */
   priorityQualityEscalated?: true;
+  /**
+   * Set to `true` when the meta-quality gate fired (issue #357).
+   *
+   * The task title contained a quality-enforcement keyword (e.g. "score bypass",
+   * "quality gate", "calibration") and the task's score fell below
+   * `META_QUALITY_FLOOR` (0.85) despite being approved by the standard guards.
+   *
+   * When this flag is set the `approved` field has been overridden to `false`
+   * and a Telegram alert (medium urgency) was sent explaining the credibility
+   * issue. The agent will receive the rejection with specific meta-quality
+   * guidance and must resubmit at ≥ 85%.
+   */
+  metaQualityRejected?: true;
 }
 
 /**
@@ -1061,6 +1080,64 @@ export class Verifier {
   }
 
   /**
+   * Apply the meta-quality gate (issue #357).
+   *
+   * Quality-enforcement tasks (those whose title contains keywords like
+   * "calibration", "quality gate", "score bypass", "threshold enforcement")
+   * must score ≥ META_QUALITY_FLOOR (0.85) to be approved.  Approving a
+   * quality-enforcement task at 0.55 would be a credibility-destroying pattern.
+   *
+   * When the gate fires:
+   *   - `approved` is overridden to `false`
+   *   - Notes are prefixed with a 🔬 META-QUALITY banner
+   *   - `verification_status` is updated to `"rejected"` in the state store
+   *   - A Telegram alert (medium urgency) is sent naming the keyword and score
+   *   - The result gains `metaQualityRejected: true`
+   *
+   * The gate is a no-op when:
+   *   - The task title has no meta-quality keyword
+   *   - The score is already ≥ META_QUALITY_FLOOR
+   *   - The result was already going to be rejected (approved=false)
+   */
+  private async applyMetaQualityGate(
+    taskId: string,
+    task: { title: string; agent_name?: string | null },
+    result: VerificationResult,
+  ): Promise<VerificationResult> {
+    const gateOutput = applyMetaQualityGateToResult({
+      taskId,
+      taskTitle: task.title,
+      agentName: task.agent_name,
+      approved: result.approved,
+      score: result.score,
+      notes: result.notes,
+      revision: result.revision,
+    });
+
+    if (!gateOutput.metaQualityRejected) {
+      return result;
+    }
+
+    // Override the task's verification status in the store.
+    this.store.updateTask(taskId, {
+      verification_status: "rejected",
+      verification_notes: gateOutput.notes,
+    });
+
+    // Fire-and-forget Telegram alert.
+    const keyword = matchedMetaQualityKeyword(task.title) ?? "quality enforcement";
+    await sendMetaQualityAlert(this.notifier, taskId, task.agent_name, result.score, keyword);
+
+    return {
+      ...result,
+      approved: false,
+      notes: gateOutput.notes,
+      revision: gateOutput.revision,
+      metaQualityRejected: true,
+    };
+  }
+
+  /**
    * Hold a sub-0.60 task for operator review instead of auto-rejecting.
    *
    * Issue #272: tasks below the quality floor (0.60) are placed in
@@ -1708,12 +1785,14 @@ export class Verifier {
       );
 
       // ── Priority quality gate (borderline path) ──────────────────────────
-      return this.applyPriorityQualityGate(
+      const borderlineAfterPriority = await this.applyPriorityQualityGate(
         taskId,
         task.agent_name,
         task.issue_priority,
         finalResult,
       );
+      // ── Meta-quality gate (borderline path) ──────────────────────────────
+      return this.applyMetaQualityGate(taskId, task, borderlineAfterPriority);
     }
 
     // ── Standard (non-borderline) result ────────────────────────────────────
@@ -1845,12 +1924,14 @@ export class Verifier {
     };
 
     // ── Priority quality gate (standard path) ────────────────────────────────
-    return this.applyPriorityQualityGate(
+    const standardAfterPriority = await this.applyPriorityQualityGate(
       taskId,
       task.agent_name,
       task.issue_priority,
       standardResult,
     );
+    // ── Meta-quality gate (standard path) ────────────────────────────────────
+    return this.applyMetaQualityGate(taskId, task, standardAfterPriority);
   }
 
   /**

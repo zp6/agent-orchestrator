@@ -111,6 +111,20 @@ export {
   PRIORITY_QUALITY_FLOOR,
 } from "./reviewer/verifier.js";
 export type { VerificationResult, QualityDimensions } from "./reviewer/verifier.js";
+
+// Meta-quality gate (issue #357) — elevated floor for quality-enforcement tasks.
+export {
+  isMetaQualityTask,
+  matchedMetaQualityKeyword,
+  applyMetaQualityGateToResult,
+  buildMetaQualityAlertBody,
+  META_QUALITY_FLOOR,
+  META_QUALITY_KEYWORDS,
+} from "./reviewer/meta-quality-gate.js";
+export type {
+  MetaQualityGateInput,
+  MetaQualityGateOutput,
+} from "./reviewer/meta-quality-gate.js";
 export type { SubtaskRollupPolicy, SubtaskRollupResult, SubtaskChildSummary, ShortCircuitDimension, ScoreCoverageMetric } from "./state/types.js";
 
 export { Supervisor, extractIssueRefs, isDecisionAlreadyResolved, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo, formatConflictStatsSection, formatPRConfidenceSection, formatRoutingAccuracySection, formatQualityByTaskTypeSection } from "./reviewer/supervisor.js";
