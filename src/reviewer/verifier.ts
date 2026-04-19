@@ -232,6 +232,46 @@ export const TRIAGE_REQUIRED_FIELDS = [
 ] as const;
 
 /**
+ * Recommended output schema for proposal tasks.
+ *
+ * Proposals are less strictly structured than research or triage tasks, so this
+ * is exported as guidance for the orchestrator dispatcher to include in proposal
+ * task prompts — not enforced as a hard schema requirement by the verifier.
+ *
+ * Proposals evaluated with PROPOSAL_SYSTEM_PROMPT use flexible assessment rather
+ * than deterministic schema checking.
+ */
+export const PROPOSAL_OUTPUT_SCHEMA = `## Proposal Summary
+[One-paragraph executive summary of the proposed feature/improvement and why it matters]
+
+## Requirements & Acceptance Criteria
+- [Feature requirement 1]
+- [Feature requirement 2]
+- [Acceptance criterion 1 — e.g. "X must be performant under Y conditions"]
+
+## Implementation Considerations
+- [Risk or architectural concern]
+- [Integration point or dependency]
+- [Effort estimate or complexity note — e.g. "estimated 2–3 sprint cycles"]
+- [Open questions or assumptions]
+
+## Issue Breakdown
+- [Issue 1: Brief description and context]
+- [Issue 2: Brief description and context]
+- [Follow-up tasks, prerequisites, or blockers]`;
+
+/**
+ * Section headers recommended in every proposal output.
+ * Used for dispatcher guidance only (not enforced by verifier).
+ */
+export const PROPOSAL_REQUIRED_SECTIONS = [
+  "## Proposal Summary",
+  "## Requirements & Acceptance Criteria",
+  "## Implementation Considerations",
+  "## Issue Breakdown",
+] as const;
+
+/**
  * Minimum schema_compliance score for a triage/housekeeping task to pass.
  * A task with schema_compliance below this threshold is rejected with a
  * specific missing-fields message regardless of LLM content quality score.
@@ -547,6 +587,49 @@ Dimension guide (for research tasks, these map to content quality):
 - **test_coverage**: Was evidence gathered comprehensively? Were findings validated or stress-tested?
 - **code_quality**: Schema compliance — are all five required sections present and substantively filled?`;
 
+const PROPOSAL_SYSTEM_PROMPT = `You are a quality reviewer for feature proposals and roadmap tasks produced by an AI agent. Given a proposal description and the agent's output, assess the quality of the proposal.
+
+## Scoring
+
+Respond with ONLY a JSON object (no markdown, no code fences):
+{
+  "approved": true/false,
+  "score": 0.0-1.0,
+  "notes": "Brief assessment of proposal quality, completeness, and feasibility",
+  "revision": "If not approved, specific guidance for improvement (omit if approved)",
+  "explanation": "REQUIRED when score < 0.60: 1-3 sentences explaining what drove the low score — e.g. which requirements were unclear, what feasibility analysis was missing, or what made the proposal hard to act on. Omit entirely when score >= 0.60.",
+  "marginal_reason": "REQUIRED when approved is true AND score is between 0.60 and 0.74: one sentence explaining what prevented a higher score (e.g. 'Missing risk analysis for integration points reduced confidence despite clear core requirements.'). Omit entirely otherwise.",
+  "dimensions": {
+    "correctness": 0.0-1.0,
+    "completeness": 0.0-1.0,
+    "test_coverage": 0.0-1.0,
+    "code_quality": 0.0-1.0
+  }
+}
+
+## Content Quality Criteria
+
+Evaluate proposal quality on:
+- **Requirements clarity**: Are all feature requirements and acceptance criteria clearly specified?
+- **Feasibility analysis**: Are implementation risks, challenges, and dependencies identified?
+- **Effort estimation**: Is the scope and complexity realistic and documented?
+- **Issue breakdown**: Is the work breakdown sufficient for a team to start implementation?
+- **Completeness**: Does the proposal cover all necessary aspects (architecture, risks, dependencies, timeline)?
+
+Scoring guide:
+- 0.9-1.0: Excellent — thorough spec, clear acceptance criteria, risks identified, actionable breakdown
+- 0.75-0.89: Good — meets minimum spec with minor gaps in detail or risk analysis
+- 0.60-0.74: Marginal — basic proposal present but with gaps in breakdown or feasibility analysis; use marginal_reason
+- Below 0.60: Rejected — score is below the hard floor; set approved:false and provide specific revision guidance
+
+IMPORTANT: Any score below 0.60 MUST have approved:false. Scores at or above 0.60 may be approved.
+
+Dimension guide (for proposals):
+- **correctness**: Is the proposal technically feasible without major architectural conflicts?
+- **completeness**: Are all requirements, constraints, and acceptance criteria specified?
+- **test_coverage**: Are risks, edge cases, and integration points identified? Is effort estimation provided?
+- **code_quality**: Is the issue breakdown actionable? Is the implementation roadmap clear enough for a team to start?`;
+
 /**
  * System prompt for the second-pass reviewer.
  * Deliberately more sceptical — it knows a first reviewer already approved
@@ -609,17 +692,21 @@ export class Verifier {
    * @param isHousekeeping - When true, dimension labels are adapted for triage tasks:
    *   - "Test Coverage" → "Evidence Coverage" (duplicates verified against each other)
    *   - "Code Quality"  → "Schema Compliance" (JSON block present and well-formed)
+   * @param isProposal - When true, dimension labels are adapted for proposal tasks:
+   *   - "Test Coverage" → "Evidence Coverage" (risks and integration points identified)
+   *   - "Code Quality"  → "Actionability" (implementation roadmap clarity)
    */
   private formatDimensionsBreakdown(
     dimensions: QualityDimensions,
     isResearch = false,
     isHousekeeping = false,
+    isProposal = false,
   ): string {
     const threshold = 0.8;
     const formatScore = (d: number) => `${(d * 100).toFixed(0)}/100`;
     const indicator = (d: number) => (d >= threshold ? "✓" : "✗");
 
-    const taskMode = isHousekeeping ? "housekeeping" : isResearch ? "research" : "standard";
+    const taskMode = isHousekeeping ? "housekeeping" : isResearch ? "research" : isProposal ? "proposal" : "standard";
 
     const labels = {
       correctness:
@@ -627,31 +714,39 @@ export class Verifier {
           ? "issues correctly classified, action/reason accurate"
           : taskMode === "research"
             ? "claims technically sound"
-            : "logic, no bugs",
+            : taskMode === "proposal"
+              ? "proposal is technically feasible"
+              : "logic, no bugs",
       completeness:
         taskMode === "housekeeping"
           ? "all open issues reviewed, nothing skipped"
           : taskMode === "research"
             ? "all aspects of question addressed"
-            : "requirements met",
+            : taskMode === "proposal"
+              ? "all requirements and acceptance criteria specified"
+              : "requirements met",
       test_coverage:
         taskMode === "housekeeping"
           ? "duplicates verified, evidence gathered"
           : taskMode === "research"
             ? "findings validated, evidence comprehensive"
-            : "edge cases covered",
+            : taskMode === "proposal"
+              ? "risks, edge cases, and integration points identified"
+              : "edge cases covered",
       code_quality:
         taskMode === "housekeeping"
           ? "JSON schema block present and well-formed"
           : taskMode === "research"
             ? "all 5 required sections present and substantive"
-            : "clarity, documentation",
+            : taskMode === "proposal"
+              ? "implementation roadmap is clear and actionable"
+              : "clarity, documentation",
     };
 
     const test_coverage_label =
       taskMode === "standard" ? "Test Coverage" : "Evidence Coverage";
     const code_quality_label =
-      taskMode === "standard" ? "Code Quality" : "Schema Compliance";
+      taskMode === "standard" ? "Code Quality" : taskMode === "proposal" ? "Actionability" : "Schema Compliance";
 
     return [
       "## Quality Dimensions Breakdown",
@@ -1387,11 +1482,17 @@ export class Verifier {
     const isResearch = task.task_type === "research";
     const isHousekeeping =
       task.task_type === "housekeeping" || task.title.includes("[housekeeping]");
+    const isProposal =
+      task.title.includes("[Proposal]") ||
+      task.title.includes("[Roadmap]") ||
+      task.title.includes("[Feature Request]");
     const prompt = isResearch
       ? `## Research Question\n${task.description ?? task.title}\n\n## Agent Analysis (${task.agent_name})\n${task.result ?? "(no result)"}`
       : isHousekeeping
         ? `## Triage Task\n${task.description ?? task.title}\n\n## Agent Output (${task.agent_name})\n${task.result ?? "(no result)"}`
-        : `## Task\n${task.description ?? task.title}\n\n## Agent Response (${task.agent_name})\n${task.result ?? "(no result)"}`;
+        : isProposal
+          ? `## Proposal\n${task.description ?? task.title}\n\n## Agent Output (${task.agent_name})\n${task.result ?? "(no result)"}`
+          : `## Task\n${task.description ?? task.title}\n\n## Agent Response (${task.agent_name})\n${task.result ?? "(no result)"}`;
 
     // ── Triage schema compliance pre-check ──────────────────────────────────
     // For housekeeping tasks, run a deterministic JSON schema check BEFORE the
@@ -1523,11 +1624,13 @@ export class Verifier {
     const LLM_TIMEOUT_MS = 5 * 60 * 1000;
 
     // ── First pass ──────────────────────────────────────────────────────────
-    const systemPrompt = isHousekeeping
-      ? TRIAGE_SYSTEM_PROMPT
-      : isResearch
-        ? RESEARCH_SYSTEM_PROMPT
-        : SYSTEM_PROMPT;
+    const systemPrompt = isProposal
+      ? PROPOSAL_SYSTEM_PROMPT
+      : isHousekeeping
+        ? TRIAGE_SYSTEM_PROMPT
+        : isResearch
+          ? RESEARCH_SYSTEM_PROMPT
+          : SYSTEM_PROMPT;
 
     const firstPassResult = await this.runLLMPass(
       client,
@@ -1656,7 +1759,7 @@ export class Verifier {
       const usedDimensions = enforcedSecondPassResult.dimensions ?? enforcedFirstPassResult.dimensions;
       const dimensionsBreakdown =
         !finalApproved && usedDimensions
-          ? `\n\n${this.formatDimensionsBreakdown(usedDimensions, isResearch, isHousekeeping)}`
+          ? `\n\n${this.formatDimensionsBreakdown(usedDimensions, isResearch, isHousekeeping, isProposal)}`
           : "";
       const enrichedRevision =
         !finalApproved && baseRevision && finalExplanation
@@ -1831,7 +1934,7 @@ export class Verifier {
     // Enrich revision with explanation and dimension breakdown so agents understand the low score.
     const dimensionsBreakdown =
       !penaltyAdjustedResult.approved && penaltyAdjustedResult.dimensions
-        ? `\n\n${this.formatDimensionsBreakdown(penaltyAdjustedResult.dimensions, isResearch, isHousekeeping)}`
+        ? `\n\n${this.formatDimensionsBreakdown(penaltyAdjustedResult.dimensions, isResearch, isHousekeeping, isProposal)}`
         : "";
     const enrichedRevision =
       !penaltyAdjustedResult.approved &&
