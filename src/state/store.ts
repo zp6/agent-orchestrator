@@ -7806,18 +7806,15 @@ export class StateStore {
   }
 
   /**
-   * Mark an antibody log entry as a false positive — i.e. the operator has
-   * determined that the filter fired incorrectly for this PR.
-   *
-   * @param id - The antibody_log.id to mark.
-   * @throws   If no entry with the given id exists.
+   * Mark an antibody_log entry as a false positive.
+   * Throws if the entry does not exist.
    */
   markAntibodyFalsePositive(id: number): void {
-    const entry = this.db
+    const row = this.db
       .prepare("SELECT id FROM antibody_log WHERE id = ?")
       .get(id);
-    if (!entry) {
-      throw new Error(`Antibody log entry ${id} not found`);
+    if (!row) {
+      throw new Error(`antibody_log entry ${id} not found`);
     }
     this.db
       .prepare("UPDATE antibody_log SET false_positive = 1 WHERE id = ?")
@@ -7825,63 +7822,54 @@ export class StateStore {
   }
 
   /**
-   * Return active (non-done) tasks that were dispatched with an antibody-risk
-   * warning in their system logs.  Used by the operator panel to show tasks
-   * that are currently "held" under antibody scrutiny.
+   * Return active tasks (pending / dispatched / in_progress) that have at
+   * least one antibody-risk warning in their logs.
    */
   getAntibodyHeldTasks(): Array<Task & { antibody_log_entry: string }> {
     return this.db.prepare(`
       SELECT t.*, tl.content AS antibody_log_entry
       FROM tasks t
       JOIN task_logs tl ON tl.task_id = t.id
-      WHERE tl.content LIKE '%[antibody-flagged]%'
+      WHERE tl.content LIKE '[antibody-flagged]%'
         AND tl.direction = 'system'
-        AND t.status NOT IN ('done', 'failed', 'escalated')
+        AND t.status IN ('pending', 'dispatched', 'in_progress')
       GROUP BY t.id
       ORDER BY t.created_at DESC
     `).all() as Array<Task & { antibody_log_entry: string }>;
   }
 
   /**
-   * Compute accuracy metrics for the antibody pre-dispatch filter over a
-   * rolling time window.
+   * Compute antibody filter accuracy metrics over a rolling window.
    *
-   * - true_positives  = flagged tasks that later failed/escalated (correct alert)
-   * - false_positives = flagged tasks that completed successfully (over-fired)
-   * - operator_overrides = antibody_log entries explicitly marked as false positive
-   * - precision = TP / (TP + FP), or null when there are no resolved tasks
-   *
-   * @param windowDays - Rolling window in days (e.g. 7, 30, 90).
+   * True positives  = flagged tasks that later failed or were escalated.
+   * False positives = flagged tasks that completed (done) + operator-marked
+   *                   antibody_log entries.
    */
   getAntibodyFilterAccuracy(windowDays: number): AntibodyFilterAccuracy {
     const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
 
-    // Tasks flagged by the antibody filter within the window
-    const flagged = this.db.prepare(`
-      SELECT t.id, t.status
+    const flaggedRows = this.db.prepare(`
+      SELECT t.status
       FROM tasks t
       JOIN task_logs tl ON tl.task_id = t.id
-      WHERE tl.content LIKE '%[antibody-flagged]%'
+      WHERE tl.content LIKE '[antibody-flagged]%'
         AND tl.direction = 'system'
         AND t.created_at >= ?
       GROUP BY t.id
-    `).all(since) as Array<{ id: string; status: string }>;
+    `).all(since) as Array<{ status: string }>;
 
-    const totalFlagged = flagged.length;
-    const truePositives  = flagged.filter((t) => t.status === "failed" || t.status === "escalated").length;
-    // Flagged tasks that completed (filter over-fired for those tasks)
-    const taskFalsePositives = flagged.filter((t) => t.status === "done").length;
+    const totalFlagged = flaggedRows.length;
+    const truePositives = flaggedRows.filter((t) => t.status === "failed" || t.status === "escalated").length;
+    const taskFalsePositives = flaggedRows.filter((t) => t.status === "done").length;
 
-    // Operator-marked false positives in the antibody_log within the window
-    const { overrides } = this.db.prepare(`
-      SELECT COUNT(*) AS overrides
+    const { operatorOverrides } = this.db.prepare(`
+      SELECT COUNT(*) AS operatorOverrides
       FROM antibody_log
       WHERE false_positive = 1
         AND timestamp >= ?
-    `).get(since) as { overrides: number };
+    `).get(since) as { operatorOverrides: number };
 
-    // false_positives = task-level FPs + operator-marked antibody log FPs
-    const falsePositives = taskFalsePositives + overrides;
+    const falsePositives = taskFalsePositives + operatorOverrides;
 
     const precision =
       truePositives + falsePositives > 0
@@ -7893,7 +7881,7 @@ export class StateStore {
       total_flagged: totalFlagged,
       true_positives: truePositives,
       false_positives: falsePositives,
-      operator_overrides: overrides,
+      operator_overrides: operatorOverrides,
       precision,
     };
   }

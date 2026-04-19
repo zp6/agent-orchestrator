@@ -160,9 +160,10 @@
         "outcome",
         "reason",
         "agent",
-        "timestamp"
+        "timestamp",
+        "false_positive"
       ],
-      "notes": "Structured failure genome — tracks PR decisions and post-merge outcomes."
+      "notes": "Structured failure genome — tracks PR decisions and post-merge outcomes. false_positive=1 means operator marked the filter as having fired incorrectly."
     },
     {
       "table": "agent_health",

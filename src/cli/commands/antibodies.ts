@@ -110,37 +110,42 @@ function formatStats(stats: Array<{ decision: string; count: number; with_outcom
   return lines.join("\n");
 }
 
-// ── Filter accuracy formatting ────────────────────────────────────────────────
-
 /**
- * Render an AntibodyFilterAccuracy summary as a human-readable string.
- * Used by the CLI `orch antibodies --accuracy` flag and exported for tests.
+ * Format an AntibodyFilterAccuracy report for terminal display.
+ * Exported so it can be unit-tested independently of CLI wiring.
  */
 export function formatFilterAccuracy(acc: AntibodyFilterAccuracy): string {
   const precisionStr =
     acc.precision === null
-      ? "n/a"
+      ? chalk.dim("n/a")
       : `${(acc.precision * 100).toFixed(1)}%`;
 
   let indicator: string;
+  let qualityLabel: string;
   if (acc.precision === null) {
-    indicator = "no data yet";
+    indicator = chalk.dim("—");
+    qualityLabel = "no data";
   } else if (acc.precision >= 0.8) {
-    indicator = "performing well";
+    indicator = chalk.green("✓");
+    qualityLabel = "performing well";
   } else if (acc.precision >= 0.6) {
-    indicator = "moderate";
+    indicator = chalk.yellow("⚠");
+    qualityLabel = "moderate accuracy";
   } else {
-    indicator = "low";
+    indicator = chalk.red("✗");
+    qualityLabel = "low accuracy — review patterns";
   }
 
-  return (
-    `Antibody filter accuracy (last ${acc.window_days}d): ` +
-    `total_flagged=${acc.total_flagged} ` +
-    `true_positives=${acc.true_positives} ` +
-    `false_positives=${acc.false_positives} ` +
-    `operator_overrides=${acc.operator_overrides} ` +
-    `precision=${precisionStr} [${indicator}]`
-  );
+  const lines = [
+    chalk.bold(`\n🧬 Antibody Filter Accuracy (last ${acc.window_days} days)\n`),
+    `  ${indicator}  Precision:          ${chalk.bold(precisionStr)}  ${chalk.dim(`(${qualityLabel})`)}`,
+    `     Total flagged:      ${chalk.bold(String(acc.total_flagged))}`,
+    `     True positives:     ${chalk.bold(String(acc.true_positives))}  ${chalk.dim("(flagged + later failed)")}`,
+    `     False positives:    ${chalk.bold(String(acc.false_positives))}  ${chalk.dim("(flagged + completed ok)")}`,
+    `     Operator overrides: ${chalk.bold(String(acc.operator_overrides))}  ${chalk.dim("(manually marked FP in log)")}`,
+  ];
+
+  return lines.join("\n");
 }
 
 // ── Command registration ──────────────────────────────────────────────────────
