@@ -481,6 +481,24 @@ export class Daemon {
       this.log.warn("Startup duplicate-ID scan failed", { error: err instanceof Error ? err.message : String(err) });
     }
 
+    // Check for data integrity issue: warn if >10% of recent approved tasks have null quality scores (issue #965).
+    // This catches regressions where verification was completed but quality_score wasn't recorded.
+    try {
+      const scoreCheck = this.store.checkRecentApprovedTasksForNullScores(30); // last 30 days
+      if (scoreCheck.shouldWarn) {
+        const msg =
+          `⚠️ Data quality warning: ${scoreCheck.nullScoreCount}/${scoreCheck.totalApproved} ` +
+          `(${scoreCheck.nullScorePercentage.toFixed(1)}%) recent approved tasks have null quality_score. ` +
+          `This indicates verification completed but quality scoring failed. ` +
+          `Run 'orch tasks backfill-scores' to repair, or investigate why the verifier is not recording scores.`;
+        this.log.warn("Null quality score threshold exceeded", scoreCheck);
+        await notifyOperator(msg, "", "warning");
+        console.warn("\n" + msg + "\n");
+      }
+    } catch (err) {
+      this.log.warn("Startup null-score check failed", { error: err instanceof Error ? err.message : String(err) });
+    }
+
     // Seed learned rules from CLAUDE.md files (idempotent — skips existing rules)
     try {
       const { seeded, repos } = await seedFromClaudeMd(this.config, this.store);

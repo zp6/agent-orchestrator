@@ -2623,6 +2623,43 @@ export class StateStore {
   }
 
   /**
+   * Check quality score data integrity: warn if >10% of recent approved tasks have null scores.
+   *
+   * Returns { totalApproved, nullScoreCount, nullScorePercentage, shouldWarn }.
+   * Filters to approved tasks created in the last 30 days.
+   *
+   * Acceptance criteria (issue #965):
+   * - Detects when quality_score IS NULL but verification_status = 'approved'
+   * - Only counts tasks from the last 30 days (recent data)
+   * - Returns shouldWarn=true when nullScorePercentage > 10%
+   * - Used at startup to alert operators to data quality issues
+   */
+  checkRecentApprovedTasksForNullScores(
+    daysSince: number = 30,
+  ): { totalApproved: number; nullScoreCount: number; nullScorePercentage: number; shouldWarn: boolean } {
+    const row = this.db.prepare(`
+      SELECT
+        COUNT(*) AS total_approved,
+        COALESCE(SUM(CASE WHEN quality_score IS NULL THEN 1 ELSE 0 END), 0) AS null_score_count
+      FROM tasks
+      WHERE parent_task_id IS NULL
+        AND verification_status = 'approved'
+        AND created_at >= datetime('now', '-' || ? || ' days')
+    `).get(daysSince) as { total_approved: number; null_score_count: number };
+
+    const { total_approved: totalApproved, null_score_count: nullScoreCount } = row;
+    const nullScorePercentage = totalApproved > 0 ? (nullScoreCount / totalApproved) * 100 : 0;
+    const shouldWarn = nullScorePercentage > 10;
+
+    return {
+      totalApproved,
+      nullScoreCount,
+      nullScorePercentage,
+      shouldWarn,
+    };
+  }
+
+  /**
    * Compute a quality score trend for a single agent.
    *
    * Compares the average score of the most recent `windowSize` scored tasks
