@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { StateStore, type AntibodyLogEntry, type DiffShape, type Task } from "../../state/store.js";
+import { StateStore, type AntibodyLogEntry, type AntibodyFilterAccuracy, type DiffShape, type Task } from "../../state/store.js";
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
 
@@ -108,6 +108,39 @@ function formatStats(stats: Array<{ decision: string; count: number; with_outcom
       `outcome_filed=${s.with_outcome} (${pct}%)`;
   });
   return lines.join("\n");
+}
+
+// ── Filter accuracy formatting ────────────────────────────────────────────────
+
+/**
+ * Render an AntibodyFilterAccuracy summary as a human-readable string.
+ * Used by the CLI `orch antibodies --accuracy` flag and exported for tests.
+ */
+export function formatFilterAccuracy(acc: AntibodyFilterAccuracy): string {
+  const precisionStr =
+    acc.precision === null
+      ? "n/a"
+      : `${(acc.precision * 100).toFixed(1)}%`;
+
+  let indicator: string;
+  if (acc.precision === null) {
+    indicator = "no data yet";
+  } else if (acc.precision >= 0.8) {
+    indicator = "performing well";
+  } else if (acc.precision >= 0.6) {
+    indicator = "moderate";
+  } else {
+    indicator = "low";
+  }
+
+  return (
+    `Antibody filter accuracy (last ${acc.window_days}d): ` +
+    `total_flagged=${acc.total_flagged} ` +
+    `true_positives=${acc.true_positives} ` +
+    `false_positives=${acc.false_positives} ` +
+    `operator_overrides=${acc.operator_overrides} ` +
+    `precision=${precisionStr} [${indicator}]`
+  );
 }
 
 // ── Command registration ──────────────────────────────────────────────────────

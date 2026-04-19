@@ -1227,6 +1227,26 @@ export interface AntibodyLogEntry {
   agent: string | null;
   /** ISO timestamp of the review decision. */
   timestamp: string;
+  /** 1 = operator has marked this entry as a false positive, 0 = genuine signal. */
+  false_positive: number;
+}
+
+/**
+ * Accuracy metrics for the antibody pre-dispatch filter over a rolling window.
+ */
+export interface AntibodyFilterAccuracy {
+  /** Number of days in the measurement window. */
+  window_days: number;
+  /** Total number of tasks that were flagged by the antibody filter. */
+  total_flagged: number;
+  /** Flagged tasks that later failed or were escalated (correctly predicted risky). */
+  true_positives: number;
+  /** Flagged tasks that completed successfully (filter over-fired). */
+  false_positives: number;
+  /** Antibody log entries explicitly marked as false positives by an operator. */
+  operator_overrides: number;
+  /** Precision = TP / (TP + FP), or null when no resolved tasks yet. */
+  precision: number | null;
 }
 
 export interface WriteAntibodyLogParams {
@@ -1588,7 +1608,7 @@ export class StateStore {
   createTask(params: {
     title: string;
     description?: string;
-    source: TaskSource;
+    source?: TaskSource;
     source_ref?: string;
     agent_name?: string;
     task_type?: TaskType;
@@ -1641,7 +1661,7 @@ export class StateStore {
         id,
         params.title,
         params.description ?? null,
-        params.source,
+        params.source ?? "manual",
         params.source_ref ?? null,
         params.agent_name ?? null,
         params.parent_task_id ?? null,
@@ -1978,6 +1998,14 @@ export class StateStore {
 
     this.db.prepare(`UPDATE tasks SET ${fields.join(", ")} WHERE id = ?`).run(...params);
     return this.getTask(id);
+  }
+
+  /**
+   * Convenience wrapper — update only the status of a task.
+   * Equivalent to `updateTask(id, { status })`.
+   */
+  updateTaskStatus(id: string, status: Task["status"]): Task | undefined {
+    return this.updateTask(id, { status });
   }
 
   addLog(params: {
@@ -7688,15 +7716,16 @@ export class StateStore {
   private runAntibodyLogMigration(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS antibody_log (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        repo        TEXT    NOT NULL,
-        pr_number   INTEGER NOT NULL,
-        diff_shape  TEXT    NOT NULL,
-        decision    TEXT    NOT NULL,
-        outcome     TEXT,
-        reason      TEXT,
-        agent       TEXT,
-        timestamp   TEXT    NOT NULL
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo           TEXT    NOT NULL,
+        pr_number      INTEGER NOT NULL,
+        diff_shape     TEXT    NOT NULL,
+        decision       TEXT    NOT NULL,
+        outcome        TEXT,
+        reason         TEXT,
+        agent          TEXT,
+        timestamp      TEXT    NOT NULL,
+        false_positive INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS idx_antibody_log_repo_pr  ON antibody_log(repo, pr_number);
       CREATE INDEX IF NOT EXISTS idx_antibody_log_decision ON antibody_log(decision);
@@ -7741,19 +7770,24 @@ export class StateStore {
    * Retrieve recent antibody log entries, optionally filtered by repo and/or
    * decision.  Returns entries newest-first.
    *
-   * @param opts.repo     - Restrict to a single repo slug.
-   * @param opts.decision - Restrict to a specific decision type.
-   * @param opts.limit    - Max rows to return (default 50).
+   * @param opts.repo                - Restrict to a single repo slug.
+   * @param opts.decision            - Restrict to a specific decision type.
+   * @param opts.limit               - Max rows to return (default 50).
+   * @param opts.includeFalsePositives - When true, include operator-marked FP entries (default false).
    */
   getAntibodyEntries(opts: {
     repo?: string;
     decision?: AntibodyLogEntry["decision"];
     limit?: number;
+    includeFalsePositives?: boolean;
   } = {}): AntibodyLogEntry[] {
-    const { repo, decision, limit = 50 } = opts;
+    const { repo, decision, limit = 50, includeFalsePositives = false } = opts;
     const conditions: string[] = [];
     const args: unknown[] = [];
 
+    if (!includeFalsePositives) {
+      conditions.push("false_positive = 0");
+    }
     if (repo) {
       conditions.push("repo = ?");
       args.push(repo);
@@ -7769,6 +7803,99 @@ export class StateStore {
     return this.db
       .prepare(`SELECT * FROM antibody_log ${where} ORDER BY timestamp DESC LIMIT ?`)
       .all(...args) as AntibodyLogEntry[];
+  }
+
+  /**
+   * Mark an antibody log entry as a false positive — i.e. the operator has
+   * determined that the filter fired incorrectly for this PR.
+   *
+   * @param id - The antibody_log.id to mark.
+   * @throws   If no entry with the given id exists.
+   */
+  markAntibodyFalsePositive(id: number): void {
+    const entry = this.db
+      .prepare("SELECT id FROM antibody_log WHERE id = ?")
+      .get(id);
+    if (!entry) {
+      throw new Error(`Antibody log entry ${id} not found`);
+    }
+    this.db
+      .prepare("UPDATE antibody_log SET false_positive = 1 WHERE id = ?")
+      .run(id);
+  }
+
+  /**
+   * Return active (non-done) tasks that were dispatched with an antibody-risk
+   * warning in their system logs.  Used by the operator panel to show tasks
+   * that are currently "held" under antibody scrutiny.
+   */
+  getAntibodyHeldTasks(): Array<Task & { antibody_log_entry: string }> {
+    return this.db.prepare(`
+      SELECT t.*, tl.content AS antibody_log_entry
+      FROM tasks t
+      JOIN task_logs tl ON tl.task_id = t.id
+      WHERE tl.content LIKE '%[antibody-flagged]%'
+        AND tl.direction = 'system'
+        AND t.status NOT IN ('done', 'failed', 'escalated')
+      GROUP BY t.id
+      ORDER BY t.created_at DESC
+    `).all() as Array<Task & { antibody_log_entry: string }>;
+  }
+
+  /**
+   * Compute accuracy metrics for the antibody pre-dispatch filter over a
+   * rolling time window.
+   *
+   * - true_positives  = flagged tasks that later failed/escalated (correct alert)
+   * - false_positives = flagged tasks that completed successfully (over-fired)
+   * - operator_overrides = antibody_log entries explicitly marked as false positive
+   * - precision = TP / (TP + FP), or null when there are no resolved tasks
+   *
+   * @param windowDays - Rolling window in days (e.g. 7, 30, 90).
+   */
+  getAntibodyFilterAccuracy(windowDays: number): AntibodyFilterAccuracy {
+    const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+
+    // Tasks flagged by the antibody filter within the window
+    const flagged = this.db.prepare(`
+      SELECT t.id, t.status
+      FROM tasks t
+      JOIN task_logs tl ON tl.task_id = t.id
+      WHERE tl.content LIKE '%[antibody-flagged]%'
+        AND tl.direction = 'system'
+        AND t.created_at >= ?
+      GROUP BY t.id
+    `).all(since) as Array<{ id: string; status: string }>;
+
+    const totalFlagged = flagged.length;
+    const truePositives  = flagged.filter((t) => t.status === "failed" || t.status === "escalated").length;
+    // Flagged tasks that completed (filter over-fired for those tasks)
+    const taskFalsePositives = flagged.filter((t) => t.status === "done").length;
+
+    // Operator-marked false positives in the antibody_log within the window
+    const { overrides } = this.db.prepare(`
+      SELECT COUNT(*) AS overrides
+      FROM antibody_log
+      WHERE false_positive = 1
+        AND timestamp >= ?
+    `).get(since) as { overrides: number };
+
+    // false_positives = task-level FPs + operator-marked antibody log FPs
+    const falsePositives = taskFalsePositives + overrides;
+
+    const precision =
+      truePositives + falsePositives > 0
+        ? truePositives / (truePositives + falsePositives)
+        : null;
+
+    return {
+      window_days: windowDays,
+      total_flagged: totalFlagged,
+      true_positives: truePositives,
+      false_positives: falsePositives,
+      operator_overrides: overrides,
+      precision,
+    };
   }
 
   /**
