@@ -557,6 +557,33 @@ export type {
   BypassDetectorConfig,
 } from "./reviewer/quality-floor-bypass-detector.js";
 
+// Score-zero approval alerter — real-time Telegram alert for score ≤ 0.05 approvals (issue #375).
+//
+// Fires an urgent Telegram notification whenever a task is approved with a score at or
+// near zero — indicating catastrophic quality failure regardless of the bypass path.
+// Complements the general LowScoreApprovalAlerter (threshold 0.70) and the
+// QualityFloorBypassDetector (threshold 0.80, filters on bypass_reason).
+//
+// Suppressed for short-circuit exits (already-in-review, pre-dispatch blocks) that
+// legitimately receive score 1.0 through a different path.
+//
+// Integration (via ReviewerInstances in orchestrator-adapter):
+//   const { scoreZeroAlerter } = createReviewerInstances(config, store, { notifier });
+//   await scoreZeroAlerter?.checkAndAlert(verificationResult, task);
+//
+// Direct usage:
+//   import { ScoreZeroApprovalAlerter } from 'claude-orchestrator-reviewer';
+//
+//   const alerter = new ScoreZeroApprovalAlerter(notifier);
+//   await alerter.checkAndAlert(verificationResult, task);
+export {
+  ScoreZeroApprovalAlerter,
+  SCORE_ZERO_ALERT_THRESHOLD,
+} from "./reviewer/score-zero-alert.js";
+export type {
+  ScoreZeroAlertOptions,
+} from "./reviewer/score-zero-alert.js";
+
 // Quality System Health — `/api/quality-system-health` API payload (issue #304).
 //
 // Surfaces bypass rate trending: how often the 0.60 quality floor is being

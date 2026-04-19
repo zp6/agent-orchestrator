@@ -29,6 +29,7 @@ import { RoutingViolationDetector } from "../reviewer/routing-violations.js";
 import { PreDispatchCapabilityEnforcer } from "../reviewer/pre-dispatch-capability-enforcer.js";
 import { LowScoreApprovalAlerter } from "../reviewer/low-score-approval-alerter.js";
 import { QualityFloorBypassDetector } from "../reviewer/quality-floor-bypass-detector.js";
+import { ScoreZeroApprovalAlerter } from "../reviewer/score-zero-alert.js";
 import type { ReviewerConfig } from "../config.js";
 import type { Notifier } from "../notify.js";
 import type {
@@ -114,6 +115,21 @@ export interface ReviewerInstances {
    * Undefined when no notifier is provided.
    */
   bypassDetector: QualityFloorBypassDetector | undefined;
+  /**
+   * Score-zero approval alerter (issue #375).
+   * Fires an urgent Telegram notification whenever a task is approved with
+   * quality_score ≤ 0.05, regardless of the bypass path.  Score-zero approvals
+   * represent catastrophic quality failure and require immediate operator attention.
+   *
+   * Suppressed for short-circuit exits (already-in-review, pre-dispatch blocks)
+   * that legitimately receive score 1.0 through a separate verification path.
+   *
+   * Call `scoreZeroAlerter.checkAndAlert(result, task)` after each approved
+   * verification result — it deduplicates per task ID and no-ops when the
+   * notifier is unconfigured.
+   * Undefined when no notifier is provided.
+   */
+  scoreZeroAlerter: ScoreZeroApprovalAlerter | undefined;
 }
 
 export interface CreateReviewerOptions {
@@ -223,6 +239,13 @@ export function createReviewerInstances(
       })
     : undefined;
 
+  // Create ScoreZeroApprovalAlerter if notifier is provided (issue #375).
+  // Fires an urgent Telegram notification for any approved task with score ≤ 0.05.
+  // Suppressed for short-circuit exits that legitimately bypass LLM scoring.
+  const scoreZeroAlerter = opts.notifier
+    ? new ScoreZeroApprovalAlerter(opts.notifier)
+    : undefined;
+
   return {
     reviewer,
     verifier: new Verifier(store, undefined, verificationResultStore),
@@ -242,5 +265,6 @@ export function createReviewerInstances(
     preDispatchEnforcer: new PreDispatchCapabilityEnforcer(config, opts.notifier),
     lowScoreApprovalAlerter,
     bypassDetector,
+    scoreZeroAlerter,
   };
 }
