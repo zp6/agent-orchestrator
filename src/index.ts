@@ -578,6 +578,47 @@ export type {
   FollowUpDispatchResult,
 } from "./reviewer/dispatch-cascade-analyzer.js";
 
+// Proactive rebase scheduler — issue #335.
+//
+// Detects open PRs where HEAD has diverged from main by ≥ N commits (default: 3)
+// AND the PR has been open > 24h. For each stale PR, emits a `StalePRRebaseTask`
+// for the orchestrator to dispatch as a rebase task — no operator input required.
+//
+// The `classifyRebaseTask()` helper lets the conflict-recovery reroute monitor
+// distinguish proactive (scheduled before conflict) from reactive (after conflict)
+// rebases, fulfilling the "count separately" acceptance criterion.
+//
+// Integration (in the orchestrator daemon loop):
+//   const scheduler = new ProactiveRebaseScheduler(notifier, { divergeThreshold: 3 });
+//   const { stalePRs } = await scheduler.run("owner/repo");
+//   for (const task of stalePRs) {
+//     await dispatcher.dispatch({ title: task.taskTitle, description: task.taskDescription });
+//   }
+//   // Record reactive rebases from the conflict-recovery path:
+//   scheduler.recordReactiveRebase();
+//   // Surface combined stats in the dashboard:
+//   const stats = scheduler.getStats(); // { proactiveScheduled, reactiveRecorded, ... }
+export {
+  ProactiveRebaseScheduler,
+  classifyRebaseTask,
+  formatProactiveRebaseAlert,
+  fetchOpenPRRecords,
+  countCommitsBehind,
+  hoursAgo,
+  DEFAULT_DIVERGE_THRESHOLD,
+  DEFAULT_MIN_PR_AGE_HOURS,
+  DEFAULT_SCHEDULE_COOLDOWN_MS,
+  MAX_STALE_PRS_PER_RUN,
+} from "./reviewer/proactive-rebase-scheduler.js";
+export type {
+  OpenPRRecord,
+  StalePRRebaseTask,
+  RebaseStats,
+  RebaseSchedulerRunResult,
+  ProactiveRebaseSchedulerOptions,
+  RebaseClassification,
+} from "./reviewer/proactive-rebase-scheduler.js";
+
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
 

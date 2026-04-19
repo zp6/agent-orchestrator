@@ -76,6 +76,7 @@ When this container is used for LLM PR reviews:
 - Routing violation detection: surface routing decisions that breach configured policy rules
 - Semantic duplicate guard: deduplicate improvement-detector issue candidates using semantic similarity
 - Quality system health: aggregate health status covering score floor, bypass rates, and calibration drift
+- Proactive rebase scheduler: detect PRs ≥3 commits behind main that have been open >24h; emit rebase tasks; count proactive vs reactive rebases separately
 
 **Out of scope (belongs to orchestrator-core):**
 - Daemon loop, state store, dispatching infrastructure
@@ -131,6 +132,7 @@ src/
     routing-violations.ts           — detect and surface routing decisions that breach policy rules
     semantic-duplicate-guard.ts     — semantic deduplication of improvement-detector issue candidates
     quality-system-health.ts        — aggregate quality-system health status: score floor, bypass rates, drift
+    proactive-rebase-scheduler.ts   — detect stale PRs (≥3 commits behind main, open >24h); emit rebase tasks; track proactive vs reactive rebase counts
   integration/
     orchestrator-adapter.ts         — createReviewerInstances() adapter for orchestrator import
   service/
