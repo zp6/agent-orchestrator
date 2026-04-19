@@ -90,25 +90,49 @@ export function seedDefaultPatterns(store: StateStore): number {
 
 // ── Retrieval & injection ─────────────────────────────────────────────────────
 
+/** How many of the injection slots are reserved for unproven patterns. */
+const UNPROVEN_SLOTS = 2;
+
 /**
  * Fetch active patterns relevant to the given repo and record a `hit` for
  * each one returned (since they are about to be injected into a prompt).
  *
+ * Mixes proven patterns (high confidence, high hits) with unproven ones
+ * (low hit count) so new patterns get exposure and a chance to prove
+ * themselves. Without rotation, high-confidence seeds permanently occupy
+ * all slots and new patterns never get injected.
+ *
  * @param store  - State store.
  * @param repo   - GitHub repo slug (e.g. "rapartlu/agent-orchestrator").
- * @param limit  - Max patterns to inject (default 5 to keep prompts lean).
+ * @param limit  - Max patterns to inject (default 7 to keep prompts lean).
  * @returns      - Array of relevant patterns; empty if none.
  */
 export function getAndRecordPatterns(
   store: StateStore,
   repo: string,
-  limit = 5,
+  limit = 7,
 ): LearnedPattern[] {
-  const patterns = store.getLearnedPatterns(repo, limit);
-  for (const p of patterns) {
+  // Fetch more than needed so we can split into proven/unproven
+  const all = store.getLearnedPatterns(repo, 50);
+  if (all.length === 0) return [];
+
+  // Split: unproven = fewer than 10 hits (haven't had a real chance yet)
+  const proven = all.filter((p) => p.hit_count >= 10);
+  const unproven = all.filter((p) => p.hit_count < 10);
+
+  // Fill proven slots first, then unproven
+  const provenSlots = Math.min(proven.length, limit - Math.min(UNPROVEN_SLOTS, unproven.length));
+  const unprovenSlots = Math.min(unproven.length, limit - provenSlots);
+
+  const selected = [
+    ...proven.slice(0, provenSlots),
+    ...unproven.slice(0, unprovenSlots),
+  ];
+
+  for (const p of selected) {
     store.recordPatternHit(p.id);
   }
-  return patterns;
+  return selected;
 }
 
 /**
