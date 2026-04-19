@@ -3,6 +3,16 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    # Only run CI when source code, tests, or build config changes.
+    # This avoids burning Actions minutes on docs/yaml/markdown PRs.
+    paths:
+      - "src/**"
+      - "test/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - "vitest.config.*"
+      - ".github/workflows/**"
   workflow_dispatch:
 
 # Cancel any in-progress run for the same branch when a new commit is pushed.
@@ -13,8 +23,12 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Use self-hosted runner when available (free); fall back to GitHub-hosted.
+    # To register this repo's host as a runner:
+    #   gh api repos/rapartlu/agent-orchestrator/actions/runners/registration-token -X POST
+    # then download + configure the Actions runner binary with that token.
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
@@ -24,7 +38,24 @@ jobs:
           node-version: "22"
           cache: npm
 
-      - run: npm ci
+      # Restore cached node_modules to avoid redundant installs across runs
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        id: cache-node-modules
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            node-modules-${{ runner.os }}-
+
+      - name: Install dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: npm ci
+
+      # If cache restored, still run npm ci in offline mode to validate integrity
+      - name: Validate dependencies (cached)
+        if: steps.cache-node-modules.outputs.cache-hit == 'true'
+        run: npm ci --prefer-offline
 
       - name: Type check
         run: npx tsc --noEmit
