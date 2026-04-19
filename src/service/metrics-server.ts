@@ -14,7 +14,7 @@
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import { StateStore, type DispatchBlockMetrics } from "../state/store.js";
+import { StateStore, type DispatchBlockMetrics, type SemanticMemoryEffectivenessResult } from "../state/store.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("metrics-server");
@@ -127,6 +127,22 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /semantic-memory-effectiveness ───────────────────────────────────
+    if (url.pathname === "/semantic-memory-effectiveness") {
+      const days = parseWindowDays(req);
+      try {
+        const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+        const result = store.getSemanticMemoryEffectiveness(since);
+        sendJson(res, 200, result);
+      } catch (err) {
+        log.warn("Failed to compute semantic memory effectiveness", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to compute metrics" });
+      }
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -135,7 +151,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
   });
 
   server.listen(port, "127.0.0.1", () => {
-    log.info("Metrics server started", { port, endpoints: ["/health", "/dispatch-efficiency"] });
+    log.info("Metrics server started", { port, endpoints: ["/health", "/dispatch-efficiency", "/semantic-memory-effectiveness"] });
   });
 
   return server;

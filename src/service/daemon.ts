@@ -91,6 +91,7 @@ const DISPATCH_BLOCK_RATE_THRESHOLD = 0.10; // 10% default
 const PROXY_HEALTH_CHECK_EVERY_N_CYCLES = 3;   // ~15min — check proxy server is reachable
 const CLOSED_ISSUE_FAILURE_CLEANUP_EVERY_N_CYCLES = 60; // ~5h — clear stale failures for closed issues
 const PROACTIVE_REBASE_EVERY_N_CYCLES = 3; // ~15min — proactively rebase stale branches
+const SEMANTIC_MEMORY_AUDIT_EVERY_N_CYCLES = 288; // ~24h — check semantic memory effectiveness (issue #1016)
 
 /**
  * Maximum time a single poll cycle is allowed to run before the watchdog
@@ -885,6 +886,44 @@ export class Daemon {
             .then((created) => { if (created > 0) console.log(`[${time}] Skip-pattern aggregator: created ${created} blocker issue(s)`); })
             .catch((err) => { this.log.warn("Skip-pattern check failed", { error: err instanceof Error ? err.message : String(err) }); }),
         );
+      }
+
+      // Semantic memory effectiveness audit — daily check that measures
+      // whether memory-assisted tasks achieve ≥15% higher first-pass
+      // verification rates vs unmatched tasks (issue #1016).
+      if (this.cycleCount % SEMANTIC_MEMORY_AUDIT_EVERY_N_CYCLES === 0) {
+        try {
+          const eff = this.store.getSemanticMemoryEffectiveness();
+          const hitPct = eff.memory_hit_rate !== null ? Math.round(eff.memory_hit_rate * 100) : 0;
+          const delta = eff.improvement_delta;
+          console.log(
+            `[${time}] Semantic memory: hit rate ${hitPct}%, ` +
+            `improvement delta ${delta !== null ? `${(delta * 100).toFixed(1)}%` : "N/A"}, ` +
+            `target met: ${eff.meets_target ?? "insufficient data"}`,
+          );
+          // Alert if we have enough data and the target is not met
+          if (
+            eff.matched.total_tasks >= 10 &&
+            eff.unmatched.total_tasks >= 10 &&
+            eff.meets_target === false
+          ) {
+            const deltaPct = delta !== null ? `${(delta * 100).toFixed(1)}%` : "N/A";
+            notifyOperator(
+              "Semantic Memory Below Target",
+              `After ${eff.matched.total_tasks + eff.unmatched.total_tasks} tasks, ` +
+              `memory-assisted first-pass rate improvement is ${deltaPct} (target: ≥15%). ` +
+              `Matched FPR: ${eff.matched.first_pass_rate !== null ? `${(eff.matched.first_pass_rate * 100).toFixed(1)}%` : "N/A"}, ` +
+              `Unmatched FPR: ${eff.unmatched.first_pass_rate !== null ? `${(eff.unmatched.first_pass_rate * 100).toFixed(1)}%` : "N/A"}. ` +
+              `Review semantic memory config (min_quality_score threshold, FTS5 query quality).`,
+              "warning",
+              "semantic-memory-effectiveness",
+            );
+          }
+        } catch (err) {
+          this.log.warn("Semantic memory effectiveness check failed", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
 
       // Already-in-review saturation check — runs every cycle.

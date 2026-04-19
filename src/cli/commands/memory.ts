@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { StateStore } from "../../state/store.js";
+import { StateStore, type SemanticMemoryCohortStats } from "../../state/store.js";
 
 /**
  * CLI command: `orch memory` — inspect and query the semantic task memory.
@@ -124,5 +124,96 @@ export function registerMemoryCommand(program: Command): void {
             ` Total: ${chalk.cyan(String(after))}`,
         );
       }
+    });
+
+  // ── effectiveness ─────────────────────────────────────────────────────────
+
+  mem
+    .command("effectiveness")
+    .description("Show semantic memory effectiveness: hit rate and first-pass verification comparison")
+    .option("-d, --days <n>", "Rolling window in days", "30")
+    .option("--json", "Output raw JSON")
+    .action((opts: { days: string; json?: boolean }) => {
+      const store = new StateStore();
+      const days = Math.max(1, parseInt(opts.days, 10) || 30);
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+      const result = store.getSemanticMemoryEffectiveness(since);
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      console.log(chalk.bold(`\nSemantic Memory Effectiveness (${days}-day window)`));
+      console.log(chalk.dim(`─`.repeat(55)));
+
+      // Hit rate
+      const hitPct = result.memory_hit_rate !== null
+        ? `${(result.memory_hit_rate * 100).toFixed(1)}%`
+        : "N/A";
+      console.log(`  Dispatches:   ${chalk.cyan(String(result.total_dispatches))}`);
+      console.log(`  Memory hits:  ${chalk.cyan(String(result.memory_hit_count))} (${hitPct})`);
+      console.log();
+
+      // Side-by-side comparison
+      const formatCohort = (label: string, c: SemanticMemoryCohortStats): void => {
+        console.log(chalk.bold(`  ${label}`));
+        console.log(`    Tasks:             ${chalk.cyan(String(c.total_tasks))}`);
+        const fpr = c.first_pass_rate !== null
+          ? `${(c.first_pass_rate * 100).toFixed(1)}%`
+          : "N/A";
+        const fprColor = c.first_pass_rate !== null && c.first_pass_rate >= 0.8
+          ? chalk.green : c.first_pass_rate !== null && c.first_pass_rate >= 0.6
+            ? chalk.yellow : chalk.red;
+        console.log(`    First-pass rate:   ${c.first_pass_rate !== null ? fprColor(fpr) : chalk.dim(fpr)}`);
+        const qs = c.avg_quality_score !== null
+          ? c.avg_quality_score.toFixed(3)
+          : "N/A";
+        console.log(`    Avg quality score: ${c.avg_quality_score !== null ? chalk.cyan(qs) : chalk.dim(qs)}`);
+        const ar = c.avg_revision_count !== null
+          ? c.avg_revision_count.toFixed(2)
+          : "N/A";
+        console.log(`    Avg revisions:     ${c.avg_revision_count !== null ? chalk.cyan(ar) : chalk.dim(ar)}`);
+        console.log(`    Revision dist:     0=${c.revision_distribution.zero}  1=${c.revision_distribution.one}  2+=${c.revision_distribution.two_plus}`);
+      };
+
+      formatCohort("Memory-assisted tasks", result.matched);
+      console.log();
+      formatCohort("No-match tasks", result.unmatched);
+      console.log();
+
+      // Improvement delta
+      if (result.improvement_delta !== null) {
+        const deltaPct = `${(result.improvement_delta * 100).toFixed(1)}%`;
+        const deltaColor = result.improvement_delta >= 0.15
+          ? chalk.green
+          : result.improvement_delta > 0
+            ? chalk.yellow
+            : chalk.red;
+        console.log(`  ${chalk.bold("Improvement delta:")} ${deltaColor(deltaPct)}`);
+        const target = result.meets_target ? chalk.green("✓ MET") : chalk.red("✗ NOT MET");
+        console.log(`  ${chalk.bold("Target (≥15%):")}     ${target}`);
+      } else {
+        console.log(chalk.dim("  Insufficient data to compute improvement delta."));
+      }
+
+      // Weekly trend
+      if (result.weekly.length > 0) {
+        console.log();
+        console.log(chalk.bold("  Weekly Trend"));
+        console.log(chalk.dim(`  ${"Week".padEnd(12)} ${"Matched FPR".padEnd(14)} ${"Unmatched FPR".padEnd(14)} Delta`));
+        for (const w of result.weekly) {
+          const mFpr = w.matched.first_pass_rate !== null
+            ? `${(w.matched.first_pass_rate * 100).toFixed(1)}%` : "—";
+          const uFpr = w.unmatched.first_pass_rate !== null
+            ? `${(w.unmatched.first_pass_rate * 100).toFixed(1)}%` : "—";
+          const delta = w.matched.first_pass_rate !== null && w.unmatched.first_pass_rate !== null
+            ? `${((w.matched.first_pass_rate - w.unmatched.first_pass_rate) * 100).toFixed(1)}%`
+            : "—";
+          console.log(`  ${w.week_start.padEnd(12)} ${mFpr.padEnd(14)} ${uFpr.padEnd(14)} ${delta}`);
+        }
+      }
+
+      console.log();
     });
 }

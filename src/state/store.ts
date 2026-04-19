@@ -1258,6 +1258,38 @@ export interface WriteAntibodyLogParams {
   agent?: string;
 }
 
+// ── Semantic Memory Effectiveness (issue #1016) ─────────────────────────────
+
+export interface SemanticMemoryCohortStats {
+  total_tasks: number;
+  first_pass_approved: number;
+  first_pass_rate: number | null;
+  avg_quality_score: number | null;
+  avg_revision_count: number | null;
+  revision_distribution: { zero: number; one: number; two_plus: number };
+}
+
+export interface SemanticMemoryWeeklyCohort {
+  week_start: string;
+  matched: SemanticMemoryCohortStats;
+  unmatched: SemanticMemoryCohortStats;
+}
+
+export interface SemanticMemoryEffectivenessResult {
+  window_start: string;
+  generated_at: string;
+  total_dispatches: number;
+  memory_hit_count: number;
+  memory_hit_rate: number | null;
+  matched: SemanticMemoryCohortStats;
+  unmatched: SemanticMemoryCohortStats;
+  /** Improvement delta: matched.first_pass_rate - unmatched.first_pass_rate */
+  improvement_delta: number | null;
+  /** Whether the ≥15% improvement target from issue #1011 is met. */
+  meets_target: boolean | null;
+  weekly: SemanticMemoryWeeklyCohort[];
+}
+
 export interface ReadSignalsFilter {
   signal_type?: string;
   repo?: string;
@@ -9510,6 +9542,173 @@ export class StateStore {
     } catch {
       return 0;
     }
+  }
+
+  // ── Semantic Memory Effectiveness (issue #1016) ─────────────────────────────
+
+  /**
+   * Classify dispatched tasks into "memory-assisted" vs "no-match" based on
+   * [semantic-memory] log entries, then compare first-pass verification rates.
+   *
+   * A task is "memory-assisted" if it has at least one task_log entry whose
+   * content starts with "[semantic-memory]".
+   *
+   * @param sinceISO  Only consider tasks created on or after this timestamp.
+   * @returns Effectiveness metrics for matched vs unmatched tasks.
+   */
+  getSemanticMemoryEffectiveness(sinceISO?: string): SemanticMemoryEffectivenessResult {
+    const cutoff = sinceISO ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    // Get all terminal tasks in the window (done, failed, escalated)
+    // that went through verification.
+    const tasks = this.db.prepare(`
+      SELECT
+        t.id,
+        t.status,
+        t.quality_score,
+        t.verification_status,
+        COALESCE(t.revision_count, 0) AS revision_count,
+        t.created_at,
+        EXISTS (
+          SELECT 1 FROM task_logs tl
+          WHERE tl.task_id = t.id
+            AND tl.direction = 'system'
+            AND tl.content LIKE '[semantic-memory]%'
+        ) AS has_memory_match
+      FROM tasks t
+      WHERE t.created_at >= ?
+        AND t.status IN ('done', 'failed', 'escalated')
+      ORDER BY t.created_at ASC
+    `).all(cutoff) as Array<{
+      id: string;
+      status: string;
+      quality_score: number | null;
+      verification_status: string | null;
+      revision_count: number;
+      created_at: string;
+      has_memory_match: number;
+    }>;
+
+    // Separate into matched and unmatched cohorts
+    const matched: typeof tasks = [];
+    const unmatched: typeof tasks = [];
+    for (const t of tasks) {
+      if (t.has_memory_match) matched.push(t);
+      else unmatched.push(t);
+    }
+
+    const computeCohort = (cohort: typeof tasks): SemanticMemoryCohortStats => {
+      const total = cohort.length;
+      if (total === 0) {
+        return {
+          total_tasks: 0,
+          first_pass_approved: 0,
+          first_pass_rate: null,
+          avg_quality_score: null,
+          avg_revision_count: null,
+          revision_distribution: { zero: 0, one: 0, two_plus: 0 },
+        };
+      }
+
+      const verified = cohort.filter((t) => t.verification_status !== null);
+      const firstPassApproved = cohort.filter(
+        (t) => t.verification_status === "approved" && t.revision_count === 0,
+      ).length;
+
+      const withScore = cohort.filter((t) => t.quality_score !== null);
+      const avgScore = withScore.length > 0
+        ? withScore.reduce((s, t) => s + (t.quality_score ?? 0), 0) / withScore.length
+        : null;
+
+      const avgRevisions = total > 0
+        ? cohort.reduce((s, t) => s + t.revision_count, 0) / total
+        : null;
+
+      const revDist = {
+        zero: cohort.filter((t) => t.revision_count === 0).length,
+        one: cohort.filter((t) => t.revision_count === 1).length,
+        two_plus: cohort.filter((t) => t.revision_count >= 2).length,
+      };
+
+      return {
+        total_tasks: total,
+        first_pass_approved: firstPassApproved,
+        first_pass_rate: verified.length > 0 ? firstPassApproved / verified.length : null,
+        avg_quality_score: avgScore,
+        avg_revision_count: avgRevisions,
+        revision_distribution: revDist,
+      };
+    };
+
+    const matchedStats = computeCohort(matched);
+    const unmatchedStats = computeCohort(unmatched);
+
+    // Compute improvement delta
+    const improvement =
+      matchedStats.first_pass_rate !== null && unmatchedStats.first_pass_rate !== null
+        ? matchedStats.first_pass_rate - unmatchedStats.first_pass_rate
+        : null;
+
+    // Build weekly cohorts for trending
+    const weeklyMap = new Map<string, { matched: typeof tasks; unmatched: typeof tasks }>();
+    for (const t of tasks) {
+      const d = new Date(t.created_at);
+      // ISO week start (Monday)
+      const day = d.getDay();
+      const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+      const weekStart = new Date(d.setDate(diff));
+      const weekKey = weekStart.toISOString().slice(0, 10);
+      if (!weeklyMap.has(weekKey)) {
+        weeklyMap.set(weekKey, { matched: [], unmatched: [] });
+      }
+      const bucket = weeklyMap.get(weekKey)!;
+      if (t.has_memory_match) bucket.matched.push(t);
+      else bucket.unmatched.push(t);
+    }
+
+    const weekly: SemanticMemoryWeeklyCohort[] = [];
+    for (const [weekStart, { matched: wm, unmatched: wu }] of weeklyMap) {
+      weekly.push({
+        week_start: weekStart,
+        matched: computeCohort(wm),
+        unmatched: computeCohort(wu),
+      });
+    }
+    weekly.sort((a, b) => a.week_start.localeCompare(b.week_start));
+
+    // Total dispatch count and memory hit rate
+    const totalDispatches = this.db.prepare(`
+      SELECT COUNT(DISTINCT t.id) AS cnt
+      FROM tasks t
+      WHERE t.created_at >= ?
+        AND t.status NOT IN ('pending', 'planning')
+    `).get(cutoff) as { cnt: number } | undefined;
+
+    const totalWithMemory = this.db.prepare(`
+      SELECT COUNT(DISTINCT tl.task_id) AS cnt
+      FROM task_logs tl
+      JOIN tasks t ON t.id = tl.task_id
+      WHERE t.created_at >= ?
+        AND tl.direction = 'system'
+        AND tl.content LIKE '[semantic-memory]%'
+    `).get(cutoff) as { cnt: number } | undefined;
+
+    const dispatchCount = totalDispatches?.cnt ?? 0;
+    const memoryHitCount = totalWithMemory?.cnt ?? 0;
+    const hitRate = dispatchCount > 0 ? memoryHitCount / dispatchCount : null;
+
+    return {
+      window_start: cutoff,
+      generated_at: new Date().toISOString(),
+      total_dispatches: dispatchCount,
+      memory_hit_count: memoryHitCount,
+      memory_hit_rate: hitRate,
+      matched: matchedStats,
+      unmatched: unmatchedStats,
+      improvement_delta: improvement,
+      meets_target: improvement !== null ? improvement >= 0.15 : null,
+      weekly,
+    };
   }
 }
 
