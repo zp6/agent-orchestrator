@@ -726,8 +726,8 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
     // so tests can distinguish defaults from real verifier scores.
     //
     // Note: the 'approved' + null-score case is already handled above
-    // (issue #266 guard) and normalizedUpdates.verification_status will have
-    // been changed to 'needs_revision' by this point, so the sentinel branch
+    // (issue #266/#272 guard) and normalizedUpdates.verification_status will have
+    // been changed to 'needs_operator_review' by this point, so the sentinel branch
     // for 'approved' below only fires when the task already has a score >= 0.60.
     //
     // ensureScoresPopulated() will NOT refine these defaults (they are no longer

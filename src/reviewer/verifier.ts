@@ -2244,44 +2244,52 @@ export class Verifier {
       try {
         const inferredResult = await this.inferMissingScore(task);
 
+        // Apply the same hard-block and sub-threshold guards that the normal
+        // verify() path applies — so the repair loop cannot silently approve a
+        // task whose inferred score is critically low (issue #203).
+        const guardedResult = this.applySubThresholdRejectionGuard(
+          this.applyHardBlockGuard(inferredResult),
+        );
+
         // For tasks already marked rejected, preserve the rejection — do not
         // flip them to approved even if the inferred score is above threshold.
-        // For approved tasks, apply the normal score-approval invariant: if the
-        // inferred score is below threshold, downgrade to rejected.
+        // For approved tasks whose guarded score is below the floor, use
+        // 'needs_revision' (not 'rejected') so the task stays in the work queue
+        // for redispatch rather than being permanently closed (issue #266).
         const alreadyRejected = task.verification_status === "rejected";
-        const effectiveStatus: "approved" | "rejected" = alreadyRejected
+        const effectiveStatus: "approved" | "rejected" | "needs_revision" = alreadyRejected
           ? "rejected"
-          : inferredResult.approved
+          : guardedResult.approved
             ? "approved"
-            : "rejected";
+            : "needs_revision";
 
         this.store.updateTask(task.id, {
           verification_status: effectiveStatus,
-          quality_score: inferredResult.score,
-          verification_notes: inferredResult.notes,
+          quality_score: guardedResult.score,
+          verification_notes: guardedResult.notes,
           quality_explanation: effectiveStatus === "approved"
-            ? (inferredResult.approvalRationale ?? null)
-            : (inferredResult.explanation ?? `Score ${inferredResult.score.toFixed(2)} below threshold — inferred score triggered rejection`),
+            ? (guardedResult.approvalRationale ?? null)
+            : (guardedResult.explanation ?? `Score ${guardedResult.score.toFixed(2)} below threshold — inferred score triggered rejection`),
         });
 
         this.recordVerificationResult(
           task.id,
           task.agent_name ?? "unknown",
-          inferredResult.score,
+          guardedResult.score,
           effectiveStatus === "approved",
-          effectiveStatus !== "approved" ? (inferredResult.explanation ?? "Inferred score below threshold") : undefined,
-          inferredResult.blockedReason,
-          inferredResult.approvalRationale,
+          effectiveStatus !== "approved" ? (guardedResult.explanation ?? "Inferred score below threshold") : undefined,
+          guardedResult.blockedReason,
+          guardedResult.approvalRationale,
         );
 
         repaired++;
         this.log.info("Repaired null score for verified task", {
           taskId: task.id,
-          inferredScore: inferredResult.score,
+          inferredScore: guardedResult.score,
           originalStatus: task.verification_status,
           effectiveStatus,
-          approvalRationale: inferredResult.approvalRationale,
-          blockedReason: inferredResult.blockedReason,
+          approvalRationale: guardedResult.approvalRationale,
+          blockedReason: guardedResult.blockedReason,
         });
       } catch (err) {
         this.log.error("Failed to repair null score for verified task", {
