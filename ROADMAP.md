@@ -1,43 +1,44 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-19 (triage cycle 4)_
+_Last updated: 2026-04-19 (triage cycle 5)_
 
 ## Completed (recent)
 
-- **#149 / PR #159** — Telegram alert when low-quality task is approved (`LOW_QUALITY_ALERT_THRESHOLD = 0.65`, deduped per task)
-- **#205 / PR #207** — Reconciliation outcomes exposed via Telegram `/reconciliation` command and `reconciliation_events` table
-- **#210 / PR #211** — Audit and fix historically approved tasks with `quality_score < 0.50` via `fixApprovedTasksBelowThreshold()` and `/audit-scores` CLI
-- **#215 / PR #216** — Per-agent routing confidence in Telegram `/routing [days]` with 🟢/🟡/🔴 badges
-- **#212 / PR #219** — `quality_score` always populated on approved tasks via `ensureScoresPopulated()` daemon hook
-- **#229 / PR #230** — Score backfill extended to rejected tasks; `getVerifiedTasksWithNullScores()` covers full verified set
-- **#258 / PR #260** — Hard score floor: `quality_score < 0.60` blocked at store write path (`SUB_THRESHOLD_REJECTION_LIMIT`)
-- **#181** — Triage acceptance criteria schema: `TRIAGE_OUTPUT_SCHEMA`, `TRIAGE_REQUIRED_FIELDS`, housekeeping pre-check gate
-- **#312** — Conflict recovery reroute metrics and Telegram alerts
-- **#310 / PR #313** — `severity` + `category` metadata emitted on `request-changes` decisions for richer alert context
-- **#298 / PR #306** — Bypass rate trending fully delivered by `quality-system-health.ts`: 7-day sparkline, 30% alert threshold, operator_override vs marginal_auto breakdown, `/quality-health` Telegram command
-- **PR #307** — `bypass_reason` backfilled for all historical sub-0.60 approved tasks in `state.db`
-- **PR #309** — `bypass_reason` surfaced in `/quality`, `/score`, and `/quality-health` Telegram commands
-- **PR #320** — Bundling detection added to housekeeping verification gate
-- **PR #322** — `/suppress` command integration tests added
+- **#331 / PR #332** — Real-time Telegram alerts for low-score approvals (`low-score-approval-alerter.ts`)
+- **#325 / PR #327** — Capability-check to reject foreign implementation tasks (`capability-check.ts`, `pre-dispatch-capability-enforcer.ts`)
+- **#278 / PR #328** — Dashboard panel: approved-but-low-score task feed (`low-score-feed.ts`)
+- **#326 / PR #329** — Cap cross-repo follow-up issues to 1 per PR review cycle
+- **#330 / PR #333** — Reviewer routing boundary enforcement (pre-dispatch)
+- **#336 / PR #342** — Cross-agent in-flight duplicate dispatch guard (`cross-agent-inflight-guard.ts`)
+- **#344 / PR #345** — Dispatch cascade analyzer for supervisor visibility (`dispatch-cascade-analyzer.ts`)
+- **#335 / PR #348** — Proactive rebase scheduler (`proactive-rebase-scheduler.ts`)
+- **#358 / PR #361** — PR scope pre-flight check (`pr-scope-checker.ts`)
+- **#357 / PR #362** — Meta-quality gate: stricter floor for quality-enforcement tasks (`meta-quality-gate.ts`)
+- **#356 / PR #363** — Score-bypass violation report page API payload (`score-violations.ts`)
+- **#367 / PR #372** — Quality floor bypass detector (`quality-floor-bypass-detector.ts`)
+- **#369 / PR #370** — Semantic task memory: daily digest + `/memory` Telegram command (`memory-digest.ts`)
+- **#366 / PR #373** — PRAGMA foreign_keys=ON + startup integrity check
+- **#374 / PR #376** — Proposal-tag dispatch routing with dedicated verification
 
 ## Next up
 
-1. **#292 — Quality floor bypass transparency: dashboard badge** _(high)_ — `bypass_reason` is now in `state.db` (PR #307) and in Telegram (PR #309). Remaining gap: the dashboard low-score feed should render it as a visual badge so operators can audit bypass patterns at a glance.
+1. **#375 — Real-time Telegram alert when a score-0 task is approved** _(high)_ — A separate, higher-urgency alert distinct from the general low-score alerter. Score-0 indicates catastrophic failure and warrants an immediate, dedicated notification with full dimension breakdown.
 
-2. **#285 — Approved-below-floor Telegram alert with per-task breakdown** _(high)_ — Per-task Telegram alert (score, all four dimension scores, PR link) when a sub-0.60 task is still approved. Distinct from the aggregate `/quality-health` command: this fires immediately per task.
+2. **#359 — Daily agent quality digest with degradation callouts** _(high)_ — Scheduled Telegram message summarising each agent's 24-hour score average, trend direction, and flagging any agent that degraded >10% day-over-day.
 
 3. **#232 — Quality scores missing from task feed** _(high)_ — Despite `ensureScoresPopulated()` and backfill commands, recent tasks still show `quality_score: null`. Need a startup/daemon check that warns when >10% of recent approved tasks have null scores.
 
-4. **#278 — Dashboard panel: approved-but-low-score task feed** _(medium)_ — Surface the full list of below-floor approved tasks in the dashboard so operators can spot patterns without querying SQLite directly.
+4. **#368 — Auto-file GitHub issues for improvements identified across 3+ consecutive batches** _(medium)_ — `ImprovementRecurrenceTracker` that records patterns by normalized title hash across distinct batches and auto-files a `chronic` + `improvement` tagged issue when threshold is reached.
 
-5. **#221 — Improvement detector deduplication** _(medium)_ — `ImprovementDetector` creates GitHub issues without checking for existing open duplicates, causing backlog spam. Add `gh issue list` pre-check with title-similarity filter before filing.
+5. **#221 — Improvement detector deduplication against existing GitHub issues** _(medium)_ — `ImprovementDetector` creates GitHub issues without checking for existing open duplicates. Add `gh issue list` pre-check with title-similarity filter before filing.
 
 ## Planned
 
+- **#364 — Hard quality floor with mandatory override audit trail** _(high)_ — Hard floor at 0.10 blocking sub-floor approvals; Telegram escalation with `/approve-override` and `/reject-override`; `score_floor_overrides` audit table.
+- **#340 — Persist proactive rebase stats to SQLite** _(medium)_ — `rebase_events` table, `IRebaseStore` interface, `/rebase-stats` Telegram command, and `/rebase-stats` HTTP endpoint for dashboard.
 - **#222 — `/help` Telegram command** _(medium)_ — List all 20+ bot commands with one-line descriptions so operators can self-serve during incidents without reading source code.
 - **#189 — PR-feedback task scoring model** _(medium)_ — PR-feedback tasks receive null scores because no `PR_FEEDBACK_SYSTEM_PROMPT` exists. Add scoring on three dimensions: correctness, completeness, approval-bias adherence.
 - **#89 — Second-pass outcome tracking** _(low)_ — Record whether borderline (0.70–0.79) second-pass reviews improve final outcomes. Metric: upgrade rate, reject rate, merged quality delta.
-- **#71 — Calibration drift score distribution** _(low)_ — `calibration-drift.ts` covers alerts; the histogram (per agent, last 30 days) and false-positive rate view still need the dashboard surface.
 
 ## Ideas
 
@@ -49,5 +50,6 @@ _Last updated: 2026-04-19 (triage cycle 4)_
 
 ## Triage notes
 
+- **2026-04-19 cycle 5**: Closed #351 (CLAUDE.md update delivered in this triage PR). Closed #353 (unclear/no actionable reviewer changes specified). Added 11 missing `src/reviewer/` modules to CLAUDE.md source layout; added 13 scope entries for recently shipped features. Moved completed items (#278, #285, #292, #325–#376 batch) from Next-up to Completed. Promoted #375 and #359 to Next-up (1, 2). Confirmed #364 and #340 (PRs closed unmerged) remain valid backlog items. No duplicate issues. No stale issues (all open issues are ≤ 3 days old).
 - **2026-04-19 cycle 4**: Closed #315 (CLAUDE.md sync already done in PR #316). Closed #298 (bypass rate trending fully implemented by `quality-system-health.ts` in PR #306). No stale issues (oldest open are #71 and #89, both 7 days old). No orphan PRs. CLAUDE.md verified current — no drift since cycle 3. Promoted #221 (improvement-detector dedup) from Planned to Next-up (5).
 - **2026-04-18 cycle 3**: Closed #231 (healthcheck — misrouted, belongs to infra/proxy, 3 retries exhausted). Closed orphan PR #305 (no `Closes #N`). Added 5 missing `src/reviewer/` modules to CLAUDE.md. Quality-floor cluster (#278, #285, #292, #298) confirmed distinct: each covers a different channel or data layer — no duplicates. No issues > 14 days old.

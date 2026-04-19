@@ -77,6 +77,16 @@ When this container is used for LLM PR reviews:
 - Semantic duplicate guard: deduplicate improvement-detector issue candidates using semantic similarity
 - Quality system health: aggregate health status covering score floor, bypass rates, and calibration drift
 - Proactive rebase scheduler: detect PRs ≥3 commits behind main that have been open >24h; emit rebase tasks; count proactive vs reactive rebases separately
+- Pre-dispatch capability enforcer: declare eligible task types and reject misrouted foreign implementation tasks
+- Cross-agent in-flight guard: prevent the same GitHub issue being dispatched to multiple agents simultaneously
+- Dispatch cascade analyzer: detect, depth-limit, and cost-track task chains spawned from a single trigger
+- Quality floor bypass detector: Telegram alert when a task is approved below 0.80 with no explicit bypass_reason
+- Meta-quality gate: stricter approval floor for tasks whose scope is quality enforcement or calibration
+- PR scope pre-flight check: deterministic bundling detection before LLM review is triggered
+- Semantic task memory: daily Telegram digest summarising the semantic task memory index; `/memory` command
+- Real-time low-score approval alerter: Telegram notification when a task is approved with score < 0.70
+- Low-score approved task feed: `/api/low-score-approved` payload builder for operator audit
+- Score-bypass violation report: `/api/score-violations` payload listing sub-threshold approvals by agent
 
 **Out of scope (belongs to orchestrator-core):**
 - Daemon loop, state store, dispatching infrastructure
@@ -133,6 +143,17 @@ src/
     semantic-duplicate-guard.ts     — semantic deduplication of improvement-detector issue candidates
     quality-system-health.ts        — aggregate quality-system health status: score floor, bypass rates, drift
     proactive-rebase-scheduler.ts   — detect stale PRs (≥3 commits behind main, open >24h); emit rebase tasks; track proactive vs reactive rebase counts
+    capability-check.ts             — declare eligible task types; reject misrouted foreign implementation tasks
+    pre-dispatch-capability-enforcer.ts — hard-block reviewer from accepting implementation tasks at dispatch time
+    cross-agent-inflight-guard.ts   — prevent same GitHub issue being dispatched to multiple agents simultaneously
+    dispatch-cascade-analyzer.ts    — detect, depth-limit, and cost-track multi-hop task cascades
+    quality-floor-bypass-detector.ts — Telegram alert when task approved below 0.80 with no bypass_reason
+    meta-quality-gate.ts            — stricter approval floor for quality-enforcement and calibration tasks
+    pr-scope-checker.ts             — deterministic bundling/multi-issue detection before LLM review round
+    memory-digest.ts                — daily Telegram digest of semantic task memory index; /memory command
+    low-score-approval-alerter.ts   — real-time Telegram alert when task approved with score < 0.70
+    low-score-feed.ts               — /api/low-score-approved payload builder for operator audit
+    score-violations.ts             — /api/score-violations payload: sub-threshold approvals grouped by agent
   integration/
     orchestrator-adapter.ts         — createReviewerInstances() adapter for orchestrator import
   service/
