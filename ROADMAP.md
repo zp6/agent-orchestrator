@@ -24,11 +24,12 @@ Solid ideas, scoped and ready when Next Up clears.
 
 | # | Issue | What & Why |
 |---|-------|-----------|
-| 6 | [#876](https://github.com/rapartlu/agent-orchestrator/issues/876) | **Research agent proactive dispatch** — auto-detect architecture/technology decisions and route them to the research agent before implementation begins |
-| 7 | [#869](https://github.com/rapartlu/agent-orchestrator/issues/869) | **Auto-route blocked dispatches to PR review queue** — when a dispatch is blocked, immediately surface it for review rather than losing it silently |
-| 8 | [#877](https://github.com/rapartlu/agent-orchestrator/issues/877) | **Decisions dashboard panel** — expose `/api/routing-decisions` in agent-dashboard for visibility into why tasks are routed where they are (needs dashboard-side work) |
-| 9 | [#794](https://github.com/rapartlu/agent-orchestrator/issues/794) | **Idempotency guard** — block re-dispatch when a PR already exists for the issue (complements existing open-PR deduplication) |
-| 10 | [#762](https://github.com/rapartlu/agent-orchestrator/issues/762) | **Antibody filter false-positive correction** — add a feedback path to demote over-aggressive immune patterns that block valid tasks |
+| 6 | [#1011](https://github.com/rapartlu/agent-orchestrator/issues/1011) | **Shared semantic task memory** — SQLite + sqlite-vec knowledge store; retrieve top-3 similar past successes at dispatch time and inject as agent context; targets ≥15% first-pass verification improvement |
+| 7 | [#876](https://github.com/rapartlu/agent-orchestrator/issues/876) | **Research agent proactive dispatch** — auto-detect architecture/technology decisions and route them to the research agent before implementation begins |
+| 8 | [#869](https://github.com/rapartlu/agent-orchestrator/issues/869) | **Auto-route blocked dispatches to PR review queue** — when a dispatch is blocked, immediately surface it for review rather than losing it silently |
+| 9 | [#877](https://github.com/rapartlu/agent-orchestrator/issues/877) | **Decisions dashboard panel** — expose `/api/routing-decisions` in agent-dashboard for visibility into why tasks are routed where they are (needs dashboard-side work) |
+| 10 | [#794](https://github.com/rapartlu/agent-orchestrator/issues/794) | **Idempotency guard** — block re-dispatch when a PR already exists for the issue (complements existing open-PR deduplication) |
+| 11 | [#762](https://github.com/rapartlu/agent-orchestrator/issues/762) | **Antibody filter false-positive correction** — add a feedback path to demote over-aggressive immune patterns that block valid tasks |
 
 ---
 
@@ -38,7 +39,10 @@ Worth tracking but not yet scoped or prioritised.
 
 | # | Issue | What & Why |
 |---|-------|-----------|
-| 11 | [#711](https://github.com/rapartlu/agent-orchestrator/issues/711) | **Lineage blast-radius graph API** — HTTP query API for lineage groups; branch `issue-711-lineage-api` has the work but PR was closed without merge |
+| 12 | [#1012](https://github.com/rapartlu/agent-orchestrator/issues/1012) | **Live operator war room dashboard** — real-time agent state machines, per-task token burn rates, queue heatmaps, one-click interventions (pause/reroute/force-approve); UI in agent-dashboard, this repo owns the intervention API endpoints |
+| 13 | [#1009](https://github.com/rapartlu/agent-orchestrator/issues/1009) | **Predictive failure shield** — pre-score tasks against a failure-probability model before dispatch; high-risk tasks get scope decomposition or context injection before any tokens are spent |
+| 14 | [#1010](https://github.com/rapartlu/agent-orchestrator/issues/1010) | **Autonomous fleet self-scaling** — capacity controller that spins up/down agent containers via Docker API based on queue depth and utilization; targets 1,000 tasks/week without manual fleet expansion |
+| 15 | [#711](https://github.com/rapartlu/agent-orchestrator/issues/711) | **Lineage blast-radius graph API** — HTTP query API for lineage groups; branch `issue-711-lineage-api` has the work but PR was closed without merge |
 
 ---
 
@@ -46,6 +50,7 @@ Worth tracking but not yet scoped or prioritised.
 
 Key features merged since last triage:
 
+- **#1000** — fix: dispatch coordination group child tasks stuck at pending (2026-04-19)
 - **#961** — fix WAL data leakage in getScoreDistribution test (isolated DB paths) (2026-04-19)
 - **#959** — fix research-agent PR-existence guard (2026-04-19)
 - **#956** — enable auto-merge in daemon merge queue (2026-04-18)
