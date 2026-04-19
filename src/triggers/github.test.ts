@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fetchOpenIssues, countOpenPRs, findApprovedPRForIssue, findExistingPRsForIssue, isIssueOpen, validateGhAuth } from "./github.js";
+import { fetchOpenIssues, countOpenPRs, findApprovedPRForIssue, findExistingPRsForIssue, findOpenPRsViaSearch, isIssueOpen, validateGhAuth } from "./github.js";
 
 vi.mock("node:child_process", () => ({
   execSync: vi.fn(),
@@ -113,19 +113,91 @@ describe("countOpenPRs", () => {
   });
 });
 
+describe("findOpenPRsViaSearch", () => {
+  it("returns PRs from search results", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify([{ number: 5, title: "Fix", url: "url", isDraft: false, headRefName: "fix-branch" }]),
+    );
+    const prs = findOpenPRsViaSearch("owner/repo", 42, mockExec);
+    expect(prs).toHaveLength(1);
+    expect(prs[0]).toMatchObject({ number: 5, isDraft: false });
+  });
+
+  it("uses the correct repo and issue number in the gh pr list command", () => {
+    const mockExec = vi.fn().mockReturnValue("[]");
+    findOpenPRsViaSearch("rapartlu/agent-reviewer", 323, mockExec);
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining("--repo rapartlu/agent-reviewer"),
+      expect.any(Object),
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining("#323"),
+      expect.any(Object),
+    );
+  });
+
+  it("includes closes, fixes, and resolves keyword variants in the search query", () => {
+    const mockExec = vi.fn().mockReturnValue("[]");
+    findOpenPRsViaSearch("owner/repo", 42, mockExec);
+    const [cmd] = mockExec.mock.calls[0] as [string, unknown];
+    expect(cmd).toContain("closes #42");
+    expect(cmd).toContain("fixes #42");
+    expect(cmd).toContain("resolves #42");
+  });
+
+  it("searches only open PRs (--state open)", () => {
+    const mockExec = vi.fn().mockReturnValue("[]");
+    findOpenPRsViaSearch("owner/repo", 42, mockExec);
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining("--state open"),
+      expect.any(Object),
+    );
+  });
+
+  it("returns empty array on gh CLI error (fail-open)", () => {
+    const mockExec = vi.fn().mockImplementation(() => { throw new Error("gh: not found"); });
+    const prs = findOpenPRsViaSearch("owner/repo", 42, mockExec);
+    expect(prs).toHaveLength(0);
+  });
+
+  it("returns empty array on empty gh output", () => {
+    const mockExec = vi.fn().mockReturnValue("");
+    const prs = findOpenPRsViaSearch("owner/repo", 42, mockExec);
+    expect(prs).toHaveLength(0);
+  });
+
+  it("correctly reflects isDraft: true for draft PRs", () => {
+    const mockExec = vi.fn().mockReturnValue(
+      JSON.stringify([{ number: 7, title: "WIP", url: "url", isDraft: true, headRefName: "wip" }]),
+    );
+    const prs = findOpenPRsViaSearch("owner/repo", 42, mockExec);
+    expect(prs[0]).toMatchObject({ number: 7, isDraft: true });
+  });
+});
+
 describe("findExistingPRsForIssue", () => {
-  // execSync is called twice: once for open PRs, once for merged PRs
+  // execSync is called three times:
+  //   1. findOpenPRsViaSearch — gh pr list --search (server-side keyword match)
+  //   2. branch-name match   — gh api pulls?state=open&per_page=100
+  //   3. merged PRs          — gh api pulls?state=closed&per_page=30
+  type SearchPR = { number: number; title: string; url: string; isDraft: boolean; headRefName: string };
+  type OpenPR   = { number: number; title: string; url: string; isDraft: boolean; body: string | null; headRefName?: string };
+  type MergedPR = { number: number; title: string; url: string; body: string | null; headRefName?: string };
+
   function mockPRCalls(
-    openPRs: Array<{ number: number; title: string; url: string; isDraft: boolean; body: string | null; headRefName?: string }>,
-    mergedPRs: Array<{ number: number; title: string; url: string; body: string | null; headRefName?: string }>,
+    searchPRs: SearchPR[],
+    openPRs: OpenPR[],
+    mergedPRs: MergedPR[],
   ): void {
     mockExecSync
-      .mockReturnValueOnce(JSON.stringify(openPRs))
-      .mockReturnValueOnce(JSON.stringify(mergedPRs));
+      .mockReturnValueOnce(JSON.stringify(searchPRs))   // call 1: gh pr list --search
+      .mockReturnValueOnce(JSON.stringify(openPRs))     // call 2: gh api pulls?state=open
+      .mockReturnValueOnce(JSON.stringify(mergedPRs));  // call 3: gh api pulls?state=closed
   }
 
   it("returns empty array when no PRs reference the issue", () => {
     mockPRCalls(
+      [], // search finds nothing
       [{ number: 10, title: "Unrelated PR", url: "https://github.com/owner/repo/pull/10", isDraft: false, body: "This does something else", headRefName: "unrelated" }],
       [],
     );
@@ -133,9 +205,12 @@ describe("findExistingPRsForIssue", () => {
     expect(prs).toHaveLength(0);
   });
 
-  it("detects an open PR with 'Closes #N' in the body", () => {
+  it("detects an open PR via server-side search (keyword match, issue #967 fix)", () => {
+    // Simulates a repo with >100 open PRs where the keyword-matched PR would
+    // have been silently missed by the old per_page=100 paginated approach.
     mockPRCalls(
-      [{ number: 5, title: "Fix the bug", url: "https://github.com/owner/repo/pull/5", isDraft: false, body: "Closes #42\nFixed the issue.", headRefName: "fix-something" }],
+      [{ number: 5, title: "Fix the bug", url: "https://github.com/owner/repo/pull/5", isDraft: false, headRefName: "fix-something" }],
+      [], // branch list is empty (PR is beyond page 1 in a large repo)
       [],
     );
     const prs = findExistingPRsForIssue("owner/repo", 42);
@@ -143,9 +218,10 @@ describe("findExistingPRsForIssue", () => {
     expect(prs[0]).toMatchObject({ number: 5, state: "open", isDraft: false });
   });
 
-  it("detects a draft PR with 'Closes #N' in the body", () => {
+  it("detects a draft PR via server-side search", () => {
     mockPRCalls(
-      [{ number: 7, title: "WIP fix", url: "https://github.com/owner/repo/pull/7", isDraft: true, body: "Work in progress\n\nCloses #42", headRefName: "wip-fix" }],
+      [{ number: 7, title: "WIP fix", url: "https://github.com/owner/repo/pull/7", isDraft: true, headRefName: "wip-fix" }],
+      [],
       [],
     );
     const prs = findExistingPRsForIssue("owner/repo", 42);
@@ -153,8 +229,9 @@ describe("findExistingPRsForIssue", () => {
     expect(prs[0]).toMatchObject({ number: 7, state: "open", isDraft: true });
   });
 
-  it("detects a merged PR with 'Fixes #N' in the body", () => {
+  it("detects a merged PR with 'Fixes #N' in the body (client-side regex on closed list)", () => {
     mockPRCalls(
+      [],
       [],
       [{ number: 3, title: "Merged fix", url: "https://github.com/owner/repo/pull/3", body: "Fixes #42 by refactoring.", headRefName: "merged-fix" }],
     );
@@ -163,26 +240,22 @@ describe("findExistingPRsForIssue", () => {
     expect(prs[0]).toMatchObject({ number: 3, state: "merged", isDraft: false });
   });
 
-  it("matches closing keywords case-insensitively", () => {
-    const bodies = [
-      "CLOSES #42",
-      "Fixes #42",
-      "RESOLVES #42",
-      "closed #42",
-      "fixed #42",
-      "resolved #42",
-    ];
+  it("merged PR keyword matching is still case-insensitive for the closed list", () => {
+    const bodies = ["CLOSES #42", "Fixes #42", "RESOLVES #42", "closed #42", "fixed #42", "resolved #42"];
     for (const body of bodies) {
       mockExecSync
-        .mockReturnValueOnce(JSON.stringify([{ number: 1, title: "PR", url: "url", isDraft: false, body, headRefName: "unrelated" }]))
-        .mockReturnValueOnce("[]");
+        .mockReturnValueOnce("[]")  // search
+        .mockReturnValueOnce("[]")  // open list
+        .mockReturnValueOnce(JSON.stringify([{ number: 1, title: "PR", url: "url", body, headRefName: "fix" }]));
       const prs = findExistingPRsForIssue("owner/repo", 42);
       expect(prs).toHaveLength(1);
     }
   });
 
   it("DOES match a PR with a matching branch name even without a closing keyword (fixes issue #959)", () => {
+    // Search finds nothing (no keyword); branch-name match catches it from the open list.
     mockPRCalls(
+      [],
       [{ number: 8, title: "Research findings", url: "url", isDraft: false, body: "Research findings from issue investigation.", headRefName: "42-research-findings" }],
       [],
     );
@@ -193,6 +266,7 @@ describe("findExistingPRsForIssue", () => {
 
   it("matches branch patterns like 'issue-N-*'", () => {
     mockPRCalls(
+      [],
       [{ number: 9, title: "Issue fix", url: "url", isDraft: false, body: "Some work.", headRefName: "issue-42-fix-something" }],
       [],
     );
@@ -202,6 +276,7 @@ describe("findExistingPRsForIssue", () => {
 
   it("matches branch patterns like 'issue_N_*'", () => {
     mockPRCalls(
+      [],
       [{ number: 10, title: "Issue fix", url: "url", isDraft: false, body: "Some work.", headRefName: "issue_42_feature" }],
       [],
     );
@@ -209,8 +284,22 @@ describe("findExistingPRsForIssue", () => {
     expect(prs).toHaveLength(1);
   });
 
+  it("deduplicates PRs found by both search and branch-name list", () => {
+    // PR #5 appears in both search results and the open list.
+    // It should appear only once in the output.
+    mockPRCalls(
+      [{ number: 5, title: "Fix", url: "url", isDraft: false, headRefName: "issue-42-fix" }],
+      [{ number: 5, title: "Fix", url: "url", isDraft: false, body: "Closes #42", headRefName: "issue-42-fix" }],
+      [],
+    );
+    const prs = findExistingPRsForIssue("owner/repo", 42);
+    expect(prs).toHaveLength(1);
+    expect(prs[0]).toMatchObject({ number: 5, state: "open" });
+  });
+
   it("does NOT match a PR that only mentions the issue without a closing keyword or matching branch", () => {
     mockPRCalls(
+      [],
       [{ number: 8, title: "Related work", url: "url", isDraft: false, body: "See issue #42 for context. Does not close it.", headRefName: "unrelated-branch" }],
       [],
     );
@@ -219,7 +308,9 @@ describe("findExistingPRsForIssue", () => {
   });
 
   it("does NOT match a different issue number (e.g. #420 vs #42)", () => {
+    // Search is scoped to #42 and returns nothing. Branch "420-fix" does not match issue-42 pattern.
     mockPRCalls(
+      [],
       [{ number: 9, title: "Other fix", url: "url", isDraft: false, body: "Closes #420", headRefName: "420-fix" }],
       [],
     );
@@ -227,9 +318,10 @@ describe("findExistingPRsForIssue", () => {
     expect(prs).toHaveLength(0);
   });
 
-  it("returns both open and merged PRs when both exist", () => {
+  it("returns both open (search) and merged PRs when both exist", () => {
     mockPRCalls(
-      [{ number: 5, title: "Open PR", url: "url1", isDraft: false, body: "Closes #42", headRefName: "fix-open" }],
+      [{ number: 5, title: "Open PR", url: "url1", isDraft: false, headRefName: "fix-open" }],
+      [],
       [{ number: 3, title: "Merged PR", url: "url2", body: "Fixes #42", headRefName: "fix-merged" }],
     );
     const prs = findExistingPRsForIssue("owner/repo", 42);
@@ -239,6 +331,8 @@ describe("findExistingPRsForIssue", () => {
   });
 
   it("returns empty array when gh CLI fails (fail-open)", () => {
+    // findOpenPRsViaSearch catches its own error and returns [].
+    // The subsequent execSync for branch list throws → outer catch → returns [].
     mockExecSync.mockImplementation(() => {
       throw new Error("gh: command not found");
     });
@@ -247,22 +341,32 @@ describe("findExistingPRsForIssue", () => {
   });
 
   it("returns empty array when gh output is empty", () => {
-    mockExecSync.mockReturnValueOnce("").mockReturnValueOnce("");
+    mockExecSync
+      .mockReturnValueOnce("")  // search
+      .mockReturnValueOnce("")  // open list
+      .mockReturnValueOnce(""); // merged
     const prs = findExistingPRsForIssue("owner/repo", 42);
     expect(prs).toHaveLength(0);
   });
 
-  it("queries the correct repo in gh API calls", () => {
-    mockPRCalls([], []);
+  it("queries the correct repo in both gh pr list and gh api calls", () => {
+    mockPRCalls([], [], []);
     findExistingPRsForIssue("rapartlu/my-agent", 99);
+    // Search call must target the right repo
+    expect(mockExecSync).toHaveBeenCalledWith(
+      expect.stringContaining("rapartlu/my-agent"),
+      expect.any(Object),
+    );
+    // Branch-list call must target the right repo via gh api
     expect(mockExecSync).toHaveBeenCalledWith(
       expect.stringContaining("repos/rapartlu/my-agent/pulls"),
       expect.any(Object),
     );
   });
 
-  it("handles null PR body gracefully", () => {
+  it("handles null PR body gracefully for branch-name list", () => {
     mockPRCalls(
+      [],
       [{ number: 11, title: "No body", url: "url", isDraft: false, body: null, headRefName: "unrelated-branch" }],
       [],
     );
@@ -270,14 +374,27 @@ describe("findExistingPRsForIssue", () => {
     expect(prs).toHaveLength(0);
   });
 
-  it("detects PR with null body but matching branch name", () => {
+  it("detects PR with null body but matching branch name (via open list)", () => {
     mockPRCalls(
+      [],
       [{ number: 12, title: "No body but matching branch", url: "url", isDraft: false, body: null, headRefName: "42-feature" }],
       [],
     );
     const prs = findExistingPRsForIssue("owner/repo", 42);
     expect(prs).toHaveLength(1);
     expect(prs[0]).toMatchObject({ number: 12, state: "open" });
+  });
+
+  it("falls back to branch-name matching when search fails", () => {
+    // First call (search via findOpenPRsViaSearch) throws — caught internally, returns [].
+    // Second call (open list) succeeds and finds a branch-matched PR.
+    mockExecSync
+      .mockImplementationOnce(() => { throw new Error("search failed"); }) // search fails
+      .mockReturnValueOnce(JSON.stringify([{ number: 8, title: "Branch match", url: "url", isDraft: false, body: null, headRefName: "42-some-work" }]))
+      .mockReturnValueOnce("[]"); // merged
+    const prs = findExistingPRsForIssue("owner/repo", 42);
+    expect(prs).toHaveLength(1);
+    expect(prs[0]).toMatchObject({ number: 8, state: "open" });
   });
 });
 

@@ -85,16 +85,61 @@ export interface LinkedPR {
 }
 
 /**
+ * Find open PRs for an issue using GitHub's search API (server-side, scalable).
+ *
+ * Unlike the REST list endpoint (gh api repos/OWNER/REPO/pulls with per_page=100),
+ * which fetches all open PRs and filters client-side, this queries GitHub's search
+ * index directly. A repo with 300+ open PRs will not silently miss a PR that
+ * appears beyond position 100 in the paginated list — the root cause of the
+ * fleet-wide guard failures described in issue #967.
+ *
+ * Searches for closing keyword variants in PR bodies:
+ * "closes #N", "fixes #N", "resolves #N" (GitHub's search is case-insensitive).
+ *
+ * Returns an empty array on any error (fail-open — callers proceed with
+ * dispatch rather than silently blocking work).
+ */
+export function findOpenPRsViaSearch(
+  repo: string,
+  issueNumber: number,
+  execFn: (cmd: string, opts: { encoding: "utf-8"; timeout: number }) => string = (cmd, opts) =>
+    execSync(cmd, opts),
+): Array<{ number: number; title: string; url: string; isDraft: boolean; headRefName: string }> {
+  try {
+    // GitHub search is case-insensitive; OR combines all closing keyword variants.
+    // Searching by issue number means results are always a small set (< 10 PRs).
+    const query = `closes #${issueNumber} OR fixes #${issueNumber} OR resolves #${issueNumber}`;
+    const raw = execFn(
+      `gh pr list --repo ${repo} --state open --search ${JSON.stringify(query)} --json number,title,url,isDraft,headRefName --limit 100`,
+      { encoding: "utf-8", timeout: 30000 },
+    );
+    return JSON.parse(raw.trim() || "[]") as Array<{
+      number: number;
+      title: string;
+      url: string;
+      isDraft: boolean;
+      headRefName: string;
+    }>;
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Find open or recently-merged PRs that are linked to a given issue number.
  *
- * Uses two detection strategies to identify linked PRs:
- * 1. **Closing keywords**: PRs with "closes #N", "fixes #N", "resolves #N", etc. in body
- * 2. **Branch-name matching**: PRs whose branch name follows the pattern "issue-N-*", "N-*"
- *    (e.g., "94-research-findings" for issue #94)
+ * Uses two complementary detection strategies for open PRs:
+ * 1. **Server-side search** (`gh pr list --search`): Finds PRs with closing
+ *    keywords ("closes #N", "fixes #N", "resolves #N") via GitHub's search
+ *    index. Scales to any repo size — no per_page cap. This is the primary
+ *    check and directly addresses the fleet-wide guard failure (issue #967)
+ *    where repos with >100 open PRs would miss keyword-referenced PRs.
+ * 2. **Branch-name matching**: Finds PRs whose branch follows "issue-N-*" or
+ *    "N-*" patterns but lack explicit closing keywords (e.g., research-agent
+ *    PRs). These are caught by the paginated list (per_page=100) as a fallback.
  *
- * The branch-name strategy catches PRs created by agents (e.g., research-agent) that
- * don't explicitly add closing keywords to the PR body but follow a predictable
- * branch naming convention. This prevents "already-in-review" wasted dispatches (issue #959).
+ * Merged PRs are checked via the paginated closed-PR list (last 30 merged),
+ * using client-side keyword and branch-name filtering.
  *
  * Returns an empty array on any error (fail-open: the caller proceeds with
  * dispatch rather than silently dropping work when the check fails).
@@ -112,12 +157,27 @@ export function findExistingPRsForIssue(repo: string, issueNumber: number): Link
   );
 
   try {
-    // Fetch open (including draft) PRs
+    // Primary: server-side search for closing keywords. Scales to repos with
+    // many open PRs without the per_page=100 cap of the REST list endpoint.
+    // A PR with "Closes #323" will be found even if 300+ other PRs are open.
+    const searchHits = findOpenPRsViaSearch(repo, issueNumber);
+    const searchByNumber = new Set(searchHits.map((pr) => pr.number));
+    const searchOpenPRs: LinkedPR[] = searchHits.map((pr) => ({
+      number: pr.number,
+      title: pr.title,
+      url: pr.url,
+      state: "open" as const,
+      isDraft: pr.isDraft,
+    }));
+
+    // Secondary: branch-name matching from the paginated list. Catches agents
+    // that follow the issue-N-description convention but omit closing keywords.
+    // PRs already found via search are deduplicated by PR number.
     const openRaw = execSync(
       `gh api "repos/${repo}/pulls?state=open&per_page=100" --jq '[.[] | {number, title, url: .html_url, isDraft: .draft, body: .body, headRefName: .head.ref}]'`,
       { encoding: "utf-8", timeout: 30000 },
     );
-    const openPRs = (
+    const branchMatchedPRs = (
       JSON.parse(openRaw.trim() || "[]") as Array<{
         number: number;
         title: string;
@@ -127,7 +187,7 @@ export function findExistingPRsForIssue(repo: string, issueNumber: number): Link
         headRefName: string;
       }>
     )
-      .filter((pr) => closingPattern.test(pr.body ?? "") || branchPattern.test(pr.headRefName))
+      .filter((pr) => !searchByNumber.has(pr.number) && branchPattern.test(pr.headRefName))
       .map((pr) => ({
         number: pr.number,
         title: pr.title,
@@ -135,6 +195,8 @@ export function findExistingPRsForIssue(repo: string, issueNumber: number): Link
         state: "open" as const,
         isDraft: pr.isDraft,
       }));
+
+    const openPRs = [...searchOpenPRs, ...branchMatchedPRs];
 
     // Fetch recently merged PRs (last 30 closed PRs that were merged)
     const mergedRaw = execSync(
