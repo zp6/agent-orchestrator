@@ -565,6 +565,19 @@ export type {
   PreDispatchCheckResult,
 } from "./reviewer/pre-dispatch-capability-enforcer.js";
 
+// Dispatch cascade analyzer
+export {
+  DispatchCascadeAnalyzer,
+  MAX_CASCADE_DEPTH,
+  DEFAULT_MAX_CROSS_REPO_FOLLOWUP_DEPTH,
+} from "./reviewer/dispatch-cascade-analyzer.js";
+export type {
+  DispatchCascadeAnalyzerOptions,
+  CascadeNode,
+  CascadeSummary,
+  FollowUpDispatchResult,
+} from "./reviewer/dispatch-cascade-analyzer.js";
+
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
 

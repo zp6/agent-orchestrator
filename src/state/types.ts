@@ -12,7 +12,7 @@ export type TaskStatus =
   | "done"
   | "failed"
   | "escalated";
-export type VerificationStatus = "pending" | "approved" | "rejected" | "needs_operator_review" | null;
+export type VerificationStatus = "pending" | "approved" | "rejected" | "needs_revision" | "needs_operator_review" | null;
 export type TaskType = "implementation" | "research" | "housekeeping";
 
 /**
