@@ -676,10 +676,13 @@ Steps:
     );
   }
 
-  // /approve <taskId> — operator force-approves a borderline-rejected task
+  // /approve <taskId> [reason] — operator force-approves a borderline-rejected task
   if (cmd.startsWith("approve ") || cmd.startsWith("/approve ")) {
-    const shortId = text.trim().split(/\s+/)[1];
-    if (!shortId) return "Usage: /approve <task-id>\nExample: /approve 01KPFBW5";
+    const parts = text.trim().split(/\s+/);
+    const shortId = parts[1];
+    const reason = parts.slice(2).join(" ");
+
+    if (!shortId) return "Usage: /approve <task-id> [reason]\nExample: /approve 01KPFBW5\nExample: /approve 01KPFBW5 \"Prototype only, not production\"";
 
     const entry = ctx.store.getApprovalQueueEntryByShortId(shortId);
     if (!entry) {
@@ -692,21 +695,36 @@ Steps:
       return `⚠️ Task \`${shortId}\` is already *${entry.status}*.`;
     }
 
+    // Threshold for requiring a reason: default 0.40 (40%)
+    const VERY_LOW_SCORE_THRESHOLD = 0.40;
+
+    // Check if score is very low and no reason provided
+    if (entry.score < VERY_LOW_SCORE_THRESHOLD && !reason) {
+      const scoreStr = (entry.score * 100).toFixed(0);
+      return (
+        `⚠️ Task score is very low (${scoreStr}%). Provide a reason:\n` +
+        `/approve ${shortId} <reason>\n\n` +
+        `Example: /approve ${shortId} "Prototype only, not production"`
+      );
+    }
+
     // Force-approve: mark task as approved and resolve queue entry
     ctx.store.updateTask(entry.task_id, { verification_status: "approved" });
-    ctx.store.resolveApprovalQueueEntry(entry.id, "approved", "operator");
+    ctx.store.resolveApprovalQueueEntry(entry.id, "approved", "operator", reason || undefined);
 
     const scoreStr = (entry.score * 100).toFixed(0);
+    const reasonSuffix = reason ? ` with reason: "${reason}"` : "";
     ctx.store.addLog({
       task_id: entry.task_id,
       direction: "system",
-      content: `Operator force-approved via Telegram (score ${scoreStr}%, bypassing quality threshold).`,
+      content: `Operator force-approved via Telegram (score ${scoreStr}%, bypassing quality threshold)${reasonSuffix}.`,
     });
 
     return (
       `✅ Task \`${shortId}\` force-approved by operator.\n` +
       `*Title:* ${entry.title.slice(0, 80)}\n` +
-      `*Score:* ${scoreStr}% (quality gate bypassed)`
+      `*Score:* ${scoreStr}% (quality gate bypassed)` +
+      (reason ? `\n*Reason:* ${reason}` : "")
     );
   }
 

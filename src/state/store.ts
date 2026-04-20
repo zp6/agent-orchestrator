@@ -81,6 +81,8 @@ export interface ApprovalQueueEntry {
   resolved_at: string | null;
   /** Who resolved: 'operator' (Telegram command) | 'system' (auto-resolved). */
   resolved_by: string | null;
+  /** Bypass reason provided by operator when approving a very low-score task (score < 0.40). */
+  bypass_reason: string | null;
 }
 
 export interface InsertApprovalQueueEntryParams {
@@ -9069,7 +9071,8 @@ export class StateStore {
         status       TEXT NOT NULL DEFAULT 'pending',
         created_at   TEXT NOT NULL,
         resolved_at  TEXT,
-        resolved_by  TEXT
+        resolved_by  TEXT,
+        bypass_reason TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_aq_status     ON approval_queue(status);
       CREATE INDEX IF NOT EXISTS idx_aq_created_at ON approval_queue(created_at);
@@ -9146,14 +9149,15 @@ export class StateStore {
    * @param id       Primary key of the entry.
    * @param status   New status: 'approved' | 'rejected'.
    * @param resolvedBy  Who resolved it: 'operator' | 'system'.
+   * @param bypassReason Optional reason provided by operator when force-approving a very low-score task.
    */
-  resolveApprovalQueueEntry(id: number, status: "approved" | "rejected", resolvedBy: string): void {
+  resolveApprovalQueueEntry(id: number, status: "approved" | "rejected", resolvedBy: string, bypassReason?: string): void {
     this.runApprovalQueueMigration();
     this.db.prepare(`
       UPDATE approval_queue
-      SET status = ?, resolved_at = ?, resolved_by = ?
+      SET status = ?, resolved_at = ?, resolved_by = ?, bypass_reason = ?
       WHERE id = ?
-    `).run(status, new Date().toISOString(), resolvedBy, id);
+    `).run(status, new Date().toISOString(), resolvedBy, bypassReason ?? null, id);
   }
 
   // ── Dispatch Block tracking (issue #976) ─────────────────────────────────────

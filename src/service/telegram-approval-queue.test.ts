@@ -363,4 +363,21 @@ describe("StateStore approval queue CRUD (requires better-sqlite3)", () => {
     const entry = store.getApprovalQueueEntry("DEDUP0000000000000000000")!;
     expect(entry.title).toBe("First"); // Original title preserved
   });
+
+  it("resolveApprovalQueueEntry can store a bypass reason for very low-score approvals", () => {
+    store.insertApprovalQueueEntry({
+      task_id: "01KPFBW500000000000000004",
+      title: "Very low score task",
+      score: 0.25,
+    });
+    const entry = store.getApprovalQueueEntry("01KPFBW500000000000000004")!;
+
+    const reason = "Prototype only, not production";
+    store.resolveApprovalQueueEntry(entry.id, "approved", "operator", reason);
+
+    const resolved = store.getApprovalQueueEntry("01KPFBW500000000000000004")!;
+    expect(resolved.status).toBe("approved");
+    expect(resolved.bypass_reason).toBe(reason);
+    expect(resolved.resolved_by).toBe("operator");
+  });
 });
