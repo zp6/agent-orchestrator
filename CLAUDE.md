@@ -36,7 +36,7 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 - **Agent pools** — multiple instances share workload via round-robin (orchestrator, reviewer, dashboard, research, proxy)
 - **Persistent sessions** — conversations resume across requests via `x-conversation-id` header
 - **Per-agent models** — Opus for coding, Sonnet for reviews, Haiku for Telegram
-- **Auto-rebase** — pre-submit validator auto-rebases stale branches before PR creation
+- **Auto-rebase** — pre-submit validator auto-rebases stale branches before PR creation; proactive rebase scheduler (~15min cadence) prevents stale-branch build failures
 - **Telegram bot** — two-way communication: `@TheSupervisor_rapartlu_bot`
 - **Antibody log** — pre-dispatch failure prediction filter; blocks known-bad agent/task combos
 - **Daemon lifecycle auditor** — immutable audit trail of daemon start/stop/restart events
@@ -44,6 +44,11 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 - **Cross-repo feature tracker** — detects feature consistency gaps across Claude/Codex pool members
 - **Health check postmortem** — auto-files structured incident reports for recurring health failures
 - **Verification calibration** — logs verification outcomes (`verification_outcome_logs`) and polls PR events to build quality-score training data
+- **Semantic task memory** — FTS5-based knowledge store; top-3 similar past successes injected into dispatch context at runtime (issue #1011)
+- **Dispatch cascade analyzer** — tracks parent→child task relationships; enforces per-trigger follow-up depth cap to prevent unbounded task spawning
+- **Post-merge regression detector** — validates merged PRs in staging; auto-files revert tasks on regressions
+- **Metrics server** — embedded HTTP server on port 3472 exposing `/dispatch-efficiency` and `/health` for dashboard polling
+- **Housekeeping triage schemas** — verifier enforces structured JSON blocks in housekeeping PR bodies (`TRIAGE_HOUSEKEEPING_SCHEMA`, `TRIAGE_CROSS_REPO_SCHEMA`); missing fields trigger immediate revision
 
 ## CRITICAL: NEVER Push Directly to Main
 
@@ -116,19 +121,23 @@ Config: `~/.claude-orchestrator/.env` (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID).
 
 ## Daemon Poll Cycle
 
-Every 30s:
+Every 5 minutes (default; configurable via `--poll-interval`):
 1. **Telegram polling** (independent 3s loop)
 2. **Stale task watchdog** — kill tasks stuck >10 min (configurable per agent)
 3. **Retry failed tasks** — exponential backoff, 3 retries max
-4. **Dispatch triggers** — poll GitHub issues, dispatch to agents (pool-aware)
-5. **Verify completed tasks** — LLM scores quality, dispatches revisions
+4. **Dispatch triggers** — poll GitHub issues, dispatch to agents (pool-aware, with semantic memory context injection)
+5. **Verify completed tasks** — LLM scores quality, dispatches revisions; enforces housekeeping triage schema
 6. **Create orphan PRs** — auto-rebase stale branches, create PRs
-7. **Review open PRs** — approve/merge, request changes, or escalate
-8. **Merge queue** — sequential merges per repo to avoid conflicts
-9. **Redeploy stale agents** — skip busy agents, health check after deploy
-10. **Preventive restart** — every ~50 min, restart idle containers
-11. **Supervisor** — strategic reasoning, dispatch decisions
-12. **Backlog triage** — every ~5h, dispatch housekeeping to agents
+7. **Proactive rebase** — every ~15min, rebase stale branches before they fall behind origin/main
+8. **Review open PRs** — approve/merge, request changes, or escalate
+9. **Merge queue** — sequential merges per repo to avoid conflicts; cascade cap enforced pre-merge
+10. **Redeploy stale agents** — skip busy agents, health check after deploy
+11. **Preventive restart** — every ~50 min, restart idle containers
+12. **Supervisor** — every ~15min, strategic reasoning, dispatch decisions
+13. **Backlog triage** — every ~5h, dispatch housekeeping to agents (staggered by `housekeeping_offset_cycles`)
+14. **Post-merge regression check** — validates staging after merges, auto-files revert tasks on failures
+15. **Semantic memory audit** — every ~24h, evaluates FTS5 memory effectiveness and adjusts min quality threshold
+16. **Roadmap proposals** — every ~24h, proposes new issues based on coverage gap detection
 
 ## Pool Routing
 
@@ -157,6 +166,24 @@ proxy:
   timeout_ms: 900000
   ssh_key: "~/.ssh/claude-proxy-agents"
 
+verification:
+  enabled: true
+  sources: ["github", "linear"]
+  min_score: 0.7      # minimum quality score to approve a task
+  max_revisions: 1    # max LLM-driven revision attempts per task
+
+escalation:
+  retry_limit: 3
+  max_followup_depth: 3   # cap follow-up chain depth before routing to escalation queue
+
+# Optional: define custom task types (built-ins: implementation, research, facilitation)
+task_types:
+  planning:
+    verification_prompt: "..."
+    prompt_header: Planning Request
+    result_header: Agent Plan
+    dimensions: [feasibility, completeness, risk_assessment, clarity]
+
 agents:
   agent-name:
     dir: "repo-directory"
@@ -167,6 +194,8 @@ agents:
     capabilities: ["typescript", "api"]
     owns_topics: ["keyword1", "keyword2"]
     github: "owner/repo"                    # for GitHub issue polling
+    housekeeping_offset_cycles: 0           # stagger housekeeping within each 5h window
+    auto_reroute_rejection_threshold: 4     # auto-reroute after N consecutive rejections
     docker:
       port: 3472
       api_key: "secret"
@@ -174,14 +203,56 @@ agents:
       session: "fresh"
 ```
 
+## Metrics Server
+
+An embedded HTTP server starts alongside the daemon on port **3472** (same as the agent port; bound to 127.0.0.1). It is started via `startMetricsServer()` in `src/service/metrics-server.ts`.
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /dispatch-efficiency` | 7-day rolling dispatch block-rate metrics (configurable via `?days=N`) |
+| `GET /health` | Basic liveness check — returns `{"status":"ok"}` |
+
+The dashboard agent polls `/dispatch-efficiency` to populate the dispatch efficiency panel without needing CLI access.
+
+## CLI Commands (`orch`)
+
+The `orch` CLI is built from `src/cli/index.ts`. Key command groups:
+
+| Command | Description |
+|---------|-------------|
+| `orch agents` | List, sync, and inspect fleet agents |
+| `orch status` | Task and agent status overview |
+| `orch health` | Agent health checks |
+| `orch metrics` | Dispatch and quality metrics |
+| `orch memory stats` | Semantic memory index size and configuration |
+| `orch memory query <text>` | Find similar past tasks (BM25 FTS5 ranking) |
+| `orch memory reindex` | Force re-index of all approved tasks |
+| `orch dispatch-efficiency` | Dispatch block-rate summary |
+| `orch decisions` | Routing decisions audit |
+| `orch audit` | General audit log |
+| `orch preflight` | Pre-PR submission checks (duplicate PR, rebase, conflicts, issue ref) |
+| `orch signals` | Dispatch signal and gate event feed |
+| `orch fleet` | Fleet scaling observability |
+| `orch supervisor-log` | Supervisor decision log |
+| `orch antibodies` | Antibody filter management |
+| `orch lineage` | Task lineage and cascade explorer |
+| `orch followup-chains` | Follow-up chain depth tracker |
+| `orch skip-blockers` | Chronically skipped issue tracker |
+| `orch routing-accuracy` | Routing accuracy and mismatch audit |
+| `orch review-saturation` | Review saturation metrics |
+| `orch cost` | Token usage and billing |
+
+Run `orch --help` for the full list. All commands accept `--json` for machine-readable output.
+
 ## Tech Stack
 
 - **Runtime:** Node.js 22+ (ES2022, ESNext modules)
 - **Language:** TypeScript (strict mode)
 - **CLI:** Commander.js
-- **State:** SQLite via better-sqlite3
+- **State:** SQLite via better-sqlite3 (FTS5 for semantic memory)
 - **Build:** tsc (test files excluded via tsconfig)
 - **GitHub API:** `gh` CLI
+- **IDs:** ULID (`src/utils/ulid.ts`) — time-ordered, collision-safe task IDs
 
 ## Monitoring Session — Proactive Recovery
 
