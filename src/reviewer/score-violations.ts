@@ -28,6 +28,7 @@ import type { IScoreViolationsStore } from "../state/types.js";
 import type { Task } from "../state/types.js";
 import { parseDimensionsFromNotes, extractPrUrl } from "../telegram/command-handler.js";
 import type { ParsedDimensions } from "../telegram/command-handler.js";
+import { BYPASS_REASON_FLOOR } from "./verifier.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -42,6 +43,15 @@ export const SCORE_VIOLATIONS_DEFAULT_DAYS = 7;
 
 /** Default result cap. */
 export const SCORE_VIOLATIONS_DEFAULT_LIMIT = 100;
+
+/**
+ * Score floor below which an explicit bypass_reason is required (issue #381).
+ *
+ * Re-exported from verifier.ts for backward compatibility — consumers that
+ * import `BYPASS_GATE_FLOOR` from this module continue to work unchanged.
+ * The canonical source of truth is `BYPASS_REASON_FLOOR` in verifier.ts.
+ */
+export const BYPASS_GATE_FLOOR = BYPASS_REASON_FLOOR;
 
 /** Score buckets for grouping violations. */
 export const SCORE_BUCKETS = [
@@ -88,6 +98,12 @@ export interface ScoreViolationEntry {
   marginal_reason: string | null;
   /** Bypass reason if floor was overridden. */
   bypass_reason: string | null;
+  /**
+   * True when the task scored below `BYPASS_GATE_FLOOR` (0.60) but has no
+   * explicit bypass_reason recorded. Indicates a sub-floor approval without
+   * the required justification — highlighted in red in the dashboard view.
+   */
+  missing_bypass_reason: boolean;
   /** When the task was approved. */
   approved_at: string;
 }
@@ -111,6 +127,30 @@ export interface ScoreBucketSummary {
   count: number;
   /** Fraction of total violations in this bucket. */
   pct: number;
+}
+
+/**
+ * Bypass-gate compliance summary included in every payload (issue #381).
+ *
+ * Counts how many approved tasks scored below `BYPASS_GATE_FLOOR` (0.60),
+ * and of those, how many lack an explicit `bypass_reason`. Operators can use
+ * this to answer "how many silent sub-floor approvals slipped through?" without
+ * reading individual violation entries.
+ */
+export interface BypassGateSummary {
+  /** Score floor used for this summary (0.60). */
+  floor: number;
+  /** Tasks approved with score < floor in the lookback window. */
+  sub_floor_count: number;
+  /** Of `sub_floor_count`, tasks with no bypass_reason recorded. */
+  missing_reason_count: number;
+  /** Of `sub_floor_count`, tasks that DO have a bypass_reason. */
+  has_reason_count: number;
+  /**
+   * Fraction of sub-floor approvals that lack a bypass_reason.
+   * null when sub_floor_count === 0 (no base to compute a rate).
+   */
+  missing_reason_rate: number | null;
 }
 
 /** Options for `getScoreViolationsPayload()`. */
@@ -143,6 +183,11 @@ export interface ScoreViolationsPayload {
   violations: ScoreViolationEntry[];
   /** Applied agent filter, or null if not filtering. */
   agent_filter: string | null;
+  /**
+   * Bypass-gate compliance summary for sub-floor approvals (issue #381).
+   * Shows how many approved tasks fell below 0.60 and how many lacked a bypass_reason.
+   */
+  bypass_gate: BypassGateSummary;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -189,22 +234,45 @@ function extractMarginalReason(task: Task): string | null {
 
 function buildViolationEntry(task: Task): ScoreViolationEntry {
   const dims = parseDimensionsFromNotes(task.verification_notes);
+  const score = task.quality_score!;
+  const bypassReason = task.bypass_reason ?? null;
+  const missingBypassReason =
+    score < BYPASS_GATE_FLOOR && (bypassReason === null || bypassReason.trim() === "");
   return {
     task_id: task.id,
     task_id_short: task.id.slice(0, 8),
     title: task.title,
     agent_name: task.agent_name ?? null,
     task_type: task.task_type,
-    quality_score: task.quality_score!,
-    bucket: classifyBucket(task.quality_score!),
+    quality_score: score,
+    bucket: classifyBucket(score),
     dimensions: dims,
     weakest_dimension: findWeakestDimension(dims),
     source_ref: task.source_ref ?? null,
     pr_url: extractPrUrl(task),
     quality_explanation: task.quality_explanation ?? null,
     marginal_reason: extractMarginalReason(task),
-    bypass_reason: task.bypass_reason ?? null,
+    bypass_reason: bypassReason,
+    missing_bypass_reason: missingBypassReason,
     approved_at: task.updated_at,
+  };
+}
+
+/**
+ * Compute the bypass-gate compliance summary for a set of violation entries.
+ */
+function buildBypassGateSummary(violations: ScoreViolationEntry[]): BypassGateSummary {
+  const subFloor = violations.filter((v) => v.quality_score < BYPASS_GATE_FLOOR);
+  const missingReason = subFloor.filter((v) => v.missing_bypass_reason);
+  const hasReason = subFloor.filter((v) => !v.missing_bypass_reason);
+  const subFloorCount = subFloor.length;
+  const missingReasonCount = missingReason.length;
+  return {
+    floor: BYPASS_GATE_FLOOR,
+    sub_floor_count: subFloorCount,
+    missing_reason_count: missingReasonCount,
+    has_reason_count: hasReason.length,
+    missing_reason_rate: subFloorCount > 0 ? missingReasonCount / subFloorCount : null,
   };
 }
 
@@ -304,6 +372,7 @@ export function getScoreViolationsPayload(
     per_agent: buildPerAgentSummary(violations),
     violations,
     agent_filter: agentFilter,
+    bypass_gate: buildBypassGateSummary(violations),
   };
 }
 
@@ -426,4 +495,152 @@ export function formatScoreViolationsForTelegram(
   }
 
   return lines.join("\n");
+}
+
+// ── HTML formatter ───────────────────────────────────────────────────────────
+
+/** HTML-escape a string to prevent XSS in inline HTML output. */
+function esc(s: string | null | undefined): string {
+  if (s == null) return "";
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * Render a `ScoreViolationsPayload` as a self-contained HTML snippet suitable
+ * for embedding in a dashboard page (issue #381).
+ *
+ * Features:
+ *   - Bypass-gate status banner: orange ⚠ with count when violations exist,
+ *     green ✓ when all sub-floor approvals have a bypass_reason
+ *   - Violations table with a **Bypass Reason** column
+ *   - Rows where `missing_bypass_reason === true` are highlighted red
+ *   - CSV export link (data-uri) includes bypass_reason and missing_bypass_reason
+ *
+ * This function is intentionally dependency-free (no framework, no bundler)
+ * so callers can inject it as a static string into any HTTP response.
+ *
+ * @param payload     The payload from `getScoreViolationsPayload()`.
+ * @param opts        Optional render options.
+ */
+export function renderScoreViolationsHtml(
+  payload: ScoreViolationsPayload,
+  opts: { title?: string; maxRows?: number } = {},
+): string {
+  const title = esc(opts.title ?? "Score Violations");
+  const maxRows = opts.maxRows ?? 200;
+  const { bypass_gate } = payload;
+  const floorPct = Math.round(bypass_gate.floor * 100);
+
+  // ── Bypass gate banner ──────────────────────────────────────────────────────
+  let bypassBanner: string;
+  if (bypass_gate.sub_floor_count === 0) {
+    bypassBanner = `
+      <div class="bypass-banner bypass-ok">
+        ✓ No sub-${floorPct}% approvals in this window — bypass gate clean.
+      </div>`;
+  } else if (bypass_gate.missing_reason_count === 0) {
+    bypassBanner = `
+      <div class="bypass-banner bypass-ok">
+        ✓ ${bypass_gate.sub_floor_count} sub-${floorPct}% approval(s) — all have a bypass_reason on record.
+      </div>`;
+  } else {
+    const missingPct = bypass_gate.missing_reason_rate !== null
+      ? ` (${Math.round(bypass_gate.missing_reason_rate * 100)}%)`
+      : "";
+    bypassBanner = `
+      <div class="bypass-banner bypass-warn">
+        ⚠ ${bypass_gate.missing_reason_count}${missingPct} of ${bypass_gate.sub_floor_count}
+        sub-${floorPct}% approval(s) are missing a bypass_reason —
+        operator override was not justified.
+      </div>`;
+  }
+
+  // ── Violation rows ──────────────────────────────────────────────────────────
+  const rows = payload.violations.slice(0, maxRows).map((v) => {
+    const scorePct = (v.quality_score * 100).toFixed(1);
+    const missingClass = v.missing_bypass_reason ? ' class="missing-bypass"' : "";
+    const bypassCell = v.bypass_reason
+      ? `<span class="bypass-badge-ok" title="${esc(v.bypass_reason)}">✓ ${esc(v.bypass_reason.slice(0, 60))}${v.bypass_reason.length > 60 ? "…" : ""}</span>`
+      : v.quality_score < bypass_gate.floor
+        ? `<span class="bypass-badge-missing">✗ missing</span>`
+        : `<span class="bypass-badge-na">—</span>`;
+
+    const dimCell = v.dimensions
+      ? `${(v.dimensions.correctness ?? 0) >= 0.80 ? "✓" : "✗"}C ${(v.dimensions.completeness ?? 0) >= 0.80 ? "✓" : "✗"}P ${(v.dimensions.test_coverage ?? 0) >= 0.80 ? "✓" : "✗"}T ${(v.dimensions.code_quality ?? 0) >= 0.80 ? "✓" : "✗"}Q`
+      : "—";
+
+    return `    <tr${missingClass}>
+      <td><code>${esc(v.task_id_short)}</code></td>
+      <td title="${esc(v.title)}">${esc(v.title.slice(0, 55))}${v.title.length > 55 ? "…" : ""}</td>
+      <td>${esc(v.agent_name ?? "(none)")}</td>
+      <td>${esc(v.task_type)}</td>
+      <td class="score">${scorePct}%</td>
+      <td>${esc(v.bucket)}</td>
+      <td><code>${dimCell}</code></td>
+      <td>${bypassCell}</td>
+      <td>${esc(v.approved_at.slice(0, 16).replace("T", " "))}</td>
+    </tr>`;
+  }).join("\n");
+
+  const extraRows = payload.violations.length > maxRows
+    ? `<tr><td colspan="9" style="text-align:center;font-style:italic;">…and ${payload.violations.length - maxRows} more</td></tr>`
+    : "";
+
+  // ── CSV export (data-uri) ───────────────────────────────────────────────────
+  const csvHeader = "task_id,agent,type,score,bucket,bypass_reason,missing_bypass_reason,approved_at\n";
+  const csvRows = payload.violations.map((v) =>
+    [
+      v.task_id,
+      v.agent_name ?? "",
+      v.task_type,
+      v.quality_score.toFixed(4),
+      v.bucket,
+      (v.bypass_reason ?? "").replace(/"/g, '""'),
+      v.missing_bypass_reason ? "true" : "false",
+      v.approved_at,
+    ].map((c) => `"${c}"`).join(","),
+  ).join("\n");
+  const csvData = encodeURIComponent(csvHeader + csvRows);
+
+  return `<div class="score-violations-panel">
+  <style>
+    .score-violations-panel { font-family: sans-serif; }
+    .bypass-banner { padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; font-weight: 600; }
+    .bypass-ok   { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+    .bypass-warn { background: #fff3cd; color: #856404; border: 1px solid #ffc107; }
+    .bypass-badge-ok      { color: #155724; }
+    .bypass-badge-missing { color: #721c24; font-weight: bold; }
+    .bypass-badge-na      { color: #666; }
+    .sv-table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
+    .sv-table th, .sv-table td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; }
+    .sv-table th { background: #f2f2f2; }
+    .sv-table tr.missing-bypass { background: #fff0f0; }
+    .sv-table td.score { font-weight: bold; }
+    .sv-export { margin-top: 8px; font-size: 0.8em; }
+  </style>
+  <h3>${title}</h3>
+  <p>Threshold: ${Math.round(payload.threshold * 100)}% &middot; Window: ${payload.days}d &middot; Total: ${payload.total}</p>
+  ${bypassBanner}
+  <table class="sv-table">
+    <thead>
+      <tr>
+        <th>ID</th><th>Title</th><th>Agent</th><th>Type</th>
+        <th>Score</th><th>Bucket</th><th>Dims</th>
+        <th>Bypass Reason</th><th>Approved</th>
+      </tr>
+    </thead>
+    <tbody>
+${rows}
+${extraRows}
+    </tbody>
+  </table>
+  <div class="sv-export">
+    <a href="data:text/csv;charset=utf-8,${csvData}" download="score-violations.csv">⬇ Download CSV</a>
+  </div>
+</div>`;
 }

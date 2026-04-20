@@ -126,8 +126,18 @@ export {
   PROPOSAL_REQUIRED_SECTIONS,
   PRIORITY_FLOOR_THRESHOLD,
   PRIORITY_QUALITY_FLOOR,
+  // Bypass-reason gate (issue #379)
+  BYPASS_REASON_FLOOR,
+  checkBypassReasonGate,
+  buildBypassRejectionFeedback,
 } from "./reviewer/verifier.js";
-export type { VerificationResult, QualityDimensions } from "./reviewer/verifier.js";
+export type {
+  VerificationResult,
+  QualityDimensions,
+  // Bypass-reason gate (issue #379)
+  BypassReasonGateResult,
+  BypassReasonGateOutcome,
+} from "./reviewer/verifier.js";
 
 // Meta-quality gate (issue #357) — elevated floor for quality-enforcement tasks.
 export {
@@ -493,10 +503,12 @@ export type {
 export {
   getScoreViolationsPayload,
   formatScoreViolationsForTelegram,
+  renderScoreViolationsHtml,
   SCORE_VIOLATIONS_DEFAULT_THRESHOLD,
   SCORE_VIOLATIONS_DEFAULT_DAYS,
   SCORE_VIOLATIONS_DEFAULT_LIMIT,
   SCORE_BUCKETS as VIOLATION_SCORE_BUCKETS,
+  BYPASS_GATE_FLOOR,
 } from "./reviewer/score-violations.js";
 export type {
   ScoreViolationsPayload,
@@ -505,6 +517,7 @@ export type {
   ScoreViolationsOptions,
   ScoreBucketSummary,
   ScoreBucket,
+  BypassGateSummary,
 } from "./reviewer/score-violations.js";
 
 // Low-score approval real-time alerter — Telegram notifications (issue #331).

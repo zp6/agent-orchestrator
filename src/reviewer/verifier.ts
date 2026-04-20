@@ -152,6 +152,18 @@ export interface VerificationResult {
    * guidance and must resubmit at ≥ 85%.
    */
   metaQualityRejected?: true;
+  /**
+   * Explicit operator-supplied justification for approving a task whose score
+   * falls below `BYPASS_REASON_FLOOR` (0.60).
+   *
+   * - When present and non-empty, the bypass is recorded as a deliberate
+   *   operator override and surfaced in the score-violations audit feed.
+   * - When absent and score < `BYPASS_REASON_FLOOR`, `applyBypassReasonGate()`
+   *   returns `blocked: true` and the approval is rejected outright.
+   *
+   * Populated only for low-score approvals; undefined for tasks that score ≥ 0.60.
+   */
+  bypass_reason?: string;
 }
 
 /**
@@ -230,6 +242,99 @@ export const TRIAGE_REQUIRED_FIELDS = [
   "priority_reordering",
   "outcome_summary",
 ] as const;
+
+// ── Bypass-reason gate (issue #379) ──────────────────────────────────────────
+
+/**
+ * Score floor below which an explicit `bypass_reason` is required before any
+ * approval is allowed. Matches `SUB_THRESHOLD_REJECTION_LIMIT` (0.60) — the
+ * same boundary enforced by the hard verifier guards.
+ *
+ * Exported so the orchestrator daemon and dashboard can apply the same check
+ * before processing operator `/approve` commands.
+ */
+export const BYPASS_REASON_FLOOR = 0.60;
+
+/**
+ * Result returned by `checkBypassReasonGate()`.
+ *
+ * - `'above_floor'`        — score ≥ 0.60; gate is a no-op.
+ * - `'allowed_with_reason'` — score < 0.60 but a non-empty bypass_reason was
+ *                             supplied; the approval is permitted with the reason
+ *                             surfaced in the audit trail.
+ * - `'blocked_no_reason'`  — score < 0.60 and bypass_reason is absent or empty;
+ *                             the approval MUST be blocked by the caller.
+ */
+export type BypassReasonGateOutcome =
+  | "above_floor"
+  | "allowed_with_reason"
+  | "blocked_no_reason";
+
+export interface BypassReasonGateResult {
+  outcome: BypassReasonGateOutcome;
+  /** True only when outcome === 'blocked_no_reason'. Caller must reject the approval. */
+  blocked: boolean;
+  /** Normalised reason string (trimmed). Present only when allowed_with_reason. */
+  bypass_reason?: string;
+  /** Score used for the gate check (passed in by caller). */
+  score: number;
+}
+
+/**
+ * Validate whether a low-score approval is permissible given the supplied
+ * bypass reason.
+ *
+ * This is a pure, stateless function — no side effects, no store access.
+ * Callers (verifier, orchestrator daemon, dashboard API) apply it before
+ * committing an approval decision.
+ *
+ * @param score        The task's quality score (0–1).
+ * @param bypassReason An explicit operator-supplied reason, or undefined/empty.
+ * @returns            `BypassReasonGateResult` describing the gate outcome.
+ */
+export function checkBypassReasonGate(
+  score: number,
+  bypassReason?: string | null,
+): BypassReasonGateResult {
+  if (score >= BYPASS_REASON_FLOOR) {
+    return { outcome: "above_floor", blocked: false, score };
+  }
+
+  const trimmed = bypassReason?.trim() ?? "";
+  if (trimmed.length > 0) {
+    return {
+      outcome: "allowed_with_reason",
+      blocked: false,
+      bypass_reason: trimmed,
+      score,
+    };
+  }
+
+  return { outcome: "blocked_no_reason", blocked: true, score };
+}
+
+/**
+ * Build the rejection feedback message sent to operators when a bypass is
+ * blocked because no reason was provided.
+ *
+ * @param score     The task's quality score.
+ * @param taskId    Short task identifier for display (e.g. first 8 chars of ULID).
+ * @returns         Human-readable rejection string suitable for Telegram or
+ *                  dashboard display.
+ */
+export function buildBypassRejectionFeedback(score: number, taskId: string): string {
+  const pct = (score * 100).toFixed(0);
+  const floor = (BYPASS_REASON_FLOOR * 100).toFixed(0);
+  return (
+    `[bypass-reason-gate] Task \`${taskId}\` scored ${pct}% — below the ${floor}% quality floor. ` +
+    `Approval blocked: a non-empty \`bypass_reason\` is required to override the quality gate. ` +
+    `Provide a justification explaining why this low-score task should be approved (e.g. ` +
+    `"prototype only", "hotfix with manual verification", "known acceptable regression"). ` +
+    `Re-submit the approval with the bypass_reason field populated.`
+  );
+}
+
+// ── End bypass-reason gate ────────────────────────────────────────────────────
 
 /**
  * Recommended output schema for proposal tasks.
@@ -1059,6 +1164,71 @@ export class Verifier {
       ...rest,
       approved: false,
       blockedReason: "hard_block_sub50",
+    };
+  }
+
+  /**
+   * Enforce the bypass-reason gate (issue #379).
+   *
+   * When a verification result is `approved` and the score falls below
+   * `BYPASS_REASON_FLOOR` (0.60), the gate requires an explicit, non-empty
+   * `bypass_reason` string to be supplied. Without one the approval is blocked:
+   * the result is returned with `approved: false` and a `revision` message
+   * explaining what is required.
+   *
+   * When `bypass_reason` is provided the gate stamps it into the result and
+   * allows the approval to proceed. This makes every sub-floor approval
+   * explicitly auditable — operators can no longer approve low-score tasks
+   * silently.
+   *
+   * The gate is a no-op when:
+   *   - `result.approved === false` (already rejected — no approval to gate)
+   *   - `result.score >= BYPASS_REASON_FLOOR` (score above floor — no gate needed)
+   *
+   * @param result      The verification result to check.
+   * @param bypassReason  An explicit operator-supplied reason, or undefined.
+   * @param taskId      Short identifier for error messages (first 8 chars of ULID).
+   * @returns           The (possibly mutated) result. When blocked, `approved` is
+   *                    false and `revision` contains the gate feedback.
+   */
+  applyBypassReasonGate(
+    result: VerificationResult,
+    bypassReason?: string | null,
+    taskId = "unknown",
+  ): VerificationResult {
+    // Gate is a no-op for rejected results or scores above the floor.
+    if (!result.approved || result.score >= BYPASS_REASON_FLOOR) {
+      return result;
+    }
+
+    const gateResult = checkBypassReasonGate(result.score, bypassReason);
+
+    if (gateResult.blocked) {
+      // Block the approval — bypass_reason is required but not provided.
+      this.log.warn("bypass-reason gate: blocked sub-floor approval — no bypass_reason provided", {
+        taskId,
+        score: result.score,
+        floor: BYPASS_REASON_FLOOR,
+      });
+      return {
+        ...result,
+        approved: false,
+        bypass_reason: undefined,
+        blockedReason: "held_for_operator_review",
+        revision: buildBypassRejectionFeedback(result.score, taskId),
+        notes: `[bypass-reason-gate] ${result.notes}`,
+      };
+    }
+
+    // Allowed — record bypass_reason in the result for audit trail.
+    this.log.info("bypass-reason gate: sub-floor approval permitted with reason", {
+      taskId,
+      score: result.score,
+      bypass_reason: gateResult.bypass_reason,
+    });
+    return {
+      ...result,
+      bypass_reason: gateResult.bypass_reason,
     };
   }
 

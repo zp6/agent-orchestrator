@@ -25,10 +25,12 @@ import { StateStore } from "../state/store.js";
 import {
   getScoreViolationsPayload,
   formatScoreViolationsForTelegram,
+  renderScoreViolationsHtml,
   SCORE_VIOLATIONS_DEFAULT_THRESHOLD,
   SCORE_VIOLATIONS_DEFAULT_DAYS,
   SCORE_VIOLATIONS_DEFAULT_LIMIT,
   SCORE_BUCKETS,
+  BYPASS_GATE_FLOOR,
 } from "../reviewer/score-violations.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -418,5 +420,287 @@ describe("formatScoreViolationsForTelegram", () => {
     expect(msg).toContain("By severity");
     expect(msg).toContain("critical");
     expect(msg).toContain("marginal");
+  });
+});
+
+// ── BYPASS_GATE_FLOOR constant ────────────────────────────────────────────────
+
+describe("BYPASS_GATE_FLOOR", () => {
+  it("equals 0.60", () => {
+    expect(BYPASS_GATE_FLOOR).toBe(0.60);
+  });
+});
+
+// ── missing_bypass_reason field on ScoreViolationEntry ───────────────────────
+
+describe("missing_bypass_reason on ScoreViolationEntry", () => {
+  let fixture: ReturnType<typeof makeStoreFixture>;
+
+  beforeEach(() => {
+    fixture = makeStoreFixture();
+  });
+
+  afterEach(() => {
+    fixture.cleanup();
+  });
+
+  it("is false for tasks scoring >= 0.60 regardless of bypass_reason", () => {
+    fixture.insertTask({ quality_score: 0.60, bypass_reason: null });
+    fixture.insertTask({ quality_score: 0.75, bypass_reason: null });
+    fixture.insertTask({ quality_score: 0.79, bypass_reason: null });
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    for (const v of payload.violations) {
+      expect(v.missing_bypass_reason).toBe(false);
+    }
+  });
+
+  it("is true for tasks scoring < 0.60 with no bypass_reason", () => {
+    fixture.insertTask({ quality_score: 0.35, bypass_reason: null });
+    fixture.insertTask({ quality_score: 0.55, bypass_reason: null });
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    for (const v of payload.violations.filter((v) => v.quality_score < 0.60)) {
+      expect(v.missing_bypass_reason).toBe(true);
+    }
+  });
+
+  it("is false for tasks scoring < 0.60 WITH a bypass_reason", () => {
+    fixture.insertTask({ quality_score: 0.35, bypass_reason: "Emergency hotfix" });
+    fixture.insertTask({ quality_score: 0.55, bypass_reason: "Approved by tech lead" });
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    for (const v of payload.violations) {
+      expect(v.missing_bypass_reason).toBe(false);
+    }
+  });
+
+  it("is true when bypass_reason is empty string", () => {
+    fixture.insertTask({ quality_score: 0.50, bypass_reason: "" });
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    expect(payload.violations[0]!.missing_bypass_reason).toBe(true);
+  });
+
+  it("is true for score exactly 0.599 with no bypass_reason", () => {
+    fixture.insertTask({ quality_score: 0.599, bypass_reason: null });
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    expect(payload.violations[0]!.missing_bypass_reason).toBe(true);
+  });
+
+  it("is false for score exactly 0.60 (inclusive floor)", () => {
+    fixture.insertTask({ quality_score: 0.60, bypass_reason: null });
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    expect(payload.violations[0]!.missing_bypass_reason).toBe(false);
+  });
+});
+
+// ── bypass_gate summary in payload ───────────────────────────────────────────
+
+describe("bypass_gate summary in ScoreViolationsPayload", () => {
+  let fixture: ReturnType<typeof makeStoreFixture>;
+
+  beforeEach(() => {
+    fixture = makeStoreFixture();
+  });
+
+  afterEach(() => {
+    fixture.cleanup();
+  });
+
+  it("has floor === 0.60", () => {
+    const payload = getScoreViolationsPayload(fixture.store);
+    expect(payload.bypass_gate.floor).toBe(0.60);
+  });
+
+  it("all counts are zero when no violations", () => {
+    const payload = getScoreViolationsPayload(fixture.store);
+    expect(payload.bypass_gate.sub_floor_count).toBe(0);
+    expect(payload.bypass_gate.missing_reason_count).toBe(0);
+    expect(payload.bypass_gate.has_reason_count).toBe(0);
+    expect(payload.bypass_gate.missing_reason_rate).toBeNull();
+  });
+
+  it("counts sub-floor tasks correctly", () => {
+    fixture.insertTask({ quality_score: 0.35 }); // sub-floor, no reason
+    fixture.insertTask({ quality_score: 0.55 }); // sub-floor, no reason
+    fixture.insertTask({ quality_score: 0.65 }); // above floor
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    expect(payload.bypass_gate.sub_floor_count).toBe(2);
+    expect(payload.bypass_gate.missing_reason_count).toBe(2);
+    expect(payload.bypass_gate.has_reason_count).toBe(0);
+  });
+
+  it("distinguishes has_reason from missing_reason", () => {
+    fixture.insertTask({ quality_score: 0.35, bypass_reason: "hotfix" }); // sub-floor, WITH reason
+    fixture.insertTask({ quality_score: 0.50, bypass_reason: null });     // sub-floor, NO reason
+    fixture.insertTask({ quality_score: 0.65, bypass_reason: null });     // above floor
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    expect(payload.bypass_gate.sub_floor_count).toBe(2);
+    expect(payload.bypass_gate.has_reason_count).toBe(1);
+    expect(payload.bypass_gate.missing_reason_count).toBe(1);
+  });
+
+  it("computes missing_reason_rate correctly", () => {
+    fixture.insertTask({ quality_score: 0.35, bypass_reason: null });   // missing
+    fixture.insertTask({ quality_score: 0.45, bypass_reason: null });   // missing
+    fixture.insertTask({ quality_score: 0.55, bypass_reason: "ok" });   // has reason
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    expect(payload.bypass_gate.sub_floor_count).toBe(3);
+    expect(payload.bypass_gate.missing_reason_count).toBe(2);
+    expect(payload.bypass_gate.missing_reason_rate).toBeCloseTo(2 / 3, 5);
+  });
+
+  it("missing_reason_rate is null when sub_floor_count is zero", () => {
+    fixture.insertTask({ quality_score: 0.65 }); // above floor only
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    expect(payload.bypass_gate.sub_floor_count).toBe(0);
+    expect(payload.bypass_gate.missing_reason_rate).toBeNull();
+  });
+
+  it("has_reason_count equals sub_floor_count when all have reasons", () => {
+    fixture.insertTask({ quality_score: 0.35, bypass_reason: "reason A" });
+    fixture.insertTask({ quality_score: 0.55, bypass_reason: "reason B" });
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    expect(payload.bypass_gate.sub_floor_count).toBe(2);
+    expect(payload.bypass_gate.has_reason_count).toBe(2);
+    expect(payload.bypass_gate.missing_reason_count).toBe(0);
+    expect(payload.bypass_gate.missing_reason_rate).toBe(0);
+  });
+});
+
+// ── renderScoreViolationsHtml ─────────────────────────────────────────────────
+
+describe("renderScoreViolationsHtml", () => {
+  let fixture: ReturnType<typeof makeStoreFixture>;
+
+  beforeEach(() => {
+    fixture = makeStoreFixture();
+  });
+
+  afterEach(() => {
+    fixture.cleanup();
+  });
+
+  it("returns a string containing HTML", () => {
+    const payload = getScoreViolationsPayload(fixture.store);
+    const html = renderScoreViolationsHtml(payload);
+    expect(typeof html).toBe("string");
+    expect(html).toContain("<table");
+    expect(html).toContain("</table>");
+  });
+
+  it("includes a Bypass Reason column header", () => {
+    const payload = getScoreViolationsPayload(fixture.store);
+    const html = renderScoreViolationsHtml(payload);
+    expect(html).toContain("Bypass Reason");
+  });
+
+  it("shows green OK banner when no sub-floor approvals", () => {
+    const payload = getScoreViolationsPayload(fixture.store);
+    const html = renderScoreViolationsHtml(payload);
+    expect(html).toContain("bypass-ok");
+    expect(html).toContain("bypass gate clean");
+  });
+
+  it("shows green OK banner when all sub-floor approvals have a bypass_reason", () => {
+    fixture.insertTask({ quality_score: 0.40, bypass_reason: "Emergency fix" });
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    const html = renderScoreViolationsHtml(payload);
+    expect(html).toContain("bypass-ok");
+    expect(html).toContain("all have a bypass_reason");
+  });
+
+  it("shows orange warning banner when sub-floor approvals lack bypass_reason", () => {
+    fixture.insertTask({ quality_score: 0.35, bypass_reason: null });
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    const html = renderScoreViolationsHtml(payload);
+    expect(html).toContain("bypass-warn");
+    expect(html).toContain("missing a bypass_reason");
+  });
+
+  it("adds missing-bypass CSS class to rows where missing_bypass_reason is true", () => {
+    fixture.insertTask({ quality_score: 0.35, bypass_reason: null }); // missing
+    fixture.insertTask({ quality_score: 0.65, bypass_reason: null }); // above floor — no class
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    const html = renderScoreViolationsHtml(payload);
+    expect(html).toContain('class="missing-bypass"');
+  });
+
+  it("does NOT add missing-bypass class when bypass_reason is present", () => {
+    fixture.insertTask({ quality_score: 0.35, bypass_reason: "justified" });
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    const html = renderScoreViolationsHtml(payload);
+    expect(html).not.toContain('class="missing-bypass"');
+  });
+
+  it("renders bypass_reason text in the table cell", () => {
+    fixture.insertTask({ quality_score: 0.40, bypass_reason: "Known regression" });
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    const html = renderScoreViolationsHtml(payload);
+    expect(html).toContain("Known regression");
+  });
+
+  it("includes ✗ missing badge when bypass_reason is absent for sub-floor task", () => {
+    fixture.insertTask({ quality_score: 0.35, bypass_reason: null });
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    const html = renderScoreViolationsHtml(payload);
+    expect(html).toContain("bypass-badge-missing");
+    expect(html).toContain("missing");
+  });
+
+  it("includes CSV download link with bypass_reason and missing_bypass_reason columns", () => {
+    fixture.insertTask({ quality_score: 0.40, bypass_reason: "hotfix" });
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    const html = renderScoreViolationsHtml(payload);
+    expect(html).toContain("data:text/csv");
+    expect(html).toContain("bypass_reason");
+    expect(html).toContain("missing_bypass_reason");
+  });
+
+  it("HTML-escapes bypass_reason to prevent XSS", () => {
+    fixture.insertTask({ quality_score: 0.40, bypass_reason: '<script>alert("xss")</script>' });
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    const html = renderScoreViolationsHtml(payload);
+    expect(html).not.toContain("<script>");
+    expect(html).toContain("&lt;script&gt;");
+  });
+
+  it("respects maxRows option", () => {
+    for (let i = 0; i < 5; i++) {
+      fixture.insertTask({ quality_score: 0.60 + i * 0.02 });
+    }
+
+    const payload = getScoreViolationsPayload(fixture.store);
+    const html = renderScoreViolationsHtml(payload, { maxRows: 2 });
+    expect(html).toContain("and 3 more");
+  });
+
+  it("uses custom title when provided", () => {
+    const payload = getScoreViolationsPayload(fixture.store);
+    const html = renderScoreViolationsHtml(payload, { title: "My Custom Report" });
+    expect(html).toContain("My Custom Report");
+  });
+
+  it("includes threshold and window metadata", () => {
+    const payload = getScoreViolationsPayload(fixture.store);
+    const html = renderScoreViolationsHtml(payload);
+    expect(html).toContain("80%");
+    expect(html).toContain("7d");
   });
 });
