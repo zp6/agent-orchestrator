@@ -700,6 +700,34 @@ export type {
   SemanticMemoryDigestReport,
 } from "./state/types.js";
 
+// Reviewer Misrouting Digest — daily Telegram summary (issue #382).
+//
+// The MisroutingDigestScheduler fires a Telegram summary once per day at
+// 09:00 UTC listing every implementation task dispatched to the reviewer
+// in the last 24 hours. Each entry shows task title, dispatched agent,
+// suggested correct agent (inferred from repo ownership), and issue link.
+//
+// Wire into the daemon poll cycle:
+//   const scheduler = new MisroutingDigestScheduler(store, notifier, config);
+//   // In each poll cycle:
+//   await scheduler.maybeFireDigest();
+export {
+  MisroutingDigestScheduler,
+  buildMisroutingDigest,
+  formatMisroutingDigest,
+  classifyMisroutedTask,
+  FLAG_LAST_MISROUTING_DIGEST_SENT,
+  MISROUTING_LOOKBACK_HOURS,
+  REVIEWER_AGENT_NAMES,
+  IMPLEMENTATION_TASK_TYPES,
+  CROSS_REPO_FOLLOWUP_PATTERNS,
+} from "./reviewer/misrouting-digest.js";
+export type {
+  MisroutingDigestEntry,
+  MisroutingDigestReport,
+  IMisroutingDigestStore,
+} from "./reviewer/misrouting-digest.js";
+
 // Pre-dispatch capability enforcer — routing boundary gate (issue #330).
 //
 // Intercepts tasks before they are sent to claude-orchestrator-reviewer and
