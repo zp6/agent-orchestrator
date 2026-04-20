@@ -901,6 +901,26 @@ export class Daemon {
             `improvement delta ${delta !== null ? `${(delta * 100).toFixed(1)}%` : "N/A"}, ` +
             `target met: ${eff.meets_target ?? "insufficient data"}`,
           );
+
+          // Auto-tune: adjust min_quality_score based on effectiveness data (issue #1029)
+          const configThreshold = this.config.semantic_memory?.min_quality_score ?? 0.80;
+          const currentThreshold = this.store.getTunedMinQualityScore() ?? configThreshold;
+          const tuneResult = this.store.applyAutoTuneIfBeneficial(currentThreshold);
+          if (tuneResult.action !== "keep") {
+            console.log(
+              `[${time}] Semantic memory auto-tune: ${tuneResult.action} threshold ` +
+              `${tuneResult.current_threshold} → ${tuneResult.recommended_threshold}. ` +
+              `Reason: ${tuneResult.reason}`,
+            );
+            notifyOperator(
+              `Semantic Memory Threshold Auto-tuned`,
+              `min_quality_score adjusted: ${tuneResult.current_threshold} → ${tuneResult.recommended_threshold}. ` +
+              tuneResult.reason,
+              "info",
+              "semantic-memory-autotune",
+            );
+          }
+
           // Alert if we have enough data and the target is not met
           if (
             eff.matched.total_tasks >= 10 &&
@@ -914,7 +934,7 @@ export class Daemon {
               `memory-assisted first-pass rate improvement is ${deltaPct} (target: ≥15%). ` +
               `Matched FPR: ${eff.matched.first_pass_rate !== null ? `${(eff.matched.first_pass_rate * 100).toFixed(1)}%` : "N/A"}, ` +
               `Unmatched FPR: ${eff.unmatched.first_pass_rate !== null ? `${(eff.unmatched.first_pass_rate * 100).toFixed(1)}%` : "N/A"}. ` +
-              `Review semantic memory config (min_quality_score threshold, FTS5 query quality).`,
+              `Auto-tune applied (new threshold: ${this.store.getTunedMinQualityScore() ?? configThreshold}).`,
               "warning",
               "semantic-memory-effectiveness",
             );

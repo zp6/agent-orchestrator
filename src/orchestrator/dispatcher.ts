@@ -1322,11 +1322,16 @@ export class Dispatcher {
       const topK = this.config.semantic_memory?.top_k ?? 3;
       const excerptChars = this.config.semantic_memory?.max_result_excerpt_chars ?? 400;
 
-      // Re-index any newly approved tasks before querying
-      const minScore = this.config.semantic_memory?.min_quality_score ?? 0.80;
+      // Re-index any newly approved tasks before querying.
+      // Use auto-tuned threshold when available, falling back to config (issue #1029).
+      const configThreshold = this.config.semantic_memory?.min_quality_score ?? 0.80;
+      const minScore = this.store.getTunedMinQualityScore() ?? configThreshold;
       this.store.indexApprovedTasksIntoMemory(minScore, excerptChars);
 
-      const matches = this.store.querySemanticMemory(message, topK, task.id);
+      const matches = this.store.querySemanticMemory(message, topK, task.id, {
+        taskId: task.id,
+        agentName,
+      });
       const semanticBlock = buildSemanticMemoryBlock(matches);
       if (semanticBlock) {
         this.log.info("Injecting semantic memory into dispatch", {

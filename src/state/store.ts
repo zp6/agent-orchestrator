@@ -1290,6 +1290,58 @@ export interface SemanticMemoryEffectivenessResult {
   weekly: SemanticMemoryWeeklyCohort[];
 }
 
+// ── Semantic Memory Auto-tuning (issue #1029) ─────────────────────────────────
+
+/**
+ * Recommendation produced by the auto-tune algorithm.
+ * The daemon applies this every audit cycle when enough data is available.
+ */
+export interface SemanticMemoryAutoTuneResult {
+  current_threshold: number;
+  recommended_threshold: number;
+  /** Direction of the recommended change. */
+  action: "lower" | "raise" | "keep";
+  reason: string;
+  basis: {
+    hit_rate: number | null;
+    improvement_delta: number | null;
+    matched_tasks: number;
+    unmatched_tasks: number;
+  };
+}
+
+/**
+ * Aggregate statistics about FTS5 query quality over a time window.
+ * Used to surface noisy query patterns that consistently produce zero matches.
+ */
+export interface SemanticMemoryQueryStats {
+  window_start: string;
+  generated_at: string;
+  total_queries: number;
+  zero_match_queries: number;
+  zero_match_rate: number | null;
+  avg_matches_returned: number | null;
+  /** Most common FTS5 query term sets that returned zero results. */
+  top_empty_patterns: Array<{ query_sample: string; count: number }>;
+}
+
+/**
+ * Per-agent effectiveness breakdown.
+ * Allows identifying which agents benefit most from semantic memory and
+ * whether agent-specific threshold adjustments are warranted.
+ */
+export interface PerAgentSemanticMemoryStats {
+  agent_name: string;
+  total_dispatches: number;
+  memory_hit_count: number;
+  memory_hit_rate: number | null;
+  matched: SemanticMemoryCohortStats;
+  unmatched: SemanticMemoryCohortStats;
+  improvement_delta: number | null;
+  /** Tuning recommendation specific to this agent. */
+  recommended_threshold_adjustment: "lower" | "raise" | "keep" | "insufficient_data";
+}
+
 export interface ReadSignalsFilter {
   signal_type?: string;
   repo?: string;
@@ -9369,6 +9421,31 @@ export class StateStore {
       );
     `);
 
+    // Settings table: persists auto-tuned configuration overrides (issue #1029).
+    // Keyed by setting name; value is a JSON-encoded scalar.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS semantic_memory_settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+
+    // Query log: records each FTS5 lookup for query quality analysis (issue #1029).
+    // Tracks term count and match count so we can surface patterns that
+    // consistently return zero results.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS semantic_memory_query_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        logged_at   TEXT    NOT NULL,
+        task_id     TEXT,
+        agent_name  TEXT,
+        fts5_query  TEXT    NOT NULL,
+        term_count  INTEGER NOT NULL,
+        match_count INTEGER NOT NULL
+      );
+    `);
+
     // Backfill: index any approved tasks not yet in the FTS5 table.
     this.indexApprovedTasksIntoMemory();
   }
@@ -9474,6 +9551,7 @@ export class StateStore {
     queryText: string,
     topK = 3,
     excludeTaskId?: string,
+    context?: { taskId?: string; agentName?: string },
   ): Array<{
     taskId: string;
     title: string;
@@ -9487,7 +9565,13 @@ export class StateStore {
     // meaningful words (>3 chars, not stopwords) and join with OR for
     // broader matching.
     const ftsQuery = buildFts5Query(queryText);
-    if (!ftsQuery) return [];
+    if (!ftsQuery) {
+      // Log zero-match query for quality analysis even when no terms extracted
+      this.logSemanticMemoryQuery("", 0, 0, context);
+      return [];
+    }
+
+    const termCount = (ftsQuery.match(/ OR /g)?.length ?? 0) + 1;
 
     try {
       const rows = this.db.prepare(`
@@ -9513,7 +9597,7 @@ export class StateStore {
         rank: number;
       }>;
 
-      return rows
+      const results = rows
         .filter((r) => r.task_id !== excludeTaskId)
         .slice(0, topK)
         .map((r) => ({
@@ -9524,8 +9608,14 @@ export class StateStore {
           reviewerNotes: r.verification_notes || null,
           resultExcerpt: r.result_excerpt || null,
         }));
+
+      // Log query for quality analysis (issue #1029)
+      this.logSemanticMemoryQuery(ftsQuery, termCount, results.length, context);
+
+      return results;
     } catch {
       // FTS5 query syntax errors are non-fatal — return empty matches.
+      this.logSemanticMemoryQuery(ftsQuery, termCount, 0, context);
       return [];
     }
   }
@@ -9709,6 +9799,357 @@ export class StateStore {
       meets_target: improvement !== null ? improvement >= 0.15 : null,
       weekly,
     };
+  }
+
+  // ── Semantic Memory Auto-tuning (issue #1029) ────────────────────────────────
+
+  /**
+   * Retrieve the persisted auto-tuned min_quality_score, or null if no
+   * tuning has been applied yet (caller should fall back to config value).
+   */
+  getTunedMinQualityScore(): number | null {
+    try {
+      const row = this.db.prepare(
+        "SELECT value FROM semantic_memory_settings WHERE key = 'min_quality_score'",
+      ).get() as { value: string } | undefined;
+      if (!row) return null;
+      const v = parseFloat(row.value);
+      return isNaN(v) ? null : v;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Persist an auto-tuned min_quality_score override.
+   * Pass null to clear the override and revert to the config default.
+   */
+  setTunedMinQualityScore(score: number | null): void {
+    if (score === null) {
+      this.db.prepare(
+        "DELETE FROM semantic_memory_settings WHERE key = 'min_quality_score'",
+      ).run();
+      return;
+    }
+    const clamped = Math.min(0.95, Math.max(0.60, score));
+    this.db.prepare(`
+      INSERT INTO semantic_memory_settings (key, value, updated_at)
+      VALUES ('min_quality_score', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(String(clamped), new Date().toISOString());
+  }
+
+  /**
+   * Compute an auto-tune recommendation for min_quality_score.
+   *
+   * Decision rules (applied in priority order):
+   *  1. Insufficient data (<20 dispatches total) → keep.
+   *  2. Hit rate < 20%  → lower by 0.05 (floor 0.60) — too few matches, increase coverage.
+   *  3. Hit rate ≥ 30% AND improvement_delta < 0 → raise by 0.05 (ceil 0.95) — matches are hurting.
+   *  4. Hit rate ≥ 50% AND 0 ≤ improvement_delta < 0.10 → raise by 0.03 — marginal benefit, increase selectivity.
+   *  5. Otherwise → keep current threshold.
+   */
+  computeAutoTuneRecommendation(currentThreshold: number): SemanticMemoryAutoTuneResult {
+    const eff = this.getSemanticMemoryEffectiveness();
+    const hitRate = eff.memory_hit_rate;
+    const delta = eff.improvement_delta;
+    const totalDispatches = eff.total_dispatches;
+
+    const basis = {
+      hit_rate: hitRate,
+      improvement_delta: delta,
+      matched_tasks: eff.matched.total_tasks,
+      unmatched_tasks: eff.unmatched.total_tasks,
+    };
+
+    // Rule 1: insufficient data
+    if (totalDispatches < 20) {
+      return {
+        current_threshold: currentThreshold,
+        recommended_threshold: currentThreshold,
+        action: "keep",
+        reason: `Insufficient data (${totalDispatches} dispatches; need ≥20 for reliable signal).`,
+        basis,
+      };
+    }
+
+    // Rule 2: hit rate too low → lower threshold to increase coverage
+    if (hitRate !== null && hitRate < 0.20) {
+      const recommended = Math.max(0.60, Math.round((currentThreshold - 0.05) * 100) / 100);
+      const action = recommended < currentThreshold ? "lower" : "keep";
+      return {
+        current_threshold: currentThreshold,
+        recommended_threshold: recommended,
+        action,
+        reason: `Hit rate ${(hitRate * 100).toFixed(1)}% is below 20% threshold. ` +
+          `Lowering min_quality_score from ${currentThreshold} to ${recommended} to index more tasks.`,
+        basis,
+      };
+    }
+
+    // Rule 3: matches are actively hurting quality → raise threshold
+    if (hitRate !== null && hitRate >= 0.30 && delta !== null && delta < 0) {
+      const recommended = Math.min(0.95, Math.round((currentThreshold + 0.05) * 100) / 100);
+      const action = recommended > currentThreshold ? "raise" : "keep";
+      return {
+        current_threshold: currentThreshold,
+        recommended_threshold: recommended,
+        action,
+        reason: `Improvement delta is ${(delta * 100).toFixed(1)}% (negative: memory matches reduce quality). ` +
+          `Raising min_quality_score from ${currentThreshold} to ${recommended} for higher selectivity.`,
+        basis,
+      };
+    }
+
+    // Rule 4: high hit rate but marginal benefit → raise slightly for precision
+    if (hitRate !== null && hitRate >= 0.50 && delta !== null && delta >= 0 && delta < 0.10) {
+      const recommended = Math.min(0.95, Math.round((currentThreshold + 0.03) * 100) / 100);
+      const action = recommended > currentThreshold ? "raise" : "keep";
+      return {
+        current_threshold: currentThreshold,
+        recommended_threshold: recommended,
+        action,
+        reason: `Hit rate ${(hitRate * 100).toFixed(1)}% is high but improvement delta is only ` +
+          `${(delta * 100).toFixed(1)}%. Raising min_quality_score from ${currentThreshold} ` +
+          `to ${recommended} to improve match precision.`,
+        basis,
+      };
+    }
+
+    return {
+      current_threshold: currentThreshold,
+      recommended_threshold: currentThreshold,
+      action: "keep",
+      reason: `Current threshold ${currentThreshold} is performing well ` +
+        `(hit rate ${hitRate !== null ? `${(hitRate * 100).toFixed(1)}%` : "N/A"}, ` +
+        `delta ${delta !== null ? `${(delta * 100).toFixed(1)}%` : "N/A"}).`,
+      basis,
+    };
+  }
+
+  /**
+   * Apply the auto-tune recommendation if the threshold would change.
+   * Persists the new threshold and re-indexes with the updated score.
+   *
+   * @param currentThreshold  The threshold currently in use (from config or last tune).
+   * @returns The auto-tune result (caller can log the action taken).
+   */
+  applyAutoTuneIfBeneficial(currentThreshold: number): SemanticMemoryAutoTuneResult {
+    const rec = this.computeAutoTuneRecommendation(currentThreshold);
+    if (rec.action !== "keep" && rec.recommended_threshold !== rec.current_threshold) {
+      this.setTunedMinQualityScore(rec.recommended_threshold);
+      // Re-index with the new threshold to bring the FTS5 table in sync
+      this.indexApprovedTasksIntoMemory(rec.recommended_threshold);
+    }
+    return rec;
+  }
+
+  // ── FTS5 Query Quality Analysis (issue #1029) ────────────────────────────────
+
+  /**
+   * Log a single FTS5 query execution for quality analysis.
+   * Called internally by querySemanticMemory() after each lookup.
+   */
+  private logSemanticMemoryQuery(
+    fts5Query: string,
+    termCount: number,
+    matchCount: number,
+    context?: { taskId?: string; agentName?: string },
+  ): void {
+    try {
+      this.db.prepare(`
+        INSERT INTO semantic_memory_query_log
+          (logged_at, task_id, agent_name, fts5_query, term_count, match_count)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        new Date().toISOString(),
+        context?.taskId ?? null,
+        context?.agentName ?? null,
+        fts5Query,
+        termCount,
+        matchCount,
+      );
+    } catch {
+      // Non-fatal: logging failures must never break dispatch
+    }
+  }
+
+  /**
+   * Aggregate FTS5 query quality statistics over a rolling window.
+   *
+   * Surfaces zero-match patterns so operators can identify noisy dispatch
+   * messages that consistently fail to find relevant past experience.
+   */
+  getSemanticMemoryQueryStats(sinceISO?: string): SemanticMemoryQueryStats {
+    const cutoff = sinceISO ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    const totRow = this.db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN match_count = 0 THEN 1 ELSE 0 END) AS zero_matches,
+        AVG(CAST(match_count AS REAL)) AS avg_matches
+      FROM semantic_memory_query_log
+      WHERE logged_at >= ?
+    `).get(cutoff) as { total: number; zero_matches: number; avg_matches: number | null } | undefined;
+
+    const total = totRow?.total ?? 0;
+    const zeroMatches = totRow?.zero_matches ?? 0;
+    const avgMatches = totRow?.avg_matches ?? null;
+
+    // Top zero-match query patterns (by frequency)
+    const emptyRows = this.db.prepare(`
+      SELECT fts5_query, COUNT(*) AS cnt
+      FROM semantic_memory_query_log
+      WHERE logged_at >= ?
+        AND match_count = 0
+        AND fts5_query != ''
+      GROUP BY fts5_query
+      ORDER BY cnt DESC
+      LIMIT 10
+    `).all(cutoff) as Array<{ fts5_query: string; cnt: number }>;
+
+    return {
+      window_start: cutoff,
+      generated_at: new Date().toISOString(),
+      total_queries: total,
+      zero_match_queries: zeroMatches,
+      zero_match_rate: total > 0 ? zeroMatches / total : null,
+      avg_matches_returned: avgMatches,
+      top_empty_patterns: emptyRows.map((r) => ({
+        query_sample: r.fts5_query.slice(0, 120),
+        count: r.cnt,
+      })),
+    };
+  }
+
+  // ── Per-Agent Effectiveness (issue #1029) ─────────────────────────────────────
+
+  /**
+   * Break down semantic memory effectiveness by agent.
+   *
+   * For each agent that dispatched tasks in the window, compute matched vs
+   * unmatched cohort stats and a threshold adjustment recommendation.
+   * Only agents with ≥5 total tasks are included (too few tasks → noisy signal).
+   */
+  getPerAgentSemanticMemoryEffectiveness(sinceISO?: string): PerAgentSemanticMemoryStats[] {
+    const cutoff = sinceISO ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    const tasks = this.db.prepare(`
+      SELECT
+        t.id,
+        t.agent_name,
+        t.status,
+        t.quality_score,
+        t.verification_status,
+        COALESCE(t.revision_count, 0) AS revision_count,
+        EXISTS (
+          SELECT 1 FROM task_logs tl
+          WHERE tl.task_id = t.id
+            AND tl.direction = 'system'
+            AND tl.content LIKE '[semantic-memory]%'
+        ) AS has_memory_match
+      FROM tasks t
+      WHERE t.created_at >= ?
+        AND t.status IN ('done', 'failed', 'escalated')
+        AND t.agent_name IS NOT NULL
+      ORDER BY t.created_at ASC
+    `).all(cutoff) as Array<{
+      id: string;
+      agent_name: string;
+      status: string;
+      quality_score: number | null;
+      verification_status: string | null;
+      revision_count: number;
+      has_memory_match: number;
+    }>;
+
+    // Group by agent
+    const byAgent = new Map<string, typeof tasks>();
+    for (const t of tasks) {
+      if (!byAgent.has(t.agent_name)) byAgent.set(t.agent_name, []);
+      byAgent.get(t.agent_name)!.push(t);
+    }
+
+    const computeCohort = (cohort: typeof tasks): SemanticMemoryCohortStats => {
+      const total = cohort.length;
+      if (total === 0) {
+        return {
+          total_tasks: 0,
+          first_pass_approved: 0,
+          first_pass_rate: null,
+          avg_quality_score: null,
+          avg_revision_count: null,
+          revision_distribution: { zero: 0, one: 0, two_plus: 0 },
+        };
+      }
+      const verified = cohort.filter((t) => t.verification_status !== null);
+      const firstPassApproved = cohort.filter(
+        (t) => t.verification_status === "approved" && t.revision_count === 0,
+      ).length;
+      const withScore = cohort.filter((t) => t.quality_score !== null);
+      const avgScore = withScore.length > 0
+        ? withScore.reduce((s, t) => s + (t.quality_score ?? 0), 0) / withScore.length
+        : null;
+      const avgRevisions = total > 0
+        ? cohort.reduce((s, t) => s + t.revision_count, 0) / total
+        : null;
+      return {
+        total_tasks: total,
+        first_pass_approved: firstPassApproved,
+        first_pass_rate: verified.length > 0 ? firstPassApproved / verified.length : null,
+        avg_quality_score: avgScore,
+        avg_revision_count: avgRevisions,
+        revision_distribution: {
+          zero: cohort.filter((t) => t.revision_count === 0).length,
+          one: cohort.filter((t) => t.revision_count === 1).length,
+          two_plus: cohort.filter((t) => t.revision_count >= 2).length,
+        },
+      };
+    };
+
+    const results: PerAgentSemanticMemoryStats[] = [];
+
+    for (const [agentName, agentTasks] of byAgent) {
+      if (agentTasks.length < 5) continue; // Too few tasks for reliable signal
+
+      const matched = agentTasks.filter((t) => t.has_memory_match);
+      const unmatched = agentTasks.filter((t) => !t.has_memory_match);
+
+      const matchedStats = computeCohort(matched);
+      const unmatchedStats = computeCohort(unmatched);
+      const hitRate = agentTasks.length > 0 ? matched.length / agentTasks.length : null;
+      const delta = matchedStats.first_pass_rate !== null && unmatchedStats.first_pass_rate !== null
+        ? matchedStats.first_pass_rate - unmatchedStats.first_pass_rate
+        : null;
+
+      // Derive a per-agent recommendation using the same rules as global auto-tune
+      let recommendation: PerAgentSemanticMemoryStats["recommended_threshold_adjustment"];
+      if (agentTasks.length < 20) {
+        recommendation = "insufficient_data";
+      } else if (hitRate !== null && hitRate < 0.20) {
+        recommendation = "lower";
+      } else if (hitRate !== null && hitRate >= 0.30 && delta !== null && delta < 0) {
+        recommendation = "raise";
+      } else if (hitRate !== null && hitRate >= 0.50 && delta !== null && delta >= 0 && delta < 0.10) {
+        recommendation = "raise";
+      } else {
+        recommendation = "keep";
+      }
+
+      results.push({
+        agent_name: agentName,
+        total_dispatches: agentTasks.length,
+        memory_hit_count: matched.length,
+        memory_hit_rate: hitRate,
+        matched: matchedStats,
+        unmatched: unmatchedStats,
+        improvement_delta: delta,
+        recommended_threshold_adjustment: recommendation,
+      });
+    }
+
+    // Sort by total_dispatches descending (most active agents first)
+    return results.sort((a, b) => b.total_dispatches - a.total_dispatches);
   }
 }
 
