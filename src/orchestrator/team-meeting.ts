@@ -22,6 +22,7 @@ import { loadGoals, measureGoalProgress, buildGoalsContext } from "./goals.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore } from "../state/store.js";
 import { createLogger } from "../service/logger.js";
+import { cacheableSystemPrompt } from "../utils/prompt-cache.js";
 import { StandupActionClient, type StandupActionItemInput } from "../client/standup-action-client.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -256,7 +257,7 @@ async function synthesiseMeeting(
       response = await client.messages.create({
         model: getLLMModel(config, "supervisor") ?? model,
         max_tokens: 4096,
-        system: SYNTHESIS_PROMPTS[meetingType],
+        system: cacheableSystemPrompt(SYNTHESIS_PROMPTS[meetingType]),
         messages: [{ role: "user", content: prompt }],
       }, { signal: abortController.signal });
     } finally {

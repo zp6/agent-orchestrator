@@ -3,6 +3,7 @@ import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore, Task } from "../state/store.js";
 import type { IssueCreator, CreatedIssue } from "./issue-creator.js";
 import { createLogger } from "../service/logger.js";
+import { cacheableSystemPrompt } from "../utils/prompt-cache.js";
 
 /**
  * An actionable implementation gap extracted from a research task's findings.
@@ -162,7 +163,7 @@ Analyze the research findings above and identify specific implementation tasks t
           {
             model,
             max_tokens: 4096,
-            system: SYSTEM_PROMPT,
+            system: cacheableSystemPrompt(SYSTEM_PROMPT),
             messages: [{ role: "user", content: prompt }],
           },
           { signal: abortController.signal },

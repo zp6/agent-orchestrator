@@ -16,6 +16,7 @@ import type { OrchestratorConfig } from "../config/schema.js";
 import type { Task } from "../state/store.js";
 import { createLogger } from "../service/logger.js";
 import { extractJSON } from "../utils/json-extract.js";
+import { cacheableSystemPrompt, cacheableSplitPrompt } from "../utils/prompt-cache.js";
 
 // ─── Shared types (re-exported so consumers don't need to reach into modules) ───
 
@@ -392,7 +393,7 @@ export class ReviewerClient {
         response = await client.messages.create({
           model: getLLMModel(this.config, "verifier") ?? model,
           max_tokens: 1024,
-          system: systemPrompt,
+          system: cacheableSystemPrompt(systemPrompt),
           messages: [{ role: "user", content: prompt }],
         }, { signal: abortController.signal });
       } finally {
@@ -429,7 +430,7 @@ export class ReviewerClient {
         response = await client.messages.create({
           model: getLLMModel(this.config, "reviewer") ?? model,
           max_tokens: 2048,
-          system: PR_REVIEW_SYSTEM_PROMPT,
+          system: cacheableSystemPrompt(PR_REVIEW_SYSTEM_PROMPT),
           messages: [{ role: "user", content: prompt }],
         }, { signal: abortController.signal });
       } finally {
@@ -464,7 +465,7 @@ export class ReviewerClient {
         response = await client.messages.create({
           model: getLLMModel(this.config, "supervisor") ?? model,
           max_tokens: 4096,
-          system: SUPERVISOR_SYSTEM_PROMPT,
+          system: cacheableSystemPrompt(SUPERVISOR_SYSTEM_PROMPT),
           messages: [{ role: "user", content: context }],
         }, { signal: abortController.signal });
       } finally {
@@ -516,7 +517,7 @@ export class ReviewerClient {
         response = await client.messages.create({
           model: getLLMModel(this.config, "improvement") ?? model,
           max_tokens: 4096,
-          system: buildImprovementSystemPrompt(this.config),
+          system: cacheableSystemPrompt(buildImprovementSystemPrompt(this.config)),
           messages: [{ role: "user", content: prompt }],
         }, { signal: abortController.signal });
       } finally {
@@ -655,7 +656,7 @@ export class ReviewerClient {
       const response = await client.messages.create({
         model: getLLMModel(this.config, "verifier") ?? model,
         max_tokens: 150,
-        system: systemPrompt,
+        system: cacheableSystemPrompt(systemPrompt),
         messages: [{ role: "user", content: userPrompt }],
       });
       const text = response.content

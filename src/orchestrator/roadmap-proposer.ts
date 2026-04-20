@@ -13,6 +13,7 @@ import { IssueCreator } from "./issue-creator.js";
 import { loadGoals, measureGoalProgress, buildGoalsContext } from "./goals.js";
 import { createLogger } from "../service/logger.js";
 import { extractJSON } from "../utils/json-extract.js";
+import { cacheableSystemPrompt } from "../utils/prompt-cache.js";
 
 const log = createLogger("roadmap-proposer");
 
@@ -127,7 +128,7 @@ export async function proposeRoadmapItems(
       response = await client.messages.create({
         model: getLLMModel(config, "supervisor") ?? model,
         max_tokens: 4096,
-        system: ROADMAP_SYSTEM_PROMPT,
+        system: cacheableSystemPrompt(ROADMAP_SYSTEM_PROMPT),
         messages: [{ role: "user", content: context }],
       }, { signal: abortController.signal });
     } finally {

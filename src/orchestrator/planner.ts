@@ -3,6 +3,7 @@ import type { OrchestratorConfig } from "../config/schema.js";
 import { PromptLearner } from "./prompt-learner.js";
 import type { StateStore } from "../state/store.js";
 import { ulid } from "ulid";
+import { cacheableSplitPrompt } from "../utils/prompt-cache.js";
 
 export interface PlanStep {
   id: string;
@@ -30,13 +31,14 @@ export class Planner {
   }
 
   async plan(task: string): Promise<Plan> {
-    const registry = this.buildRegistryPrompt() + (this.learner?.buildPlannerContext() ?? "");
+    const { staticPrefix, dynamicSuffix } = this.buildRegistryPromptParts();
+    const learnerCtx = this.learner?.buildPlannerContext() ?? "";
     const { client, model } = createLLMClient(this.config, "planner");
 
     const response = await client.messages.create({
       model: getLLMModel(this.config, "planner") ?? model,
       max_tokens: 4096,
-      system: registry,
+      system: cacheableSplitPrompt(staticPrefix, dynamicSuffix + learnerCtx),
       messages: [{ role: "user", content: task }],
     });
 
@@ -50,18 +52,16 @@ export class Planner {
     return plan;
   }
 
-  private buildRegistryPrompt(): string {
+  /** Split the registry prompt into cacheable static prefix + dynamic suffix. */
+  private buildRegistryPromptParts(): { staticPrefix: string; dynamicSuffix: string } {
     const agentList = Object.entries(this.config.agents)
       .map(([name, agent]) =>
         `- **${name}**: ${agent.description}\n  Capabilities: ${agent.capabilities.join(", ")}\n  Topics: ${agent.owns_topics.join(", ")}`,
       )
       .join("\n");
 
-    return [
+    const staticPrefix = [
       "You are a task planner for a multi-agent system. Analyze the given task and decide whether it needs one agent or multiple agents working together.",
-      "",
-      "Available agents:",
-      agentList,
       "",
       "Respond with ONLY a JSON object (no markdown, no code fences):",
       "{",
@@ -93,6 +93,15 @@ export class Planner {
       "- Each step's task should be self-contained and actionable.",
       "- Only use agent names from the list above.",
     ].join("\n");
+
+    const dynamicSuffix = `\n\nAvailable agents:\n${agentList}`;
+
+    return { staticPrefix, dynamicSuffix };
+  }
+
+  private buildRegistryPrompt(): string {
+    const { staticPrefix, dynamicSuffix } = this.buildRegistryPromptParts();
+    return staticPrefix + dynamicSuffix;
   }
 
   private parseResponse(text: string, originalTask: string): Plan {

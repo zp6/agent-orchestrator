@@ -13,6 +13,7 @@ import type { OrchestratorConfig } from "../config/schema.js";
 import { createLLMClient, getLLMModel } from "../client/llm-client.js";
 import { extractJSON } from "../utils/json-extract.js";
 import { createLogger } from "../service/logger.js";
+import { cacheableSystemPrompt } from "../utils/prompt-cache.js";
 
 const log = createLogger("goals");
 
@@ -377,7 +378,7 @@ Propose goals for ${nextMonth}. Carry forward any incomplete goals that are stil
     const response = await client.messages.create({
       model: getLLMModel(config, "supervisor") ?? model,
       max_tokens: 2048,
-      system: GOAL_REFRESH_SYSTEM_PROMPT,
+      system: cacheableSystemPrompt(GOAL_REFRESH_SYSTEM_PROMPT),
       messages: [{ role: "user", content: context }],
     }, { signal: controller.signal });
 

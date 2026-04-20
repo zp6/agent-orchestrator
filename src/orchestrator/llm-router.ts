@@ -2,6 +2,7 @@ import { createLLMClient, getLLMModel } from "../client/llm-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { PromptLearner } from "./prompt-learner.js";
 import type { StateStore } from "../state/store.js";
+import { cacheableSplitPrompt } from "../utils/prompt-cache.js";
 
 export interface LLMRouteResult {
   agentName: string;
@@ -19,14 +20,15 @@ export class LLMRouter {
   }
 
   async route(task: string, sourceRepo?: string): Promise<LLMRouteResult | null> {
-    const registry = this.buildRegistryPrompt(sourceRepo) + (this.learner?.buildRouterContext() ?? "");
+    const { staticPrefix, dynamicSuffix } = this.buildRegistryPromptParts(sourceRepo);
+    const learnerCtx = this.learner?.buildRouterContext() ?? "";
     const { client, model } = createLLMClient(this.config, "router");
 
     try {
       const response = await client.messages.create({
         model: getLLMModel(this.config, "router") ?? model,
         max_tokens: 1024,
-        system: registry,
+        system: cacheableSplitPrompt(staticPrefix, dynamicSuffix + learnerCtx),
         messages: [{ role: "user", content: task }],
       });
 
@@ -41,7 +43,11 @@ export class LLMRouter {
     }
   }
 
-  private buildRegistryPrompt(sourceRepo?: string): string {
+  /** Split the registry prompt into cacheable static prefix + dynamic suffix. */
+  private buildRegistryPromptParts(sourceRepo?: string): {
+    staticPrefix: string;
+    dynamicSuffix: string;
+  } {
     const agentList = Object.entries(this.config.agents)
       .map(([name, agent]) =>
         `- **${name}** (repo: ${agent.github ?? "none"}): ${agent.description}\n  Capabilities: ${agent.capabilities.join(", ")}\n  Topics: ${agent.owns_topics.join(", ")}`,
@@ -52,11 +58,8 @@ export class LLMRouter {
       ? `\nThis task was triggered from the repo: ${sourceRepo}. The triggering repo is NOT necessarily the destination — read the task carefully.\n`
       : "";
 
-    return `You are a task router. Given a task description, pick the most appropriate agent to handle it.
+    const staticPrefix = `You are a task router. Given a task description, pick the most appropriate agent to handle it.
 
-Available agents:
-${agentList}
-${sourceNote}
 ROUTING RULES:
 1. Match the agent whose capabilities and owned topics best fit the task.
 2. INTEGRATION TASKS: When a task uses integration phrasing such as "wire X into Y",
@@ -76,6 +79,16 @@ Respond with ONLY a JSON object (no markdown, no code fences):
 
 If no agent is a good fit, respond with:
 {"agentName": "", "confidence": 0, "reason": "No suitable agent found"}`;
+
+    const dynamicSuffix = `\n\nAvailable agents:\n${agentList}\n${sourceNote}`;
+
+    return { staticPrefix, dynamicSuffix };
+  }
+
+  /** Build the full registry prompt as a single string (backwards compat). */
+  private buildRegistryPrompt(sourceRepo?: string): string {
+    const { staticPrefix, dynamicSuffix } = this.buildRegistryPromptParts(sourceRepo);
+    return staticPrefix + dynamicSuffix;
   }
 
   private parseResponse(text: string): LLMRouteResult | null {

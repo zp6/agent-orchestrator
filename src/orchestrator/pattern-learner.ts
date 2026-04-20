@@ -15,6 +15,7 @@ import type { StateStore, LearnedPattern } from "../state/store.js";
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import { extractJSON } from "../utils/json-extract.js";
+import { cacheableSystemPrompt } from "../utils/prompt-cache.js";
 
 const log = createLogger("pattern-learner");
 
@@ -272,7 +273,7 @@ async function extractPatternsFromSignals(
       {
         model,
         max_tokens: 1024,
-        system: EXTRACT_SYSTEM_PROMPT,
+        system: cacheableSystemPrompt(EXTRACT_SYSTEM_PROMPT),
         messages: [{ role: "user", content: userPrompt }],
       },
       { signal: controller.signal },
