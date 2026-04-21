@@ -1,9 +1,11 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-21 (triage cycle 6)_
+_Last updated: 2026-04-21 (triage cycle 7)_
 
 ## Completed (recent)
 
+- **#393 / PR #396** — Triage coaching: concrete `old_rank: null` JSON example injected into every coached prompt (`triage-coaching.ts`)
+- **#398 / PR #401** — `/api/bypass-audit` endpoint + daily Telegram digest for sub-floor approvals (`bypass-audit.ts`, `IBypassAuditStore`)
 - **#331 / PR #332** — Real-time Telegram alerts for low-score approvals (`low-score-approval-alerter.ts`)
 - **#325 / PR #327** — Capability-check to reject foreign implementation tasks (`capability-check.ts`, `pre-dispatch-capability-enforcer.ts`)
 - **#278 / PR #328** — Dashboard panel: approved-but-low-score task feed (`low-score-feed.ts`)
@@ -29,13 +31,17 @@ _Last updated: 2026-04-21 (triage cycle 6)_
 
 2. **#392 — Orchestrator pre-dispatch gate: hard-block issues with open PRs** _(high)_ — Enforce a hard block at dispatch time when a PR already exists for the issue; stricter than the soft existing guard which can be bypassed.
 
-3. **#359 — Daily agent quality digest with degradation callouts** _(high)_ — Scheduled Telegram message summarising each agent's 24-hour score average, trend direction, and flagging any agent that degraded >10% day-over-day.
+3. **#390 / PR #397** — PR guard cooldown _(awaiting merge)_ — `pr_guard_cooldown` table; `isPRGuardCooldownActive()` prevents re-queuing same issue for 60 min after `already-in-review` hit.
 
-4. **#232 — Quality scores missing from task feed** _(high)_ — Despite `ensureScoresPopulated()` and backfill commands, recent tasks still show `quality_score: null`. Need a startup/daemon check that warns when >10% of recent approved tasks have null scores.
+4. **#399 / PR #400** — old_rank pre-submission validator _(awaiting merge)_ — `validateOldRankInPriorityReordering()` detects `old_rank: 0` and new-issue keyword heuristics; `validation_pre_check_passed` field in coaching directive.
 
-5. **#368 — Auto-file GitHub issues for improvements identified across 3+ consecutive batches** _(medium)_ — `ImprovementRecurrenceTracker` that records patterns by normalized title hash across distinct batches and auto-files a `chronic` + `improvement` tagged issue when threshold is reached.
+5. **#359 — Daily agent quality digest with degradation callouts** _(high)_ — Scheduled Telegram message summarising each agent's 24-hour score average, trend direction, and flagging any agent that degraded >10% day-over-day.
 
-6. **#221 — Improvement detector deduplication against existing GitHub issues** _(medium)_ — `ImprovementDetector` creates GitHub issues without checking for existing open duplicates. Add `gh issue list` pre-check with title-similarity filter before filing.
+6. **#232 — Quality scores missing from task feed** _(high)_ — Despite `ensureScoresPopulated()` and backfill commands, recent tasks still show `quality_score: null`. Need a startup/daemon check that warns when >10% of recent approved tasks have null scores.
+
+7. **#368 — Auto-file GitHub issues for improvements identified across 3+ consecutive batches** _(medium)_ — `ImprovementRecurrenceTracker` that records patterns by normalized title hash across distinct batches and auto-files a `chronic` + `improvement` tagged issue when threshold is reached.
+
+8. **#221 — Improvement detector deduplication against existing GitHub issues** _(medium)_ — `ImprovementDetector` creates GitHub issues without checking for existing open duplicates. Add `gh issue list` pre-check with title-similarity filter before filing.
 
 ## Planned
 
@@ -55,6 +61,7 @@ _Last updated: 2026-04-21 (triage cycle 6)_
 
 ## Triage notes
 
+- **2026-04-21 cycle 7**: No duplicate issues found (11 open, all distinct). No stale issues (oldest #221 is 5 days old). No orphan PRs (#397 closes #390, #400 closes #399 — both open awaiting merge). Completed: #393 (merged PR #396 — triage coaching old_rank example) and #398 (merged PR #401 — bypass-audit endpoint). CLAUDE.md: added `bypass-audit.ts`, `pr_guard_cooldown`, `validateOldRankInPriorityReordering`, and `IBypassAuditStore` to scope and source layout. ROADMAP.md: promoted #393/#398 to Completed; added #390/#399 (PRs open) to Next up.
 - **2026-04-21 cycle 6**: Closed #389 as duplicate of #391 (both request per-issue dispatch surge alerting in Telegram; #391 has acceptance criteria). No stale issues (all open issues ≤2 days old). No open PRs to audit. CLAUDE.md fixes: (1) system architecture table had wrong repo names — corrected to `rapartlu/*` GitHub repos and added 3 missing agents (telegram, research, meeting-facilitator); (2) added `score-zero-alert.ts` and `misrouting-digest.ts` to source layout (shipped in PRs #378, #386, #388 but not documented); (3) added scope entries for both. ROADMAP.md: promoted #375/#382/#388 to Completed; added #391 and #392 to Next up.
 - **2026-04-19 cycle 5**: Closed #351 (CLAUDE.md update delivered in this triage PR). Closed #353 (unclear/no actionable reviewer changes specified). Added 11 missing `src/reviewer/` modules to CLAUDE.md source layout; added 13 scope entries for recently shipped features. Moved completed items (#278, #285, #292, #325–#376 batch) from Next-up to Completed. Promoted #375 and #359 to Next-up (1, 2). Confirmed #364 and #340 (PRs closed unmerged) remain valid backlog items. No duplicate issues. No stale issues (all open issues are ≤ 3 days old).
 - **2026-04-19 cycle 4**: Closed #315 (CLAUDE.md sync already done in PR #316). Closed #298 (bypass rate trending fully implemented by `quality-system-health.ts` in PR #306). No stale issues (oldest open are #71 and #89, both 7 days old). No orphan PRs. CLAUDE.md verified current — no drift since cycle 3. Promoted #221 (improvement-detector dedup) from Planned to Next-up (5).

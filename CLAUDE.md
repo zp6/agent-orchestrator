@@ -92,6 +92,10 @@ When this container is used for LLM PR reviews:
 - Low-score approved task feed: `/api/low-score-approved` payload builder for operator audit
 - Score-bypass violation report: `/api/score-violations` payload listing sub-threshold approvals by agent
 - Misrouting digest: daily Telegram summary of all tasks dispatched to the reviewer that matched implementation patterns; `/misrouting [hours]` on-demand command
+- Bypass-audit endpoint: `/api/bypass-audit` payload builder listing all tasks approved below the 0.60 quality floor in a rolling window with `bypass_reason` (or 'none' for silent bypasses); `BypassAuditScheduler` sends a daily Telegram digest with count and worst offender
+- PR guard cooldown: `pr_guard_cooldown` table in `state.db` — written when the PR existence guard returns `already-in-review`; `isPRGuardCooldownActive()` prevents re-queuing the same issue for 60 min without a second gh CLI call
+- old_rank pre-submission validator: `validateOldRankInPriorityReordering()` — deterministic checker for `priority_reordering` entries where `old_rank` should be `null` (newly-added issues); embedded as a pre-submission checklist in the triage coaching prompt
+- Per-agent triage coaching with `validation_pre_check_passed`: coaching directive now carries `validation_pre_check_passed: boolean | null` and exposes validator results for prior submissions in the prompt banner
 
 **Out of scope (belongs to orchestrator-core):**
 - Daemon loop, state store, dispatching infrastructure
@@ -161,6 +165,7 @@ src/
     low-score-feed.ts               — /api/low-score-approved payload builder for operator audit
     score-violations.ts             — /api/score-violations payload: sub-threshold approvals grouped by agent
     misrouting-digest.ts            — daily Telegram digest of implementation tasks dispatched to reviewer; /misrouting [hours] on-demand command
+    bypass-audit.ts                 — /api/bypass-audit payload + BypassAuditScheduler daily Telegram digest for sub-0.60-floor approvals; IBypassAuditStore
   integration/
     orchestrator-adapter.ts         — createReviewerInstances() adapter for orchestrator import
   service/
