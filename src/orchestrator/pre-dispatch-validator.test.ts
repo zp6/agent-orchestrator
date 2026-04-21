@@ -11,6 +11,8 @@ vi.mock("../triggers/github.js", () => ({
   findApprovedPRForIssue: vi.fn().mockReturnValue(null),
   findBranchForIssue: vi.fn().mockReturnValue(null),
   findExistingPRsForIssue: (...args: unknown[]) => mockFindExistingPRsForIssue(...args),
+  // Cross-repo check (issue #991): default fail-open (no peer-repo PRs found)
+  findExistingPRsForIssueAcrossRepos: vi.fn().mockReturnValue([]),
 }));
 
 vi.mock("../triggers/issue-state-bridge.js", () => ({

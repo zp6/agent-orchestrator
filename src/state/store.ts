@@ -436,6 +436,28 @@ export interface DispatchWasteMetrics {
   avg_waste_rate_pct: number | null;
 }
 
+/** Per-hour dispatch waste bucket for 24h rolling window view. */
+export interface DispatchWasteHour {
+  /** ISO hour string: 'YYYY-MM-DD HH:00' */
+  hour: string;
+  /** Dispatches blocked by the issue-state cache in this hour */
+  stale_prevented: number;
+  /** Total dispatch attempts = actual dispatches + stale_prevented */
+  dispatches_total: number;
+  /** Waste rate as a percentage (0–100), null if no attempts */
+  waste_rate_pct: number | null;
+}
+
+/** Aggregated dispatch waste metrics over a rolling 24-hour window. */
+export interface DispatchWasteMetrics24h {
+  hourly: DispatchWasteHour[];
+  total_stale_prevented: number;
+  total_dispatches: number;
+  avg_waste_rate_pct: number | null;
+  /** Highest waste rate recorded in any single hour; null when no data. */
+  peak_waste_rate_pct: number | null;
+}
+
 /** Per-day health check efficiency metrics (issue #749) */
 export interface HealthCheckEfficiencyDay {
   /** ISO date string: 'YYYY-MM-DD' */
@@ -5857,6 +5879,73 @@ export class StateStore {
       total_stale_prevented: totalStale,
       total_dispatches: totalDispatches,
       avg_waste_rate_pct: rates.length > 0 ? rates.reduce((a, b) => a + b, 0) / rates.length : null,
+    };
+  }
+
+  /**
+   * Return per-hour dispatch waste data over a rolling 24-hour window.
+   *
+   * Waste rate = stale_prevented / (dispatched + stale_prevented).
+   * "Dispatched" counts top-level tasks created in each hour bucket;
+   * stale_prevented sums daemon_cycles rows for the same hour.
+   */
+  getDispatchWasteMetrics24h(): DispatchWasteMetrics24h {
+    // Per-hour stale-prevented counts from daemon_cycles
+    const staleRows = this.db
+      .prepare(
+        `SELECT
+          strftime('%Y-%m-%d %H:00', started_at) AS hour,
+          SUM(stale_dispatches_prevented)         AS stale_prevented
+        FROM daemon_cycles
+        WHERE finished_at IS NOT NULL
+          AND started_at >= datetime('now', '-24 hours')
+        GROUP BY strftime('%Y-%m-%d %H:00', started_at)
+        ORDER BY hour ASC`,
+      )
+      .all() as Array<{ hour: string; stale_prevented: number }>;
+
+    // Per-hour dispatched task counts (top-level tasks created in last 24h)
+    const dispatchRows = this.db
+      .prepare(
+        `SELECT
+          strftime('%Y-%m-%d %H:00', created_at) AS hour,
+          COUNT(*)                               AS dispatched
+        FROM tasks
+        WHERE parent_task_id IS NULL
+          AND created_at >= datetime('now', '-24 hours')
+        GROUP BY strftime('%Y-%m-%d %H:00', created_at)
+        ORDER BY hour ASC`,
+      )
+      .all() as Array<{ hour: string; dispatched: number }>;
+
+    const dispatchByHour = new Map<string, number>();
+    for (const r of dispatchRows) {
+      dispatchByHour.set(r.hour, r.dispatched);
+    }
+
+    const hourly: DispatchWasteHour[] = staleRows.map((r) => {
+      const actual = dispatchByHour.get(r.hour) ?? 0;
+      const total = r.stale_prevented + actual;
+      return {
+        hour: r.hour,
+        stale_prevented: r.stale_prevented,
+        dispatches_total: total,
+        waste_rate_pct: total > 0 ? (r.stale_prevented / total) * 100 : null,
+      };
+    });
+
+    const totalStale = hourly.reduce((s, h) => s + h.stale_prevented, 0);
+    const totalDispatches = hourly.reduce((s, h) => s + h.dispatches_total, 0);
+    const rates = hourly.map((h) => h.waste_rate_pct).filter((v): v is number => v !== null);
+    const avgRate = rates.length > 0 ? rates.reduce((a, b) => a + b, 0) / rates.length : null;
+    const peakRate = rates.length > 0 ? Math.max(...rates) : null;
+
+    return {
+      hourly,
+      total_stale_prevented: totalStale,
+      total_dispatches: totalDispatches,
+      avg_waste_rate_pct: avgRate,
+      peak_waste_rate_pct: peakRate,
     };
   }
 

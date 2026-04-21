@@ -86,6 +86,8 @@ const MEETING_SCHEDULE_CHECK_EVERY_N_CYCLES = 6; // ~30 min
 const ROADMAP_PROPOSAL_EVERY_N_CYCLES = 288; // ~24h at 5min interval
 const SKIP_PATTERN_CHECK_EVERY_N_CYCLES = 288; // ~24h at 5min interval
 const ALREADY_IN_REVIEW_SATURATION_THRESHOLD = 0.30; // Alert when >30% of completed tasks are duplicates
+/** Alert when >15% of dispatches in the 1h window are blocked by the already-in-review guard. */
+const DISPATCH_WASTE_RATE_THRESHOLD = 0.15;
 /** Alert when the 7-day rolling dispatch block rate exceeds this fraction (issue #976). */
 const DISPATCH_BLOCK_RATE_THRESHOLD = 0.10; // 10% default
 const PROXY_HEALTH_CHECK_EVERY_N_CYCLES = 3;   // ~15min — check proxy server is reachable
@@ -975,6 +977,43 @@ export class Daemon {
         }
       } catch (err) {
         this.log.warn("Already-in-review saturation check failed", { error: err instanceof Error ? err.message : String(err) });
+      }
+
+      // Dispatch waste-rate alert (issue #991): fires when the open_pr_exists
+      // guard is blocking ≥15% of dispatch attempts in the last 1-hour window.
+      // Complements the 30%-saturation check above with an earlier warning that
+      // lets operators investigate before efficiency falls to critical levels.
+      try {
+        const wasteMetrics = this.store.getDispatchWasteMetrics24h();
+        // Check the most recent hour only (last element in the hourly array)
+        const recentHour = wasteMetrics.hourly.at(-1);
+        if (
+          recentHour &&
+          recentHour.dispatches_total >= 3 &&
+          recentHour.waste_rate_pct !== null &&
+          recentHour.waste_rate_pct > DISPATCH_WASTE_RATE_THRESHOLD * 100
+        ) {
+          const pct = recentHour.waste_rate_pct.toFixed(1);
+          this.log.warn("Dispatch waste rate threshold breached", {
+            hour: recentHour.hour,
+            waste_rate_pct: recentHour.waste_rate_pct,
+            stale_prevented: recentHour.stale_prevented,
+            dispatches_total: recentHour.dispatches_total,
+          });
+          await notifyOperator(
+            "⚠️ Dispatch Waste Rate Elevated",
+            `${pct}% of dispatch attempts in the last hour were blocked by the ` +
+            `already-in-review guard (${recentHour.stale_prevented} blocked / ${recentHour.dispatches_total} total).\n\n` +
+            `This exceeds the ${Math.round(DISPATCH_WASTE_RATE_THRESHOLD * 100)}% threshold. ` +
+            `The orchestrator is re-triggering issues that already have open PRs.\n\n` +
+            `Run \`orch dispatch-efficiency\` for a 24h/7d breakdown or check the dispatch dedup logic.`,
+            "warning",
+            "dispatch-waste-rate-threshold",
+          );
+          this.store.incrementStat("dispatch_waste_rate_alerts");
+        }
+      } catch (err) {
+        this.log.warn("Dispatch waste rate check failed", { error: err instanceof Error ? err.message : String(err) });
       }
 
       // Dispatch block rate check (issue #976): alert when the 7-day rolling

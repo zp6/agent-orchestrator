@@ -229,6 +229,47 @@ export function findExistingPRsForIssue(repo: string, issueNumber: number): Link
 }
 
 /**
+ * Check for PRs linked to an issue across multiple repos.
+ *
+ * Used for cross-repo dispatch guard: when an issue in repo-A is fixed by a
+ * PR in repo-B (e.g. a monorepo-style feature spanning reviewer + dashboard),
+ * we must not re-dispatch to repo-B just because repo-A's guard didn't fire.
+ *
+ * Returns an array of { repo, pr } pairs — the PR's `repo` field indicates
+ * which repo it was found in (may differ from the issue's own repo).
+ *
+ * Fail-open: errors on individual repos are silently ignored so a transient
+ * API failure on a peer repo does not block dispatch of the primary task.
+ *
+ * @param primaryRepo - The repo that owns the issue.
+ * @param issueNumber - The issue number to look up.
+ * @param peerRepos   - Additional repos to scan for cross-repo PRs.
+ */
+export function findExistingPRsForIssueAcrossRepos(
+  primaryRepo: string,
+  issueNumber: number,
+  peerRepos: string[],
+): Array<LinkedPR & { repo: string }> {
+  // Only scan peer repos — the primary repo is handled by the caller via
+  // findExistingPRsForIssue so we avoid double-checking the same repo.
+  const reposToCheck = peerRepos.filter((r) => r !== primaryRepo);
+  const results: Array<LinkedPR & { repo: string }> = [];
+
+  for (const repo of reposToCheck) {
+    try {
+      const prs = findExistingPRsForIssue(repo, issueNumber);
+      for (const pr of prs) {
+        results.push({ ...pr, repo });
+      }
+    } catch {
+      // fail-open: transient API errors on peer repos must not block dispatch
+    }
+  }
+
+  return results;
+}
+
+/**
  * Count the number of open PRs in a repository.
  *
  * Returns `null` on failure so callers can fail open when GitHub is

@@ -9,7 +9,7 @@
 
 import type { Command } from "commander";
 import chalk from "chalk";
-import { StateStore, type DispatchWasteDay, type DispatchWasteMetrics } from "../../state/store.js";
+import { StateStore, type DispatchWasteDay, type DispatchWasteMetrics, type DispatchWasteHour, type DispatchWasteMetrics24h } from "../../state/store.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -77,6 +77,15 @@ function formatDayRow(d: DispatchWasteDay): string {
   return `  ${chalk.dim(d.date)}  ${bar}  ${rate}  ${stale}  ${total}`;
 }
 
+/** Format a per-hour row for the 24h trend table. */
+function formatHourRow(h: DispatchWasteHour): string {
+  const bar = renderWasteBar(h.waste_rate_pct);
+  const rate = colorWasteRate(h.waste_rate_pct).padStart(8);
+  const stale = String(h.stale_prevented).padStart(7);
+  const total = String(h.dispatches_total).padStart(7);
+  return `  ${chalk.dim(h.hour)}  ${bar}  ${rate}  ${stale}  ${total}`;
+}
+
 /** Print a full window section (header + day rows + summary). */
 function printWindow(label: string, data: DispatchWasteMetrics): void {
   console.log(chalk.bold(`\n● ${label}`));
@@ -120,6 +129,53 @@ function printWindow(label: string, data: DispatchWasteMetrics): void {
   console.log(`  ${"Trend:".padEnd(28)} ${trendLabel(nonNullRates)}`);
 }
 
+/** Print the 24h rolling window section. */
+function printWindow24h(data: DispatchWasteMetrics24h): void {
+  console.log(chalk.bold(`\n● Last 24 hours (hourly breakdown)`));
+
+  if (data.hourly.length === 0) {
+    console.log(chalk.dim("  No daemon cycles recorded in the last 24 hours yet."));
+    return;
+  }
+
+  const header = [
+    "Hour              ",
+    " ".repeat(BAR_WIDTH),
+    "   Rate",
+    " Blocked",
+    "   Total",
+  ].join("  ");
+  const sep = "─".repeat(header.length + 2);
+
+  console.log(chalk.dim("  " + header));
+  console.log(chalk.dim("  " + sep));
+
+  // Only show last 8 hours to keep output concise; use --json for full data
+  const displayed = data.hourly.slice(-8);
+  if (data.hourly.length > 8) {
+    console.log(chalk.dim(`  … (${data.hourly.length - 8} earlier hours omitted — use --json for full data)`));
+  }
+  for (const h of displayed) {
+    console.log(formatHourRow(h));
+  }
+
+  console.log(chalk.dim("  " + sep));
+
+  const avgRate = data.avg_waste_rate_pct !== null
+    ? colorWasteRate(data.avg_waste_rate_pct)
+    : chalk.dim("—");
+  const peakRate = data.peak_waste_rate_pct !== null
+    ? colorWasteRate(data.peak_waste_rate_pct)
+    : chalk.dim("—");
+  console.log(
+    `  ${"Avg waste rate (24h):".padEnd(28)} ${avgRate}   ` +
+    `${chalk.dim(`(${data.total_stale_prevented} blocked / ${data.total_dispatches} total)`)}`
+  );
+  console.log(
+    `  ${"Peak hourly waste rate:".padEnd(28)} ${peakRate}`
+  );
+}
+
 // ── Command registration ───────────────────────────────────────────────────────
 
 export function registerDispatchEfficiencyCommand(program: Command): void {
@@ -141,17 +197,17 @@ export function registerDispatchEfficiencyCommand(program: Command): void {
         process.exit(1);
       }
 
+      let data24h: DispatchWasteMetrics24h;
       let data7: DispatchWasteMetrics;
-      let data30: DispatchWasteMetrics;
       try {
+        data24h = store.getDispatchWasteMetrics24h();
         data7 = store.getDispatchWasteMetrics(7);
-        data30 = store.getDispatchWasteMetrics(30);
       } finally {
         store.close();
       }
 
       if (opts.json) {
-        console.log(JSON.stringify({ "7d": data7, "30d": data30 }, null, 2));
+        console.log(JSON.stringify({ "24h": data24h, "7d": data7 }, null, 2));
         return;
       }
 
@@ -163,8 +219,8 @@ export function registerDispatchEfficiencyCommand(program: Command): void {
         )
       );
 
+      printWindow24h(data24h);
       printWindow("Last 7 days", data7);
-      printWindow("Last 30 days", data30);
 
       // Overall health note
       const rate = data7.avg_waste_rate_pct;
@@ -198,7 +254,10 @@ export function registerDispatchEfficiencyCommand(program: Command): void {
       }
 
       console.log(
-        chalk.dim("  Run `orch dispatch-efficiency --json` for machine-readable output.\n")
+        chalk.dim(
+          "  Run `orch dispatch-efficiency --json` for machine-readable output.\n" +
+          "  Telegram alerts fire when the waste rate exceeds 15% in any 1h window.\n"
+        )
       );
     });
 }

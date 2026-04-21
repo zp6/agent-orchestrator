@@ -11,6 +11,7 @@ import {
   findApprovedPRForIssue,
   findBranchForIssue,
   findExistingPRsForIssue,
+  findExistingPRsForIssueAcrossRepos,
   type LinkedPR,
 } from "../triggers/github.js";
 import { DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
@@ -415,6 +416,44 @@ export function runGitHubPreDispatchValidation(params: {
   // Always query the live GitHub API for linked PRs so a freshly opened PR is
   // never hidden behind the issue cache's 60s TTL window.
   const linkedPRs: LinkedPR[] = findExistingPRsForIssue(issue.repo, issue.number);
+
+  // Cross-repo PR check (issue #991): also scan all peer agent repos for PRs
+  // that mention this issue number. A cross-repo PR (e.g. a fix for a dashboard
+  // issue filed in the reviewer repo) should block re-dispatch just as firmly
+  // as a same-repo PR. Fail-open: errors on peer repos are silently ignored.
+  const peerRepos = Object.values(config.agents)
+    .filter((a) => a.github && a.github !== issue.repo)
+    .map((a) => a.github!);
+  const crossRepoPRs = peerRepos.length > 0
+    ? findExistingPRsForIssueAcrossRepos(issue.repo, issue.number, peerRepos)
+        .filter((r) => r.repo !== issue.repo)
+    : [];
+
+  // If any peer repo already has an open (non-draft) PR for this issue, block.
+  const crossRepoOpenPR = crossRepoPRs.find((pr) => pr.state === "open" && !pr.isDraft) ?? null;
+  if (crossRepoOpenPR) {
+    const failed = makeFailedResult(
+      base,
+      "branch_conflicts",
+      "open_pr_exists_cross_repo",
+      `issue ${sourceRef} already has open PR #${crossRepoOpenPR.number} in peer repo ${crossRepoOpenPR.repo}`,
+    );
+    failed.blockingPRNumber = crossRepoOpenPR.number;
+    store.addDispatchValidation({
+      source,
+      source_ref: sourceRef,
+      agent_name: agentName,
+      repo: issue.repo,
+      issue_number: issue.number,
+      outcome: failed.outcome,
+      failure_check: failed.failureCheck,
+      failure_code: failed.failureCode,
+      failure_reason: failed.failureReason,
+      checklist: failed.checks,
+    });
+    return failed;
+  }
+
   const mergedPR = linkedPRs.find((pr) => pr.state === "merged") ?? null;
   if (mergedPR) {
     // Issue #775: A merged PR against an OPEN issue does NOT block dispatch.

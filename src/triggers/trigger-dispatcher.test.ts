@@ -9,6 +9,7 @@ vi.mock("./github.js", () => ({
   findApprovedPRForIssue: vi.fn().mockReturnValue(null),
   findBranchForIssue: vi.fn().mockReturnValue(null),
   findExistingPRsForIssue: vi.fn().mockReturnValue([]),
+  findExistingPRsForIssueAcrossRepos: vi.fn().mockReturnValue([]),
   isIssueOpen: vi.fn().mockReturnValue(true),
   countOpenPRs: vi.fn().mockReturnValue(0),
   // Default: authenticated — tests that need unauthenticated state override this
