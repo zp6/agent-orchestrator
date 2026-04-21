@@ -173,6 +173,12 @@ export function buildTriageCoachingDirective(
 
   lines.push(
     `Before submitting, confirm all four JSON schema fields are present: ${allFields}.`,
+    ``,
+    `Common mistake — priority_reordering: when an issue is newly added to the roadmap`,
+    `(no prior rank), set old_rank to null, not 0 and not omit the field entirely.`,
+    `Correct example:`,
+    `  { "issue": 42, "old_rank": null, "new_rank": 3, "reason": "new high-priority feature added to Next Up" }`,
+    ``,
     `See the triage output schema in the task description for the exact required structure.`,
   );
 

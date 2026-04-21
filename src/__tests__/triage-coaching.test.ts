@@ -166,6 +166,29 @@ describe("buildTriageCoachingDirective()", () => {
     expect(d.directive).not.toContain("0.80");
   });
 
+  it("always includes old_rank: null example for priority_reordering (issue #393)", () => {
+    // The coached prompt must always include a concrete worked example showing
+    // old_rank: null for newly-added roadmap items, so agents see the pattern
+    // rather than infer it from prose.
+    const d = buildTriageCoachingDirective("agent-x", 0.72, 5, []);
+    expect(d.directive).toContain("old_rank");
+    expect(d.directive).toContain("null");
+    // The example must show new_rank as a number (not null)
+    expect(d.directive).toMatch(/"new_rank":\s*\d/);
+  });
+
+  it("old_rank: null example is syntactically valid JSON when extracted", () => {
+    const d = buildTriageCoachingDirective("agent-x", 0.72, 5, []);
+    // Extract the inline JSON object from the directive
+    const match = d.directive.match(/\{\s*"issue":\s*\d+.*?"reason":\s*"[^"]+"\s*\}/s);
+    expect(match).not.toBeNull();
+    const parsed = JSON.parse(match![0]);
+    expect(parsed.old_rank).toBeNull();
+    expect(typeof parsed.new_rank).toBe("number");
+    expect(typeof parsed.issue).toBe("number");
+    expect(typeof parsed.reason).toBe("string");
+  });
+
   it("defaults to TRIAGE_COACHING_THRESHOLD (0.80) when no threshold arg given", () => {
     expect(TRIAGE_COACHING_THRESHOLD).toBe(0.80);
     const d = buildTriageCoachingDirective("agent-x", 0.72, 3, []);
