@@ -1499,53 +1499,96 @@ export class Daemon {
   // ── Proxy health check ──────────────────────────────────────────────────
   /** Track consecutive proxy failures for escalation. */
   private proxyFailureCount = 0;
+  /** Rolling window of failure timestamps for flapping detection. */
+  private proxyFailureTimestamps: number[] = [];
+  /** Whether we're in a declared outage (prevents alert spam). */
+  private proxyOutageDeclared = false;
+  /** Consecutive successes needed before declaring recovery (debounce). */
+  private proxyRecoveryStreak = 0;
+
+  /** Failures in this window trigger a flapping alert. */
+  private static readonly PROXY_FLAP_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+  /** This many failures in the window = flapping alert. */
+  private static readonly PROXY_FLAP_THRESHOLD = 3;
+  /** Consecutive successes before declaring recovery. */
+  private static readonly PROXY_RECOVERY_DEBOUNCE = 3;
 
   /**
    * Ping the proxy server (not the management API) to confirm it can route
    * LLM requests.  When the proxy is down, every dispatch/verify/review call
    * silently fails with "Connection error" or "Request was aborted", burning
-   * retry budget and deadlocking the cycle.  This check detects that early.
+   * retry budget and deadlocking the cycle.
+   *
+   * Handles flapping (intermittent failures that reset the consecutive counter)
+   * by tracking failures in a rolling window. Requires multiple consecutive
+   * successes before declaring recovery to avoid false "recovered" alerts.
    */
   private async checkProxyHealth(time: string): Promise<void> {
     const proxyUrl = this.config.proxy.url;
+    let healthy = false;
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10_000);
       const res = await fetch(`${proxyUrl}/health`, { signal: controller.signal });
       clearTimeout(timeout);
-
-      if (res.ok) {
-        if (this.proxyFailureCount > 0) {
-          this.log.info("Proxy recovered", { previousFailures: this.proxyFailureCount });
-          // Clear infrastructure-error failure history so affected issues can be
-          // re-dispatched now that the proxy is back.
-          this.clearInfrastructureFailures(time);
-          await notifyOperator(
-            `Proxy recovered`,
-            `Proxy server at ${proxyUrl} is back online after ${this.proxyFailureCount} failed check(s). Infrastructure failure history cleared.`,
-            "info",
-          );
-        }
-        this.proxyFailureCount = 0;
-        return;
-      }
-      this.proxyFailureCount++;
+      healthy = res.ok;
     } catch {
-      this.proxyFailureCount++;
+      healthy = false;
     }
+
+    if (healthy) {
+      this.proxyRecoveryStreak++;
+      this.proxyFailureCount = 0;
+
+      // Require multiple consecutive successes before declaring recovery
+      if (this.proxyOutageDeclared && this.proxyRecoveryStreak >= Daemon.PROXY_RECOVERY_DEBOUNCE) {
+        this.proxyOutageDeclared = false;
+        this.proxyFailureTimestamps = [];
+        this.log.info("Proxy recovered (confirmed)", { consecutiveSuccesses: this.proxyRecoveryStreak });
+        this.clearInfrastructureFailures(time);
+        await notifyOperator(
+          "Proxy recovered",
+          `Proxy server at ${proxyUrl} is confirmed back online (${this.proxyRecoveryStreak} consecutive successes). Infrastructure failure history cleared.`,
+          "info",
+        );
+      }
+      return;
+    }
+
+    // Failure path
+    this.proxyRecoveryStreak = 0;
+    this.proxyFailureCount++;
+
+    // Track in rolling window
+    const now = Date.now();
+    this.proxyFailureTimestamps.push(now);
+    this.proxyFailureTimestamps = this.proxyFailureTimestamps.filter(
+      (ts) => now - ts < Daemon.PROXY_FLAP_WINDOW_MS,
+    );
 
     this.log.warn("Proxy health check failed", {
       url: proxyUrl,
       consecutiveFailures: this.proxyFailureCount,
+      failuresInWindow: this.proxyFailureTimestamps.length,
     });
 
-    if (this.proxyFailureCount === 2) {
-      // Alert exactly once at threshold — not every check while proxy is down.
-      await notifyOperator(
-        "Proxy server unreachable",
-        `Proxy at ${proxyUrl} has failed ${this.proxyFailureCount} consecutive health checks. All LLM routing is down — dispatches will fail with connection errors.`,
-        "critical",
-      );
+    // Alert on either: 2 consecutive failures OR N failures in the rolling window (flapping)
+    if (!this.proxyOutageDeclared) {
+      const shouldAlert =
+        this.proxyFailureCount >= 2 ||
+        this.proxyFailureTimestamps.length >= Daemon.PROXY_FLAP_THRESHOLD;
+
+      if (shouldAlert) {
+        this.proxyOutageDeclared = true;
+        const reason = this.proxyFailureCount >= 2
+          ? `${this.proxyFailureCount} consecutive failures`
+          : `${this.proxyFailureTimestamps.length} failures in the last hour (flapping)`;
+        await notifyOperator(
+          "Proxy server unreachable",
+          `Proxy at ${proxyUrl} is down: ${reason}. All LLM routing is affected — dispatches will fail with connection errors.\n\nCheck OrbStack/Docker: \`docker context show\` → \`curl --unix-socket /var/run/docker.sock http://localhost/ping\``,
+          "critical",
+        );
+      }
     }
   }
 
