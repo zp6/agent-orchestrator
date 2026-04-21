@@ -370,7 +370,7 @@ export type { ReviewerConfig, AgentConfig } from "./config.js";
 // APPROVAL_SCORE_FLOOR is exported separately so callers can reference the
 // hard floor constant without importing the full StateStore class (issue #266).
 export { StateStore, APPROVAL_SCORE_FLOOR } from "./state/store.js";
-export type { ILowScoreFeedStore } from "./state/types.js";
+export type { ILowScoreFeedStore, IBypassAuditStore } from "./state/types.js";
 export type {
   IStateStore,
   IScoreOutcomeStore,
@@ -627,6 +627,34 @@ export type {
   BypassReason,
   BypassBand,
 } from "./reviewer/quality-system-health.js";
+
+// Bypass-audit endpoint + daily Telegram digest (issue #398).
+// Lists all tasks approved below the 0.60 quality floor in the last 7 days with
+// their bypass_reason (or 'none').  Mount as /api/bypass-audit in the orchestrator;
+// the BypassAuditScheduler sends a daily Telegram summary with count and worst offender.
+//
+//   app.get('/api/bypass-audit', (req, res) => {
+//     res.json(getBypassAuditPayload(store, {
+//       days: req.query.days ? Number(req.query.days) : undefined,
+//     }));
+//   });
+//
+//   const scheduler = new BypassAuditScheduler(store, notifier);
+//   await scheduler.checkAndSend(); // call from daily maintenance cycle
+export {
+  getBypassAuditPayload,
+  formatBypassAuditForTelegram,
+  BypassAuditScheduler,
+  BYPASS_AUDIT_FLOOR,
+  BYPASS_AUDIT_DEFAULT_DAYS,
+  BYPASS_AUDIT_DEFAULT_LIMIT,
+} from "./reviewer/bypass-audit.js";
+export type {
+  BypassAuditEntry,
+  BypassAuditPayload,
+  BypassAuditOptions,
+  BypassAuditSchedulerOptions,
+} from "./reviewer/bypass-audit.js";
 
 // CLI smoke test verifier (issue #274)
 export {

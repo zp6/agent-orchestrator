@@ -68,6 +68,7 @@ import type {
   RoutingViolation,
   ILowScoreFeedStore,
   IScoreViolationsStore,
+  IBypassAuditStore,
   ISemanticMemoryStore,
   MemoryEntry,
   TopQueriedTopic,
@@ -88,7 +89,7 @@ import { ulid } from "../util/ulid.js";
  */
 export const APPROVAL_SCORE_FLOOR = 0.60;
 
-export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, ISemanticMemoryStore {
+export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore {
   private db: Database.Database;
 
   constructor(dbPath: string = process.env.STATE_DB_PATH ?? "state.db") {
@@ -1155,6 +1156,33 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
          LIMIT ?`,
       )
       .all(safeThreshold, `-${safeDays}`, safeLimit) as Task[];
+  }
+
+  /**
+   * Return all tasks approved below the hard quality floor (0.60) in the last
+   * `days` days, ordered by quality_score ascending (worst first).
+   *
+   * Issue #398: feeds the `/api/bypass-audit` endpoint so operators can query
+   * exactly which tasks bypassed the floor and why, without digging through logs.
+   *
+   * @param days  - Lookback window in days. Default: 7.
+   * @param limit - Maximum rows to return. Default: 200.
+   */
+  getBypassAuditTasks(days: number = 7, limit: number = 200): Task[] {
+    const safeDays = Number.isFinite(days) && days >= 1 ? Math.floor(days) : 7;
+    const safeLimit = Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : 200;
+
+    return this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE verification_status = 'approved'
+           AND quality_score IS NOT NULL
+           AND quality_score < 0.60
+           AND updated_at >= datetime('now', ? || ' days')
+         ORDER BY quality_score ASC, updated_at DESC
+         LIMIT ?`,
+      )
+      .all(`-${safeDays}`, safeLimit) as Task[];
   }
 
   /**

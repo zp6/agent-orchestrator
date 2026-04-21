@@ -982,6 +982,25 @@ export interface IScoreViolationsStore {
   getScoreViolationTasks(threshold?: number, days?: number, limit?: number): Task[];
 }
 
+// ── Bypass audit store (issue #398) ──────────────────────────────────────────
+
+/**
+ * Minimal store interface for the bypass-audit endpoint.
+ *
+ * Returns tasks approved below the hard quality floor (0.60) in a rolling
+ * window, ordered by quality_score ascending (worst first).
+ */
+export interface IBypassAuditStore {
+  /**
+   * Return all tasks approved below 0.60 in the last `days` days, including
+   * those with and without an explicit `bypass_reason`.
+   *
+   * @param days  - Lookback window in days. Default: 7.
+   * @param limit - Maximum rows to return. Default: 200.
+   */
+  getBypassAuditTasks(days?: number, limit?: number): Task[];
+}
+
 // ── Score calibration types ───────────────────────────────────────────────
 
 /**
