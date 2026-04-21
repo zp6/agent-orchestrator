@@ -369,6 +369,24 @@ export async function runTeamMeeting(
     log.info(`Round ${i + 1} complete`, { responded, total: round.entries.length });
   }
 
+  // Check if any agent actually responded — if not, this meeting is a wash
+  // (e.g. all agents returned connection errors during a Docker outage).
+  // Don't save it or file it, so the time-based scheduler retries next cycle.
+  const totalResponses = rounds.reduce(
+    (sum, r) => sum + r.entries.filter((e) => e.response).length, 0,
+  );
+  if (totalResponses === 0) {
+    log.warn("Meeting abandoned: zero responses from all agents", { type: meetingType, rounds: rounds.length });
+    return {
+      date: new Date().toISOString().slice(0, 10),
+      type: meetingType,
+      rounds,
+      synthesis: "Meeting abandoned — no agents responded (likely infrastructure outage).",
+      actionItems: [],
+      goalAdjustments: [],
+    };
+  }
+
   // Synthesise all rounds
   const { synthesis, actionItems, goalAdjustments } = await synthesiseMeeting(
     config, meetingType, rounds, goalsContext,
