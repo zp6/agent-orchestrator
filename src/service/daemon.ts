@@ -2210,10 +2210,13 @@ export class Daemon {
     const perAgentThresholds = verification.per_agent_quality_thresholds ?? {};
     const windowTasks = verification.quality_sla_window_tasks ?? DEFAULT_QUALITY_SLA_WINDOW_TASKS;
 
-    // Gather agent names that have at least one scored task.
+    // Gather agent names that have at least one scored task AND still exist
+    // in the current config. Without this filter, removed agents (e.g. Codex)
+    // trigger SLA breach alerts indefinitely from their historical data.
+    const configAgents = new Set(Object.keys(this.config.agents));
     const agentNames: string[] = this.store
       .getAgentStats()
-      .filter((a) => a.avg_score !== null)
+      .filter((a) => a.avg_score !== null && configAgents.has(a.agent_name))
       .map((a) => a.agent_name);
 
     if (agentNames.length === 0) return;

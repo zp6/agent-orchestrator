@@ -192,6 +192,9 @@ export async function verifyAndReviseTask(
       sourceRef: task.source_ref,
       revisionCount: newRevisionCount,
     });
+    // Rate limit key includes the date so stuck issues alert at most once per day,
+    // not every 15 minutes (the previous behaviour generated 96+ alerts/day per issue).
+    const alertDate = new Date().toISOString().slice(0, 10);
     await notifyOperator(
       "Stuck Issue — Revision Loop",
       `Issue ${sourceLabel} has reached ${newRevisionCount} revision(s).\n` +
@@ -200,7 +203,7 @@ export async function verifyAndReviseTask(
       `Task: ${task.title}\n\n` +
       "This issue may need manual intervention.",
       "warning",
-      `stuck-issue:${task.source_ref ?? taskId}`,
+      `stuck-issue:${task.source_ref ?? taskId}:${alertDate}`,
     );
   }
 
