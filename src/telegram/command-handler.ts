@@ -34,6 +34,7 @@
  *   /backfill-bypass-reasons   → backfill bypass_reason for historical sub-0.60 approved tasks (idempotent)
  *   /low-score [threshold] [limit] → approved tasks with quality score below threshold (default 0.75), with dimension breakdown
  *   /memory [expand <topic>|digest] → semantic task memory digest or full topic expansion
+ *   /misrouting [hours]        → implementation tasks misrouted to reviewer in last N hours (default 24h, max 720h)
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -77,6 +78,11 @@ import {
   buildMemoryDigest,
   formatMemoryDigest,
 } from "../reviewer/memory-digest.js";
+import {
+  buildMisroutingDigest,
+  formatMisroutingDigest,
+} from "../reviewer/misrouting-digest.js";
+import type { ReviewerConfig } from "../config.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
 const log = createLogger("telegram-commands");
@@ -135,7 +141,8 @@ type CommandName =
   | "quality-health"
   | "backfill-bypass-reasons"
   | "low-score"
-  | "memory";
+  | "memory"
+  | "misrouting";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -174,6 +181,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "backfill-bypass-reasons",
   "low-score",
   "memory",
+  "misrouting",
 ]);
 
 interface ParsedCommand {
@@ -272,6 +280,7 @@ async function executeCommand(
   verifier?: Verifier,
   dashboardUrl?: string,
   surgeDetector?: DuplicateDispatchSurgeDetector,
+  reviewerConfig?: ReviewerConfig,
 ): Promise<string> {
   switch (cmd.command) {
     case "status":
@@ -519,6 +528,14 @@ async function executeCommand(
       // Treat any unrecognised subcommand as a topic expand
       const fallbackTopic = [subCommand, ...topicParts].join(" ").trim();
       return handleMemoryExpand(store, fallbackTopic);
+    }
+
+    case "misrouting": {
+      const hoursStr = cmd.args[0]?.trim();
+      const lookbackHours = hoursStr
+        ? Math.min(Math.max(parseInt(hoursStr, 10) || 24, 1), 720)
+        : 24;
+      return handleMisrouting(store, lookbackHours, reviewerConfig);
     }
   }
 }
@@ -2279,6 +2296,25 @@ function handleRoutingViolations(store: ITelegramStateStore, limit: number): str
   return lines.join("\n");
 }
 
+// ── Misrouting digest handler (issue #387) ───────────────────────────────
+
+function handleMisrouting(
+  store: ITelegramStateStore,
+  lookbackHours: number,
+  reviewerConfig?: ReviewerConfig,
+): string {
+  if (!reviewerConfig) {
+    return [
+      `⚠️ *Misrouting Digest — Unavailable*`,
+      ``,
+      `Reviewer config is not available in this session.`,
+      `Please ensure the command handler is initialised with a \`reviewerConfig\`.`,
+    ].join("\n");
+  }
+  const report = buildMisroutingDigest(store, reviewerConfig, { lookbackHours });
+  return formatMisroutingDigest(report);
+}
+
 // ── Quality system health handler (issue #304) ────────────────────────────
 
 function handleQualitySystemHealth(
@@ -2462,6 +2498,11 @@ export class TelegramCommandHandler {
    * can silence storm alerts for specific issues in the current session.
    */
   private surgeDetector?: DuplicateDispatchSurgeDetector;
+  /**
+   * Optional reviewer config — required for `/misrouting` to work.
+   * When omitted, `/misrouting` returns a "not available" message.
+   */
+  private reviewerConfig?: ReviewerConfig;
 
   constructor(
     store: ITelegramStateStore,
@@ -2477,6 +2518,11 @@ export class TelegramCommandHandler {
        * When omitted, `/suppress` returns a "not available" message.
        */
       surgeDetector?: DuplicateDispatchSurgeDetector;
+      /**
+       * Reviewer config — required for `/misrouting` to work.
+       * When omitted, `/misrouting` returns a "not available" message.
+       */
+      reviewerConfig?: ReviewerConfig;
     } = {},
   ) {
     this.store = store;
@@ -2486,6 +2532,7 @@ export class TelegramCommandHandler {
     this.verifier = opts.verifier;
     this.dashboardUrl = opts.dashboardUrl ?? process.env.DASHBOARD_URL;
     this.surgeDetector = opts.surgeDetector;
+    this.reviewerConfig = opts.reviewerConfig;
   }
 
   /**
@@ -2519,7 +2566,7 @@ export class TelegramCommandHandler {
             log.info("Received Telegram command", { command: cmd.command, args: cmd.args });
 
             try {
-              const reply = await executeCommand(cmd, this.store, config.botToken, this.conflictStatsProvider, this.calibrationDriftProvider, this.verifier, this.dashboardUrl, this.surgeDetector);
+              const reply = await executeCommand(cmd, this.store, config.botToken, this.conflictStatsProvider, this.calibrationDriftProvider, this.verifier, this.dashboardUrl, this.surgeDetector, this.reviewerConfig);
               await sendMessage(config.botToken, cmd.chatId, reply);
             } catch (err) {
               log.error("Error executing command", {
