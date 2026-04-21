@@ -1505,6 +1505,11 @@ export class Daemon {
   private proxyOutageDeclared = false;
   /** Consecutive successes needed before declaring recovery (debounce). */
   private proxyRecoveryStreak = 0;
+  /** Number of Docker/OrbStack restart attempts during current outage. */
+  private dockerRestartAttempts = 0;
+
+  /** Max Docker restart attempts per outage before giving up. */
+  private static readonly MAX_DOCKER_RESTART_ATTEMPTS = 2;
 
   /** Failures in this window trigger a flapping alert. */
   private static readonly PROXY_FLAP_WINDOW_MS = 60 * 60 * 1000; // 1 hour
@@ -1544,6 +1549,7 @@ export class Daemon {
       if (this.proxyOutageDeclared && this.proxyRecoveryStreak >= Daemon.PROXY_RECOVERY_DEBOUNCE) {
         this.proxyOutageDeclared = false;
         this.proxyFailureTimestamps = [];
+        this.dockerRestartAttempts = 0;
         this.log.info("Proxy recovered (confirmed)", { consecutiveSuccesses: this.proxyRecoveryStreak });
         this.clearInfrastructureFailures(time);
         await notifyOperator(
@@ -1583,12 +1589,93 @@ export class Daemon {
         const reason = this.proxyFailureCount >= 2
           ? `${this.proxyFailureCount} consecutive failures`
           : `${this.proxyFailureTimestamps.length} failures in the last hour (flapping)`;
+
+        // Auto-recovery: restart Docker/OrbStack before alerting operator
+        const recovered = await this.attemptDockerRestart(time);
+        if (recovered) return; // Recovery succeeded — skip the alert
+
         await notifyOperator(
-          "Proxy server unreachable",
-          `Proxy at ${proxyUrl} is down: ${reason}. All LLM routing is affected — dispatches will fail with connection errors.\n\nCheck OrbStack/Docker: \`docker context show\` → \`curl --unix-socket /var/run/docker.sock http://localhost/ping\``,
+          "Proxy server unreachable — auto-restart failed",
+          `Proxy at ${proxyUrl} is down: ${reason}. Auto-restart of Docker/OrbStack was attempted but did not restore connectivity.\n\nManual check needed: \`docker context show\` → \`curl --unix-socket /var/run/docker.sock http://localhost/ping\``,
           "critical",
         );
       }
+    }
+  }
+
+  /**
+   * Attempt to restart the Docker runtime (OrbStack or Docker Desktop) and
+   * re-sync agents. Returns true if the proxy is reachable after restart.
+   */
+  private async attemptDockerRestart(time: string): Promise<boolean> {
+    if (this.dockerRestartAttempts >= Daemon.MAX_DOCKER_RESTART_ATTEMPTS) {
+      this.log.warn("Docker restart: max attempts reached, skipping", {
+        attempts: this.dockerRestartAttempts,
+      });
+      return false;
+    }
+    this.dockerRestartAttempts++;
+
+    try {
+      // Detect runtime
+      const runtime = execSync("docker context show", { encoding: "utf-8", timeout: 10_000 }).trim();
+      this.log.info("Docker restart: detected runtime", { runtime, attempt: this.dockerRestartAttempts });
+
+      if (runtime === "orbstack") {
+        execSync("killall OrbStack 2>/dev/null; true", { encoding: "utf-8", timeout: 10_000 });
+        await new Promise((r) => setTimeout(r, 5_000));
+        execSync("open -a OrbStack", { encoding: "utf-8", timeout: 10_000 });
+      } else {
+        execSync("killall Docker 2>/dev/null; true", { encoding: "utf-8", timeout: 10_000 });
+        await new Promise((r) => setTimeout(r, 5_000));
+        execSync("open -a Docker", { encoding: "utf-8", timeout: 10_000 });
+      }
+
+      // Wait for Docker to come up
+      this.log.info("Docker restart: waiting for socket", { runtime });
+      await new Promise((r) => setTimeout(r, 60_000));
+
+      // Verify socket
+      try {
+        execSync("curl --unix-socket /var/run/docker.sock --max-time 10 http://localhost/ping", {
+          encoding: "utf-8", timeout: 15_000,
+        });
+      } catch {
+        this.log.warn("Docker restart: socket still unresponsive after restart", { runtime });
+        return false;
+      }
+
+      // Re-sync agents
+      this.log.info("Docker restart: socket responsive, syncing agents");
+      await this.syncAgents();
+
+      // Verify proxy
+      try {
+        const res = await fetch(`${this.config.proxy.url}/health`, { signal: AbortSignal.timeout(10_000) });
+        if (res.ok) {
+          this.proxyOutageDeclared = false;
+          this.proxyFailureTimestamps = [];
+          this.proxyFailureCount = 0;
+          this.proxyRecoveryStreak = Daemon.PROXY_RECOVERY_DEBOUNCE;
+          this.clearInfrastructureFailures(time);
+          console.log(`[${time}] Docker auto-restart succeeded — proxy recovered`);
+          await notifyOperator(
+            "Auto-recovery: Docker restarted, proxy restored",
+            `Docker runtime (${runtime}) was restarted automatically. Proxy is back online. Infrastructure failure history cleared.`,
+            "info",
+          );
+          return true;
+        }
+      } catch { /* fall through */ }
+
+      this.log.warn("Docker restart: proxy still unreachable after restart", { runtime });
+      return false;
+    } catch (err) {
+      this.log.error("Docker restart failed", {
+        attempt: this.dockerRestartAttempts,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
     }
   }
 
