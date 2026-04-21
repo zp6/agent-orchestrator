@@ -44,11 +44,14 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 - **Cross-repo feature tracker** — detects feature consistency gaps across Claude/Codex pool members
 - **Health check postmortem** — auto-files structured incident reports for recurring health failures
 - **Verification calibration** — logs verification outcomes (`verification_outcome_logs`) and polls PR events to build quality-score training data
-- **Semantic task memory** — FTS5-based knowledge store; top-3 similar past successes injected into dispatch context at runtime (issue #1011)
+- **Semantic task memory** — FTS5-based knowledge store; top-3 similar past successes injected into dispatch context at runtime; auto-tunes `min_quality_score` threshold via FTS5 query analysis with per-agent breakdown (issues #1011, #1033)
 - **Dispatch cascade analyzer** — tracks parent→child task relationships; enforces per-trigger follow-up depth cap to prevent unbounded task spawning
 - **Post-merge regression detector** — validates merged PRs in staging; auto-files revert tasks on regressions
 - **Metrics server** — embedded HTTP server on port 3472 exposing `/dispatch-efficiency` and `/health` for dashboard polling
 - **Housekeeping triage schemas** — verifier enforces structured JSON blocks in housekeeping PR bodies (`TRIAGE_HOUSEKEEPING_SCHEMA`, `TRIAGE_CROSS_REPO_SCHEMA`); missing fields trigger immediate revision
+- **Prompt caching** — all static LLM system prompts cached via Anthropic `cache_control: { type: 'ephemeral' }`; dynamic config portions kept variable to avoid cache invalidation; reduces token spend on repeated supervisor/verifier calls (issue #1037)
+- **Dispatch waste rate alerting** — `getDispatchWasteMetrics24h()` tracks per-hour rolling window; Telegram alert fires when waste rate exceeds 15% in the most recent hour (`DISPATCH_WASTE_RATE_THRESHOLD = 0.15`) (issue #991)
+- **Cross-repo PR guard** — pre-dispatch validator checks all peer agent repos (`config.agents[*].github`) for open non-draft PRs before dispatching; blocks with failure code `open_pr_exists_cross_repo` (issue #991)
 
 ## CRITICAL: NEVER Push Directly to Main
 
@@ -125,7 +128,7 @@ Every 5 minutes (default; configurable via `--poll-interval`):
 1. **Telegram polling** (independent 3s loop)
 2. **Stale task watchdog** — kill tasks stuck >10 min (configurable per agent)
 3. **Retry failed tasks** — exponential backoff, 3 retries max
-4. **Dispatch triggers** — poll GitHub issues, dispatch to agents (pool-aware, with semantic memory context injection)
+4. **Dispatch triggers** — poll GitHub issues, dispatch to agents (pool-aware, with semantic memory context injection); cross-repo PR guard checks all peer repos before dispatching to block `open_pr_exists_cross_repo` failures
 5. **Verify completed tasks** — LLM scores quality, dispatches revisions; enforces housekeeping triage schema
 6. **Create orphan PRs** — auto-rebase stale branches, create PRs
 7. **Proactive rebase** — every ~15min, rebase stale branches before they fall behind origin/main
@@ -136,7 +139,7 @@ Every 5 minutes (default; configurable via `--poll-interval`):
 12. **Supervisor** — every ~15min, strategic reasoning, dispatch decisions
 13. **Backlog triage** — every ~5h, dispatch housekeeping to agents (staggered by `housekeeping_offset_cycles`)
 14. **Post-merge regression check** — validates staging after merges, auto-files revert tasks on failures
-15. **Semantic memory audit** — every ~24h, evaluates FTS5 memory effectiveness and adjusts min quality threshold
+15. **Semantic memory audit** — every ~24h, evaluates FTS5 memory effectiveness (zero-match rate tracking, query quality analysis), auto-tunes `min_quality_score` threshold, and provides per-agent memory breakdown
 16. **Roadmap proposals** — every ~24h, proposes new issues based on coverage gap detection
 
 ## Pool Routing
@@ -227,7 +230,11 @@ The `orch` CLI is built from `src/cli/index.ts`. Key command groups:
 | `orch memory stats` | Semantic memory index size and configuration |
 | `orch memory query <text>` | Find similar past tasks (BM25 FTS5 ranking) |
 | `orch memory reindex` | Force re-index of all approved tasks |
-| `orch dispatch-efficiency` | Dispatch block-rate summary |
+| `orch memory effectiveness` | Memory quality metrics: match rates, latency, usefulness scores |
+| `orch memory autotune` | Show or apply recommended `min_quality_score` adjustment |
+| `orch memory query-stats` | FTS5 query analysis: zero-match rates and noisy patterns |
+| `orch memory per-agent` | Per-agent semantic memory effectiveness breakdown |
+| `orch dispatch-efficiency` | Dispatch waste rate: 24h hourly breakdown, last 8h inline, avg/peak rates |
 | `orch decisions` | Routing decisions audit |
 | `orch audit` | General audit log |
 | `orch preflight` | Pre-PR submission checks (duplicate PR, rebase, conflicts, issue ref) |

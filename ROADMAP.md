@@ -1,6 +1,6 @@
 # Agent Orchestrator — Roadmap
 
-This is the prioritised backlog for `rapartlu/agent-orchestrator`. Updated 2026-04-19.
+This is the prioritised backlog for `rapartlu/agent-orchestrator`. Updated 2026-04-21.
 
 ---
 
@@ -10,11 +10,11 @@ These are the most impactful items — highest signal-to-noise for the fleet.
 
 | # | Issue | What & Why |
 |---|-------|-----------|
-| 1 | [#938](https://github.com/rapartlu/agent-orchestrator/issues/938) | **Dispatch safety audit log** — unified guard event feed for all pre-dispatch safety decisions (antibody, idempotency, lock, affinity); critical for debugging misroutes and blocked dispatches |
-| 2 | [#929](https://github.com/rapartlu/agent-orchestrator/issues/929) | **Pre-dispatch semantic duplicate detection** — LLM-based dedup of open issues before dispatching; prevents agents implementing the same feature twice under different titles |
-| 3 | [#911](https://github.com/rapartlu/agent-orchestrator/issues/911) | **Score coverage backfill endpoint** — expose `/api/tasks/backfill-scores` in daemon loop to retroactively score tasks missing quality data |
-| 4 | [#885](https://github.com/rapartlu/agent-orchestrator/issues/885) | **Issue existence validation before dispatch** — stops wasted cycles dispatching to already-closed or nonexistent issues |
-| 5 | [#874](https://github.com/rapartlu/agent-orchestrator/issues/874) | **Agent name canonicalization** — prevent silent misrouting from name typos or renamed agents (complements the UNKNOWN_AGENT guard) |
+| 1 | [#1047](https://github.com/rapartlu/agent-orchestrator/issues/1047) | **Already-in-review state persistence** — persist already-in-review results to `state.db` so cross-restart re-dispatch is prevented; high severity — 20 identical wasted dispatches observed in a single daemon window |
+| 2 | [#1046](https://github.com/rapartlu/agent-orchestrator/issues/1046) | **Dispatch storm suppression for already-in-review** — TTL-keyed suppression table so once an issue is detected as already-in-review, subsequent dispatches are dropped for the TTL window without calling the agent |
+| 3 | [#938](https://github.com/rapartlu/agent-orchestrator/issues/938) | **Dispatch safety audit log** — unified guard event feed for all pre-dispatch safety decisions (antibody, idempotency, lock, affinity); critical for debugging misroutes and blocked dispatches |
+| 4 | [#929](https://github.com/rapartlu/agent-orchestrator/issues/929) | **Pre-dispatch semantic duplicate detection** — LLM-based dedup of open issues before dispatching; prevents agents implementing the same feature twice under different titles |
+| 5 | [#911](https://github.com/rapartlu/agent-orchestrator/issues/911) | **Score coverage backfill endpoint** — expose `/api/tasks/backfill-scores` in daemon loop to retroactively score tasks missing quality data |
 
 ---
 
@@ -24,10 +24,11 @@ Solid ideas, scoped and ready when Next Up clears.
 
 | # | Issue | What & Why |
 |---|-------|-----------|
-| 6 | [#1011](https://github.com/rapartlu/agent-orchestrator/issues/1011) | **Shared semantic task memory** — SQLite + sqlite-vec knowledge store; retrieve top-3 similar past successes at dispatch time and inject as agent context; targets ≥15% first-pass verification improvement |
-| 7 | [#876](https://github.com/rapartlu/agent-orchestrator/issues/876) | **Research agent proactive dispatch** — auto-detect architecture/technology decisions and route them to the research agent before implementation begins |
-| 8 | [#869](https://github.com/rapartlu/agent-orchestrator/issues/869) | **Auto-route blocked dispatches to PR review queue** — when a dispatch is blocked, immediately surface it for review rather than losing it silently |
-| 9 | [#877](https://github.com/rapartlu/agent-orchestrator/issues/877) | **Decisions dashboard panel** — expose `/api/routing-decisions` in agent-dashboard for visibility into why tasks are routed where they are (needs dashboard-side work) |
+| 6 | [#885](https://github.com/rapartlu/agent-orchestrator/issues/885) | **Issue existence validation before dispatch** — stops wasted cycles dispatching to already-closed or nonexistent issues |
+| 7 | [#874](https://github.com/rapartlu/agent-orchestrator/issues/874) | **Agent name canonicalization** — prevent silent misrouting from name typos or renamed agents (complements the UNKNOWN_AGENT guard) |
+| 8 | [#876](https://github.com/rapartlu/agent-orchestrator/issues/876) | **Research agent proactive dispatch** — auto-detect architecture/technology decisions and route them to the research agent before implementation begins |
+| 9 | [#869](https://github.com/rapartlu/agent-orchestrator/issues/869) | **Auto-route blocked dispatches to PR review queue** — when a dispatch is blocked, immediately surface it for review rather than losing it silently |
+| 10 | [#877](https://github.com/rapartlu/agent-orchestrator/issues/877) | **Decisions dashboard panel** — expose `/api/routing-decisions` in agent-dashboard for visibility into why tasks are routed where they are (needs dashboard-side work) |
 | 10 | [#794](https://github.com/rapartlu/agent-orchestrator/issues/794) | **Idempotency guard** — block re-dispatch when a PR already exists for the issue (complements existing open-PR deduplication) |
 | 11 | [#762](https://github.com/rapartlu/agent-orchestrator/issues/762) | **Antibody filter false-positive correction** — add a feedback path to demote over-aggressive immune patterns that block valid tasks |
 
@@ -50,6 +51,15 @@ Worth tracking but not yet scoped or prioritised.
 
 Key features merged since last triage:
 
+- **#991/#1048** — dispatch waste rate metric (24h hourly window), 15% Telegram alert, cross-repo PR guard checking all peer agent repos before dispatch (2026-04-21)
+- **#1049** — reduce Telegram noise: stop alerting on removed agents + daily stuck-issue cap (2026-04-21)
+- **#1045** — auto-restart Docker/OrbStack when proxy outage detected (2026-04-21)
+- **#1044** — fix proxy alert flapping: rolling window + recovery debounce (2026-04-20)
+- **#1039** — bypass reason validation for `/approve` with very low scores (2026-04-20)
+- **#1037** — prompt caching (`cache_control: { type: 'ephemeral' }`) on all LLM system prompts to reduce token spend (2026-04-20)
+- **#1028/#1033** — semantic memory effectiveness dashboard + auto-tuning of `min_quality_score`, FTS5 query analysis, per-agent breakdown (2026-04-19)
+- **#1032** — CI: path filtering, caching, and self-hosted runner support to fix billing exhaustion (2026-04-19)
+- **#1011** — shared semantic task memory: FTS5-based knowledge store, top-3 similar past successes injected at dispatch time (2026-04-19)
 - **#1000** — fix: dispatch coordination group child tasks stuck at pending (2026-04-19)
 - **#961** — fix WAL data leakage in getScoreDistribution test (isolated DB paths) (2026-04-19)
 - **#959** — fix research-agent PR-existence guard (2026-04-19)
