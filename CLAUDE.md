@@ -12,10 +12,13 @@ The orchestrator manages a fleet of Claude Code agents, each in a Docker contain
 
 | Agent | Repo | Port | Purpose |
 |-------|------|------|---------|
-| claude-agent-orchestrator | claude-agent-orchestrator | 3472 | Core daemon, state store, dispatching, triggers |
-| claude-orchestrator-dashboard | claude-orchestrator-dashboard | 3473 | Dashboard UI, CLI commands, metrics |
-| claude-orchestrator-reviewer | claude-orchestrator-reviewer | 3474 | **This repo** — PR review, verification, supervisor |
-| claude-proxy | claude-proxy | 3471 | Proxy server wrapping Claude CLI sessions |
+| claude-agent-orchestrator | rapartlu/agent-orchestrator | 3472 | Core daemon, state store, dispatching, triggers |
+| claude-orchestrator-dashboard | rapartlu/agent-dashboard | 3473 | Dashboard UI, CLI commands, metrics |
+| claude-orchestrator-reviewer | rapartlu/agent-reviewer | 3474 | **This repo** — PR review, verification, supervisor |
+| claude-orchestrator-telegram | rapartlu/agent-orchestrator | 3477 | Telegram command handling (Haiku model) |
+| claude-research-agent | rapartlu/research-agent | 3478 | Research, investigation, technology evaluation |
+| claude-proxy | rapartlu/agent-proxy | 3471 | Proxy server, container management |
+| meeting-facilitator-agent | rapartlu/meeting-facilitator-agent | 3485 | Meeting facilitation, structured discussions |
 
 **Daemon loop** runs every 30s: poll GitHub issues → dispatch to agents → verify quality → review PRs → detect improvements → supervisor decisions.
 
@@ -85,8 +88,10 @@ When this container is used for LLM PR reviews:
 - PR scope pre-flight check: deterministic bundling detection before LLM review is triggered
 - Semantic task memory: daily Telegram digest summarising the semantic task memory index; `/memory` command
 - Real-time low-score approval alerter: Telegram notification when a task is approved with score < 0.70
+- Score-zero approval alerter: dedicated real-time Telegram alert for catastrophic score ≤ 0.05 approvals with full dimension breakdown
 - Low-score approved task feed: `/api/low-score-approved` payload builder for operator audit
 - Score-bypass violation report: `/api/score-violations` payload listing sub-threshold approvals by agent
+- Misrouting digest: daily Telegram summary of all tasks dispatched to the reviewer that matched implementation patterns; `/misrouting [hours]` on-demand command
 
 **Out of scope (belongs to orchestrator-core):**
 - Daemon loop, state store, dispatching infrastructure
@@ -152,8 +157,10 @@ src/
     pr-scope-checker.ts             — deterministic bundling/multi-issue detection before LLM review round
     memory-digest.ts                — daily Telegram digest of semantic task memory index; /memory command
     low-score-approval-alerter.ts   — real-time Telegram alert when task approved with score < 0.70
+    score-zero-alert.ts             — dedicated alert for catastrophic score ≤ 0.05 approvals; higher-urgency than general low-score alerter
     low-score-feed.ts               — /api/low-score-approved payload builder for operator audit
     score-violations.ts             — /api/score-violations payload: sub-threshold approvals grouped by agent
+    misrouting-digest.ts            — daily Telegram digest of implementation tasks dispatched to reviewer; /misrouting [hours] on-demand command
   integration/
     orchestrator-adapter.ts         — createReviewerInstances() adapter for orchestrator import
   service/

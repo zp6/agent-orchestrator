@@ -1,6 +1,6 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-19 (triage cycle 5)_
+_Last updated: 2026-04-21 (triage cycle 6)_
 
 ## Completed (recent)
 
@@ -19,18 +19,23 @@ _Last updated: 2026-04-19 (triage cycle 5)_
 - **#369 / PR #370** — Semantic task memory: daily digest + `/memory` Telegram command (`memory-digest.ts`)
 - **#366 / PR #373** — PRAGMA foreign_keys=ON + startup integrity check
 - **#374 / PR #376** — Proposal-tag dispatch routing with dedicated verification
+- **#375 / PR #378** — Score-zero approval alerter: dedicated real-time Telegram alert for score ≤ 0.05 approvals (`score-zero-alert.ts`)
+- **#382 / PR #386** — Daily misrouting digest: Telegram summary of implementation tasks dispatched to reviewer (`misrouting-digest.ts`)
+- **#388 / PR #388** — `/misrouting [hours]` Telegram command for on-demand misrouting stats
 
 ## Next up
 
-1. **#375 — Real-time Telegram alert when a score-0 task is approved** _(high)_ — A separate, higher-urgency alert distinct from the general low-score alerter. Score-0 indicates catastrophic failure and warrants an immediate, dedicated notification with full dimension breakdown.
+1. **#391 — Per-issue dispatch surge alerter** _(high)_ — Extend `duplicate-dispatch-surge-detector.ts` to key on `(repo, issue_number)` and fire a Telegram alert when any single issue accumulates ≥3 dispatches within a 15-minute window; deduplicate at most once per 30 min per issue.
 
-2. **#359 — Daily agent quality digest with degradation callouts** _(high)_ — Scheduled Telegram message summarising each agent's 24-hour score average, trend direction, and flagging any agent that degraded >10% day-over-day.
+2. **#392 — Orchestrator pre-dispatch gate: hard-block issues with open PRs** _(high)_ — Enforce a hard block at dispatch time when a PR already exists for the issue; stricter than the soft existing guard which can be bypassed.
 
-3. **#232 — Quality scores missing from task feed** _(high)_ — Despite `ensureScoresPopulated()` and backfill commands, recent tasks still show `quality_score: null`. Need a startup/daemon check that warns when >10% of recent approved tasks have null scores.
+3. **#359 — Daily agent quality digest with degradation callouts** _(high)_ — Scheduled Telegram message summarising each agent's 24-hour score average, trend direction, and flagging any agent that degraded >10% day-over-day.
 
-4. **#368 — Auto-file GitHub issues for improvements identified across 3+ consecutive batches** _(medium)_ — `ImprovementRecurrenceTracker` that records patterns by normalized title hash across distinct batches and auto-files a `chronic` + `improvement` tagged issue when threshold is reached.
+4. **#232 — Quality scores missing from task feed** _(high)_ — Despite `ensureScoresPopulated()` and backfill commands, recent tasks still show `quality_score: null`. Need a startup/daemon check that warns when >10% of recent approved tasks have null scores.
 
-5. **#221 — Improvement detector deduplication against existing GitHub issues** _(medium)_ — `ImprovementDetector` creates GitHub issues without checking for existing open duplicates. Add `gh issue list` pre-check with title-similarity filter before filing.
+5. **#368 — Auto-file GitHub issues for improvements identified across 3+ consecutive batches** _(medium)_ — `ImprovementRecurrenceTracker` that records patterns by normalized title hash across distinct batches and auto-files a `chronic` + `improvement` tagged issue when threshold is reached.
+
+6. **#221 — Improvement detector deduplication against existing GitHub issues** _(medium)_ — `ImprovementDetector` creates GitHub issues without checking for existing open duplicates. Add `gh issue list` pre-check with title-similarity filter before filing.
 
 ## Planned
 
@@ -50,6 +55,7 @@ _Last updated: 2026-04-19 (triage cycle 5)_
 
 ## Triage notes
 
+- **2026-04-21 cycle 6**: Closed #389 as duplicate of #391 (both request per-issue dispatch surge alerting in Telegram; #391 has acceptance criteria). No stale issues (all open issues ≤2 days old). No open PRs to audit. CLAUDE.md fixes: (1) system architecture table had wrong repo names — corrected to `rapartlu/*` GitHub repos and added 3 missing agents (telegram, research, meeting-facilitator); (2) added `score-zero-alert.ts` and `misrouting-digest.ts` to source layout (shipped in PRs #378, #386, #388 but not documented); (3) added scope entries for both. ROADMAP.md: promoted #375/#382/#388 to Completed; added #391 and #392 to Next up.
 - **2026-04-19 cycle 5**: Closed #351 (CLAUDE.md update delivered in this triage PR). Closed #353 (unclear/no actionable reviewer changes specified). Added 11 missing `src/reviewer/` modules to CLAUDE.md source layout; added 13 scope entries for recently shipped features. Moved completed items (#278, #285, #292, #325–#376 batch) from Next-up to Completed. Promoted #375 and #359 to Next-up (1, 2). Confirmed #364 and #340 (PRs closed unmerged) remain valid backlog items. No duplicate issues. No stale issues (all open issues are ≤ 3 days old).
 - **2026-04-19 cycle 4**: Closed #315 (CLAUDE.md sync already done in PR #316). Closed #298 (bypass rate trending fully implemented by `quality-system-health.ts` in PR #306). No stale issues (oldest open are #71 and #89, both 7 days old). No orphan PRs. CLAUDE.md verified current — no drift since cycle 3. Promoted #221 (improvement-detector dedup) from Planned to Next-up (5).
 - **2026-04-18 cycle 3**: Closed #231 (healthcheck — misrouted, belongs to infra/proxy, 3 retries exhausted). Closed orphan PR #305 (no `Closes #N`). Added 5 missing `src/reviewer/` modules to CLAUDE.md. Quality-floor cluster (#278, #285, #292, #298) confirmed distinct: each covers a different channel or data layer — no duplicates. No issues > 14 days old.
