@@ -347,3 +347,93 @@ describe("checkPRExistenceBeforeDispatch — onShortCircuit callback", () => {
     expect(result.skip).toBe(true);
   });
 });
+
+// ── cooldownStore (issue #390) ────────────────────────────────────────────────
+
+describe("checkPRExistenceBeforeDispatch — cooldownStore (issue #390)", () => {
+  it("calls setPRGuardCooldown when already-in-review and cooldownStore provided", async () => {
+    const cooldownStore = {
+      setPRGuardCooldown: vi.fn(),
+      isPRGuardCooldownActive: vi.fn().mockReturnValue(false),
+    };
+
+    const result = await checkPRExistenceBeforeDispatch(
+      "owner/repo",
+      42,
+      mockPRs,
+      { cooldownStore },
+    );
+
+    expect(result.skip).toBe(true);
+    expect(result.resolution).toBe("already-in-review");
+    expect(cooldownStore.setPRGuardCooldown).toHaveBeenCalledOnce();
+    expect(cooldownStore.setPRGuardCooldown).toHaveBeenCalledWith("owner/repo", 42, 60);
+  });
+
+  it("respects custom cooldownTtlMinutes", async () => {
+    const cooldownStore = {
+      setPRGuardCooldown: vi.fn(),
+      isPRGuardCooldownActive: vi.fn().mockReturnValue(false),
+    };
+
+    await checkPRExistenceBeforeDispatch(
+      "owner/repo",
+      42,
+      mockPRs,
+      { cooldownStore, cooldownTtlMinutes: 120 },
+    );
+
+    expect(cooldownStore.setPRGuardCooldown).toHaveBeenCalledWith("owner/repo", 42, 120);
+  });
+
+  it("does NOT call setPRGuardCooldown when no PR found (no-existing-pr)", async () => {
+    const cooldownStore = {
+      setPRGuardCooldown: vi.fn(),
+      isPRGuardCooldownActive: vi.fn().mockReturnValue(false),
+    };
+
+    const result = await checkPRExistenceBeforeDispatch(
+      "owner/repo",
+      999,
+      mockPRs,
+      { cooldownStore },
+    );
+
+    expect(result.skip).toBe(false);
+    expect(result.resolution).toBe("no-existing-pr");
+    expect(cooldownStore.setPRGuardCooldown).not.toHaveBeenCalled();
+  });
+
+  it("still returns already-in-review if setPRGuardCooldown throws (fail-open)", async () => {
+    const cooldownStore = {
+      setPRGuardCooldown: vi.fn().mockImplementationOnce(() => {
+        throw new Error("db write failure");
+      }),
+      isPRGuardCooldownActive: vi.fn().mockReturnValue(false),
+    };
+
+    const result = await checkPRExistenceBeforeDispatch(
+      "owner/repo",
+      42,
+      mockPRs,
+      { cooldownStore },
+    );
+
+    // Guard decision must not be affected by a cooldown write failure
+    expect(result.skip).toBe(true);
+    expect(result.resolution).toBe("already-in-review");
+  });
+
+  it("works without cooldownStore — backward-compatible", async () => {
+    // No cooldownStore in opts — must not throw
+    const result = await checkPRExistenceBeforeDispatch(
+      "owner/repo",
+      42,
+      mockPRs,
+      { taskId: "task-42" }, // opts present but no cooldownStore
+    );
+
+    expect(result.skip).toBe(true);
+    expect(result.resolution).toBe("already-in-review");
+  });
+});

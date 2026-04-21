@@ -941,6 +941,14 @@ export interface IStateStore {
    * @returns true if the override was applied, false if the task was not held
    */
   operatorOverride(taskId: string, decision: "approve" | "reject", operatorNote: string): boolean;
+
+  // PR guard cooldown (issue #390)
+  /** Write (or refresh) a per-issue cooldown keyed on (repo, issueNumber). */
+  setPRGuardCooldown(repo: string, issueNumber: number, ttlMinutes?: number): void;
+  /** Return true when an active (non-expired) cooldown exists for (repo, issueNumber). */
+  isPRGuardCooldownActive(repo: string, issueNumber: number): boolean;
+  /** Delete expired cooldown rows; returns row count pruned. */
+  prunePRGuardCooldowns(): number;
 }
 
 // ── Low-score approved feed store interface (issue #278) ──────────────────────

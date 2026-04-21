@@ -28,6 +28,12 @@ import { execSync } from "child_process";
 import { createLogger } from "../service/logger.js";
 import type { ShortCircuitDimension } from "../state/types.js";
 
+/** Minimal store interface needed by the PR existence guard cooldown. */
+export interface IPRGuardCooldownStore {
+  setPRGuardCooldown(repo: string, issueNumber: number, ttlMinutes?: number): void;
+  isPRGuardCooldownActive(repo: string, issueNumber: number): boolean;
+}
+
 const log = createLogger("pr-existence-guard");
 
 // ── Callback type ─────────────────────────────────────────────────────────────
@@ -64,6 +70,19 @@ export interface PRExistenceGuardOptions {
    * is provided.  Typically wired to `verifier.recordShortCircuitScore()`.
    */
   onShortCircuit?: ShortCircuitCallback;
+  /**
+   * Optional state store to persist a per-(repo, issue) cooldown entry when
+   * the guard returns 'already-in-review'.  The dispatcher can then call
+   * `store.isPRGuardCooldownActive()` to avoid re-queuing for the TTL window.
+   *
+   * If omitted, no cooldown is written (backward-compatible).
+   */
+  cooldownStore?: IPRGuardCooldownStore;
+  /**
+   * TTL for the cooldown entry in minutes (default 60).
+   * Ignored when `cooldownStore` is not provided.
+   */
+  cooldownTtlMinutes?: number;
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -149,6 +168,23 @@ export async function checkPRExistenceBeforeDispatch(
           log.warn("Failed to record short-circuit score — Phase 3 backfill will cover it", {
             taskId: opts.taskId,
             error: scoreErr instanceof Error ? scoreErr.message : String(scoreErr),
+          });
+        }
+      }
+
+      // Write a per-issue cooldown so the dispatcher skips re-queuing for the
+      // TTL window without making another gh CLI call.
+      if (opts?.cooldownStore) {
+        try {
+          const ttl = opts.cooldownTtlMinutes ?? 60;
+          opts.cooldownStore.setPRGuardCooldown(repo, issueNumber, ttl);
+          log.info("PR guard cooldown set", { repo, issueNumber, ttlMinutes: ttl });
+        } catch (cooldownErr) {
+          // Cooldown write failure must not block the guard decision.
+          log.warn("Failed to write PR guard cooldown — dispatch may retry this cycle", {
+            repo,
+            issueNumber,
+            error: cooldownErr instanceof Error ? cooldownErr.message : String(cooldownErr),
           });
         }
       }

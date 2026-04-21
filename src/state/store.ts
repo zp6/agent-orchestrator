@@ -618,6 +618,84 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
             VALUES ('delete', old.id, old.topic);
         END;
     `);
+
+    // PR guard cooldown table (idempotent — issue #390).
+    // Prevents re-queuing after the PR existence guard fires by persisting a
+    // per-(repo, issue_number) TTL entry.  Rows expire when expires_at < now.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pr_guard_cooldown (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo         TEXT NOT NULL,
+        issue_number INTEGER NOT NULL,
+        expires_at   TEXT NOT NULL,
+        created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (repo, issue_number)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pr_guard_cooldown_expires
+        ON pr_guard_cooldown (expires_at);
+    `);
+  }
+
+  // ── PR guard cooldown (issue #390) ───────────────────────────────────────
+
+  /**
+   * Write (or refresh) a cooldown entry for `(repo, issueNumber)`.
+   *
+   * If an entry already exists it is updated so the TTL resets from now.
+   * The dispatcher must call `isPRGuardCooldownActive()` before queuing.
+   *
+   * @param repo         - Repository in "owner/repo" format
+   * @param issueNumber  - GitHub issue number
+   * @param ttlMinutes   - How long (in minutes) to suppress re-queuing (default 60)
+   */
+  setPRGuardCooldown(repo: string, issueNumber: number, ttlMinutes = 60): void {
+    const expiresAt = new Date(Date.now() + ttlMinutes * 60_000).toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO pr_guard_cooldown (repo, issue_number, expires_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT (repo, issue_number)
+         DO UPDATE SET expires_at = excluded.expires_at,
+                       created_at = datetime('now')`,
+      )
+      .run(repo, issueNumber, expiresAt);
+  }
+
+  /**
+   * Return true when an active (non-expired) cooldown exists for
+   * `(repo, issueNumber)`.
+   *
+   * The dispatcher calls this before queuing a task for a GitHub issue. If
+   * true, the issue should be skipped for the remainder of the cooldown window.
+   *
+   * @param repo         - Repository in "owner/repo" format
+   * @param issueNumber  - GitHub issue number
+   */
+  isPRGuardCooldownActive(repo: string, issueNumber: number): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM pr_guard_cooldown
+         WHERE repo = ? AND issue_number = ? AND expires_at > datetime('now')
+         LIMIT 1`,
+      )
+      .get(repo, issueNumber);
+    return row !== undefined;
+  }
+
+  /**
+   * Delete expired cooldown rows.
+   *
+   * Call this periodically (e.g. alongside other prune tasks in the daemon
+   * batch cycle) to keep the table small.
+   *
+   * @returns Number of rows deleted.
+   */
+  prunePRGuardCooldowns(): number {
+    const result = this.db
+      .prepare(`DELETE FROM pr_guard_cooldown WHERE expires_at <= datetime('now')`)
+      .run();
+    return result.changes;
   }
 
   // ── Schema access instrumentation ────────────────────────────────────────

@@ -288,6 +288,7 @@ export type {
   OpenPRSummary,
   ShortCircuitCallback,
   PRExistenceGuardOptions,
+  IPRGuardCooldownStore,
 } from "./reviewer/pr-existence-guard.js";
 
 // Duplicate-dispatch surge detector (issue #262) — Telegram alert when >= 3 already-in-review
