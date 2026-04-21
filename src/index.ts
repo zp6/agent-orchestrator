@@ -165,6 +165,7 @@ export {
   buildTriageCoachingDirective,
   formatTriageCoachingSection,
   injectTriageCoachingIntoPrompt,
+  validateOldRankInPriorityReordering,
   TRIAGE_COACHING_THRESHOLD,
   TRIAGE_COACHING_WINDOW,
 } from "./reviewer/triage-coaching.js";
@@ -172,6 +173,8 @@ export type {
   TriageCoachingDirective,
   TriageCoachingProvider,
   AgentTriageStats,
+  OldRankViolation,
+  OldRankValidationResult,
 } from "./reviewer/triage-coaching.js";
 
 export { RoutingAccuracyTracker } from "./reviewer/routing-accuracy.js";

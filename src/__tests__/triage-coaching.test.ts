@@ -19,10 +19,12 @@ import {
   formatTriageCoachingSection,
   injectTriageCoachingIntoPrompt,
   TriageCoachingAdvisor,
+  validateOldRankInPriorityReordering,
   TRIAGE_COACHING_THRESHOLD,
   TRIAGE_COACHING_WINDOW,
   type TriageCoachingDirective,
   type TriageCoachingProvider,
+  type OldRankValidationResult,
 } from "../reviewer/triage-coaching.js";
 import { TRIAGE_REQUIRED_FIELDS } from "../reviewer/verifier.js";
 import { StateStore } from "../state/store.js";
@@ -536,5 +538,192 @@ describe("Supervisor — Triage Coaching Directives section in buildContext()", 
         triageCoachingProvider: mockProvider,
       });
     }).not.toThrow();
+  });
+});
+
+// ── validateOldRankInPriorityReordering (issue #399) ──────────────────────────
+
+describe("validateOldRankInPriorityReordering", () => {
+  it("returns passed:true for empty priority_reordering array", () => {
+    const json = JSON.stringify({
+      duplicates_checked: true,
+      stale_issues: [],
+      priority_reordering: [],
+      outcome_summary: "all good",
+    });
+    const result = validateOldRankInPriorityReordering(json);
+    expect(result.passed).toBe(true);
+    expect(result.violations).toHaveLength(0);
+  });
+
+  it("returns passed:true when no priority_reordering key in JSON", () => {
+    const json = JSON.stringify({ duplicates_checked: true, outcome_summary: "done" });
+    expect(validateOldRankInPriorityReordering(json).passed).toBe(true);
+  });
+
+  it("returns passed:true for entries with old_rank: null (correct for new issues)", () => {
+    const json = JSON.stringify({
+      priority_reordering: [
+        { issue: 42, old_rank: null, new_rank: 3, reason: "newly added to Next Up" },
+        { issue: 55, old_rank: 1, new_rank: 2, reason: "bumped up due to urgency" },
+      ],
+    });
+    const result = validateOldRankInPriorityReordering(json);
+    expect(result.passed).toBe(true);
+    expect(result.violations).toHaveLength(0);
+  });
+
+  it("returns passed:false when old_rank is 0 (always invalid — 1-indexed)", () => {
+    const json = JSON.stringify({
+      priority_reordering: [
+        { issue: 42, old_rank: 0, new_rank: 2, reason: "promoted to Next Up" },
+      ],
+    });
+    const result = validateOldRankInPriorityReordering(json);
+    expect(result.passed).toBe(false);
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0]!.issue).toBe(42);
+    expect(result.violations[0]!.old_rank).toBe(0);
+    expect(result.violations[0]!.violation).toContain("old_rank is 0");
+    expect(result.violations[0]!.violation).toContain("null");
+  });
+
+  it("returns passed:false when reason says 'newly added' but old_rank is numeric", () => {
+    const json = JSON.stringify({
+      priority_reordering: [
+        { issue: 99, old_rank: 5, new_rank: 1, reason: "newly added to roadmap — high priority" },
+      ],
+    });
+    const result = validateOldRankInPriorityReordering(json);
+    expect(result.passed).toBe(false);
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0]!.issue).toBe(99);
+    expect(result.violations[0]!.violation).toContain("newly added");
+  });
+
+  it("detects multiple violations in one pass", () => {
+    const json = JSON.stringify({
+      priority_reordering: [
+        { issue: 1, old_rank: 0, new_rank: 3, reason: "added to Next Up" },
+        { issue: 2, old_rank: 7, new_rank: 2, reason: "not previously in roadmap" },
+        { issue: 3, old_rank: 2, new_rank: 1, reason: "bumped — critical bug" },
+      ],
+    });
+    const result = validateOldRankInPriorityReordering(json);
+    expect(result.passed).toBe(false);
+    expect(result.violations).toHaveLength(2); // issue 1 (old_rank:0), issue 2 (not previously)
+    const violatedIssues = result.violations.map((v) => v.issue);
+    expect(violatedIssues).toContain(1);
+    expect(violatedIssues).toContain(2);
+    expect(violatedIssues).not.toContain(3);
+  });
+
+  it("returns passed:true for unparseable input (fail-open)", () => {
+    const result = validateOldRankInPriorityReordering("not json at all");
+    expect(result.passed).toBe(true);
+    expect(result.violations).toHaveLength(0);
+  });
+
+  it("handles markdown-fenced JSON blocks", () => {
+    const text = `
+Some prose before the block.
+
+\`\`\`json
+{
+  "priority_reordering": [
+    { "issue": 12, "old_rank": 0, "new_rank": 1, "reason": "added to Next Up" }
+  ]
+}
+\`\`\`
+
+Some prose after.
+`;
+    const result = validateOldRankInPriorityReordering(text);
+    expect(result.passed).toBe(false);
+    expect(result.violations[0]!.issue).toBe(12);
+  });
+
+  it("returns passed:true for valid numeric old_rank with non-new-issue reason", () => {
+    const json = JSON.stringify({
+      priority_reordering: [
+        { issue: 77, old_rank: 3, new_rank: 1, reason: "critical security fix — promoted to top" },
+      ],
+    });
+    expect(validateOldRankInPriorityReordering(json).passed).toBe(true);
+  });
+});
+
+// ── buildTriageCoachingDirective — validation_pre_check_passed (issue #399) ───
+
+describe("buildTriageCoachingDirective — validation_pre_check_passed (issue #399)", () => {
+  const baseArgs = [
+    "test-agent",
+    0.72,
+    5,
+    [] as Array<{ field: string; count: number }>,
+    0.80,
+  ] as const;
+
+  it("validation_pre_check_passed is null when no priorOutput provided", () => {
+    const d = buildTriageCoachingDirective(...baseArgs);
+    expect(d.validation_pre_check_passed).toBeNull();
+  });
+
+  it("validation_pre_check_passed is null when priorOutput is null", () => {
+    const d = buildTriageCoachingDirective(...baseArgs, null);
+    expect(d.validation_pre_check_passed).toBeNull();
+  });
+
+  it("validation_pre_check_passed is null when priorOutput is empty string", () => {
+    const d = buildTriageCoachingDirective(...baseArgs, "");
+    expect(d.validation_pre_check_passed).toBeNull();
+  });
+
+  it("validation_pre_check_passed is true when priorOutput has no violations", () => {
+    const priorOutput = JSON.stringify({
+      priority_reordering: [
+        { issue: 42, old_rank: null, new_rank: 3, reason: "newly added to Next Up" },
+      ],
+    });
+    const d = buildTriageCoachingDirective(...baseArgs, priorOutput);
+    expect(d.validation_pre_check_passed).toBe(true);
+  });
+
+  it("validation_pre_check_passed is false when priorOutput has old_rank: 0 violation", () => {
+    const priorOutput = JSON.stringify({
+      priority_reordering: [
+        { issue: 7, old_rank: 0, new_rank: 2, reason: "added to Next Up" },
+      ],
+    });
+    const d = buildTriageCoachingDirective(...baseArgs, priorOutput);
+    expect(d.validation_pre_check_passed).toBe(false);
+  });
+
+  it("directive text includes the pre-submission checklist (issue #399)", () => {
+    const d = buildTriageCoachingDirective(...baseArgs);
+    expect(d.directive).toContain("pre-submission checklist");
+    expect(d.directive).toContain("validation_pre_check_passed");
+    expect(d.directive).toContain("old_rank to null");
+  });
+
+  it("directive text surfaces specific violation details when priorOutput failed", () => {
+    const priorOutput = JSON.stringify({
+      priority_reordering: [
+        { issue: 55, old_rank: 0, new_rank: 1, reason: "newly added" },
+      ],
+    });
+    const d = buildTriageCoachingDirective(...baseArgs, priorOutput);
+    expect(d.directive).toContain("Pre-submission validator FAILED");
+    expect(d.directive).toContain("old_rank is 0");
+  });
+
+  it("no FAILED banner in directive when priorOutput passes validation", () => {
+    const priorOutput = JSON.stringify({
+      priority_reordering: [
+        { issue: 33, old_rank: null, new_rank: 4, reason: "added to Planned" },
+      ],
+    });
+    const d = buildTriageCoachingDirective(...baseArgs, priorOutput);
+    expect(d.directive).not.toContain("FAILED");
   });
 });

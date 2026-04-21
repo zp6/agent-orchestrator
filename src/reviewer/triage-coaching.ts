@@ -58,6 +58,166 @@
 import type { IStateStore } from "../state/types.js";
 import { TRIAGE_REQUIRED_FIELDS } from "./verifier.js";
 
+// ── old_rank pre-submission validator (issue #399) ────────────────────────────
+
+/**
+ * A single `priority_reordering` entry that violated the old_rank rule.
+ */
+export interface OldRankViolation {
+  /** The issue number from the priority_reordering entry. */
+  issue: number;
+  /** The numeric old_rank value that triggered the violation (never null here). */
+  old_rank: number;
+  /** Reason text from the entry (for diagnostics). */
+  reason: string;
+  /** Human-readable explanation of the specific violation. */
+  violation: string;
+}
+
+/**
+ * Result returned by `validateOldRankInPriorityReordering()`.
+ */
+export interface OldRankValidationResult {
+  /**
+   * True when no violations were detected.
+   * False when at least one `priority_reordering` entry has an illegal numeric
+   * `old_rank` for what appears to be a newly-added issue.
+   */
+  passed: boolean;
+  /** All detected violations. Empty when `passed === true`. */
+  violations: OldRankViolation[];
+}
+
+/**
+ * Keywords in a `priority_reordering[*].reason` field that strongly indicate
+ * the issue is newly added to the roadmap (i.e., had no prior rank and should
+ * use `old_rank: null`).
+ */
+const NEW_ISSUE_REASON_KEYWORDS = [
+  "newly added",
+  "new to roadmap",
+  "new to next",
+  "new to planned",
+  "new to ideas",
+  "added to roadmap",
+  "added to next",
+  "added to planned",
+  "added to ideas",
+  "first time",
+  "not previously",
+  "wasn't in",
+  "was not in",
+  "no prior rank",
+  "no previous rank",
+  "no existing rank",
+];
+
+/**
+ * Deterministic pre-submission validator for `priority_reordering` old_rank values.
+ *
+ * Scans any JSON text (typically a triage output block) for a
+ * `priority_reordering` array and flags entries where `old_rank` is a number
+ * (not null) but appears to refer to a newly-added issue:
+ *
+ *   - `old_rank === 0` — always invalid (roadmap ranks are 1-indexed)
+ *   - `old_rank` is numeric AND the `reason` field contains keywords that
+ *     indicate the issue is new to the backlog
+ *
+ * Callers should embed this in pre-dispatch validation and in the verifier's
+ * triage schema compliance check.
+ *
+ * Returns `{ passed: true, violations: [] }` when:
+ *   - The text contains no parseable `priority_reordering` array, OR
+ *   - All entries have correct `old_rank` values.
+ *
+ * Fail-open: JSON parse errors produce `passed: true` so dispatch is never
+ * blocked by a malformed-input false negative.
+ *
+ * @param jsonOrText - Raw text that may contain a JSON block with
+ *                     `priority_reordering`.  Both bare JSON objects and
+ *                     markdown-fenced blocks (```json ... ```) are supported.
+ */
+export function validateOldRankInPriorityReordering(
+  jsonOrText: string,
+): OldRankValidationResult {
+  const violations: OldRankViolation[] = [];
+
+  let parsed: unknown;
+  try {
+    // Strip markdown code fences if present, then try to extract the first
+    // JSON object from the text.
+    const stripped = jsonOrText
+      .replace(/```json\s*/gi, "")
+      .replace(/```\s*/g, "")
+      .trim();
+
+    // Find the first { … } JSON object in the text (handles prose wrapping JSON).
+    const jsonMatch = stripped.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return { passed: true, violations: [] };
+
+    parsed = JSON.parse(jsonMatch[0]);
+  } catch {
+    // Unparseable — fail-open: do not block dispatch on bad input.
+    return { passed: true, violations: [] };
+  }
+
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("priority_reordering" in parsed)
+  ) {
+    return { passed: true, violations: [] };
+  }
+
+  const entries = (parsed as Record<string, unknown>)["priority_reordering"];
+  if (!Array.isArray(entries)) return { passed: true, violations: [] };
+
+  for (const entry of entries) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+
+    const issueNum = typeof e["issue"] === "number" ? e["issue"] : null;
+    const oldRank = e["old_rank"];
+    const reason = typeof e["reason"] === "string" ? e["reason"] : "";
+
+    // Skip entries where old_rank is null (correct for newly-added issues).
+    if (oldRank === null) continue;
+    if (typeof oldRank !== "number") continue;
+
+    // Rule 1: old_rank === 0 is always invalid (ranks are 1-indexed).
+    if (oldRank === 0) {
+      violations.push({
+        issue: issueNum ?? -1,
+        old_rank: oldRank,
+        reason,
+        violation:
+          `old_rank is 0 for issue #${issueNum ?? "?"}. ` +
+          `Roadmap ranks are 1-indexed; newly-added issues must use old_rank: null.`,
+      });
+      continue;
+    }
+
+    // Rule 2: old_rank is a positive number but reason suggests the issue is new.
+    const reasonLower = reason.toLowerCase();
+    const isNewIssueByReason = NEW_ISSUE_REASON_KEYWORDS.some((kw) =>
+      reasonLower.includes(kw),
+    );
+    if (isNewIssueByReason) {
+      violations.push({
+        issue: issueNum ?? -1,
+        old_rank: oldRank,
+        reason,
+        violation:
+          `old_rank is ${oldRank} for issue #${issueNum ?? "?"} but the reason ` +
+          `("${reason}") indicates this issue is newly added. ` +
+          `Newly-added roadmap items must use old_rank: null, not a number.`,
+      });
+    }
+  }
+
+  return { passed: violations.length === 0, violations };
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /**
@@ -114,6 +274,18 @@ export interface TriageCoachingDirective {
    * Plain text, suitable for appending directly to the task description.
    */
   directive: string;
+  /**
+   * Whether a prior triage submission (passed as `priorOutput` to
+   * `buildTriageCoachingDirective`) passed the old_rank pre-submission
+   * validator.
+   *
+   * - `null`  — no prior output was provided; not yet validated.
+   * - `true`  — prior output had no old_rank violations.
+   * - `false` — prior output contained at least one old_rank violation.
+   *
+   * Populated by `validateOldRankInPriorityReordering()` (issue #399).
+   */
+  validation_pre_check_passed: boolean | null;
 }
 
 /**
@@ -146,6 +318,10 @@ export interface TriageCoachingProvider {
  * @param taskCount        Number of tasks in the rolling window.
  * @param missingFields    Fields missed in recent rejections, desc by count.
  * @param threshold        Threshold that was not met (default 0.80).
+ * @param priorOutput      Optional: text of the agent's most recent triage
+ *                         submission.  When provided, `validateOldRankInPriorityReordering()`
+ *                         is run on it and the result is stored in
+ *                         `validation_pre_check_passed` (issue #399).
  */
 export function buildTriageCoachingDirective(
   agentName: string,
@@ -153,10 +329,18 @@ export function buildTriageCoachingDirective(
   taskCount: number,
   missingFields: Array<{ field: string; count: number }>,
   threshold: number = TRIAGE_COACHING_THRESHOLD,
+  priorOutput?: string | null,
 ): TriageCoachingDirective {
   const scoreStr = rollingScore.toFixed(2);
   const thresholdStr = threshold.toFixed(2);
   const allFields = TRIAGE_REQUIRED_FIELDS.join(", ");
+
+  // Run the old_rank validator against the prior submission if available.
+  let validationResult: OldRankValidationResult | null = null;
+  if (priorOutput != null && priorOutput.trim().length > 0) {
+    validationResult = validateOldRankInPriorityReordering(priorOutput);
+  }
+  const validationPreCheckPassed = validationResult?.passed ?? null;
 
   const lines: string[] = [
     `⚠️ Coaching note for ${agentName}:`,
@@ -171,8 +355,25 @@ export function buildTriageCoachingDirective(
     );
   }
 
+  // Surface prior-output validation failures with specific details.
+  if (validationResult && !validationResult.passed) {
+    lines.push(
+      ``,
+      `⛔ Pre-submission validator FAILED on your last submission:`,
+    );
+    for (const v of validationResult.violations.slice(0, 3)) {
+      lines.push(`  • ${v.violation}`);
+    }
+  }
+
   lines.push(
-    `Before submitting, confirm all four JSON schema fields are present: ${allFields}.`,
+    ``,
+    `Before submitting, run this pre-submission checklist:`,
+    `  □ All four JSON schema fields present: ${allFields}`,
+    `  □ For every entry in priority_reordering: if the issue was NOT previously`,
+    `    ranked in the roadmap, set old_rank to null (never 0, never a number).`,
+    `  □ Include "validation_pre_check_passed": true in your JSON output to confirm`,
+    `    you ran these checks before opening the PR.`,
     ``,
     `Common mistake — priority_reordering: when an issue is newly added to the roadmap`,
     `(no prior rank), set old_rank to null, not 0 and not omit the field entirely.`,
@@ -188,6 +389,7 @@ export function buildTriageCoachingDirective(
     task_count: taskCount,
     missing_fields: missingFields,
     directive: lines.join("\n"),
+    validation_pre_check_passed: validationPreCheckPassed,
   };
 }
 
