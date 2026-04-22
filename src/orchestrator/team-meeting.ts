@@ -23,6 +23,7 @@ import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore } from "../state/store.js";
 import { createLogger } from "../service/logger.js";
 import { cacheableSystemPrompt } from "../utils/prompt-cache.js";
+import { execSync } from "node:child_process";
 import { StandupActionClient, type StandupActionItemInput } from "../client/standup-action-client.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -151,6 +152,86 @@ Produce a JSON object (no markdown, no code fences):
   "summary": "2-3 sentence summary of the most exciting outcomes"
 }`,
 };
+
+// ── Live issue/PR context for meetings ─────────────────────────────────────
+
+/**
+ * Build a context block with live issue and PR state across all repos so
+ * agents don't reference stale/closed issues in their standup responses.
+ * Fetches open issues and PRs per repo via `gh` CLI.
+ */
+function buildLiveIssueContext(config: OrchestratorConfig, store: StateStore): string {
+  const sections: string[] = ["## Live Fleet State (auto-generated — do NOT reference issues/PRs not listed here)"];
+
+  // Task stats
+  const stats = store.getAgentStats(168); // 7 days
+  const totalDone = stats.reduce((s, a) => s + a.done, 0);
+  const totalFailed = stats.reduce((s, a) => s + a.failed, 0);
+  const failRate = totalDone + totalFailed > 0
+    ? ((totalFailed / (totalDone + totalFailed)) * 100).toFixed(1)
+    : "0";
+  sections.push(`\n### 7-Day Performance\n- Completed: ${totalDone}, Failed: ${totalFailed} (${failRate}% failure rate)`);
+
+  // Per-repo: open issues and PRs
+  const repos = new Set<string>();
+  for (const agent of Object.values(config.agents)) {
+    if (agent.github) repos.add(agent.github);
+  }
+
+  const repoSections: string[] = [];
+  for (const repo of repos) {
+    try {
+      const issuesRaw = execSync(
+        `gh issue list --repo ${repo} --state open --json number,title,labels --limit 15`,
+        { encoding: "utf-8", timeout: 15_000 },
+      );
+      const issues = JSON.parse(issuesRaw.trim() || "[]") as Array<{ number: number; title: string; labels: Array<{ name: string }> }>;
+
+      const prsRaw = execSync(
+        `gh pr list --repo ${repo} --state open --json number,title,mergeable --limit 10`,
+        { encoding: "utf-8", timeout: 15_000 },
+      );
+      const prs = JSON.parse(prsRaw.trim() || "[]") as Array<{ number: number; title: string; mergeable: string }>;
+
+      if (issues.length === 0 && prs.length === 0) continue;
+
+      const lines: string[] = [`\n### ${repo}`];
+      if (issues.length > 0) {
+        lines.push(`**Open issues (${issues.length}):**`);
+        for (const i of issues) {
+          const labels = i.labels.map((l) => l.name).join(", ");
+          lines.push(`- #${i.number}: ${i.title}${labels ? ` [${labels}]` : ""}`);
+        }
+      }
+      if (prs.length > 0) {
+        lines.push(`**Open PRs (${prs.length}):**`);
+        for (const pr of prs) {
+          lines.push(`- PR #${pr.number}: ${pr.title} (${pr.mergeable})`);
+        }
+      }
+      repoSections.push(lines.join("\n"));
+    } catch (err) {
+      log.debug("Failed to fetch live state for repo", { repo, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  if (repoSections.length === 0) return "";
+  sections.push(...repoSections);
+
+  // Recent task failures for context
+  try {
+    const recentFails = store.listTasks({ status: "failed", limit: 5 });
+    if (recentFails.length > 0) {
+      sections.push("\n### Recent failures");
+      for (const t of recentFails) {
+        const result = t.result?.substring(0, 80) ?? "(no result)";
+        sections.push(`- ${t.source_ref ?? t.title?.substring(0, 60)}: ${result}`);
+      }
+    }
+  } catch { /* non-fatal */ }
+
+  return sections.join("\n");
+}
 
 // ── Core meeting logic ──────────────────────────────────────────────────────
 
@@ -348,6 +429,12 @@ export async function runTeamMeeting(
   // Prepend topic to context if provided
   if (options?.topic) {
     goalsContext = `## Meeting Topic\n${options.topic}\n\n${goalsContext}`;
+  }
+
+  // Inject live issue/PR state so agents reference real, current data
+  const liveContext = buildLiveIssueContext(config, store);
+  if (liveContext) {
+    goalsContext += `\n\n${liveContext}`;
   }
 
   const client = new AgentClient(config);
