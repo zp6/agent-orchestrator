@@ -74,6 +74,9 @@ import type {
   TopQueriedTopic,
   RepeatedAttemptTopic,
   LowConfidenceTopic,
+  IMeetingFacilitatorGoalStore,
+  MeetingFacilitatorGoalWidget,
+  MeetingFacilitatorGoalItem,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -89,7 +92,7 @@ import { ulid } from "../util/ulid.js";
  */
 export const APPROVAL_SCORE_FLOOR = 0.60;
 
-export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore {
+export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore, IMeetingFacilitatorGoalStore {
   private db: Database.Database;
 
   constructor(dbPath: string = process.env.STATE_DB_PATH ?? "state.db") {
@@ -4237,6 +4240,91 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
     if (!integrityFailed && fkRows.length === 0) {
       console.log("[state.db] startup integrity check: OK");
     }
+  }
+
+  // ── Meeting-facilitator monthly goals (issue #411) ──────────────────────
+
+  /**
+   * Return the monthly goal widget for the meeting-facilitator-agent.
+   *
+   * Tracks two goals for the current calendar month:
+   *  1. `meetings_facilitated` — done tasks dispatched to the agent; target 5.
+   *  2. `core_logic_shipped`   — approved implementation task for the agent; target 1.
+   *
+   * @param agentNamePattern SQL LIKE pattern to match agent names.
+   *   Defaults to `'%meeting-facilitator%'`.
+   */
+  getMeetingFacilitatorGoalWidget(
+    agentNamePattern = "%meeting-facilitator%",
+  ): MeetingFacilitatorGoalWidget {
+    const MEETINGS_TARGET = 5;
+    const CORE_LOGIC_TARGET = 1;
+
+    const now = new Date();
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const monthStartIso = monthStart.toISOString();
+
+    // Goal 1: meetings facilitated — count of 'done' tasks this month.
+    const facilitatedRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS cnt
+         FROM tasks
+         WHERE agent_name LIKE ?
+           AND status = 'done'
+           AND created_at >= ?`,
+      )
+      .get(agentNamePattern, monthStartIso) as { cnt: number } | undefined;
+
+    const meetingsCurrent = facilitatedRow?.cnt ?? 0;
+    const meetingsMet = meetingsCurrent >= MEETINGS_TARGET;
+    const meetingsProgress = Math.min(meetingsCurrent / MEETINGS_TARGET, 1);
+
+    // Goal 2: core logic shipped — at least one approved implementation task.
+    const coreRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS cnt
+         FROM tasks
+         WHERE agent_name LIKE ?
+           AND task_type = 'implementation'
+           AND status = 'done'
+           AND verification_status = 'approved'`,
+      )
+      .get(agentNamePattern) as { cnt: number } | undefined;
+
+    const coreCurrent = Math.min(coreRow?.cnt ?? 0, CORE_LOGIC_TARGET);
+    const coreMet = coreCurrent >= CORE_LOGIC_TARGET;
+    const coreProgress = Math.min(coreCurrent / CORE_LOGIC_TARGET, 1);
+
+    const goals: MeetingFacilitatorGoalItem[] = [
+      {
+        key: "core_logic_shipped",
+        description: "At least one implementation task approved for the agent",
+        target: CORE_LOGIC_TARGET,
+        current: coreCurrent,
+        progress: coreProgress,
+        met: coreMet,
+      },
+      {
+        key: "meetings_facilitated",
+        description: "Five or more meetings facilitated end-to-end this month",
+        target: MEETINGS_TARGET,
+        current: meetingsCurrent,
+        progress: meetingsProgress,
+        met: meetingsMet,
+      },
+    ];
+
+    const overallProgress =
+      goals.reduce((sum, g) => sum + g.progress, 0) / goals.length;
+    const allGoalsMet = goals.every((g) => g.met);
+
+    return {
+      month_start: monthStartIso,
+      generated_at: now.toISOString(),
+      overall_progress: overallProgress,
+      all_goals_met: allGoalsMet,
+      goals,
+    };
   }
 
   /**

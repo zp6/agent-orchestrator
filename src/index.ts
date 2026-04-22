@@ -987,6 +987,25 @@ export type {
   InvestigationsFeedPayload,
 } from "./reviewer/investigations-feed.js";
 
+// Meeting-facilitator monthly goal widget — `/meeting-facilitator-goal` API payload (issue #411).
+//
+// Tracks two monthly goals for the meeting-facilitator-agent:
+//  1. core_logic_shipped   — at least one approved implementation task
+//  2. meetings_facilitated — five or more done tasks in the current calendar month
+//
+// Mount in the orchestrator or dashboard server:
+//   app.get('/meeting-facilitator-goal', (_req, res) =>
+//     res.json(getMeetingFacilitatorGoalPayload(store)));
+export { getMeetingFacilitatorGoalPayload } from "./reviewer/meeting-facilitator-goal.js";
+export type {
+  MeetingFacilitatorGoalOptions,
+} from "./reviewer/meeting-facilitator-goal.js";
+export type {
+  MeetingFacilitatorGoalWidget,
+  MeetingFacilitatorGoalItem,
+  IMeetingFacilitatorGoalStore,
+} from "./state/types.js";
+
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
 

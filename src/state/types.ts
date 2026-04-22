@@ -1917,7 +1917,8 @@ export interface ITelegramStateStore
     ISecretsHealthStore,
     IFirstPassRateStore,
     ILowScoreFeedStore,
-    IScoreViolationsStore {
+    IScoreViolationsStore,
+    IMeetingFacilitatorGoalStore {
   // System flags (pause/resume, operator overrides)
   getSystemFlag(key: string): string | null;
   setSystemFlag(key: string, value: string): void;
@@ -2106,4 +2107,64 @@ export interface ISemanticMemoryStore {
    * @param limit  max rows to return (default 20)
    */
   expandMemoryTopic(topic: string, limit?: number): MemoryEntry[];
+}
+
+// ── Meeting-facilitator monthly goal types (issue #411) ───────────────────
+
+/**
+ * Progress toward one of the meeting-facilitator-agent's monthly goals.
+ */
+export interface MeetingFacilitatorGoalItem {
+  /** Short machine key for the goal. */
+  key: string;
+  /** Human-readable description of what the goal measures. */
+  description: string;
+  /** Numeric target (e.g. 5 for meetings, 1 for shipping). */
+  target: number;
+  /** Current count this calendar month. */
+  current: number;
+  /** Progress as a fraction 0–1, capped at 1. */
+  progress: number;
+  /** Whether this individual goal is met. */
+  met: boolean;
+}
+
+/**
+ * Complete monthly goal widget payload for the meeting-facilitator-agent.
+ *
+ * Returned by `IMeetingFacilitatorGoalStore.getMeetingFacilitatorGoalWidget()`.
+ *
+ * Tracks two goals for the current calendar month:
+ *  1. `meetings_facilitated` — count of done tasks dispatched to the agent, target 5.
+ *  2. `core_logic_shipped`   — at least one approved implementation task, target 1.
+ */
+export interface MeetingFacilitatorGoalWidget {
+  /** ISO-8601 start of the current calendar month (UTC). */
+  month_start: string;
+  /** ISO-8601 timestamp of when this payload was generated. */
+  generated_at: string;
+  /**
+   * Overall progress 0–1: average of the individual goal progress fractions.
+   * Useful for a single progress bar.
+   */
+  overall_progress: number;
+  /** True only when every goal is met. */
+  all_goals_met: boolean;
+  /** Per-goal breakdown, ordered by key. */
+  goals: MeetingFacilitatorGoalItem[];
+}
+
+/**
+ * Store interface for the meeting-facilitator monthly goal widget.
+ *
+ * Implemented by the reviewer's StateStore.
+ */
+export interface IMeetingFacilitatorGoalStore {
+  /**
+   * Return the complete monthly goal widget for the meeting-facilitator-agent.
+   *
+   * @param agentNamePattern - SQL LIKE pattern to match the agent name.
+   *   Defaults to `'%meeting-facilitator%'`.
+   */
+  getMeetingFacilitatorGoalWidget(agentNamePattern?: string): MeetingFacilitatorGoalWidget;
 }
