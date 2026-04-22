@@ -35,6 +35,7 @@
  *   /low-score [threshold] [limit] → approved tasks with quality score below threshold (default 0.75), with dimension breakdown
  *   /memory [expand <topic>|digest] → semantic task memory digest or full topic expansion
  *   /misrouting [hours]        → implementation tasks misrouted to reviewer in last N hours (default 24h, max 720h)
+ *   /triage-health [agent]     → per-agent triage schema pass/fail rate, missing fields, revision count, and 7-day trend
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -82,6 +83,10 @@ import {
   buildMisroutingDigest,
   formatMisroutingDigest,
 } from "../reviewer/misrouting-digest.js";
+import {
+  getTriageHealthPayload,
+  formatTriageHealthForTelegram,
+} from "../reviewer/triage-health.js";
 import type { ReviewerConfig } from "../config.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
@@ -142,7 +147,8 @@ type CommandName =
   | "backfill-bypass-reasons"
   | "low-score"
   | "memory"
-  | "misrouting";
+  | "misrouting"
+  | "triage-health";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -182,6 +188,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "low-score",
   "memory",
   "misrouting",
+  "triage-health",
 ]);
 
 interface ParsedCommand {
@@ -536,6 +543,13 @@ async function executeCommand(
         ? Math.min(Math.max(parseInt(hoursStr, 10) || 24, 1), 720)
         : 24;
       return handleMisrouting(store, lookbackHours, reviewerConfig);
+    }
+
+    case "triage-health": {
+      // /triage-health [agent]
+      // When an agent name is supplied, show that agent's detail only.
+      const agentArg = cmd.args.join(" ").trim() || undefined;
+      return handleTriageHealth(store, agentArg);
     }
   }
 }
@@ -2313,6 +2327,22 @@ function handleMisrouting(
   }
   const report = buildMisroutingDigest(store, reviewerConfig, { lookbackHours });
   return formatMisroutingDigest(report);
+}
+
+// ── Triage health handler (issue #409) ───────────────────────────────────────
+
+/**
+ * Handle the `/triage-health [agent]` command.
+ *
+ * Shows per-agent triage schema pass/fail rates, most commonly missing fields,
+ * revision counts, and a 7-day trend so operators can answer "is coaching working?"
+ */
+function handleTriageHealth(
+  store: ITelegramStateStore,
+  agentName?: string,
+): string {
+  const report = getTriageHealthPayload(store, agentName);
+  return formatTriageHealthForTelegram(report, agentName);
 }
 
 // ── Quality system health handler (issue #304) ────────────────────────────

@@ -177,6 +177,29 @@ export type {
   OldRankValidationResult,
 } from "./reviewer/triage-coaching.js";
 
+// Triage health report — /triage-health Telegram command + /api/triage-health payload (issue #409).
+//
+// Per-agent triage schema pass/fail rates, missing-field frequencies, revision counts,
+// and 7-day trend so operators can see whether coaching is working.
+//
+// Mount in the orchestrator or dashboard server:
+//   app.get('/api/triage-health', (req, res) => res.json(
+//     getTriageHealthPayload(store, req.query.agent as string | undefined)
+//   ));
+export {
+  getTriageHealthPayload,
+  formatTriageHealthForTelegram,
+  TRIAGE_HEALTH_CURRENT_DAYS,
+  TRIAGE_HEALTH_PRIOR_DAYS,
+  TRIAGE_PASS_THRESHOLD,
+} from "./reviewer/triage-health.js";
+export type {
+  TriageHealthReport,
+  AgentTriageHealthEntry,
+  AgentTriagePeriodStats,
+  ITriageHealthStore,
+} from "./reviewer/triage-health.js";
+
 export { RoutingAccuracyTracker } from "./reviewer/routing-accuracy.js";
 
 export {
