@@ -22,6 +22,23 @@ export const ISSUE_CLAIM_TTL_MS = 7_200_000;
  */
 export const GUARD_FLOOD_GATE_WINDOW_MS = 3_600_000;
 
+/**
+ * PR guard surge threshold (issue #1082).
+ * When this many issues are blocked by the same open PR in a single poll cycle,
+ * fire a single consolidated Telegram alert instead of N individual alerts.
+ * Default: 5. Configurable via config.triggers.pr_guard_surge_threshold.
+ */
+export const PR_GUARD_SURGE_THRESHOLD = 5;
+
+/**
+ * In-memory cooldown tracker for PR guard surge alerts (issue #1082).
+ * Key: `${repo}#${prNumber}` — the blocking PR reference (repo-qualified).
+ * Value: timestamp (ms) when the last surge alert was sent.
+ * Prevents repeated surge alerts for the same PR within the flood gate window.
+ * Module-level so it persists across poll cycles within a single daemon instance.
+ */
+export const prGuardSurgeAlertSentAt = new Map<string, number>();
+
 import { runGitHubPreDispatchValidation } from "../orchestrator/pre-dispatch-validator.js";
 import { looksLikeStandupTask, extractStandupIssueNumber, shouldSkipStandupDispatch } from "./standup-dispatch-guard.js";
 
@@ -383,6 +400,25 @@ export async function dispatchGitHubIssues(
 ): Promise<TriggerResult> {
   const result: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
 
+  /**
+   * PR guard surge accumulator (issue #1082).
+   * Accumulates blocked issues per blocking PR for this poll cycle.
+   * Key: `${repo}#${prNumber}` — the blocking PR reference.
+   * After all agents are processed, the accumulator is flushed:
+   *   - >= PR_GUARD_SURGE_THRESHOLD issues blocked by same PR → one consolidated Telegram alert
+   *   - < threshold → individual Telegram alerts per first-fire source_ref (existing behaviour)
+   */
+  interface PrGuardSurgeEntry {
+    prUrl: string;
+    prNumber: number;
+    repo: string;
+    /** Issue numbers that passed the per-source-ref flood gate (first fires). */
+    firstFireIssueNumbers: number[];
+    /** Total blocked count including flood-gated hits (AC #3: "still counted"). */
+    totalBlockedCount: number;
+  }
+  const prGuardAccumulator = new Map<string, PrGuardSurgeEntry>();
+
   // Pre-flight: verify gh is authenticated before attempting any API calls.
   // Surfaces a clear error rather than silently dispatching work that will fail
   // mid-task when the agent tries to create a PR (tasks 01KNEEEN, 01KNDFMP, 01KNDCBP).
@@ -558,12 +594,28 @@ export async function dispatchGitHubIssues(
               failureCode: validation.failureCode,
               windowMs: GUARD_FLOOD_GATE_WINDOW_MS,
             });
+            // Surge counting (issue #1082, AC #3): flood-gated hits still count
+            // toward the blocking PR's total so the surge alert message is accurate.
+            const floodPrKey = `${issue.repo}#${validation.blockingPRNumber}`;
+            const floodEntry = prGuardAccumulator.get(floodPrKey);
+            if (floodEntry) {
+              floodEntry.totalBlockedCount++;
+            } else {
+              prGuardAccumulator.set(floodPrKey, {
+                prUrl: `https://github.com/${issue.repo}/pull/${validation.blockingPRNumber}`,
+                prNumber: validation.blockingPRNumber,
+                repo: issue.repo,
+                firstFireIssueNumbers: [],
+                totalBlockedCount: 1,
+              });
+            }
             result.skipped++;
             continue;
           }
 
-          // First guard fire within the window — record the task, persist the
-          // block event, and send a single Telegram alert.
+          // First guard fire within the window — record the task and persist the
+          // block event. Telegram alert is deferred to the post-loop surge flush
+          // (issue #1082) so we can consolidate when many issues hit the same PR.
           recordAlreadyInReviewTask(store, {
             sourceRef,
             agentName,
@@ -587,18 +639,32 @@ export async function dispatchGitHubIssues(
               blockCode: validation.failureCode,
               blockingPRNumber: validation.blockingPRNumber,
             });
-
-            // Telegram alert: one notification per source_ref per cooldown window.
-            const prUrl = `https://github.com/${issue.repo}/pull/${validation.blockingPRNumber}`;
-            sendTelegramAlert(
-              `🚦 *Dispatch guard fired* for \`${sourceRef}\`\n` +
-              `PR [#${validation.blockingPRNumber}](${prUrl}) is already in review — dispatch suppressed for 60 min.`,
-            );
           } catch (blockErr) {
             log.warn("Failed to record dispatch block event", {
               sourceRef,
               error: blockErr instanceof Error ? blockErr.message : String(blockErr),
             });
+          }
+
+          // Accumulate into surge tracker (issue #1082): Telegram alert will be
+          // sent post-loop — either one consolidated message per blocking PR
+          // (when >= PR_GUARD_SURGE_THRESHOLD issues are blocked) or individual
+          // messages per source_ref (when below threshold).
+          {
+            const prKey = `${issue.repo}#${validation.blockingPRNumber}`;
+            const surgeEntry = prGuardAccumulator.get(prKey);
+            if (surgeEntry) {
+              surgeEntry.firstFireIssueNumbers.push(issue.number);
+              surgeEntry.totalBlockedCount++;
+            } else {
+              prGuardAccumulator.set(prKey, {
+                prUrl: `https://github.com/${issue.repo}/pull/${validation.blockingPRNumber}`,
+                prNumber: validation.blockingPRNumber,
+                repo: issue.repo,
+                firstFireIssueNumbers: [issue.number],
+                totalBlockedCount: 1,
+              });
+            }
           }
 
           // Priority review fast-lane (issue #871): route open PRs blocking dispatch
@@ -758,6 +824,58 @@ export async function dispatchGitHubIssues(
 
       result.dispatched++;
       dispatchedForAgent++;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // PR guard surge flush (issue #1082)
+  // ---------------------------------------------------------------------------
+  // Now that all agents' issues have been processed, decide how to alert for
+  // each blocking PR that was hit this cycle:
+  //   - >= PR_GUARD_SURGE_THRESHOLD total blocked: one consolidated Telegram alert
+  //     (subject to a per-PR surge cooldown that matches GUARD_FLOOD_GATE_WINDOW_MS)
+  //   - < threshold: individual alerts for each first-fire source_ref (existing behaviour)
+  if (prGuardAccumulator.size > 0) {
+    const surgeNow = Date.now();
+    const surgeThreshold = (config as unknown as { triggers?: { pr_guard_surge_threshold?: number } })
+      .triggers?.pr_guard_surge_threshold ?? PR_GUARD_SURGE_THRESHOLD;
+
+    for (const [prKey, surgeEntry] of prGuardAccumulator) {
+      const { prUrl, prNumber, repo, firstFireIssueNumbers, totalBlockedCount } = surgeEntry;
+      const lastSurgeAlertAt = prGuardSurgeAlertSentAt.get(prKey) ?? 0;
+      const surgeCooldownActive = (surgeNow - lastSurgeAlertAt) < GUARD_FLOOD_GATE_WINDOW_MS;
+
+      if (totalBlockedCount >= surgeThreshold) {
+        if (surgeCooldownActive) {
+          log.info("PR guard surge cooldown active: suppressing consolidated alert", {
+            prKey,
+            totalBlockedCount,
+            msSinceLastAlert: surgeNow - lastSurgeAlertAt,
+          });
+        } else {
+          // AC #1: exactly one Telegram message per PR per surge event
+          // AC #2: message includes PR URL, blocked issue count, and up to 5 issue numbers
+          const displayNums = firstFireIssueNumbers.slice(0, 5).map((n) => `#${n}`);
+          const remaining = totalBlockedCount - displayNums.length;
+          const issueList = displayNums.join(", ") + (remaining > 0 ? ` +${remaining} more` : "");
+          sendTelegramAlert(
+            `🚦 *PR guard surge* — ${totalBlockedCount} issues blocked by ` +
+            `[PR #${prNumber}](${prUrl}) waiting to merge. ` +
+            `Issues: ${issueList}`,
+          );
+          prGuardSurgeAlertSentAt.set(prKey, surgeNow);
+          log.info("PR guard surge alert sent", { prKey, prNumber, repo, totalBlockedCount, issueList });
+        }
+      } else {
+        // Below threshold — send individual alerts for each first-fire source_ref
+        // (existing per-source-ref behaviour, one Telegram per source_ref per cooldown window)
+        for (const issueNumber of firstFireIssueNumbers) {
+          sendTelegramAlert(
+            `🚦 *Dispatch guard fired* for \`${repo}#${issueNumber}\`\n` +
+            `PR [#${prNumber}](${prUrl}) is already in review — dispatch suppressed for 60 min.`,
+          );
+        }
+      }
     }
   }
 
