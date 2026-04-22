@@ -318,6 +318,21 @@ export type {
   IPRGuardCooldownStore,
 } from "./reviewer/pr-existence-guard.js";
 
+// PR guard cooldown feed — /api/pr-guard-cooldowns payload (issue #420).
+// Lists all active (non-expired) cooldown entries so callers can pre-filter
+// a full dispatch batch in one DB call.
+//
+// Mount in the orchestrator or dashboard server:
+//   app.get('/api/pr-guard-cooldowns', (req, res) => res.json(
+//     getPRGuardCooldownFeedPayload(store, req.query.repo as string | undefined)
+//   ));
+export { getPRGuardCooldownFeedPayload } from "./reviewer/pr-guard-cooldown-feed.js";
+export type {
+  PRGuardCooldownEntry,
+  PRGuardCooldownFeedPayload,
+  IPRGuardCooldownFeedStore,
+} from "./reviewer/pr-guard-cooldown-feed.js";
+
 // Duplicate-dispatch surge detector (issue #262) — Telegram alert when >= 3 already-in-review
 // blocks occur within a 30-minute window; 2-hour cooldown prevents alert fatigue.
 export { DuplicateDispatchSurgeDetector } from "./reviewer/duplicate-dispatch-surge-detector.js";

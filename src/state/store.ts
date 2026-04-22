@@ -716,6 +716,39 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
     return result.changes;
   }
 
+  /**
+   * Return all currently active (non-expired) PR guard cooldowns.
+   *
+   * Allows the orchestrator dispatcher to pre-filter an entire dispatch batch
+   * in one DB call instead of calling isPRGuardCooldownActive() per issue.
+   *
+   * @param repo  Optional "owner/repo" filter.  When omitted, all repos are returned.
+   * @returns Array of active cooldown entries ordered by expires_at ascending.
+   */
+  listActivePRGuardCooldowns(repo?: string): Array<{ repo: string; issueNumber: number; expiresAt: string }> {
+    // Build query dynamically based on whether repo filter is provided
+    const rows = repo
+      ? this.db.prepare(
+          `SELECT repo, issue_number, expires_at
+           FROM pr_guard_cooldown
+           WHERE expires_at > datetime('now')
+             AND repo = ?
+           ORDER BY expires_at ASC`,
+        ).all(repo) as Array<{ repo: string; issue_number: number; expires_at: string }>
+      : this.db.prepare(
+          `SELECT repo, issue_number, expires_at
+           FROM pr_guard_cooldown
+           WHERE expires_at > datetime('now')
+           ORDER BY expires_at ASC`,
+        ).all() as Array<{ repo: string; issue_number: number; expires_at: string }>;
+
+    return rows.map((r) => ({
+      repo: r.repo,
+      issueNumber: r.issue_number,
+      expiresAt: r.expires_at,
+    }));
+  }
+
   // ── Schema access instrumentation ────────────────────────────────────────
 
   /**
