@@ -660,6 +660,27 @@ export type {
   BypassAuditSchedulerOptions,
 } from "./reviewer/bypass-audit.js";
 
+// Pre-submission triage schema validator — POST /api/validate-triage-schema (issue #406).
+// Agents call this before opening a PR to self-check their JSON block against the same
+// logic used by Verifier.checkTriageSchemaCompliance().  Eliminates revision cycles caused
+// by schema errors only caught during post-submission verification.
+//
+//   app.post('/api/validate-triage-schema', express.json(), createTriageSchemaValidationHandler());
+//
+//   curl -s -X POST .../api/validate-triage-schema \
+//     -H 'Content-Type: application/json' \
+//     -d '{"body": "```json\n{\"duplicates_checked\":true,...}\n```"}'
+export {
+  validateTriageSchema,
+  createTriageSchemaValidationHandler,
+  TRIAGE_VALIDATION_PASS_THRESHOLD,
+  TRIAGE_FIELD_SCORE_WEIGHTS,
+} from "./reviewer/triage-schema-validator.js";
+export type {
+  TriageSchemaValidationResult,
+  TriageFieldError,
+} from "./reviewer/triage-schema-validator.js";
+
 // CLI smoke test verifier (issue #274)
 export {
   runCLISmokeTest,
