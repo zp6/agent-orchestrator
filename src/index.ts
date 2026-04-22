@@ -869,6 +869,36 @@ export type {
   RebaseClassification,
 } from "./reviewer/proactive-rebase-scheduler.js";
 
+// Universal Quality Gate — cross-path 0.80 quality floor (issue #405).
+//
+// Catches sub-0.80 approvals across ALL task types and ALL approval paths:
+// normal verify() callback, orchestrator short-circuit, operator Telegram
+// /approve commands, and cross-repo follow-up task completions.
+//
+// Unlike QualityFloorBypassDetector (verify() callback only), this gate can be
+// called after ANY approval event.  No task-type exemptions.
+//
+// Pure-function form (one-off checks from any approval path):
+//   import { checkApprovalQualityGate } from 'claude-orchestrator-reviewer';
+//   const fired = await checkApprovalQualityGate(task, notifier);
+//
+// Daemon-style (per-task dedup across many approvals):
+//   import { UniversalQualityGateMonitor } from 'claude-orchestrator-reviewer';
+//   const monitor = new UniversalQualityGateMonitor(notifier, { floor: 0.80 });
+//   await monitor.checkAndAlert(task);
+//
+//   // Batch processing (daemon integration):
+//   const { alerted, skipped } = await monitor.checkBatch(recentlyApprovedTasks);
+export {
+  checkApprovalQualityGate,
+  formatUniversalQualityGateAlert,
+  UniversalQualityGateMonitor,
+  UNIVERSAL_QUALITY_FLOOR,
+} from "./reviewer/universal-quality-gate.js";
+export type {
+  UniversalQualityGateConfig,
+} from "./reviewer/universal-quality-gate.js";
+
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
 

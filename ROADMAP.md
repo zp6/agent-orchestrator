@@ -1,6 +1,6 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-21 (triage cycle 7)_
+_Last updated: 2026-04-22 (post #405)_
 
 ## Completed (recent)
 
@@ -24,6 +24,7 @@ _Last updated: 2026-04-21 (triage cycle 7)_
 - **#375 / PR #378** — Score-zero approval alerter: dedicated real-time Telegram alert for score ≤ 0.05 approvals (`score-zero-alert.ts`)
 - **#382 / PR #386** — Daily misrouting digest: Telegram summary of implementation tasks dispatched to reviewer (`misrouting-digest.ts`)
 - **#388 / PR #388** — `/misrouting [hours]` Telegram command for on-demand misrouting stats
+- **#405 / PR #407** — Universal quality gate: `checkApprovalQualityGate()` + `UniversalQualityGateMonitor`; sub-0.80 alert for ALL task types across ALL approval paths (`universal-quality-gate.ts`)
 
 ## Next up
 

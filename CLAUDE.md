@@ -96,6 +96,7 @@ When this container is used for LLM PR reviews:
 - PR guard cooldown: `pr_guard_cooldown` table in `state.db` — written when the PR existence guard returns `already-in-review`; `isPRGuardCooldownActive()` prevents re-queuing the same issue for 60 min without a second gh CLI call
 - old_rank pre-submission validator: `validateOldRankInPriorityReordering()` — deterministic checker for `priority_reordering` entries where `old_rank` should be `null` (newly-added issues); embedded as a pre-submission checklist in the triage coaching prompt
 - Per-agent triage coaching with `validation_pre_check_passed`: coaching directive now carries `validation_pre_check_passed: boolean | null` and exposes validator results for prior submissions in the prompt banner
+- Universal quality gate: `checkApprovalQualityGate(task, notifier)` pure function + `UniversalQualityGateMonitor` class; catches sub-0.80 approvals across ALL task types and ALL approval paths (verify callback, orchestrator short-circuit, operator `/approve`, cross-repo follow-ups); no task-type exemptions
 
 **Out of scope (belongs to orchestrator-core):**
 - Daemon loop, state store, dispatching infrastructure
@@ -166,6 +167,7 @@ src/
     score-violations.ts             — /api/score-violations payload: sub-threshold approvals grouped by agent
     misrouting-digest.ts            — daily Telegram digest of implementation tasks dispatched to reviewer; /misrouting [hours] on-demand command
     bypass-audit.ts                 — /api/bypass-audit payload + BypassAuditScheduler daily Telegram digest for sub-0.60-floor approvals; IBypassAuditStore
+    universal-quality-gate.ts       — checkApprovalQualityGate() + UniversalQualityGateMonitor; sub-0.80 alert for ALL task types across ALL approval paths
   integration/
     orchestrator-adapter.ts         — createReviewerInstances() adapter for orchestrator import
   service/
