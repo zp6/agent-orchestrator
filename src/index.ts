@@ -192,6 +192,7 @@ export type {
 export {
   getTriageHealthPayload,
   formatTriageHealthForTelegram,
+  fetchConsecutiveFailureBlocks,
   TRIAGE_HEALTH_CURRENT_DAYS,
   TRIAGE_HEALTH_PRIOR_DAYS,
   TRIAGE_PASS_THRESHOLD,

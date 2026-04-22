@@ -87,6 +87,7 @@ import {
 import {
   getTriageHealthPayload,
   formatTriageHealthForTelegram,
+  fetchConsecutiveFailureBlocks,
 } from "../reviewer/triage-health.js";
 import {
   formatInvestigationsForTelegram,
@@ -558,7 +559,7 @@ async function executeCommand(
       // /triage-health [agent]
       // When an agent name is supplied, show that agent's detail only.
       const agentArg = cmd.args.join(" ").trim() || undefined;
-      return handleTriageHealth(store, agentArg);
+      return handleTriageHealth(store, agentArg, reviewerConfig);
     }
 
     case "investigations": {
@@ -2350,13 +2351,20 @@ async function handleMisrouting(
  *
  * Shows per-agent triage schema pass/fail rates, most commonly missing fields,
  * revision counts, and a 7-day trend so operators can answer "is coaching working?"
+ *
+ * When an agent's failure_rate > 50%, and the dashboard's consecutive-failure-detector
+ * reports an active block for that agent, an inline cross-link is shown so operators
+ * can navigate directly to the detector page.
  */
-function handleTriageHealth(
+async function handleTriageHealth(
   store: ITelegramStateStore,
   agentName?: string,
-): string {
+  reviewerConfig?: ReviewerConfig,
+): Promise<string> {
   const report = getTriageHealthPayload(store, agentName);
-  return formatTriageHealthForTelegram(report, agentName);
+  const dashboardUrl = reviewerConfig?.dashboard_url;
+  const blockedAgents = await fetchConsecutiveFailureBlocks(dashboardUrl);
+  return formatTriageHealthForTelegram(report, agentName, blockedAgents, dashboardUrl);
 }
 
 // ── Investigations handler (issue #134) ──────────────────────────────────────

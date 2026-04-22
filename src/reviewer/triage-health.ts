@@ -52,6 +52,9 @@
 
 import type { Task } from "../state/types.js";
 import { TRIAGE_REQUIRED_FIELDS } from "./verifier.js";
+import { createLogger } from "../service/logger.js";
+
+const log = createLogger("triage-health");
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -477,6 +480,66 @@ function buildValidatorCallStats(
   return { total_calls, passing_calls, calls_per_task };
 }
 
+// ── Consecutive failure block fetch ──────────────────────────────────────────
+
+/**
+ * Shape of a single block entry from the consecutive-failure-detector API.
+ * Only the `agent_name` field is required for the cross-link feature.
+ */
+interface ConsecutiveFailureBlock {
+  agent_name: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Fetch the set of agent names that currently have active consecutive-failure
+ * blocks from the dashboard API.
+ *
+ * Calls `GET <dashboardBaseUrl>/api/consecutive-failure-detector/blocks`.
+ * Returns an empty Set on any network or parse error so that callers remain
+ * unaffected when the dashboard is unreachable.
+ *
+ * @param dashboardBaseUrl  Base URL of the agent dashboard (e.g. "http://localhost:3473").
+ *                          When omitted, defaults to `DASHBOARD_URL` env var or
+ *                          "http://localhost:3473".
+ */
+export async function fetchConsecutiveFailureBlocks(
+  dashboardBaseUrl?: string,
+): Promise<Set<string>> {
+  const base = dashboardBaseUrl
+    ?? process.env["DASHBOARD_URL"]
+    ?? "http://localhost:3473";
+
+  const url = `${base}/api/consecutive-failure-detector/blocks`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+    if (!res.ok) {
+      log.warn(`fetchConsecutiveFailureBlocks: HTTP ${res.status} from ${url}`);
+      return new Set();
+    }
+    const json = await res.json() as unknown;
+    // Accept both { blocks: [...] } and a plain array.
+    const blocks: unknown[] = Array.isArray(json)
+      ? json
+      : Array.isArray((json as Record<string, unknown>)["blocks"])
+        ? ((json as Record<string, unknown>)["blocks"] as unknown[])
+        : [];
+
+    const names = new Set<string>();
+    for (const b of blocks) {
+      const block = b as ConsecutiveFailureBlock;
+      if (typeof block.agent_name === "string" && block.agent_name) {
+        names.add(block.agent_name);
+      }
+    }
+    return names;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.warn(`fetchConsecutiveFailureBlocks: failed to fetch ${url}: ${msg}`);
+    return new Set();
+  }
+}
+
 // ── Telegram formatting ───────────────────────────────────────────────────────
 
 const TREND_ICON: Record<string, string> = {
@@ -515,12 +578,22 @@ function formatPeriodStats(stats: AgentTriagePeriodStats, label: string): string
 /**
  * Format a `TriageHealthReport` as a Telegram Markdown message.
  *
- * @param report       The report to format.
- * @param agentFilter  Optional: when set, show only this agent's entry.
+ * @param report         The report to format.
+ * @param agentFilter    Optional: when set, show only this agent's entry.
+ * @param blockedAgents  Optional: set of agent names with active consecutive-failure
+ *                       blocks. When an agent has failure_rate > 50% and appears in
+ *                       this set, an inline warning link to the dashboard's
+ *                       /consecutive-failure-detector page is shown.
+ * @param dashboardUrl   Optional: base URL of the dashboard used for the inline link
+ *                       (e.g. "https://dashboard.example.com"). When omitted the
+ *                       link path is shown without a host so operators still see the
+ *                       anchor text.
  */
 export function formatTriageHealthForTelegram(
   report: TriageHealthReport,
   agentFilter?: string | null,
+  blockedAgents?: Set<string> | null,
+  dashboardUrl?: string | null,
 ): string {
   const lines: string[] = [];
 
@@ -606,6 +679,25 @@ export function formatTriageHealthForTelegram(
     if (entry.recent_failures.length > 0) {
       lines.push(
         `Recent failures: ${entry.recent_failures.map((id) => `\`${id.slice(0, 10)}\``).join(", ")}`,
+      );
+    }
+
+    // Show consecutive-failure-detector cross-link when failure_rate > 50%
+    // and the dashboard reports an active block for this agent.
+    const failureRate = entry.current.pass_rate !== null
+      ? 1 - entry.current.pass_rate
+      : null;
+    if (
+      failureRate !== null &&
+      failureRate > 0.5 &&
+      blockedAgents?.has(entry.agent_name)
+    ) {
+      const detectorPath = "/consecutive-failure-detector";
+      const detectorUrl = dashboardUrl
+        ? `${dashboardUrl}${detectorPath}`
+        : detectorPath;
+      lines.push(
+        `⚠️ Consecutive failure blocks active — [review here](${detectorUrl})`,
       );
     }
 

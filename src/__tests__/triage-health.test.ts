@@ -22,6 +22,7 @@ import {
   type ITriageHealthStore,
   type TriageHealthReport,
 } from "../reviewer/triage-health.js";
+// fetchConsecutiveFailureBlocks is an async HTTP function tested via mocks in the dedicated section below.
 import type { Task } from "../state/types.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -768,5 +769,93 @@ describe("formatTriageHealthForTelegram with #413 additions", () => {
     const msg = formatTriageHealthForTelegram(report);
     expect(msg).toMatch(/Pre-submit validator/i);
     expect(msg).toMatch(/1 calls/);
+  });
+});
+
+// ── Consecutive failure block cross-link tests (issue #432) ───────────────────
+
+describe("formatTriageHealthForTelegram consecutive-failure cross-link", () => {
+  /**
+   * Helper: build a report with one agent at a given pass_rate.
+   * pass_rate 0.0 → failure_rate 100% (> 50% threshold)
+   * pass_rate 0.6 → failure_rate 40% (< 50% threshold)
+   */
+  function buildReportWithAgent(
+    agentName: string,
+    qualityScore: number,
+  ): TriageHealthReport {
+    const store = makeStore([
+      makeTask({
+        agent_name: agentName,
+        task_type: "housekeeping",
+        status: "done",
+        quality_score: qualityScore,
+        created_at: daysAgo(1),
+      }),
+    ]);
+    return getTriageHealthPayload(store);
+  }
+
+  it("shows consecutive-failure cross-link when failure_rate > 50% and agent is blocked", () => {
+    const report = buildReportWithAgent("bad-agent", 0.40); // fail_rate = 60%
+    const blocked = new Set(["bad-agent"]);
+    const msg = formatTriageHealthForTelegram(report, null, blocked, "https://dash.example.com");
+    expect(msg).toMatch(/Consecutive failure blocks active/);
+    expect(msg).toMatch(/consecutive-failure-detector/);
+    expect(msg).toMatch(/https:\/\/dash\.example\.com\/consecutive-failure-detector/);
+  });
+
+  it("shows cross-link without dashboard URL using relative path", () => {
+    const report = buildReportWithAgent("bad-agent", 0.30); // fail_rate = 70%
+    const blocked = new Set(["bad-agent"]);
+    const msg = formatTriageHealthForTelegram(report, null, blocked);
+    expect(msg).toMatch(/Consecutive failure blocks active/);
+    expect(msg).toMatch(/\/consecutive-failure-detector/);
+  });
+
+  it("does NOT show cross-link when failure_rate <= 50% even if agent is blocked", () => {
+    // quality_score 0.90 >= TRIAGE_PASS_THRESHOLD (0.80) → passes → failure_rate = 0%
+    const report = buildReportWithAgent("ok-agent", 0.90);
+    const blocked = new Set(["ok-agent"]);
+    const msg = formatTriageHealthForTelegram(report, null, blocked);
+    expect(msg).not.toMatch(/Consecutive failure blocks active/);
+  });
+
+  it("does NOT show cross-link when failure_rate > 50% but agent is NOT blocked", () => {
+    const report = buildReportWithAgent("bad-agent", 0.30); // fail_rate = 70%
+    const blocked = new Set<string>(["other-agent"]);
+    const msg = formatTriageHealthForTelegram(report, null, blocked);
+    expect(msg).not.toMatch(/Consecutive failure blocks active/);
+  });
+
+  it("does NOT show cross-link when blockedAgents is null", () => {
+    const report = buildReportWithAgent("bad-agent", 0.30); // fail_rate = 70%
+    const msg = formatTriageHealthForTelegram(report, null, null);
+    expect(msg).not.toMatch(/Consecutive failure blocks active/);
+  });
+
+  it("does NOT show cross-link when pass_rate is exactly 0.50 (failure_rate = 50%)", () => {
+    // The threshold is failure_rate > 50% (strictly greater), so 50% should NOT trigger
+    const store = makeStore([
+      makeTask({
+        agent_name: "borderline-agent",
+        task_type: "housekeeping",
+        status: "done",
+        quality_score: 0.80,
+        created_at: daysAgo(1),
+      }),
+      makeTask({
+        agent_name: "borderline-agent",
+        task_type: "housekeeping",
+        status: "done",
+        quality_score: 0.50,
+        created_at: daysAgo(2),
+      }),
+    ]);
+    const report = getTriageHealthPayload(store);
+    const blocked = new Set(["borderline-agent"]);
+    // pass_rate = 0.5, failure_rate = 0.5 — not strictly > 0.5
+    const msg = formatTriageHealthForTelegram(report, null, blocked);
+    expect(msg).not.toMatch(/Consecutive failure blocks active/);
   });
 });
