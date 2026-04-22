@@ -18,6 +18,7 @@ import {
   REVIEWER_AGENT_NAMES,
 } from "../reviewer/misrouting-digest.js";
 import type { IMisroutingDigestStore, MisroutingDigestReport } from "../reviewer/misrouting-digest.js";
+import type { ResearchInvestigationClient, ResearchMisroutingRecord, ResearchMisroutingReport } from "../reviewer/research-investigation-client.js";
 import type { Task, TaskType } from "../state/types.js";
 import type { Notifier } from "../notify.js";
 import type { ReviewerConfig } from "../config.js";
@@ -110,6 +111,24 @@ function makeNotifier(): Notifier & { messages: string[] } {
   };
 }
 
+function makeResearchMisroutingRecord(overrides: Partial<ResearchMisroutingRecord> & { id: string }): ResearchMisroutingRecord {
+  return {
+    title: "Research misrouting task",
+    category: "implementation",
+    dispatched_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+/**
+ * Minimal mock for ResearchInvestigationClient that only implements getMisroutingReport().
+ */
+function makeResearchClient(report: ResearchMisroutingReport | null): Pick<ResearchInvestigationClient, "getMisroutingReport"> {
+  return {
+    getMisroutingReport: async () => report,
+  } as Pick<ResearchInvestigationClient, "getMisroutingReport">;
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe("classifyMisroutedTask", () => {
@@ -140,15 +159,16 @@ describe("classifyMisroutedTask", () => {
 });
 
 describe("buildMisroutingDigest", () => {
-  it("returns empty entries when no tasks are dispatched to reviewer", () => {
+  it("returns empty entries when no tasks are dispatched to reviewer", async () => {
     const store = makeStore([]);
     const config = makeConfig();
-    const report = buildMisroutingDigest(store, config);
+    const report = await buildMisroutingDigest(store, config);
     expect(report.entries).toHaveLength(0);
     expect(report.lookback_hours).toBe(24);
+    expect(report.research_agent_entries).toBeNull();
   });
 
-  it("detects implementation tasks dispatched to reviewer", () => {
+  it("detects implementation tasks dispatched to reviewer", async () => {
     const now = new Date().toISOString();
     const tasks = [
       makeTask({
@@ -162,7 +182,7 @@ describe("buildMisroutingDigest", () => {
     ];
     const store = makeStore(tasks);
     const config = makeConfig();
-    const report = buildMisroutingDigest(store, config);
+    const report = await buildMisroutingDigest(store, config);
 
     expect(report.entries).toHaveLength(1);
     expect(report.entries[0].task_title).toBe("Implement token tracking");
@@ -172,7 +192,7 @@ describe("buildMisroutingDigest", () => {
     expect(report.entries[0].category).toBe("implementation");
   });
 
-  it("excludes tasks older than lookback window", () => {
+  it("excludes tasks older than lookback window", async () => {
     const old = new Date(Date.now() - 25 * 3_600_000).toISOString(); // 25 hours ago
     const tasks = [
       makeTask({
@@ -186,11 +206,11 @@ describe("buildMisroutingDigest", () => {
     ];
     const store = makeStore(tasks);
     const config = makeConfig();
-    const report = buildMisroutingDigest(store, config);
+    const report = await buildMisroutingDigest(store, config);
     expect(report.entries).toHaveLength(0);
   });
 
-  it("excludes non-implementation tasks", () => {
+  it("excludes non-implementation tasks", async () => {
     const now = new Date().toISOString();
     const tasks = [
       makeTask({
@@ -204,11 +224,11 @@ describe("buildMisroutingDigest", () => {
     ];
     const store = makeStore(tasks);
     const config = makeConfig();
-    const report = buildMisroutingDigest(store, config);
+    const report = await buildMisroutingDigest(store, config);
     expect(report.entries).toHaveLength(0);
   });
 
-  it("infers suggested agent from repo ownership", () => {
+  it("infers suggested agent from repo ownership", async () => {
     const now = new Date().toISOString();
     const tasks = [
       makeTask({
@@ -222,13 +242,13 @@ describe("buildMisroutingDigest", () => {
     ];
     const store = makeStore(tasks);
     const config = makeConfig();
-    const report = buildMisroutingDigest(store, config);
+    const report = await buildMisroutingDigest(store, config);
 
     expect(report.entries).toHaveLength(1);
     expect(report.entries[0].suggested_agent).toBe("claude-orchestrator-dashboard");
   });
 
-  it("sets suggested_agent to null for unknown repos", () => {
+  it("sets suggested_agent to null for unknown repos", async () => {
     const now = new Date().toISOString();
     const tasks = [
       makeTask({
@@ -242,13 +262,13 @@ describe("buildMisroutingDigest", () => {
     ];
     const store = makeStore(tasks);
     const config = makeConfig();
-    const report = buildMisroutingDigest(store, config);
+    const report = await buildMisroutingDigest(store, config);
 
     expect(report.entries).toHaveLength(1);
     expect(report.entries[0].suggested_agent).toBeNull();
   });
 
-  it("detects cross-repo-followup category from title", () => {
+  it("detects cross-repo-followup category from title", async () => {
     const now = new Date().toISOString();
     const tasks = [
       makeTask({
@@ -262,10 +282,75 @@ describe("buildMisroutingDigest", () => {
     ];
     const store = makeStore(tasks);
     const config = makeConfig();
-    const report = buildMisroutingDigest(store, config);
+    const report = await buildMisroutingDigest(store, config);
 
     expect(report.entries).toHaveLength(1);
     expect(report.entries[0].category).toBe("cross-repo-followup");
+  });
+
+  it("includes research agent misrouting entries when researchClient is provided", async () => {
+    const store = makeStore([]);
+    const config = makeConfig();
+    const researchRecord = makeResearchMisroutingRecord({
+      id: "RES001",
+      task_id: "01RESEARCHIMPL",
+      title: "Add OAuth login flow",
+      category: "implementation",
+      quality_score: 72,
+      source_ref: "rapartlu/research-agent#154",
+      dispatched_at: new Date().toISOString(),
+    });
+    const researchClient = makeResearchClient({
+      total_count: 1,
+      lookback_hours: 24,
+      entries: [researchRecord],
+      category_histogram: { implementation: 1 },
+    }) as unknown as ResearchInvestigationClient;
+
+    const report = await buildMisroutingDigest(store, config, { researchClient });
+
+    expect(report.research_agent_entries).not.toBeNull();
+    expect(report.research_agent_entries).toHaveLength(1);
+    expect(report.research_agent_entries![0].title).toBe("Add OAuth login flow");
+    expect(report.research_agent_entries![0].category).toBe("implementation");
+    expect(report.research_agent_entries![0].quality_score).toBe(72);
+  });
+
+  it("sets research_agent_entries to empty array when research agent returns no misroutes", async () => {
+    const store = makeStore([]);
+    const config = makeConfig();
+    const researchClient = makeResearchClient({
+      total_count: 0,
+      lookback_hours: 24,
+      entries: [],
+      category_histogram: {},
+    }) as unknown as ResearchInvestigationClient;
+
+    const report = await buildMisroutingDigest(store, config, { researchClient });
+
+    expect(report.research_agent_entries).toEqual([]);
+  });
+
+  it("sets research_agent_entries to null when research agent is unreachable", async () => {
+    const store = makeStore([]);
+    const config = makeConfig();
+    const researchClient = makeResearchClient(null) as unknown as ResearchInvestigationClient;
+
+    const report = await buildMisroutingDigest(store, config, { researchClient });
+
+    expect(report.research_agent_entries).toBeNull();
+  });
+
+  it("sets research_agent_entries to null when researchClient throws", async () => {
+    const store = makeStore([]);
+    const config = makeConfig();
+    const failingClient = {
+      getMisroutingReport: async () => { throw new Error("network failure"); },
+    } as unknown as ResearchInvestigationClient;
+
+    const report = await buildMisroutingDigest(store, config, { researchClient: failingClient });
+
+    expect(report.research_agent_entries).toBeNull();
   });
 });
 
@@ -275,6 +360,7 @@ describe("formatMisroutingDigest", () => {
       generated_at: "2026-04-20T09:00:00.000Z",
       lookback_hours: 24,
       entries: [],
+      research_agent_entries: null,
     };
     const msg = formatMisroutingDigest(report);
     expect(msg).toContain("Reviewer Misrouting Digest");
@@ -304,6 +390,7 @@ describe("formatMisroutingDigest", () => {
           category: "cross-repo-followup",
         },
       ],
+      research_agent_entries: null,
     };
     const msg = formatMisroutingDigest(report);
 
@@ -331,11 +418,85 @@ describe("formatMisroutingDigest", () => {
           category: "implementation",
         },
       ],
+      research_agent_entries: null,
     };
     const msg = formatMisroutingDigest(report);
 
     expect(msg).toContain("1 implementation task dispatched");
     expect(msg).not.toContain("Suggested:");
+  });
+
+  it("renders 'Research agent implementation tasks' section with entries", () => {
+    const report: MisroutingDigestReport = {
+      generated_at: "2026-04-20T09:00:00.000Z",
+      lookback_hours: 24,
+      entries: [],
+      research_agent_entries: [
+        {
+          id: "RES001",
+          task_id: "01RESEARCHIMPL",
+          title: "Add OAuth login flow",
+          category: "implementation",
+          quality_score: 72,
+          source_ref: "rapartlu/research-agent#154",
+          dispatched_at: "2026-04-20T07:00:00.000Z",
+        },
+      ],
+    };
+    const msg = formatMisroutingDigest(report);
+
+    expect(msg).toContain("Research agent implementation tasks");
+    expect(msg).toContain("1 implementation task dispatched to research agent");
+    expect(msg).toContain("Add OAuth login flow");
+    expect(msg).toContain("claude-research-agent");
+    expect(msg).toContain("Quality score: 72/100");
+    expect(msg).toContain("rapartlu/research-agent#154");
+    expect(msg).toContain("File implementation tasks via the orchestrator");
+  });
+
+  it("renders 'no misroutes' line in research section when entries are empty", () => {
+    const report: MisroutingDigestReport = {
+      generated_at: "2026-04-20T09:00:00.000Z",
+      lookback_hours: 24,
+      entries: [],
+      research_agent_entries: [],
+    };
+    const msg = formatMisroutingDigest(report);
+
+    expect(msg).toContain("Research agent implementation tasks");
+    expect(msg).toContain("No implementation tasks dispatched to the research agent");
+  });
+
+  it("renders 'unreachable' line in research section when entries are null", () => {
+    const report: MisroutingDigestReport = {
+      generated_at: "2026-04-20T09:00:00.000Z",
+      lookback_hours: 24,
+      entries: [],
+      research_agent_entries: null,
+    };
+    const msg = formatMisroutingDigest(report);
+
+    expect(msg).toContain("Research agent unreachable");
+  });
+
+  it("omits quality score line when not present in research entry", () => {
+    const report: MisroutingDigestReport = {
+      generated_at: "2026-04-20T09:00:00.000Z",
+      lookback_hours: 24,
+      entries: [],
+      research_agent_entries: [
+        {
+          id: "RES002",
+          title: "Build analytics dashboard",
+          category: "feature",
+          dispatched_at: "2026-04-20T06:00:00.000Z",
+        },
+      ],
+    };
+    const msg = formatMisroutingDigest(report);
+
+    expect(msg).toContain("Build analytics dashboard");
+    expect(msg).not.toContain("Quality score:");
   });
 });
 

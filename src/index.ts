@@ -967,6 +967,9 @@ export type {
   RegisterInvestigationRequest,
   CompleteInvestigationRequest,
   ResearchInvestigationClientOptions,
+  ResearchMisroutingRecord,
+  ResearchMisroutingReport,
+  RecordMisroutingRequest,
 } from "./reviewer/research-investigation-client.js";
 
 // Investigations feed — formatter for the /investigations Telegram command and

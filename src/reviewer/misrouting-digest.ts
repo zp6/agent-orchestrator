@@ -26,6 +26,7 @@ import type { Notifier } from "../notify.js";
 import type { ReviewerConfig } from "../config.js";
 import type { Task } from "../state/types.js";
 import { buildRepoOwnerMap, extractRepoFromSourceRef } from "./routing-violations.js";
+import type { ResearchInvestigationClient, ResearchMisroutingRecord } from "./research-investigation-client.js";
 
 const log = createLogger("misrouting-digest");
 
@@ -82,8 +83,14 @@ export interface MisroutingDigestReport {
   generated_at: string;
   /** Number of hours looked back. */
   lookback_hours: number;
-  /** Misrouted entries found. */
+  /** Misrouted entries found (tasks dispatched to reviewer). */
   entries: MisroutingDigestEntry[];
+  /**
+   * Implementation tasks dispatched to the research agent, fetched from
+   * GET /misrouting on the research agent.  `null` when the research agent is
+   * unreachable; empty array when reachable but no misroutes were recorded.
+   */
+  research_agent_entries: ResearchMisroutingRecord[] | null;
 }
 
 /**
@@ -123,12 +130,16 @@ export function classifyMisroutedTask(task: Task): "implementation" | "cross-rep
  *
  * Queries all tasks dispatched to reviewer agents in the lookback window
  * and filters for implementation-type tasks that should have gone elsewhere.
+ *
+ * When `researchClient` is provided, also fetches the research agent's
+ * misrouting report (GET /misrouting) and includes those entries in the
+ * "Research agent implementation tasks" digest section.
  */
-export function buildMisroutingDigest(
+export async function buildMisroutingDigest(
   store: IMisroutingDigestStore,
   config: ReviewerConfig,
-  opts: { lookbackHours?: number } = {},
-): MisroutingDigestReport {
+  opts: { lookbackHours?: number; researchClient?: ResearchInvestigationClient } = {},
+): Promise<MisroutingDigestReport> {
   const lookbackHours = opts.lookbackHours ?? MISROUTING_LOOKBACK_HOURS;
   const cutoff = new Date(Date.now() - lookbackHours * 3_600_000).toISOString();
   const repoOwnerMap = buildRepoOwnerMap(config.agents);
@@ -161,15 +172,37 @@ export function buildMisroutingDigest(
     }
   }
 
+  // Fetch research agent misrouting data when a client is available
+  let research_agent_entries: ResearchMisroutingRecord[] | null = null;
+  if (opts.researchClient) {
+    try {
+      const researchReport = await opts.researchClient.getMisroutingReport();
+      // null means unreachable; empty report means reachable but no misroutes
+      research_agent_entries = researchReport !== null ? researchReport.entries : null;
+    } catch (err) {
+      log.warn("Failed to fetch research agent misrouting report", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      research_agent_entries = null;
+    }
+  }
+
   return {
     generated_at: new Date().toISOString(),
     lookback_hours: lookbackHours,
     entries,
+    research_agent_entries,
   };
 }
 
 /**
  * Format a MisroutingDigestReport as a Telegram Markdown message.
+ *
+ * Renders two sections:
+ *  1. Reviewer misrouting — implementation tasks dispatched to the reviewer.
+ *  2. Research agent implementation tasks — tasks dispatched to the research
+ *     agent that should have been implementation tasks.  Only shown when
+ *     `report.research_agent_entries` is non-null.
  */
 export function formatMisroutingDigest(report: MisroutingDigestReport): string {
   const lines: string[] = [
@@ -178,38 +211,78 @@ export function formatMisroutingDigest(report: MisroutingDigestReport): string {
     ``,
   ];
 
+  // ── Section 1: Reviewer misrouting ──────────────────────────────────────────
+
   if (report.entries.length === 0) {
     lines.push(`✅ No implementation tasks landed on the reviewer in the last ${report.lookback_hours}h.`);
     lines.push(``);
     lines.push(`_Routing policies are working correctly._`);
-    return lines.join("\n");
+  } else {
+    lines.push(
+      `⚠️ *${report.entries.length} implementation task${report.entries.length !== 1 ? "s" : ""} dispatched to reviewer in the last ${report.lookback_hours}h:*`,
+    );
+    lines.push(``);
+
+    for (let i = 0; i < report.entries.length; i++) {
+      const entry = report.entries[i];
+      const taskIdShort = entry.task_id.slice(0, 8);
+      const categoryLabel = entry.category === "cross-repo-followup" ? "cross-repo" : "impl";
+
+      lines.push(`${i + 1}. \\[${categoryLabel}\\] *${escapeMarkdown(entry.task_title.slice(0, 80))}*`);
+      lines.push(`   Task: \`${taskIdShort}\` → Agent: \`${entry.dispatched_agent}\``);
+
+      if (entry.suggested_agent) {
+        lines.push(`   ✳️ Suggested: \`${entry.suggested_agent}\``);
+      }
+
+      if (entry.issue_link) {
+        lines.push(`   🔗 ${entry.issue_link}`);
+      }
+
+      lines.push(``);
+    }
+
+    lines.push(`_Review dispatch policies if misrouting persists._`);
   }
 
-  lines.push(
-    `⚠️ *${report.entries.length} implementation task${report.entries.length !== 1 ? "s" : ""} dispatched to reviewer in the last ${report.lookback_hours}h:*`,
-  );
+  // ── Section 2: Research agent implementation tasks ───────────────────────────
+
+  lines.push(``);
+  lines.push(`🔬 *Research agent implementation tasks*`);
   lines.push(``);
 
-  for (let i = 0; i < report.entries.length; i++) {
-    const entry = report.entries[i];
-    const taskIdShort = entry.task_id.slice(0, 8);
-    const categoryLabel = entry.category === "cross-repo-followup" ? "cross-repo" : "impl";
-
-    lines.push(`${i + 1}. \\[${categoryLabel}\\] *${escapeMarkdown(entry.task_title.slice(0, 80))}*`);
-    lines.push(`   Task: \`${taskIdShort}\` → Agent: \`${entry.dispatched_agent}\``);
-
-    if (entry.suggested_agent) {
-      lines.push(`   ✳️ Suggested: \`${entry.suggested_agent}\``);
-    }
-
-    if (entry.issue_link) {
-      lines.push(`   🔗 ${entry.issue_link}`);
-    }
-
+  if (report.research_agent_entries === null) {
+    lines.push(`_Research agent unreachable — misrouting data unavailable._`);
+  } else if (report.research_agent_entries.length === 0) {
+    lines.push(`✅ No implementation tasks dispatched to the research agent in the last ${report.lookback_hours}h.`);
+  } else {
+    const count = report.research_agent_entries.length;
+    lines.push(
+      `⚠️ *${count} implementation task${count !== 1 ? "s" : ""} dispatched to research agent:*`,
+    );
     lines.push(``);
-  }
 
-  lines.push(`_Review dispatch policies if misrouting persists._`);
+    for (let i = 0; i < report.research_agent_entries.length; i++) {
+      const entry = report.research_agent_entries[i];
+      const idShort = (entry.task_id ?? entry.id).slice(0, 8);
+      const categoryLabel = escapeMarkdown(entry.category.slice(0, 20));
+
+      lines.push(`${i + 1}. \\[${categoryLabel}\\] *${escapeMarkdown(entry.title.slice(0, 80))}*`);
+      lines.push(`   Task: \`${idShort}\` → Agent: \`claude-research-agent\``);
+
+      if (entry.quality_score !== undefined) {
+        lines.push(`   📊 Quality score: ${entry.quality_score}/100`);
+      }
+
+      if (entry.source_ref) {
+        lines.push(`   🔗 ${entry.source_ref}`);
+      }
+
+      lines.push(``);
+    }
+
+    lines.push(`_File implementation tasks via the orchestrator, not the research agent._`);
+  }
 
   return lines.join("\n");
 }
@@ -232,17 +305,20 @@ export class MisroutingDigestScheduler {
   private config: ReviewerConfig;
   /** Hour of day (UTC) at which to fire the digest. */
   private digestHourUtc: number;
+  /** Optional research agent client for the "Research agent implementation tasks" section. */
+  private researchClient?: ResearchInvestigationClient;
 
   constructor(
     store: IMisroutingDigestStore,
     notifier: Notifier,
     config: ReviewerConfig,
-    opts: { digestHourUtc?: number } = {},
+    opts: { digestHourUtc?: number; researchClient?: ResearchInvestigationClient } = {},
   ) {
     this.store = store;
     this.notifier = notifier;
     this.config = config;
     this.digestHourUtc = opts.digestHourUtc ?? 9;
+    this.researchClient = opts.researchClient;
   }
 
   /**
@@ -264,13 +340,16 @@ export class MisroutingDigestScheduler {
     if (lastSent && lastSent >= todayUtc) return false;
 
     try {
-      const report = buildMisroutingDigest(this.store, this.config);
+      const report = await buildMisroutingDigest(this.store, this.config, {
+        researchClient: this.researchClient,
+      });
       const message = formatMisroutingDigest(report);
       await this.notifier.send(message);
 
       this.store.setSystemFlag(FLAG_LAST_MISROUTING_DIGEST_SENT, todayUtc);
       log.info("Misrouting digest sent", {
         entries: report.entries.length,
+        researchEntries: report.research_agent_entries?.length ?? null,
         lookbackHours: report.lookback_hours,
       });
       return true;

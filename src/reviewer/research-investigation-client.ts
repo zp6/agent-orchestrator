@@ -104,6 +104,82 @@ export interface RegisterInvestigationRequest {
   id?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Misrouting types
+// ---------------------------------------------------------------------------
+
+/**
+ * A single record of an implementation task that was mistakenly dispatched to
+ * the research agent.  Returned by GET /misrouting on the research agent.
+ */
+export interface ResearchMisroutingRecord {
+  /** Stable record ID assigned by the research agent. */
+  id: string;
+  /** Orchestrator task ID, if available. */
+  task_id?: string;
+  /** Human-readable task title. */
+  title: string;
+  /**
+   * Category reported by the research agent: "feature", "fix", "implementation",
+   * "cross-repo-followup", or similar.
+   */
+  category: string;
+  /** Quality score (0–100) from the verifier, if a post-hoc record was filed. */
+  quality_score?: number;
+  /** GitHub source ref (e.g. "rapartlu/research-agent#154"). */
+  source_ref?: string;
+  /** ISO timestamp when the task was originally dispatched. */
+  dispatched_at: string;
+}
+
+/**
+ * The full payload returned by GET /misrouting on the research agent.
+ *
+ * Includes individual records plus aggregate histograms that the research
+ * agent builds over time as post-hoc records are filed via
+ * POST /api/misrouting/record.
+ */
+export interface ResearchMisroutingReport {
+  /** Total number of misrouted records stored by the research agent. */
+  total_count: number;
+  /** Lookback window used by the research agent, in hours. */
+  lookback_hours: number;
+  /** Individual misrouting records. */
+  entries: ResearchMisroutingRecord[];
+  /**
+   * Count of records grouped by category label.
+   * Populated once the research agent has processed post-hoc submissions.
+   * e.g. { "implementation": 3, "cross-repo-followup": 1 }
+   */
+  category_histogram: Record<string, number>;
+  /**
+   * Count of records grouped by quality-score bucket (e.g. "0-24", "25-49",
+   * "50-74", "75-100").  Populated by post-hoc submissions.
+   */
+  quality_score_histogram?: Record<string, number>;
+}
+
+/**
+ * Payload for POST /api/misrouting/record — filed by the reviewer after it
+ * has verified a task that should have gone to the research agent.  Populates
+ * the research agent's `category_histogram` and `quality_score_histogram`.
+ */
+export interface RecordMisroutingRequest {
+  /** Orchestrator task ID. */
+  task_id: string;
+  /** Human-readable task title. */
+  title: string;
+  /**
+   * Category determined by the reviewer:
+   * "implementation", "feature", "fix", or "cross-repo-followup".
+   */
+  category: string;
+  /** Final quality score (0–100) from the verifier, if available. */
+  quality_score?: number;
+  /** GitHub source ref (e.g. "rapartlu/research-agent#154"). */
+  source_ref?: string;
+}
+
 /** Payload for completing an investigation (PATCH /api/investigations/:id). */
 export interface CompleteInvestigationRequest {
   /**
@@ -235,6 +311,55 @@ export class ResearchInvestigationClient {
    */
   async summary(): Promise<InvestigationsSummary | null> {
     return this.request<InvestigationsSummary>("GET", "/api/investigations/summary");
+  }
+
+  /**
+   * Fetch the research agent's misrouting report from GET /misrouting.
+   *
+   * Returns the full `ResearchMisroutingReport` (including aggregate histograms)
+   * or `null` when the research agent is unreachable or returns a non-2xx status.
+   *
+   * The report is used by the reviewer's daily misrouting digest to surface a
+   * "Research agent implementation tasks" section alongside the standard
+   * reviewer-misrouting entries.
+   *
+   * @example
+   *   const report = await client.getMisroutingReport();
+   *   if (report) {
+   *     log.info('research misroutes', { total: report.total_count });
+   *   }
+   */
+  async getMisroutingReport(): Promise<ResearchMisroutingReport | null> {
+    return this.request<ResearchMisroutingReport>("GET", "/misrouting");
+  }
+
+  /**
+   * File a post-hoc misrouting record with the research agent via
+   * POST /api/misrouting/record.
+   *
+   * Call this after the reviewer verifies a task that was dispatched to the
+   * research agent but turned out to be an implementation task.  The research
+   * agent will incorporate the record into its `category_histogram` and
+   * `quality_score_histogram`.
+   *
+   * Returns the created `ResearchMisroutingRecord` on success, or `null` on
+   * failure (the reviewer continues regardless — this is best-effort telemetry).
+   *
+   * @example
+   *   await client.recordMisrouting({
+   *     task_id: task.id,
+   *     title: task.title,
+   *     category: 'implementation',
+   *     quality_score: 65,
+   *     source_ref: 'rapartlu/research-agent#154',
+   *   });
+   */
+  async recordMisrouting(req: RecordMisroutingRequest): Promise<ResearchMisroutingRecord | null> {
+    return this.request<ResearchMisroutingRecord>(
+      "POST",
+      "/api/misrouting/record",
+      req as unknown as Record<string, unknown>,
+    );
   }
 
   /**

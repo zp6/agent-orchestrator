@@ -2326,11 +2326,11 @@ function handleRoutingViolations(store: ITelegramStateStore, limit: number): str
 
 // ── Misrouting digest handler (issue #387) ───────────────────────────────
 
-function handleMisrouting(
+async function handleMisrouting(
   store: ITelegramStateStore,
   lookbackHours: number,
   reviewerConfig?: ReviewerConfig,
-): string {
+): Promise<string> {
   if (!reviewerConfig) {
     return [
       `⚠️ *Misrouting Digest — Unavailable*`,
@@ -2339,7 +2339,7 @@ function handleMisrouting(
       `Please ensure the command handler is initialised with a \`reviewerConfig\`.`,
     ].join("\n");
   }
-  const report = buildMisroutingDigest(store, reviewerConfig, { lookbackHours });
+  const report = await buildMisroutingDigest(store, reviewerConfig, { lookbackHours });
   return formatMisroutingDigest(report);
 }
 
