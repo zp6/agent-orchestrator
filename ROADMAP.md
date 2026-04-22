@@ -1,9 +1,12 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-22 (triage cycle 8)_
+_Last updated: 2026-04-22 (triage cycle 9)_
 
 ## Completed (recent)
 
+- **#432 / PR #433** — `/triage-health` cross-link to consecutive-failure-detector: `fetchConsecutiveFailureBlocks()` shows warning when agent `failure_rate > 50%` and has active consecutive-failure blocks
+- **#428 / PR #429** — `LowQualityPRLabeler`: adds/removes `low-quality` GitHub label on PRs when tasks score below 0.80 (`low-quality-pr-labeler.ts`)
+- **#382 / PR #431** — Research agent implementation tasks section added to misrouting digest: `getMisroutingReport()` + `recordMisrouting()` methods on `ResearchInvestigationClient`
 - **#411 / PR #425** — Meeting-facilitator monthly goal widget: `getMeetingFacilitatorGoalWidget()` tracking `core_logic_shipped` + `meetings_facilitated` targets (`meeting-facilitator-goal.ts`)
 - **#423 / PR #424** — `summary()` method added to `ResearchInvestigationClient` — `GET /api/investigations/summary` for lightweight active_count / last_completed / oldest_in_flight_age snapshot
 - **#134 / PR #422** — `/investigations` Telegram command: research agent investigation feed grouped by status (`investigations-feed.ts`)
@@ -38,24 +41,23 @@ _Last updated: 2026-04-22 (triage cycle 8)_
 
 ## Next up
 
-1. **#391 — Per-issue dispatch surge alerter** _(high)_ — Extend `duplicate-dispatch-surge-detector.ts` to key on `(repo, issue_number)` and fire a Telegram alert when any single issue accumulates ≥3 dispatches within a 15-minute window; deduplicate at most once per 30 min per issue.
+1. **#427 — PR-level dispatch lock to prevent same-PR guard storms** _(high)_ — Write a PR-level lock (keyed by blocking PR URL) atomically before dispatch and check it for all issues in the same daemon batch; eliminates 12+ wasted task dispatches when multiple issues point to the same blocking PR.
 
-2. **#392 — Orchestrator pre-dispatch gate: hard-block issues with open PRs** _(high)_ — Enforce a hard block at dispatch time when a PR already exists for the issue; stricter than the soft existing guard which can be bypassed.
+2. **#391 — Per-issue dispatch surge alerter** _(high)_ — Extend `duplicate-dispatch-surge-detector.ts` to key on `(repo, issue_number)` and fire a Telegram alert when any single issue accumulates ≥3 dispatches within a 15-minute window; deduplicate at most once per 30 min per issue.
 
-3. **#414 — Bookkeeping task type: score 'close-by-reference' outcomes appropriately** _(high)_ — Tasks that close issues by reference (e.g. "Closes #N" in a PR they reviewed) should receive a quality score reflecting the outcome rather than a null or defaulted score.
+3. **#392 — Orchestrator pre-dispatch gate: hard-block issues with open PRs** _(high)_ — Enforce a hard block at dispatch time when a PR already exists for the issue; stricter than the soft existing guard which can be bypassed.
 
-4. **#359 — Daily agent quality digest with degradation callouts** _(high)_ — Scheduled Telegram message summarising each agent's 24-hour score average, trend direction, and flagging any agent that degraded >10% day-over-day.
+4. **#414 — Bookkeeping task type: score 'close-by-reference' outcomes appropriately** _(high)_ — Tasks that close issues by reference (e.g. "Closes #N" in a PR they reviewed) should receive a quality score reflecting the outcome rather than a null or defaulted score.
 
-5. **#232 — Quality scores missing from task feed** _(high)_ — Despite `ensureScoresPopulated()` and backfill commands, recent tasks still show `quality_score: null`. Need a startup/daemon check that warns when >10% of recent approved tasks have null scores.
-
-6. **#368 — Auto-file GitHub issues for improvements identified across 3+ consecutive batches** _(medium)_ — `ImprovementRecurrenceTracker` that records patterns by normalized title hash across distinct batches and auto-files a `chronic` + `improvement` tagged issue when threshold is reached.
-
-7. **#221 — Improvement detector deduplication against existing GitHub issues** _(medium)_ — `ImprovementDetector` creates GitHub issues without checking for existing open duplicates. Add `gh issue list` pre-check with title-similarity filter before filing.
+5. **#359 — Daily agent quality digest with degradation callouts** _(high)_ — Scheduled Telegram message summarising each agent's 24-hour score average, trend direction, and flagging any agent that degraded >10% day-over-day.
 
 ## Planned
 
 - **#364 — Hard quality floor with mandatory override audit trail** _(high)_ — Hard floor at 0.10 blocking sub-floor approvals; Telegram escalation with `/approve-override` and `/reject-override`; `score_floor_overrides` audit table.
+- **#368 — Auto-file GitHub issues for improvements identified across 3+ consecutive batches** _(medium)_ — `ImprovementRecurrenceTracker` records patterns by normalized title hash across distinct batches; auto-files `chronic` + `improvement` tagged issue when threshold is reached.
 - **#340 — Persist proactive rebase stats to SQLite** _(medium)_ — `rebase_events` table, `IRebaseStore` interface, `/rebase-stats` Telegram command, and `/rebase-stats` HTTP endpoint for dashboard.
+- **#221 — Improvement detector deduplication against existing GitHub issues** _(medium)_ — `ImprovementDetector` creates GitHub issues without checking for existing open duplicates. Add `gh issue list` pre-check with title-similarity filter before filing.
+- **#232 — Quality scores missing from task feed** _(high)_ — Despite `ensureScoresPopulated()` and backfill commands, recent tasks still show `quality_score: null`. Need a startup/daemon check that warns when >10% of recent approved tasks have null scores.
 - **#222 — `/help` Telegram command** _(medium)_ — List all 20+ bot commands with one-line descriptions so operators can self-serve during incidents without reading source code.
 - **#189 — PR-feedback task scoring model** _(medium)_ — PR-feedback tasks receive null scores because no `PR_FEEDBACK_SYSTEM_PROMPT` exists. Add scoring on three dimensions: correctness, completeness, approval-bias adherence.
 - **#89 — Second-pass outcome tracking** _(low)_ — Record whether borderline (0.70–0.79) second-pass reviews improve final outcomes. Metric: upgrade rate, reject rate, merged quality delta.
@@ -69,6 +71,8 @@ _Last updated: 2026-04-22 (triage cycle 8)_
 - **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
 
 ## Triage notes
+
+- **2026-04-22 cycle 9**: No duplicate issues found (12 open, all distinct). No stale issues (oldest #221 is 6 days old). No open PRs (none to audit for orphan links). Completed since cycle 8: #428 (PR #429 merged — LowQualityPRLabeler), #382 (PR #431 merged — research agent misrouting section in digest), #432 (PR #433 merged — triage-health cross-link to consecutive-failure-detector). CLAUDE.md: added `low-quality-pr-labeler.ts` to Scope and Source Layout; added consecutive-failure cross-link description to `triage-health.ts` scope entry. ROADMAP.md: promoted #428/#382/#432 to Completed; added #427 (PR-level dispatch lock) to Next up position 1; renumbered prior items 1–5 → 2–6 with #232 dropping to 6.
 
 - **2026-04-22 cycle 8**: No duplicate issues found (11 open, all distinct). No stale issues (oldest #221 is 6 days old). No open PRs (none to audit for orphan links). Completed since cycle 7: #390 (PR #397 merged — PR guard cooldown), #399 (PR #400 merged — old_rank validator), #406 (PR #407 — triage-schema-validator), #409 (PR #412 — /triage-health command), #413 (PR #416 — triage revision-rate dashboard), #128 (PR #418 — ResearchInvestigationClient), #420 (PR #421 — listActivePRGuardCooldowns), #134 (PR #422 — /investigations command), #423 (PR #424 — summary()), #411 (PR #425 — meeting-facilitator goal widget). CLAUDE.md: added 5 missing source modules (`investigations-feed.ts`, `meeting-facilitator-goal.ts`, `pr-guard-cooldown-feed.ts`, `triage-health.ts`, `triage-schema-validator.ts`) and corresponding scope entries. ROADMAP.md: promoted 10 items to Completed; added #414 to Next up; removed merged #390/#399 awaiting entries.
 
