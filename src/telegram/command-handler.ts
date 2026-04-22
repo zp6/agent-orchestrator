@@ -36,6 +36,7 @@
  *   /memory [expand <topic>|digest] → semantic task memory digest or full topic expansion
  *   /misrouting [hours]        → implementation tasks misrouted to reviewer in last N hours (default 24h, max 720h)
  *   /triage-health [agent]     → per-agent triage schema pass/fail rate, missing fields, revision count, and 7-day trend
+ *   /investigations            → list pending/active/completed research agent investigations with titles, times, and result issue URLs
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -87,6 +88,12 @@ import {
   getTriageHealthPayload,
   formatTriageHealthForTelegram,
 } from "../reviewer/triage-health.js";
+import {
+  formatInvestigationsForTelegram,
+} from "../reviewer/investigations-feed.js";
+import {
+  createResearchInvestigationClient,
+} from "../reviewer/research-investigation-client.js";
 import type { ReviewerConfig } from "../config.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
@@ -148,7 +155,8 @@ type CommandName =
   | "low-score"
   | "memory"
   | "misrouting"
-  | "triage-health";
+  | "triage-health"
+  | "investigations";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -189,6 +197,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "memory",
   "misrouting",
   "triage-health",
+  "investigations",
 ]);
 
 interface ParsedCommand {
@@ -550,6 +559,11 @@ async function executeCommand(
       // When an agent name is supplied, show that agent's detail only.
       const agentArg = cmd.args.join(" ").trim() || undefined;
       return handleTriageHealth(store, agentArg);
+    }
+
+    case "investigations": {
+      // /investigations — list pending/active/completed research investigations.
+      return handleInvestigations(reviewerConfig);
     }
   }
 }
@@ -2343,6 +2357,31 @@ function handleTriageHealth(
 ): string {
   const report = getTriageHealthPayload(store, agentName);
   return formatTriageHealthForTelegram(report, agentName);
+}
+
+// ── Investigations handler (issue #134) ──────────────────────────────────────
+
+/**
+ * Handle the `/investigations` command.
+ *
+ * Fetches the live investigation list from the research agent's
+ * `GET /api/investigations` feed and returns a formatted Telegram message
+ * showing pending, active, and recently completed investigations with titles,
+ * dispatch times, finding summaries, and result GitHub issue links.
+ *
+ * Uses `RESEARCH_AGENT_URL` env var (default: `http://localhost:3478`).
+ * Returns a safe error notice if the research agent is unreachable.
+ */
+async function handleInvestigations(reviewerConfig?: ReviewerConfig): Promise<string> {
+  const baseUrl = process.env["RESEARCH_AGENT_URL"] ?? "http://localhost:3478";
+  const client = createResearchInvestigationClient(baseUrl);
+  try {
+    const investigations = await client.list({ limit: 50 });
+    return formatInvestigationsForTelegram(investigations);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `⚠️ *Research Agent Unavailable*\n\nCould not fetch investigation feed from \`${baseUrl}\`.\n\`${msg.slice(0, 200)}\``;
+  }
 }
 
 // ── Quality system health handler (issue #304) ────────────────────────────

@@ -968,6 +968,24 @@ export type {
   ResearchInvestigationClientOptions,
 } from "./reviewer/research-investigation-client.js";
 
+// Investigations feed — formatter for the /investigations Telegram command and
+// /api/investigations dashboard REST endpoint (coordinated change research-agent#134).
+//
+// `getInvestigationsFeedPayload(investigations)` — converts a raw Investigation[]
+// into a typed payload for REST consumers.
+//
+// `formatInvestigationsForTelegram(investigations)` — renders as Telegram Markdown.
+export {
+  getInvestigationsFeedPayload,
+  formatInvestigationsForTelegram,
+  MAX_RECENT_COMPLETE,
+  MAX_COMPLETE_IN_TELEGRAM,
+} from "./reviewer/investigations-feed.js";
+export type {
+  InvestigationSummary,
+  InvestigationsFeedPayload,
+} from "./reviewer/investigations-feed.js";
+
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
 
