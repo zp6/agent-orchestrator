@@ -98,6 +98,11 @@ When this container is used for LLM PR reviews:
 - old_rank pre-submission validator: `validateOldRankInPriorityReordering()` — deterministic checker for `priority_reordering` entries where `old_rank` should be `null` (newly-added issues); embedded as a pre-submission checklist in the triage coaching prompt
 - Per-agent triage coaching with `validation_pre_check_passed`: coaching directive now carries `validation_pre_check_passed: boolean | null` and exposes validator results for prior submissions in the prompt banner
 - Universal quality gate: `checkApprovalQualityGate(task, notifier)` pure function + `UniversalQualityGateMonitor` class; catches sub-0.80 approvals across ALL task types and ALL approval paths (verify callback, orchestrator short-circuit, operator `/approve`, cross-repo follow-ups); no task-type exemptions
+- Triage schema pre-submission validator: `POST /api/validate-triage-schema` endpoint allows agents to self-check housekeeping JSON blocks before submission, reducing revision cycles
+- Triage health dashboard: `/triage-health` Telegram command exposes per-agent schema failure rates and validator call counts from `triage_validator_calls` table; triage revision-rate before/after metrics
+- Investigations feed: `/investigations` Telegram command shows research agent investigation feed (active, pending, done, cancelled) via `investigations-feed.ts`
+- Meeting-facilitator goal widget: monthly goal tracking for the meeting-facilitator agent (`meeting-facilitator-goal.ts`) — `core_logic_shipped` and `meetings_facilitated` targets surfaced to operators
+- PR guard cooldown feed: `listActivePRGuardCooldowns()` bulk query + `/api/pr-guard-cooldowns` REST endpoint (`pr-guard-cooldown-feed.ts`) for dashboard-level flood gate visibility
 
 **Out of scope (belongs to orchestrator-core):**
 - Daemon loop, state store, dispatching infrastructure
@@ -170,6 +175,11 @@ src/
     bypass-audit.ts                 — /api/bypass-audit payload + BypassAuditScheduler daily Telegram digest for sub-0.60-floor approvals; IBypassAuditStore
     universal-quality-gate.ts       — checkApprovalQualityGate() + UniversalQualityGateMonitor; sub-0.80 alert for ALL task types across ALL approval paths
     research-investigation-client.ts — HTTP client for research agent /api/investigations feed; register/activate/complete/cancel lifecycle; `summary()` method for GET /api/investigations/summary snapshot (active_count, last_completed, oldest_in_flight_age); used by improvement-detector when dispatching research tasks
+    investigations-feed.ts          — `/investigations` Telegram command: `getInvestigationsFeedPayload()` + `formatInvestigationsForTelegram()`; research feed grouped by status (active/pending/done/cancelled)
+    meeting-facilitator-goal.ts     — meeting-facilitator monthly goal widget: `getMeetingFacilitatorGoalWidget()` tracking `core_logic_shipped` (target 1) and `meetings_facilitated` (target 5); `IMeetingFacilitatorGoalStore` wired into `ITelegramStateStore`
+    pr-guard-cooldown-feed.ts       — `listActivePRGuardCooldowns(repo?)` bulk query returning all non-expired cooldown entries; `getPRGuardCooldownFeedPayload()` REST payload for `/api/pr-guard-cooldowns` endpoint
+    triage-health.ts                — per-agent schema failure rates and triage validation stats; powers `/triage-health` Telegram command; reads from `triage_validator_calls` table
+    triage-schema-validator.ts      — `POST /api/validate-triage-schema` pre-submission self-check; `validateTriageSchema()` callable by agents before submitting housekeeping results to avoid revision cycles
   integration/
     orchestrator-adapter.ts         — createReviewerInstances() adapter for orchestrator import
   service/

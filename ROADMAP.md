@@ -1,9 +1,19 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-22 (post #405)_
+_Last updated: 2026-04-22 (triage cycle 8)_
 
 ## Completed (recent)
 
+- **#411 / PR #425** — Meeting-facilitator monthly goal widget: `getMeetingFacilitatorGoalWidget()` tracking `core_logic_shipped` + `meetings_facilitated` targets (`meeting-facilitator-goal.ts`)
+- **#423 / PR #424** — `summary()` method added to `ResearchInvestigationClient` — `GET /api/investigations/summary` for lightweight active_count / last_completed / oldest_in_flight_age snapshot
+- **#134 / PR #422** — `/investigations` Telegram command: research agent investigation feed grouped by status (`investigations-feed.ts`)
+- **#420 / PR #421** — Expose `listActivePRGuardCooldowns()` bulk query + `/api/pr-guard-cooldowns` REST payload builder (`pr-guard-cooldown-feed.ts`)
+- **#128 / PR #418** — `ResearchInvestigationClient`: HTTP client for research agent `/api/investigations` feed; register/activate/complete/cancel lifecycle (`research-investigation-client.ts`)
+- **#413 / PR #416** — Triage revision-rate dashboard: `triage_validator_calls` table + before/after validator metrics for `/triage-health`
+- **#409 / PR #412** — `/triage-health` Telegram command: per-agent schema failure rate and validation stats (`triage-health.ts`)
+- **#406 / PR #407** — `POST /api/validate-triage-schema` pre-submission self-check: `validateTriageSchema()` callable by agents before submitting housekeeping results (`triage-schema-validator.ts`)
+- **#399 / PR #400** — old_rank pre-submission validator: `validateOldRankInPriorityReordering()` + `validation_pre_check_passed` field in triage coaching prompt
+- **#390 / PR #397** — PR guard cooldown: `pr_guard_cooldown` table + `isPRGuardCooldownActive()` prevents re-queuing within 60 min of `already-in-review` hit
 - **#393 / PR #396** — Triage coaching: concrete `old_rank: null` JSON example injected into every coached prompt (`triage-coaching.ts`)
 - **#398 / PR #401** — `/api/bypass-audit` endpoint + daily Telegram digest for sub-floor approvals (`bypass-audit.ts`, `IBypassAuditStore`)
 - **#331 / PR #332** — Real-time Telegram alerts for low-score approvals (`low-score-approval-alerter.ts`)
@@ -24,7 +34,7 @@ _Last updated: 2026-04-22 (post #405)_
 - **#375 / PR #378** — Score-zero approval alerter: dedicated real-time Telegram alert for score ≤ 0.05 approvals (`score-zero-alert.ts`)
 - **#382 / PR #386** — Daily misrouting digest: Telegram summary of implementation tasks dispatched to reviewer (`misrouting-digest.ts`)
 - **#388 / PR #388** — `/misrouting [hours]` Telegram command for on-demand misrouting stats
-- **#405 / PR #407** — Universal quality gate: `checkApprovalQualityGate()` + `UniversalQualityGateMonitor`; sub-0.80 alert for ALL task types across ALL approval paths (`universal-quality-gate.ts`)
+- **#405 / PR #408** — Universal quality gate: `checkApprovalQualityGate()` + `UniversalQualityGateMonitor`; sub-0.80 alert for ALL task types across ALL approval paths (`universal-quality-gate.ts`)
 
 ## Next up
 
@@ -32,17 +42,15 @@ _Last updated: 2026-04-22 (post #405)_
 
 2. **#392 — Orchestrator pre-dispatch gate: hard-block issues with open PRs** _(high)_ — Enforce a hard block at dispatch time when a PR already exists for the issue; stricter than the soft existing guard which can be bypassed.
 
-3. **#390 / PR #397** — PR guard cooldown _(awaiting merge)_ — `pr_guard_cooldown` table; `isPRGuardCooldownActive()` prevents re-queuing same issue for 60 min after `already-in-review` hit.
+3. **#414 — Bookkeeping task type: score 'close-by-reference' outcomes appropriately** _(high)_ — Tasks that close issues by reference (e.g. "Closes #N" in a PR they reviewed) should receive a quality score reflecting the outcome rather than a null or defaulted score.
 
-4. **#399 / PR #400** — old_rank pre-submission validator _(awaiting merge)_ — `validateOldRankInPriorityReordering()` detects `old_rank: 0` and new-issue keyword heuristics; `validation_pre_check_passed` field in coaching directive.
+4. **#359 — Daily agent quality digest with degradation callouts** _(high)_ — Scheduled Telegram message summarising each agent's 24-hour score average, trend direction, and flagging any agent that degraded >10% day-over-day.
 
-5. **#359 — Daily agent quality digest with degradation callouts** _(high)_ — Scheduled Telegram message summarising each agent's 24-hour score average, trend direction, and flagging any agent that degraded >10% day-over-day.
+5. **#232 — Quality scores missing from task feed** _(high)_ — Despite `ensureScoresPopulated()` and backfill commands, recent tasks still show `quality_score: null`. Need a startup/daemon check that warns when >10% of recent approved tasks have null scores.
 
-6. **#232 — Quality scores missing from task feed** _(high)_ — Despite `ensureScoresPopulated()` and backfill commands, recent tasks still show `quality_score: null`. Need a startup/daemon check that warns when >10% of recent approved tasks have null scores.
+6. **#368 — Auto-file GitHub issues for improvements identified across 3+ consecutive batches** _(medium)_ — `ImprovementRecurrenceTracker` that records patterns by normalized title hash across distinct batches and auto-files a `chronic` + `improvement` tagged issue when threshold is reached.
 
-7. **#368 — Auto-file GitHub issues for improvements identified across 3+ consecutive batches** _(medium)_ — `ImprovementRecurrenceTracker` that records patterns by normalized title hash across distinct batches and auto-files a `chronic` + `improvement` tagged issue when threshold is reached.
-
-8. **#221 — Improvement detector deduplication against existing GitHub issues** _(medium)_ — `ImprovementDetector` creates GitHub issues without checking for existing open duplicates. Add `gh issue list` pre-check with title-similarity filter before filing.
+7. **#221 — Improvement detector deduplication against existing GitHub issues** _(medium)_ — `ImprovementDetector` creates GitHub issues without checking for existing open duplicates. Add `gh issue list` pre-check with title-similarity filter before filing.
 
 ## Planned
 
@@ -61,6 +69,8 @@ _Last updated: 2026-04-22 (post #405)_
 - **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
 
 ## Triage notes
+
+- **2026-04-22 cycle 8**: No duplicate issues found (11 open, all distinct). No stale issues (oldest #221 is 6 days old). No open PRs (none to audit for orphan links). Completed since cycle 7: #390 (PR #397 merged — PR guard cooldown), #399 (PR #400 merged — old_rank validator), #406 (PR #407 — triage-schema-validator), #409 (PR #412 — /triage-health command), #413 (PR #416 — triage revision-rate dashboard), #128 (PR #418 — ResearchInvestigationClient), #420 (PR #421 — listActivePRGuardCooldowns), #134 (PR #422 — /investigations command), #423 (PR #424 — summary()), #411 (PR #425 — meeting-facilitator goal widget). CLAUDE.md: added 5 missing source modules (`investigations-feed.ts`, `meeting-facilitator-goal.ts`, `pr-guard-cooldown-feed.ts`, `triage-health.ts`, `triage-schema-validator.ts`) and corresponding scope entries. ROADMAP.md: promoted 10 items to Completed; added #414 to Next up; removed merged #390/#399 awaiting entries.
 
 - **2026-04-21 cycle 7**: No duplicate issues found (11 open, all distinct). No stale issues (oldest #221 is 5 days old). No orphan PRs (#397 closes #390, #400 closes #399 — both open awaiting merge). Completed: #393 (merged PR #396 — triage coaching old_rank example) and #398 (merged PR #401 — bypass-audit endpoint). CLAUDE.md: added `bypass-audit.ts`, `pr_guard_cooldown`, `validateOldRankInPriorityReordering`, and `IBypassAuditStore` to scope and source layout. ROADMAP.md: promoted #393/#398 to Completed; added #390/#399 (PRs open) to Next up.
 - **2026-04-21 cycle 6**: Closed #389 as duplicate of #391 (both request per-issue dispatch surge alerting in Telegram; #391 has acceptance criteria). No stale issues (all open issues ≤2 days old). No open PRs to audit. CLAUDE.md fixes: (1) system architecture table had wrong repo names — corrected to `rapartlu/*` GitHub repos and added 3 missing agents (telegram, research, meeting-facilitator); (2) added `score-zero-alert.ts` and `misrouting-digest.ts` to source layout (shipped in PRs #378, #386, #388 but not documented); (3) added scope entries for both. ROADMAP.md: promoted #375/#382/#388 to Completed; added #391 and #392 to Next up.
