@@ -1006,6 +1006,20 @@ export type {
   IMeetingFacilitatorGoalStore,
 } from "./state/types.js";
 
+// Low-quality PR labeler (issue #428)
+export {
+  LowQualityPRLabeler,
+  parsePrRef,
+  ensureLowQualityLabel,
+  addLowQualityLabel,
+  removeLowQualityLabel,
+  LOW_QUALITY_LABEL_THRESHOLD,
+  LOW_QUALITY_LABEL_NAME,
+  LOW_QUALITY_LABEL_COLOR,
+  LOW_QUALITY_LABEL_DESCRIPTION,
+} from "./reviewer/low-quality-pr-labeler.js";
+export type { LowQualityPRLabelerOptions, PrRef } from "./reviewer/low-quality-pr-labeler.js";
+
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
 

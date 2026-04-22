@@ -30,6 +30,7 @@ import { PreDispatchCapabilityEnforcer } from "../reviewer/pre-dispatch-capabili
 import { LowScoreApprovalAlerter } from "../reviewer/low-score-approval-alerter.js";
 import { QualityFloorBypassDetector } from "../reviewer/quality-floor-bypass-detector.js";
 import { ScoreZeroApprovalAlerter } from "../reviewer/score-zero-alert.js";
+import { LowQualityPRLabeler } from "../reviewer/low-quality-pr-labeler.js";
 import type { ReviewerConfig } from "../config.js";
 import type { Notifier } from "../notify.js";
 import type {
@@ -130,6 +131,21 @@ export interface ReviewerInstances {
    * Undefined when no notifier is provided.
    */
   scoreZeroAlerter: ScoreZeroApprovalAlerter | undefined;
+  /**
+   * Low-quality PR labeler (issue #428).
+   * Applies the `low-quality` GitHub label to the PR associated with a task
+   * whenever that task is approved with quality_score < 0.70.  The label is
+   * automatically removed when a revision brings the score at or above threshold.
+   *
+   * The label provides a persistent visual signal on the PR diff page so
+   * reviewers and merge-queue operators can see quality risk before merging —
+   * unlike Telegram alerts, which are transient.
+   *
+   * Call `lowQualityPRLabeler.applyLabel(result, task)` after each approved
+   * verification result.  The labeler is a no-op when the task has no PR
+   * `source_ref`, or when the `gh` CLI is unavailable.
+   */
+  lowQualityPRLabeler: LowQualityPRLabeler;
 }
 
 export interface CreateReviewerOptions {
@@ -246,6 +262,11 @@ export function createReviewerInstances(
     ? new ScoreZeroApprovalAlerter(opts.notifier)
     : undefined;
 
+  // Create LowQualityPRLabeler (issue #428).
+  // Applies/removes the `low-quality` GitHub label on PRs approved below 0.70.
+  // Always constructed — it is a no-op when the task has no PR source_ref.
+  const lowQualityPRLabeler = new LowQualityPRLabeler();
+
   return {
     reviewer,
     verifier: new Verifier(store, undefined, verificationResultStore),
@@ -266,5 +287,6 @@ export function createReviewerInstances(
     lowScoreApprovalAlerter,
     bypassDetector,
     scoreZeroAlerter,
+    lowQualityPRLabeler,
   };
 }
