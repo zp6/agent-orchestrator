@@ -496,26 +496,39 @@ export function runGitHubPreDispatchValidation(params: {
 
   const openPR = linkedPRs.find((pr) => pr.state === "open") ?? null;
   if (openPR && !openPR.isDraft) {
-    const failed = makeFailedResult(
-      base,
-      "branch_conflicts",
-      "open_pr_exists",
-      `issue ${sourceRef} already has open PR #${openPR.number}`,
+    // Issue #1073: Exempt pr-feedback source from open_pr_exists guard.
+    // PR feedback by definition targets an already-open PR to provide
+    // review comments. Blocking it defeats the purpose of the review cycle.
+    if (source !== "pr-feedback") {
+      const failed = makeFailedResult(
+        base,
+        "branch_conflicts",
+        "open_pr_exists",
+        `issue ${sourceRef} already has open PR #${openPR.number}`,
+      );
+      failed.blockingPRNumber = openPR.number;
+      store.addDispatchValidation({
+        source,
+        source_ref: sourceRef,
+        agent_name: agentName,
+        repo: issue.repo,
+        issue_number: issue.number,
+        outcome: failed.outcome,
+        failure_check: failed.failureCheck,
+        failure_code: failed.failureCode,
+        failure_reason: failed.failureReason,
+        checklist: failed.checks,
+      });
+      return failed;
+    }
+    // For pr-feedback, record as INFO and allow dispatch to continue
+    checks.push(
+      makeInfoCheck(
+        "branch_conflicts",
+        "open_pr_feedback_allowed",
+        `issue ${sourceRef} has open PR #${openPR.number}; pr-feedback source is allowed to proceed`,
+      ),
     );
-    failed.blockingPRNumber = openPR.number;
-    store.addDispatchValidation({
-      source,
-      source_ref: sourceRef,
-      agent_name: agentName,
-      repo: issue.repo,
-      issue_number: issue.number,
-      outcome: failed.outcome,
-      failure_check: failed.failureCheck,
-      failure_code: failed.failureCode,
-      failure_reason: failed.failureReason,
-      checklist: failed.checks,
-    });
-    return failed;
   }
 
   let draftPR: LinkedPR | null = null;

@@ -373,4 +373,30 @@ describe("runGitHubPreDispatchValidation — open-PR dedup gate (issue #884)", (
     expect(block).toBeDefined();
     expect(block?.outcome).toBe("blocked");
   });
+
+  it("exempts pr-feedback source from open_pr_exists guard (issue #1073)", () => {
+    const config = makeConfig();
+    const store = new StateStore(":memory:");
+    mockCountOpenPRs.mockReturnValue(1);
+    mockFindExistingPRsForIssue.mockReturnValue([
+      { number: 1057, title: "Fix schema", url: "https://github.com/owner/repo/pull/1057", state: "open", isDraft: false },
+    ]);
+
+    // pr-feedback should bypass the open_pr_exists guard since feedback
+    // by definition targets an already-open PR
+    const result = runGitHubPreDispatchValidation({
+      config,
+      store,
+      source: "pr-feedback",
+      agentName: "test-agent",
+      issue: { repo: "owner/repo", number: 1057 },
+    });
+
+    expect(result.outcome).toBe("passed");
+    expect(result.failureCode).toBeNull();
+    const feedbackCheck = result.checks.find((c) => c.code === "open_pr_feedback_allowed");
+    expect(feedbackCheck).toBeDefined();
+    expect(feedbackCheck?.status).toBe("info");
+    expect(feedbackCheck?.detail).toContain("pr-feedback source is allowed");
+  });
 });
