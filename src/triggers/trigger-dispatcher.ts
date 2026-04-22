@@ -5,12 +5,23 @@ import { StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { createLogger } from "../service/logger.js";
 import { scoreIssuePriority } from "../orchestrator/priority-scorer.js";
+import { sendTelegramAlert } from "../service/telegram.js";
 
 /**
  * Default TTL for issue claims: 2 hours (matches agents.yaml stale_timeout_ms conventions).
  * Configurable via `triggers.issue_claim_ttl_ms` in agents.yaml.
  */
 export const ISSUE_CLAIM_TTL_MS = 7_200_000;
+
+/**
+ * Dispatch flood gate cooldown window (issue #1060).
+ * Once an "already-in-review" guard fires for a source_ref, subsequent guard
+ * hits within this window are silently dropped — no task created, no block
+ * event recorded, no Telegram notification sent.
+ * Default: 60 minutes (matches the PR guard cooldown period).
+ */
+export const GUARD_FLOOD_GATE_WINDOW_MS = 3_600_000;
+
 import { runGitHubPreDispatchValidation } from "../orchestrator/pre-dispatch-validator.js";
 import { looksLikeStandupTask, extractStandupIssueNumber, shouldSkipStandupDispatch } from "./standup-dispatch-guard.js";
 
@@ -530,10 +541,29 @@ export async function dispatchGitHubIssues(
         // task record and report a dashboard skip event. This eliminates
         // re-implementation waste by providing a visible audit trail instead of
         // silently skipping.
+        //
+        // Dispatch flood gate (issue #1060): if this guard already fired for the
+        // same source_ref within the last 60 minutes, silently drop the event —
+        // no task, no block record, no Telegram notification.  Only the *first*
+        // fire within the window creates a task and sends an alert.
         if (
           (validation.failureCode === "open_pr_exists" || validation.failureCode === "approved_pr_waiting") &&
           validation.blockingPRNumber
         ) {
+          const isFloodGateActive = store.hasRecentGuardBlock(sourceRef, GUARD_FLOOD_GATE_WINDOW_MS);
+          if (isFloodGateActive) {
+            log.info("Dispatch flood gate: suppressing duplicate guard fire within cooldown window", {
+              sourceRef,
+              blockingPRNumber: validation.blockingPRNumber,
+              failureCode: validation.failureCode,
+              windowMs: GUARD_FLOOD_GATE_WINDOW_MS,
+            });
+            result.skipped++;
+            continue;
+          }
+
+          // First guard fire within the window — record the task, persist the
+          // block event, and send a single Telegram alert.
           recordAlreadyInReviewTask(store, {
             sourceRef,
             agentName,
@@ -557,6 +587,13 @@ export async function dispatchGitHubIssues(
               blockCode: validation.failureCode,
               blockingPRNumber: validation.blockingPRNumber,
             });
+
+            // Telegram alert: one notification per source_ref per cooldown window.
+            const prUrl = `https://github.com/${issue.repo}/pull/${validation.blockingPRNumber}`;
+            sendTelegramAlert(
+              `🚦 *Dispatch guard fired* for \`${sourceRef}\`\n` +
+              `PR [#${validation.blockingPRNumber}](${prUrl}) is already in review — dispatch suppressed for 60 min.`,
+            );
           } catch (blockErr) {
             log.warn("Failed to record dispatch block event", {
               sourceRef,

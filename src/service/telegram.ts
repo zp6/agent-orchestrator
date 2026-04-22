@@ -1278,3 +1278,19 @@ export async function pollTelegram(ctx: TelegramContext): Promise<void> {
   if (!loadConfig()) return;
   startTelegramPolling(ctx);
 }
+
+/**
+ * Send a proactive alert to the Telegram operator chat.
+ *
+ * Fire-and-forget: errors are swallowed so callers never crash.
+ * Intended for daemon-generated notifications (e.g. dispatch flood-gate
+ * first-fire alerts) rather than interactive command responses.
+ *
+ * @param text  Markdown-compatible message text (max ~4000 chars)
+ */
+export function sendTelegramAlert(text: string): void {
+  if (!loadConfig()) return;
+  sendReply(text).catch(() => {
+    // Intentionally swallowed — alert delivery is best-effort
+  });
+}

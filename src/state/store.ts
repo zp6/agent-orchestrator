@@ -9305,6 +9305,34 @@ export class StateStore {
   }
 
   /**
+   * Check whether a PR-guard block (open_pr_exists | approved_pr_waiting) was
+   * already recorded for this source_ref within the given window.
+   *
+   * Used by the dispatch flood gate (issue #1060) to suppress duplicate
+   * "already-in-review" tasks: the second and subsequent guard fires within
+   * the cooldown window are silently dropped — no task created, no block
+   * event recorded, no Telegram notification sent.
+   *
+   * @param sourceRef  e.g. "rapartlu/agent-orchestrator#1060"
+   * @param windowMs   Look-back window in milliseconds (default: 60 minutes)
+   */
+  hasRecentGuardBlock(sourceRef: string, windowMs = 3_600_000): boolean {
+    this.runDispatchBlocksMigration();
+    const cutoff = new Date(Date.now() - windowMs).toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT 1
+         FROM dispatch_blocks
+         WHERE source_ref = ?
+           AND block_code IN ('open_pr_exists', 'approved_pr_waiting')
+           AND timestamp >= ?
+         LIMIT 1`,
+      )
+      .get(sourceRef, cutoff);
+    return row !== undefined;
+  }
+
+  /**
    * Return per-day dispatch block rate metrics over a rolling window.
    *
    * Block rate = blocked / (blocked + actual_dispatches).

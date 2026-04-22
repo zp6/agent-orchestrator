@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { dispatchGitHubIssues, dispatchIdleAgentBacklog, dispatchLinearChecks, dispatchSlackChecks, buildExistingPRReviewChecklist, routeBlockingPRToQueue } from "./trigger-dispatcher.js";
+import { dispatchGitHubIssues, dispatchIdleAgentBacklog, dispatchLinearChecks, dispatchSlackChecks, buildExistingPRReviewChecklist, routeBlockingPRToQueue, GUARD_FLOOD_GATE_WINDOW_MS } from "./trigger-dispatcher.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { StateStore } from "../state/store.js";
@@ -19,6 +19,11 @@ vi.mock("./github.js", () => ({
 vi.mock("./reporters.js", () => ({
   reportResult: vi.fn(),
   DEFAULT_ESCALATION_RETRY_LIMIT: 3,
+}));
+
+// Mock telegram so tests don't attempt real HTTP calls
+vi.mock("../service/telegram.js", () => ({
+  sendTelegramAlert: vi.fn(),
 }));
 
 // Mock issue-state-bridge: default = issue is open, no PRs
@@ -114,6 +119,11 @@ describe("dispatchGitHubIssues", () => {
       addInFlightReservation: vi.fn(),
       removeInFlightReservation: vi.fn(),
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
+      // Dispatch flood gate (issue #1060)
+      hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      recordDispatchBlock: vi.fn(),
+      createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
+      updateTask: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -357,6 +367,9 @@ describe("pre-dispatch issue state validation", () => {
       addInFlightReservation: vi.fn(),
       removeInFlightReservation: vi.fn(),
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
+      // Dispatch flood gate (issue #1060)
+      hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -448,6 +461,9 @@ describe("duplicate PR detection before dispatch", () => {
       addInFlightReservation: vi.fn(),
       removeInFlightReservation: vi.fn(),
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
+      // Dispatch flood gate (issue #1060)
+      hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -674,6 +690,9 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       addInFlightReservation: vi.fn(),
       removeInFlightReservation: vi.fn(),
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
+      // Dispatch flood gate (issue #1060)
+      hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -803,6 +822,9 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       addInFlightReservation: vi.fn(),
       removeInFlightReservation: vi.fn(),
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
+      // Dispatch flood gate (issue #1060)
+      hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1154,6 +1176,9 @@ describe("dispatchIdleAgentBacklog", () => {
       addInFlightReservation: vi.fn(),
       removeInFlightReservation: vi.fn(),
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
+      // Dispatch flood gate (issue #1060)
+      hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1421,6 +1446,9 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       addInFlightReservation: vi.fn(),
       removeInFlightReservation: vi.fn(),
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
+      // Dispatch flood gate (issue #1060)
+      hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1569,6 +1597,9 @@ describe("in-flight branch detection", () => {
       addInFlightReservation: vi.fn(),
       removeInFlightReservation: vi.fn(),
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
+      // Dispatch flood gate (issue #1060)
+      hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
 
     vi.mocked(mockStore.hasActiveTask).mockReturnValue(false);
@@ -1628,6 +1659,9 @@ describe("in-flight branch detection", () => {
       addInFlightReservation: vi.fn(),
       removeInFlightReservation: vi.fn(),
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
+      // Dispatch flood gate (issue #1060)
+      hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
 
     await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1688,6 +1722,9 @@ describe("in-flight branch detection", () => {
       addInFlightReservation: vi.fn(),
       removeInFlightReservation: vi.fn(),
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
+      // Dispatch flood gate (issue #1060)
+      hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
 
     const result = await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1743,6 +1780,9 @@ describe("in-flight branch detection", () => {
       addInFlightReservation: vi.fn(),
       removeInFlightReservation: vi.fn(),
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
+      // Dispatch flood gate (issue #1060)
+      hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
 
     await dispatchIdleAgentBacklog(branchConfig, mockStore, mockDispatcher);
@@ -1798,6 +1838,11 @@ describe("approved PR skip logic", () => {
       addInFlightReservation: vi.fn(),
       removeInFlightReservation: vi.fn(),
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
+      // Dispatch flood gate (issue #1060) — no createTask/updateTask here so
+      // recordAlreadyInReviewTask silently fails (caught), preserving the
+      // "does NOT mark processed" assertion for approved_pr_waiting.
+      hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1960,6 +2005,9 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
       addInFlightReservation: vi.fn(),
       removeInFlightReservation: vi.fn(),
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
+      // Dispatch flood gate (issue #1060)
+      hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -2163,6 +2211,120 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
 
     // Should NOT call addToPriorityReviewQueue — already pending
     expect(mockStore.addToPriorityReviewQueue).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dispatch flood gate (issue #1060)
+// ---------------------------------------------------------------------------
+
+describe("dispatch flood gate (issue #1060)", () => {
+  let mockStore: StateStore;
+  let mockDispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStore = {
+      isProcessed: vi.fn().mockReturnValue(false),
+      markProcessed: vi.fn(),
+      getTask: vi.fn().mockReturnValue(null),
+      listTasks: vi.fn().mockReturnValue([]),
+      hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
+      findDispatchCandidateBySourceRef: vi.fn().mockReturnValue(undefined),
+      countFailuresForSourceRef: vi.fn().mockReturnValue(0),
+      addDispatchValidation: vi.fn(),
+      cleanExpiredClaims: vi.fn().mockReturnValue(0),
+      tryClaimIssue: vi.fn().mockReturnValue(true),
+      getActiveClaim: vi.fn().mockReturnValue(undefined),
+      releaseIssueClaim: vi.fn(),
+      updateClaimTaskId: vi.fn(),
+      cancelSupersededTasks: vi.fn().mockReturnValue(0),
+      findAllTasksBySourceRef: vi.fn().mockReturnValue([]),
+      getSecretMountStatus: vi.fn().mockReturnValue([]),
+      isPRInMergeQueue: vi.fn().mockReturnValue(false),
+      isPRInPriorityReviewQueue: vi.fn().mockReturnValue(false),
+      addToPriorityReviewQueue: vi.fn(),
+      getDispatchLock: vi.fn().mockReturnValue(undefined),
+      acquireDispatchLock: vi.fn(),
+      releaseDispatchLock: vi.fn(),
+      cleanExpiredDispatchLocks: vi.fn().mockReturnValue(0),
+      getInFlightReservation: vi.fn().mockReturnValue(undefined),
+      addInFlightReservation: vi.fn(),
+      removeInFlightReservation: vi.fn(),
+      cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
+      // Flood gate methods
+      hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      recordDispatchBlock: vi.fn(),
+      createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
+      updateTask: vi.fn(),
+    } as unknown as StateStore;
+    mockDispatcher = {
+      dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
+    } as unknown as Dispatcher;
+    mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
+  });
+
+  it("creates already-in-review task and records block on FIRST guard fire within window", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Feature", body: "Do it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 99, title: "Fix Feature", url: "https://github.com/owner/my-repo/pull/99", state: "open", isDraft: false },
+    ]);
+    // Flood gate is NOT active — first fire
+    (mockStore.hasRecentGuardBlock as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // Task must be created for the first guard fire
+    expect(mockStore.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ source_ref: "owner/my-repo#42" }),
+    );
+    // Block event must be recorded (which sets the flood gate)
+    expect(mockStore.recordDispatchBlock).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceRef: "owner/my-repo#42", blockCode: "open_pr_exists" }),
+    );
+    // Issue must NOT be dispatched to the agent
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("silently drops dispatch when flood gate is ACTIVE (duplicate fire within window)", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 42, title: "Feature", body: "Do it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 99, title: "Fix Feature", url: "https://github.com/owner/my-repo/pull/99", state: "open", isDraft: false },
+    ]);
+    // Flood gate IS active — duplicate fire
+    (mockStore.hasRecentGuardBlock as ReturnType<typeof vi.fn>).mockReturnValue(true);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // Entire dispatch is dropped — no task, no block event recorded
+    expect(mockStore.createTask).not.toHaveBeenCalled();
+    expect(mockStore.recordDispatchBlock).not.toHaveBeenCalled();
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("hasRecentGuardBlock is called with the correct sourceRef and window", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 7, title: "Issue 7", body: "body", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 55, title: "PR 55", url: "https://github.com/owner/my-repo/pull/55", state: "open", isDraft: false },
+    ]);
+    (mockStore.hasRecentGuardBlock as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(mockStore.hasRecentGuardBlock).toHaveBeenCalledWith(
+      "owner/my-repo#7",
+      3_600_000, // GUARD_FLOOD_GATE_WINDOW_MS
+    );
   });
 });
 
