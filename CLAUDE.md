@@ -52,6 +52,8 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 - **Prompt caching** — all static LLM system prompts cached via Anthropic `cache_control: { type: 'ephemeral' }`; dynamic config portions kept variable to avoid cache invalidation; reduces token spend on repeated supervisor/verifier calls (issue #1037)
 - **Dispatch waste rate alerting** — `getDispatchWasteMetrics24h()` tracks per-hour rolling window; Telegram alert fires when waste rate exceeds 15% in the most recent hour (`DISPATCH_WASTE_RATE_THRESHOLD = 0.15`) (issue #991)
 - **Cross-repo PR guard** — pre-dispatch validator checks all peer agent repos (`config.agents[*].github`) for open non-draft PRs before dispatching; blocks with failure code `open_pr_exists_cross_repo` (issue #991)
+- **Dispatch flood gate** — after the PR existence guard fires for a given issue, subsequent guard re-fires within a 60-minute cooldown window (`GUARD_FLOOD_GATE_WINDOW_MS = 3_600_000`) are silently dropped — no task created, no block recorded, no Telegram alert; only the first hit within the window creates a task and sends an alert (issue #1060)
+- **Resilient team meetings** — if all agents return connection errors in a standup (e.g. Docker outage), the meeting is abandoned without saving to the DB, so the time-based scheduler retries on the next cycle rather than waiting the full 24-hour cooldown (issue #1053)
 
 ## CRITICAL: NEVER Push Directly to Main
 
