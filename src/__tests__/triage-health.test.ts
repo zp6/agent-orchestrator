@@ -533,3 +533,240 @@ describe("formatTriageHealthForTelegram", () => {
     expect(msg).not.toMatch(/agent-beta/);
   });
 });
+
+// ── First-pass rate tests (issue #413) ────────────────────────────────────────
+
+describe("first_pass_rate (issue #413)", () => {
+  it("is null when there are no scored tasks", () => {
+    const store = makeStore([]);
+    const report = getTriageHealthPayload(store);
+    expect(report.fleet.first_pass_rate).toBeNull();
+  });
+
+  it("is 1.0 when every passed task has zero revisions", () => {
+    const store = makeStore([
+      makeTask({
+        task_type: "housekeeping",
+        status: "done",
+        quality_score: 0.90,
+        result: null,
+        verification_notes: null,
+        created_at: daysAgo(1),
+      }),
+      makeTask({
+        task_type: "housekeeping",
+        status: "done",
+        quality_score: 0.85,
+        result: null,
+        verification_notes: null,
+        created_at: daysAgo(2),
+      }),
+    ]);
+    const report = getTriageHealthPayload(store);
+    expect(report.fleet.first_pass_rate).toBe(1.0);
+  });
+
+  it("is 0 when all tasks required revisions before passing", () => {
+    const store = makeStore([
+      makeTask({
+        task_type: "housekeeping",
+        status: "done",
+        quality_score: 0.85,
+        verification_notes: "revision attempt — retry",
+        created_at: daysAgo(1),
+      }),
+    ]);
+    const report = getTriageHealthPayload(store);
+    // estimateRevisions returns 1 for "revision" in verification_notes
+    expect(report.fleet.first_pass_rate).toBe(0);
+  });
+
+  it("counts only passed-with-zero-revisions tasks toward first_pass_rate", () => {
+    // 2 tasks: one passed with no revisions, one passed with 1 revision
+    const store = makeStore([
+      makeTask({
+        task_type: "housekeeping",
+        status: "done",
+        quality_score: 0.90,
+        result: null,
+        verification_notes: null,
+        created_at: daysAgo(1),
+      }),
+      makeTask({
+        task_type: "housekeeping",
+        status: "done",
+        quality_score: 0.85,
+        verification_notes: "revision attempt",
+        created_at: daysAgo(2),
+      }),
+    ]);
+    const report = getTriageHealthPayload(store);
+    // 1 out of 2 tasks passed on first try → 0.5
+    expect(report.fleet.first_pass_rate).toBe(0.5);
+  });
+
+  it("first_pass_rate appears in per-agent stats", () => {
+    const store = makeStore([
+      makeTask({
+        agent_name: "agent-alpha",
+        task_type: "housekeeping",
+        status: "done",
+        quality_score: 0.90,
+        result: null,
+        verification_notes: null,
+        created_at: daysAgo(1),
+      }),
+    ]);
+    const report = getTriageHealthPayload(store);
+    const entry = report.agents.find((a) => a.agent_name === "agent-alpha");
+    expect(entry).toBeDefined();
+    expect(entry!.current.first_pass_rate).toBe(1.0);
+  });
+});
+
+// ── Validator call stats tests (issue #413) ───────────────────────────────────
+
+describe("validator call stats (issue #413)", () => {
+  it("returns null stats when store does not implement listTriageValidatorCalls", () => {
+    const store = makeStore([
+      makeTask({
+        task_type: "housekeeping",
+        status: "done",
+        quality_score: 0.85,
+        created_at: daysAgo(1),
+      }),
+    ]);
+    // makeStore only returns { listTasks } — no listTriageValidatorCalls
+    const report = getTriageHealthPayload(store);
+    expect(report.validator.total_calls).toBeNull();
+    expect(report.validator.passing_calls).toBeNull();
+    expect(report.validator.calls_per_task).toBeNull();
+  });
+
+  it("returns zero call stats when store returns empty validator calls", () => {
+    const store: ITriageHealthStore = {
+      listTasks: () => [
+        makeTask({
+          task_type: "housekeeping",
+          status: "done",
+          quality_score: 0.85,
+          created_at: daysAgo(1),
+        }) as Task,
+      ],
+      listTriageValidatorCalls: () => [],
+    };
+    const report = getTriageHealthPayload(store);
+    expect(report.validator.total_calls).toBe(0);
+    expect(report.validator.passing_calls).toBe(0);
+    expect(report.validator.calls_per_task).toBe(0);
+  });
+
+  it("computes calls_per_task as validator calls / fleet total tasks", () => {
+    const baseTask = makeTask({
+      task_type: "housekeeping",
+      status: "done",
+      quality_score: 0.85,
+      created_at: daysAgo(1),
+    });
+    const store: ITriageHealthStore = {
+      listTasks: () => [baseTask as Task],
+      listTriageValidatorCalls: () => [
+        { id: 1, agent_name: "agent-a", passed: true, score: 1.0, created_at: daysAgo(1) },
+        { id: 2, agent_name: "agent-a", passed: false, score: 0.5, created_at: daysAgo(2) },
+      ],
+    };
+    const report = getTriageHealthPayload(store);
+    // 2 calls / 1 task = 2.0
+    expect(report.validator.total_calls).toBe(2);
+    expect(report.validator.passing_calls).toBe(1);
+    expect(report.validator.calls_per_task).toBe(2.0);
+  });
+
+  it("calls_per_task is null when fleet has no tasks but validator calls exist", () => {
+    const store: ITriageHealthStore = {
+      // Only non-housekeeping tasks — fleet.total will be 0
+      listTasks: () => [
+        makeTask({ task_type: "implementation", status: "done", created_at: daysAgo(1) }) as Task,
+      ],
+      listTriageValidatorCalls: () => [
+        { id: 1, agent_name: "agent-a", passed: true, score: 1.0, created_at: daysAgo(1) },
+      ],
+    };
+    const report = getTriageHealthPayload(store);
+    expect(report.validator.calls_per_task).toBeNull();
+  });
+
+  it("gracefully returns null stats when listTriageValidatorCalls throws", () => {
+    const store: ITriageHealthStore = {
+      listTasks: () => [
+        makeTask({
+          task_type: "housekeeping",
+          status: "done",
+          quality_score: 0.85,
+          created_at: daysAgo(1),
+        }) as Task,
+      ],
+      listTriageValidatorCalls: () => {
+        throw new Error("DB unavailable");
+      },
+    };
+    const report = getTriageHealthPayload(store);
+    expect(report.validator.total_calls).toBeNull();
+    expect(report.validator.passing_calls).toBeNull();
+    expect(report.validator.calls_per_task).toBeNull();
+  });
+});
+
+// ── Telegram format includes new metrics (issue #413) ─────────────────────────
+
+describe("formatTriageHealthForTelegram with #413 additions", () => {
+  it("includes 1st-pass rate in fleet summary", () => {
+    const store = makeStore([
+      makeTask({
+        task_type: "housekeeping",
+        status: "done",
+        quality_score: 0.90,
+        result: null,
+        verification_notes: null,
+        created_at: daysAgo(1),
+      }),
+    ]);
+    const report = getTriageHealthPayload(store);
+    const msg = formatTriageHealthForTelegram(report);
+    expect(msg).toMatch(/1st-pass/i);
+  });
+
+  it("shows 'tracking not available' when store lacks validator call support", () => {
+    const store = makeStore([
+      makeTask({
+        task_type: "housekeeping",
+        status: "done",
+        quality_score: 0.85,
+        created_at: daysAgo(1),
+      }),
+    ]);
+    const report = getTriageHealthPayload(store);
+    const msg = formatTriageHealthForTelegram(report);
+    expect(msg).toMatch(/tracking not available/i);
+  });
+
+  it("shows validator call rate when tracking is available", () => {
+    const store: ITriageHealthStore = {
+      listTasks: () => [
+        makeTask({
+          task_type: "housekeeping",
+          status: "done",
+          quality_score: 0.85,
+          created_at: daysAgo(1),
+        }) as Task,
+      ],
+      listTriageValidatorCalls: () => [
+        { id: 1, agent_name: "agent-a", passed: true, score: 1.0, created_at: daysAgo(1) },
+      ],
+    };
+    const report = getTriageHealthPayload(store);
+    const msg = formatTriageHealthForTelegram(report);
+    expect(msg).toMatch(/Pre-submit validator/i);
+    expect(msg).toMatch(/1 calls/);
+  });
+});

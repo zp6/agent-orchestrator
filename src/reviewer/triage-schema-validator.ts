@@ -282,15 +282,33 @@ export function validateTriageSchema(jsonOrText: string): TriageSchemaValidation
 // ── HTTP handler factory ──────────────────────────────────────────────────────
 
 /**
+ * Minimal store interface required by the validation handler for call tracking.
+ *
+ * Implemented by `StateStore.recordTriageValidatorCall()` (issue #413).
+ * When provided, every successful validation is persisted so that
+ * `/triage-health` can report the validator call rate vs. tasks submitted.
+ *
+ * Passing `null` / omitting the store disables call tracking (safe for tests
+ * and for callers that don't need the metric).
+ */
+export interface ITriageValidatorCallStore {
+  recordTriageValidatorCall(
+    agentName: string | null,
+    passed: boolean,
+    score: number,
+  ): void;
+}
+
+/**
  * Create an Express-compatible `POST /api/validate-triage-schema` route handler.
  *
  * Mount in your orchestrator or dashboard server:
  *
  *   import { createTriageSchemaValidationHandler } from 'claude-orchestrator-reviewer';
- *   app.post('/api/validate-triage-schema', express.json(), createTriageSchemaValidationHandler());
+ *   app.post('/api/validate-triage-schema', express.json(), createTriageSchemaValidationHandler({ store }));
  *
  * Request body (JSON):
- *   { "body": "<PR body text or fenced JSON block string>" }
+ *   { "body": "<PR body text or fenced JSON block string>", "agent_name": "<optional>" }
  *   OR the triage schema object directly (if already parsed by express.json()):
  *   { "duplicates_checked": true, "stale_issues": [], "priority_reordering": [], "outcome_summary": "..." }
  *
@@ -307,13 +325,22 @@ export function validateTriageSchema(jsonOrText: string): TriageSchemaValidation
  * Always returns 200 (even for validation failures) so agents can safely read
  * the response body. A 4xx is only returned for genuinely malformed requests
  * (missing Content-Type, no body).
+ *
+ * @param opts.store  Optional state store for recording validator call metrics
+ *                    (issue #413).  Pass the live `StateStore` instance to enable
+ *                    validator call rate tracking in `/triage-health`.
  */
-export function createTriageSchemaValidationHandler(): (req: any, res: any) => void {
+export function createTriageSchemaValidationHandler(
+  opts: { store?: ITriageValidatorCallStore | null } = {},
+): (req: any, res: any) => void {
+  const { store = null } = opts;
+
   return (req: any, res: any): void => {
     try {
       const body: unknown = req.body;
 
       let inputText: string;
+      let agentName: string | null = null;
 
       if (typeof body === "string") {
         // Body was sent as plain text
@@ -322,8 +349,11 @@ export function createTriageSchemaValidationHandler(): (req: any, res: any) => v
         // Express parsed the JSON body — check for a "body" string field first
         const bodyObj = body as Record<string, unknown>;
         if (typeof bodyObj["body"] === "string") {
-          // Agent sent { "body": "<PR body text>" }
+          // Agent sent { "body": "<PR body text>", "agent_name": "..." }
           inputText = bodyObj["body"];
+          if (typeof bodyObj["agent_name"] === "string" && bodyObj["agent_name"].trim()) {
+            agentName = bodyObj["agent_name"].trim();
+          }
         } else {
           // Treat the whole parsed object as the triage schema
           inputText = JSON.stringify(bodyObj);
@@ -341,7 +371,18 @@ export function createTriageSchemaValidationHandler(): (req: any, res: any) => v
         passed: result.passed,
         score: result.score,
         missingFields: result.missing_fields,
+        agentName,
       });
+
+      // Persist the call so /triage-health can report validator call rate (issue #413).
+      try {
+        store?.recordTriageValidatorCall(agentName, result.passed, result.score);
+      } catch (storeErr) {
+        // Non-fatal — never let tracking failures break the validation response.
+        log.warn("Failed to record triage validator call", {
+          error: storeErr instanceof Error ? storeErr.message : String(storeErr),
+        });
+      }
 
       res.json(result);
     } catch (err) {

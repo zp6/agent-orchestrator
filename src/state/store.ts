@@ -635,6 +635,24 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       CREATE INDEX IF NOT EXISTS idx_pr_guard_cooldown_expires
         ON pr_guard_cooldown (expires_at);
     `);
+
+    // Triage pre-submission validator call log (issue #413).
+    // Records each call to POST /api/validate-triage-schema so that
+    // getTriageHealthPayload() can compute the validator call rate vs.
+    // tasks submitted.  agent_name is optional — agents may not always
+    // pass identifying information in the request body.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS triage_validator_calls (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_name  TEXT,
+        passed      INTEGER NOT NULL,
+        score       REAL NOT NULL,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_triage_validator_calls_created_at
+        ON triage_validator_calls (created_at DESC);
+    `);
   }
 
   // ── PR guard cooldown (issue #390) ───────────────────────────────────────
@@ -4089,6 +4107,62 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
         created_at: r.created_at,
       };
     });
+  }
+
+  // ── Triage pre-submission validator calls (issue #413) ──────────────────
+
+  /**
+   * Record one call to the triage pre-submission validator endpoint.
+   *
+   * Call this inside `createTriageSchemaValidationHandler()` after computing
+   * the validation result so that `/triage-health` can report the validator
+   * call rate alongside the triage submission rate.
+   *
+   * @param agentName  Agent that made the call (may be null if not supplied).
+   * @param passed     Whether the submitted schema passed validation.
+   * @param score      Validation score returned to the caller (0–1).
+   */
+  recordTriageValidatorCall(
+    agentName: string | null,
+    passed: boolean,
+    score: number,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO triage_validator_calls (agent_name, passed, score)
+         VALUES (?, ?, ?)`,
+      )
+      .run(agentName ?? null, passed ? 1 : 0, score);
+  }
+
+  /**
+   * Return all validator call records on or after `sinceIso`.
+   *
+   * @param sinceIso  ISO timestamp lower bound (inclusive).
+   */
+  listTriageValidatorCalls(sinceIso: string): Array<{
+    id: number;
+    agent_name: string | null;
+    passed: boolean;
+    score: number;
+    created_at: string;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT id, agent_name, passed, score, created_at
+         FROM triage_validator_calls
+         WHERE created_at >= ?
+         ORDER BY created_at DESC`,
+      )
+      .all(sinceIso) as Array<{
+        id: number;
+        agent_name: string | null;
+        passed: 0 | 1;
+        score: number;
+        created_at: string;
+      }>;
+
+    return rows.map((r) => ({ ...r, passed: r.passed === 1 }));
   }
 
   // ── Startup integrity check (issue #366) ────────────────────────────────

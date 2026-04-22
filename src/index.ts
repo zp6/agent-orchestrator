@@ -182,6 +182,9 @@ export type {
 // Per-agent triage schema pass/fail rates, missing-field frequencies, revision counts,
 // and 7-day trend so operators can see whether coaching is working.
 //
+// Issue #413 additions: first-pass approval rate and pre-submission validator call rate
+// (calls to POST /api/validate-triage-schema per task submitted in the window).
+//
 // Mount in the orchestrator or dashboard server:
 //   app.get('/api/triage-health', (req, res) => res.json(
 //     getTriageHealthPayload(store, req.query.agent as string | undefined)
@@ -197,6 +200,7 @@ export type {
   TriageHealthReport,
   AgentTriageHealthEntry,
   AgentTriagePeriodStats,
+  ValidatorCallStats,
   ITriageHealthStore,
 } from "./reviewer/triage-health.js";
 
@@ -702,6 +706,7 @@ export {
 export type {
   TriageSchemaValidationResult,
   TriageFieldError,
+  ITriageValidatorCallStore,
 } from "./reviewer/triage-schema-validator.js";
 
 // CLI smoke test verifier (issue #274)

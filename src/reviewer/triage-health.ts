@@ -31,6 +31,23 @@
  * `TriageHealthReport` as a Telegram Markdown message.
  *
  * Both functions are pure / synchronous — no I/O, easy to unit-test.
+ *
+ * ## Issue #413 additions
+ *
+ * The report now includes two additional metrics beyond the original #409 scope:
+ *
+ * **First-pass approval rate** — tasks approved without any revision round (0 revisions
+ * and passed). Distinct from the overall pass rate which includes eventual approvals
+ * after one or more revision cycles.
+ *
+ * **Validator call rate** — number of pre-submission validator calls relative to
+ * housekeeping tasks submitted in the same window.  This is the primary "before/after"
+ * signal: if the validator shipped and agents are using it, `validator_call_rate` will
+ * rise and `avg_revisions_per_task` will fall over time.
+ *
+ * The store interface is extended with an optional `listTriageValidatorCalls()` method.
+ * When the method is not available (e.g. in older tests or minimal mocks), validator
+ * call metrics are reported as null and the rest of the report is unaffected.
  */
 
 import type { Task } from "../state/types.js";
@@ -59,6 +76,13 @@ export interface AgentTriagePeriodStats {
   failed: number;
   /** Pass rate 0–1 (null when total === 0). */
   pass_rate: number | null;
+  /**
+   * First-pass approval rate — tasks approved without any revision round.
+   * Null when total === 0.  Distinct from `pass_rate`: a task can pass
+   * after one or more revision cycles and still count toward `pass_rate`
+   * but NOT toward `first_pass_rate`.
+   */
+  first_pass_rate: number | null;
   /** Total revision rounds across all tasks in this window. */
   total_revisions: number;
   /** Average revisions per triage task (null when total === 0). */
@@ -92,6 +116,28 @@ export interface AgentTriageHealthEntry {
   recent_failures: string[];
 }
 
+/** Validator call stats for one time window. */
+export interface ValidatorCallStats {
+  /**
+   * Total pre-submission validator calls recorded in the window.
+   * Null when the store does not support validator call tracking
+   * (i.e. `listTriageValidatorCalls` is not implemented).
+   */
+  total_calls: number | null;
+  /**
+   * Calls that produced a passing result (score ≥ 0.80).
+   * Null when tracking is unavailable.
+   */
+  passing_calls: number | null;
+  /**
+   * Validator calls per housekeeping task submitted (0–∞).
+   * A value > 1 means agents are running multiple pre-checks per submission.
+   * A value of 0 means no agents called the validator despite submitting tasks.
+   * Null when tracking is unavailable or total tasks === 0.
+   */
+  calls_per_task: number | null;
+}
+
 /** Full triage health report. */
 export interface TriageHealthReport {
   /** ISO timestamp when the report was generated. */
@@ -106,11 +152,30 @@ export interface TriageHealthReport {
    * Fleet-level summary across ALL agents in the current window.
    */
   fleet: AgentTriagePeriodStats;
+  /**
+   * Pre-submission validator call stats for the current window (issue #413).
+   * The primary "before/after" signal: as validator adoption rises,
+   * `fleet.avg_revisions_per_task` should fall.
+   */
+  validator: ValidatorCallStats;
 }
 
 /** Minimal store interface needed by this module. */
 export interface ITriageHealthStore {
   listTasks(opts: { limit?: number }): Task[];
+  /**
+   * Return triage validator call records on or after `sinceIso`.
+   *
+   * Optional — when not implemented, validator call metrics in the report will
+   * be null.  Implemented by `StateStore.listTriageValidatorCalls()` (issue #413).
+   */
+  listTriageValidatorCalls?(sinceIso: string): Array<{
+    id: number;
+    agent_name: string | null;
+    passed: boolean;
+    score: number;
+    created_at: string;
+  }>;
 }
 
 // ── Core logic ────────────────────────────────────────────────────────────────
@@ -206,6 +271,7 @@ function buildPeriodStats(tasks: Task[]): AgentTriagePeriodStats {
       passed: 0,
       failed: 0,
       pass_rate: null,
+      first_pass_rate: null,
       total_revisions: 0,
       avg_revisions_per_task: null,
       missing_fields: [],
@@ -215,6 +281,12 @@ function buildPeriodStats(tasks: Task[]): AgentTriagePeriodStats {
   const passed = scoredTasks.filter((t) => triageTaskPassed(t) === true).length;
   const failed = total - passed;
   const pass_rate = passed / total;
+
+  // First-pass rate: tasks that passed AND required zero revision rounds.
+  const firstPassCount = scoredTasks.filter(
+    (t) => triageTaskPassed(t) === true && estimateRevisions(t) === 0,
+  ).length;
+  const first_pass_rate = firstPassCount / total;
 
   const totalRevisions = scoredTasks.reduce(
     (sum, t) => sum + estimateRevisions(t),
@@ -237,6 +309,7 @@ function buildPeriodStats(tasks: Task[]): AgentTriagePeriodStats {
     passed,
     failed,
     pass_rate,
+    first_pass_rate,
     total_revisions: totalRevisions,
     avg_revisions_per_task: totalRevisions / total,
     missing_fields,
@@ -362,13 +435,46 @@ export function getTriageHealthPayload(
   });
   const fleet = buildPeriodStats(currentTasksAll);
 
+  // Compute validator call stats for the current window (issue #413).
+  const validator = buildValidatorCallStats(store, currentCutoff, fleet.total);
+
   return {
     generated_at: new Date(nowMs).toISOString(),
     current_window_days: TRIAGE_HEALTH_CURRENT_DAYS,
     prior_window_days: TRIAGE_HEALTH_PRIOR_DAYS,
     agents: agentEntries,
     fleet,
+    validator,
   };
+}
+
+/**
+ * Build `ValidatorCallStats` from the store's validator call log.
+ *
+ * When the store does not implement `listTriageValidatorCalls`, all metrics
+ * are null so existing callers using a minimal mock store are unaffected.
+ */
+function buildValidatorCallStats(
+  store: ITriageHealthStore,
+  sinceIso: string,
+  fleetTotal: number,
+): ValidatorCallStats {
+  if (typeof store.listTriageValidatorCalls !== "function") {
+    return { total_calls: null, passing_calls: null, calls_per_task: null };
+  }
+
+  let calls: Array<{ passed: boolean }>;
+  try {
+    calls = store.listTriageValidatorCalls(sinceIso);
+  } catch {
+    return { total_calls: null, passing_calls: null, calls_per_task: null };
+  }
+
+  const total_calls = calls.length;
+  const passing_calls = calls.filter((c) => c.passed).length;
+  const calls_per_task = fleetTotal > 0 ? total_calls / fleetTotal : null;
+
+  return { total_calls, passing_calls, calls_per_task };
 }
 
 // ── Telegram formatting ───────────────────────────────────────────────────────
@@ -386,12 +492,15 @@ function formatPassRate(r: number | null): string {
 
 function formatPeriodStats(stats: AgentTriagePeriodStats, label: string): string {
   const passRate = formatPassRate(stats.pass_rate);
+  const firstPassRate = formatPassRate(stats.first_pass_rate);
   const revisions =
     stats.avg_revisions_per_task !== null
       ? `${stats.avg_revisions_per_task.toFixed(1)} rev/task`
       : "0 rev/task";
 
-  const line = `${label}: ${passRate} pass (${stats.passed}/${stats.total}) · ${revisions}`;
+  const line =
+    `${label}: ${passRate} pass (${stats.passed}/${stats.total}) · ` +
+    `1st-pass ${firstPassRate} · ${revisions}`;
 
   if (stats.missing_fields.length > 0) {
     const top = stats.missing_fields
@@ -423,6 +532,7 @@ export function formatTriageHealthForTelegram(
     lines.push(
       `*Fleet* (all agents, last ${report.current_window_days}d)`,
       `Pass rate: ${formatPassRate(fleet.pass_rate)} (${fleet.passed}/${fleet.total})`,
+      `1st-pass rate: ${formatPassRate(fleet.first_pass_rate)}`,
       `Avg revisions/task: ${fleet.avg_revisions_per_task?.toFixed(1) ?? "0"}`,
     );
     if (fleet.missing_fields.length > 0) {
@@ -432,6 +542,24 @@ export function formatTriageHealthForTelegram(
         .join(", ");
       lines.push(`Most missed fields: ${top}`);
     }
+
+    // Validator call rate (issue #413) — shows whether agents are using the
+    // pre-submission validator and whether it correlates with reduced revisions.
+    const v = report.validator;
+    if (v.total_calls !== null) {
+      const callsPerTask =
+        v.calls_per_task !== null ? v.calls_per_task.toFixed(2) : "—";
+      const passingPct =
+        v.total_calls > 0 && v.passing_calls !== null
+          ? `${Math.round((v.passing_calls / v.total_calls) * 100)}% passed pre-check`
+          : "";
+      lines.push(
+        `Pre-submit validator: ${v.total_calls} calls · ${callsPerTask} calls/task${passingPct ? ` · ${passingPct}` : ""}`,
+      );
+    } else {
+      lines.push(`Pre-submit validator: tracking not available`);
+    }
+
     lines.push(``);
   }
 
