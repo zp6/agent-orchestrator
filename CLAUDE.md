@@ -216,6 +216,8 @@ An embedded HTTP server starts alongside the daemon on port **3472** (same as th
 |----------|-------------|
 | `GET /dispatch-efficiency` | 7-day rolling dispatch block-rate metrics (configurable via `?days=N`) |
 | `GET /health` | Basic liveness check — returns `{"status":"ok"}` |
+| `GET /semantic-memory-effectiveness` | Semantic memory effectiveness metrics (match rates, latency, usefulness) over configurable window (`?days=N`) |
+| `GET /investigations` | Research investigation feed — paginated task list with status/quality filters (`?limit=N&offset=N&status=done`) |
 
 The dashboard agent polls `/dispatch-efficiency` to populate the dispatch efficiency panel without needing CLI access.
 
@@ -248,7 +250,10 @@ The `orch` CLI is built from `src/cli/index.ts`. Key command groups:
 | `orch followup-chains` | Follow-up chain depth tracker |
 | `orch skip-blockers` | Chronically skipped issue tracker |
 | `orch routing-accuracy` | Routing accuracy and mismatch audit |
-| `orch review-saturation` | Review saturation metrics |
+| `orch routing-mismatches` | Routing mismatch audit: tasks where executed agent ≠ intended agent |
+| `orch review-saturation` | Review saturation metrics: ratio of already-in-review dedup responses |
+| `orch health-checks` | Health check storm effectiveness panel: dispatched vs suppressed events (24h rolling) |
+| `orch agent-gaps` | Coverage gap detection: unowned topics, scope overload, low-confidence routing |
 | `orch cost` | Token usage and billing |
 
 Run `orch --help` for the full list. All commands accept `--json` for machine-readable output.

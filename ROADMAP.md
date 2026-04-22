@@ -10,11 +10,14 @@ These are the most impactful items — highest signal-to-noise for the fleet.
 
 | # | Issue | What & Why |
 |---|-------|-----------|
-| 1 | [#1047](https://github.com/rapartlu/agent-orchestrator/issues/1047) | **Already-in-review state persistence** — persist already-in-review results to `state.db` so cross-restart re-dispatch is prevented; the flood gate (#1060) covers the in-process case but not cross-restart |
-| 2 | [#938](https://github.com/rapartlu/agent-orchestrator/issues/938) | **Dispatch safety audit log** — unified guard event feed for all pre-dispatch safety decisions (antibody, idempotency, lock, affinity); critical for debugging misroutes and blocked dispatches |
-| 3 | [#929](https://github.com/rapartlu/agent-orchestrator/issues/929) | **Pre-dispatch semantic duplicate detection** — LLM-based dedup of open issues before dispatching; prevents agents implementing the same feature twice under different titles |
-| 4 | [#911](https://github.com/rapartlu/agent-orchestrator/issues/911) | **Score coverage backfill endpoint** — expose `/api/tasks/backfill-scores` in daemon loop to retroactively score tasks missing quality data |
-| 5 | [#885](https://github.com/rapartlu/agent-orchestrator/issues/885) | **Issue existence validation before dispatch** — stops wasted cycles dispatching to already-closed or nonexistent issues |
+| 1 | [#1061](https://github.com/rapartlu/agent-orchestrator/issues/1061) | **Hard quality floor for cross-repo triage follow-ups** — cross-repo housekeeping tasks scoring 0.42–0.51 are being approved; enforce minimum 0.60 floor for triage schema compliance |
+| 2 | [#1052](https://github.com/rapartlu/agent-orchestrator/issues/1052) | **PR existence guard issue-level cooldown** — guard detects open PR but doesn't prevent re-queue on next daemon cycle; set issue-level cooldown after first hit |
+| 3 | [#1047](https://github.com/rapartlu/agent-orchestrator/issues/1047) | **Already-in-review state persistence** — persist already-in-review results to `state.db` so cross-restart re-dispatch is prevented; the flood gate (#1060) covers the in-process case but not cross-restart |
+| 4 | [#1040](https://github.com/rapartlu/agent-orchestrator/issues/1040) | **CI failing on main** — auto-detected CI failure; P1-high bug requiring investigation and fix |
+| 5 | [#938](https://github.com/rapartlu/agent-orchestrator/issues/938) | **Dispatch safety audit log** — unified guard event feed for all pre-dispatch safety decisions (antibody, idempotency, lock, affinity); critical for debugging misroutes and blocked dispatches |
+| 6 | [#929](https://github.com/rapartlu/agent-orchestrator/issues/929) | **Pre-dispatch semantic duplicate detection** — LLM-based dedup of open issues before dispatching; prevents agents implementing the same feature twice under different titles |
+| 7 | [#911](https://github.com/rapartlu/agent-orchestrator/issues/911) | **Score coverage backfill endpoint** — expose `/api/tasks/backfill-scores` in daemon loop to retroactively score tasks missing quality data |
+| 8 | [#885](https://github.com/rapartlu/agent-orchestrator/issues/885) | **Issue existence validation before dispatch** — stops wasted cycles dispatching to already-closed or nonexistent issues |
 
 ---
 
@@ -24,11 +27,11 @@ Solid ideas, scoped and ready when Next Up clears.
 
 | # | Issue | What & Why |
 |---|-------|-----------|
-| 6 | [#874](https://github.com/rapartlu/agent-orchestrator/issues/874) | **Agent name canonicalization** — prevent silent misrouting from name typos or renamed agents (complements the UNKNOWN_AGENT guard) |
-| 7 | [#876](https://github.com/rapartlu/agent-orchestrator/issues/876) | **Research agent proactive dispatch** — auto-detect architecture/technology decisions and route them to the research agent before implementation begins |
-| 8 | [#869](https://github.com/rapartlu/agent-orchestrator/issues/869) | **Auto-route blocked dispatches to PR review queue** — when a dispatch is blocked, immediately surface it for review rather than losing it silently |
-| 9 | [#992](https://github.com/rapartlu/agent-orchestrator/issues/992) | **Cross-repo security propagation tracker** — detect when a security fix in one agent repo hasn't been applied to peer repos; auto-file propagation issues |
-| 10 | [#877](https://github.com/rapartlu/agent-orchestrator/issues/877) | **Decisions dashboard panel** — expose `/api/routing-decisions` in agent-dashboard for visibility into why tasks are routed where they are (needs dashboard-side work) |
+| 9 | [#874](https://github.com/rapartlu/agent-orchestrator/issues/874) | **Agent name canonicalization** — prevent silent misrouting from name typos or renamed agents (complements the UNKNOWN_AGENT guard) |
+| 10 | [#876](https://github.com/rapartlu/agent-orchestrator/issues/876) | **Research agent proactive dispatch** — auto-detect architecture/technology decisions and route them to the research agent before implementation begins |
+| 11 | [#869](https://github.com/rapartlu/agent-orchestrator/issues/869) | **Auto-route blocked dispatches to PR review queue** — when a dispatch is blocked, immediately surface it for review rather than losing it silently |
+| 12 | [#992](https://github.com/rapartlu/agent-orchestrator/issues/992) | **Cross-repo security propagation tracker** — detect when a security fix in one agent repo hasn't been applied to peer repos; auto-file propagation issues |
+| 13 | [#877](https://github.com/rapartlu/agent-orchestrator/issues/877) | **Decisions dashboard panel** — expose `/api/routing-decisions` in agent-dashboard for visibility into why tasks are routed where they are (needs dashboard-side work) |
 
 ---
 
@@ -38,12 +41,12 @@ Worth tracking but not yet scoped or prioritised.
 
 | # | Issue | What & Why |
 |---|-------|-----------|
-| 11 | [#1009](https://github.com/rapartlu/agent-orchestrator/issues/1009) | **Predictive failure shield** — pre-score tasks against a failure-probability model before dispatch; high-risk tasks get scope decomposition or context injection before any tokens are spent |
-| 12 | [#1010](https://github.com/rapartlu/agent-orchestrator/issues/1010) | **Autonomous fleet self-scaling** — capacity controller that spins up/down agent containers via Docker API based on queue depth and utilization |
-| 13 | [#1019](https://github.com/rapartlu/agent-orchestrator/issues/1019) | **Fleet scaling dashboard integration** — metrics endpoint + dashboard panel for fleet capacity observability |
-| 14 | [#1025](https://github.com/rapartlu/agent-orchestrator/issues/1025) | **Quality floor bypass alerts** — Telegram alert when a PR is approved despite very low quality score (bypass path) |
-| 15 | [#1022](https://github.com/rapartlu/agent-orchestrator/issues/1022) | **Scaling alerting rules and anomaly detection** — dynamic thresholds, multi-metric correlation, anomaly severity classification |
-| 16 | [#1038](https://github.com/rapartlu/agent-orchestrator/issues/1038) | **Prompt cache hit rate widget** — dashboard panel + weekly cost savings report from prompt caching (issue #1037 shipped caching; this tracks its ROI) |
+| 14 | [#1009](https://github.com/rapartlu/agent-orchestrator/issues/1009) | **Predictive failure shield** — pre-score tasks against a failure-probability model before dispatch; high-risk tasks get scope decomposition or context injection before any tokens are spent |
+| 15 | [#1010](https://github.com/rapartlu/agent-orchestrator/issues/1010) | **Autonomous fleet self-scaling** — capacity controller that spins up/down agent containers via Docker API based on queue depth and utilization |
+| 16 | [#1019](https://github.com/rapartlu/agent-orchestrator/issues/1019) | **Fleet scaling dashboard integration** — metrics endpoint + dashboard panel for fleet capacity observability |
+| 17 | [#1025](https://github.com/rapartlu/agent-orchestrator/issues/1025) | **Quality floor bypass alerts** — Telegram alert when a PR is approved despite very low quality score (bypass path) |
+| 18 | [#1022](https://github.com/rapartlu/agent-orchestrator/issues/1022) | **Scaling alerting rules and anomaly detection** — dynamic thresholds, multi-metric correlation, anomaly severity classification |
+| 19 | [#1038](https://github.com/rapartlu/agent-orchestrator/issues/1038) | **Prompt cache hit rate widget** — dashboard panel + weekly cost savings report from prompt caching (issue #1037 shipped caching; this tracks its ROI) |
 
 ---
 
