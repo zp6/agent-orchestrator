@@ -13,6 +13,8 @@
  *   GET /health                       — basic liveness check
  *   GET /investigations               — research investigation feed (issue #140)
  *   GET /investigations?limit=20&offset=0&status=done
+ *   GET /misrouting                   — research agent impl-task misroute feed (issue #1077)
+ *   GET /misrouting?agent=claude-research-agent&days=7
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
@@ -86,6 +88,48 @@ export interface InvestigationFeedResponse {
   /** Pagination metadata. */
   limit: number;
   offset: number;
+  /** ISO timestamp of when this response was generated. */
+  generated_at: string;
+}
+
+/**
+ * Quality score histogram buckets for GET /misrouting.
+ */
+export interface MisroutingQualityHistogram {
+  excellent: number;
+  good: number;
+  fair: number;
+  poor: number;
+  unscored: number;
+}
+
+/**
+ * A single misrouted task in the /misrouting feed.
+ */
+export interface MisroutingTaskItem {
+  id: string;
+  title: string;
+  task_type: string;
+  quality_score: number | null;
+  status: string;
+  created_at: string;
+}
+
+/**
+ * JSON response shape for GET /misrouting.
+ * Returns implementation tasks that were dispatched to a research-only agent.
+ */
+export interface MisroutingFeedResponse {
+  /** The agent being inspected. */
+  agent: string;
+  /** Look-back window in days. */
+  days: number;
+  /** Total number of misrouted tasks in the window. */
+  count: number;
+  /** Quality score distribution across all misrouted tasks. */
+  quality_histogram: MisroutingQualityHistogram;
+  /** Misrouted task list (most recent first, max 500). */
+  tasks: MisroutingTaskItem[];
   /** ISO timestamp of when this response was generated. */
   generated_at: string;
 }
@@ -223,6 +267,38 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /misrouting ───────────────────────────────────────────────────────
+    if (url.pathname === "/misrouting") {
+      const days = parseWindowDays(req);
+      const agent = url.searchParams.get("agent") ?? "claude-research-agent";
+
+      try {
+        const result = store.getResearchAgentImplMisroutes(agent, days);
+        const body: MisroutingFeedResponse = {
+          agent: result.agent,
+          days: result.days,
+          count: result.count,
+          quality_histogram: result.qualityHistogram,
+          tasks: result.tasks.map((t) => ({
+            id: t.id,
+            title: t.title,
+            task_type: t.taskType,
+            quality_score: t.qualityScore,
+            status: t.status,
+            created_at: t.createdAt,
+          })),
+          generated_at: new Date().toISOString(),
+        };
+        sendJson(res, 200, body);
+      } catch (err) {
+        log.warn("Failed to fetch misrouting feed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to fetch misrouting data" });
+      }
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -233,7 +309,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
   server.listen(port, "127.0.0.1", () => {
     log.info("Metrics server started", {
       port,
-      endpoints: ["/health", "/dispatch-efficiency", "/semantic-memory-effectiveness", "/investigations"],
+      endpoints: ["/health", "/dispatch-efficiency", "/semantic-memory-effectiveness", "/investigations", "/misrouting"],
     });
   });
 

@@ -36,6 +36,12 @@ export interface DigestData {
     mergedPRs: number;
     avgQualityScore: number | null;
   }>;
+  /** Research agent implementation task misroutes in the digest window. */
+  researchMisroutes?: {
+    count: number;
+    avgQualityScore: number | null;
+    examples: Array<{ title: string; qualityScore: number | null }>;
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -156,6 +162,29 @@ export function buildDigestData(
 
   void healthSummaries; // available for future enrichment
 
+  // Research agent implementation task misroutes (issue #1077)
+  let researchMisroutes: DigestData["researchMisroutes"];
+  try {
+    const misrouteResult = store.getResearchAgentImplMisroutes("claude-research-agent", days);
+    if (misrouteResult.count > 0) {
+      const scoredTasks = misrouteResult.tasks.filter((t) => t.qualityScore !== null);
+      const avgQs =
+        scoredTasks.length > 0
+          ? scoredTasks.reduce((sum, t) => sum + (t.qualityScore as number), 0) / scoredTasks.length
+          : null;
+      researchMisroutes = {
+        count: misrouteResult.count,
+        avgQualityScore: avgQs,
+        examples: misrouteResult.tasks.slice(0, 3).map((t) => ({
+          title: t.title,
+          qualityScore: t.qualityScore,
+        })),
+      };
+    }
+  } catch {
+    // Non-fatal — misroute data is supplementary
+  }
+
   return {
     windowDays: days,
     generatedAt: new Date().toISOString(),
@@ -167,6 +196,7 @@ export function buildDigestData(
       avgQualityScore: avgQuality,
     },
     agents: rows,
+    ...(researchMisroutes ? { researchMisroutes } : {}),
   };
 }
 
@@ -210,15 +240,35 @@ export function formatSlackDigest(data: DigestData): object {
   const agentSection =
     agentLines.length > 0 ? agentLines.join("\n") : "_No agent activity in this window._";
 
+  // Build misrouting alert attachment if research agent received implementation tasks
+  const attachments: object[] = [
+    {
+      color: fleet.tasksFailed > 0 || fleet.tasksEscalated > 0 ? "warning" : "good",
+      text: agentSection,
+      footer: `claude-agent-orchestrator  ·  ${new Date(data.generatedAt).toLocaleString()}`,
+    },
+  ];
+
+  if (data.researchMisroutes && data.researchMisroutes.count > 0) {
+    const mr = data.researchMisroutes;
+    const avgStr = mr.avgQualityScore !== null ? fmtScore(mr.avgQualityScore) : "—";
+    const exampleLines = mr.examples
+      .map((e) => `  › ${e.title}${e.qualityScore !== null ? ` (quality: ${fmtScore(e.qualityScore)})` : ""}`)
+      .join("\n");
+    attachments.push({
+      color: "danger",
+      title: `:warning: Research Agent Misrouting — ${mr.count} implementation task${mr.count === 1 ? "" : "s"} in ${label}`,
+      text:
+        `*claude-research-agent* received ${mr.count} implementation task${mr.count === 1 ? "" : "s"} (avg quality: ${avgStr}).\n` +
+        `These should be rerouted to implementation agents. Recent examples:\n${exampleLines}\n` +
+        `Run \`orch routing-mismatches --actual claude-research-agent\` or check \`/misrouting\` for details.`,
+      footer: "Research agent misroute alert  ·  issue #1077",
+    });
+  }
+
   return {
     text: headerLine,
-    attachments: [
-      {
-        color: fleet.tasksFailed > 0 || fleet.tasksEscalated > 0 ? "warning" : "good",
-        text: agentSection,
-        footer: `claude-agent-orchestrator  ·  ${new Date(data.generatedAt).toLocaleString()}`,
-      },
-    ],
+    attachments,
   };
 }
 

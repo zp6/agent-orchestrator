@@ -2825,6 +2825,98 @@ export class StateStore {
   }
 
   /**
+   * Get implementation tasks dispatched to the research agent (misroutes).
+   *
+   * Returns tasks where `agent_name = 'claude-research-agent'` and the task
+   * type is "implementation" (or the title matches implementation patterns),
+   * along with a quality score histogram. Used by the `/misrouting` metrics
+   * endpoint and the daily Slack digest misrouting section.
+   *
+   * Issue #1077: Research agent implementation task misrouting detection.
+   *
+   * @param agentName  Agent to inspect (default: "claude-research-agent")
+   * @param days       Look-back window in days (default 7)
+   */
+  getResearchAgentImplMisroutes(
+    agentName = "claude-research-agent",
+    days = 7,
+  ): {
+    agent: string;
+    days: number;
+    count: number;
+    qualityHistogram: {
+      excellent: number; // ≥ 0.90
+      good: number;      // 0.70–0.89
+      fair: number;      // 0.50–0.69
+      poor: number;      // < 0.50
+      unscored: number;  // null quality_score
+    };
+    tasks: Array<{
+      id: string;
+      title: string;
+      taskType: string;
+      qualityScore: number | null;
+      status: string;
+      createdAt: string;
+    }>;
+  } {
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+    const rows = this.db.prepare(`
+      SELECT id, title, task_type, quality_score, status, created_at
+      FROM tasks
+      WHERE agent_name = ?
+        AND created_at >= ?
+        AND (
+          task_type = 'implementation'
+          OR lower(title) LIKE '%implement%'
+          OR lower(title) LIKE '%create pr%'
+          OR lower(title) LIKE '%open pr%'
+          OR lower(title) LIKE '%build%feature%'
+          OR lower(title) LIKE '%build%api%'
+          OR lower(title) LIKE '%build%endpoint%'
+          OR lower(title) LIKE '%write%code%'
+          OR lower(title) LIKE '%write%test%'
+        )
+      ORDER BY created_at DESC
+      LIMIT 500
+    `).all(agentName, cutoff) as Array<{
+      id: string;
+      title: string;
+      task_type: string;
+      quality_score: number | null;
+      status: string;
+      created_at: string;
+    }>;
+
+    const histogram = { excellent: 0, good: 0, fair: 0, poor: 0, unscored: 0 };
+
+    for (const row of rows) {
+      const s = row.quality_score;
+      if (s === null || s === undefined) histogram.unscored++;
+      else if (s >= 0.9) histogram.excellent++;
+      else if (s >= 0.7) histogram.good++;
+      else if (s >= 0.5) histogram.fair++;
+      else histogram.poor++;
+    }
+
+    return {
+      agent: agentName,
+      days,
+      count: rows.length,
+      qualityHistogram: histogram,
+      tasks: rows.map((r) => ({
+        id: r.id,
+        title: r.title,
+        taskType: r.task_type,
+        qualityScore: r.quality_score ?? null,
+        status: r.status,
+        createdAt: r.created_at,
+      })),
+    };
+  }
+
+  /**
    * Compute the quality score distribution across all verified top-level tasks.
    * Buckets: excellent (≥0.90), good (0.70–0.89), fair (0.50–0.69), poor (<0.50),
    * unscored (verified but no numeric score).

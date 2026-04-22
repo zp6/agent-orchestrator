@@ -219,6 +219,7 @@ An embedded HTTP server starts alongside the daemon on port **3472** (same as th
 | `GET /health` | Basic liveness check — returns `{"status":"ok"}` |
 | `GET /semantic-memory-effectiveness` | Semantic memory effectiveness metrics (match rates, latency, usefulness) over configurable window (`?days=N`) |
 | `GET /investigations` | Research investigation feed — paginated task list with status/quality filters (`?limit=N&offset=N&status=done`) |
+| `GET /misrouting` | Research agent implementation-task misroute feed — count + quality histogram for tasks dispatched to research-only agents (`?agent=claude-research-agent&days=N`) |
 
 The dashboard agent polls `/dispatch-efficiency` to populate the dispatch efficiency panel without needing CLI access.
 

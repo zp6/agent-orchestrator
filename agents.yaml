@@ -208,6 +208,7 @@ agents:
     pool: "research"
     description: "Research agent: web search, doc analysis, technology evaluation (Claude)."
     capabilities: ["research", "web-search", "documentation", "analysis"]
+    capability_tags: ["research-only"]
     github: "rapartlu/research-agent"
     owns_topics: ["research", "investigation", "comparison", "evaluation", "exploration", "temporal", "architecture"]
     # Housekeeping fires at cycle modulo 30 → fourth slot in each 5h window (~:150min offset)
