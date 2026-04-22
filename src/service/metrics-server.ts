@@ -11,6 +11,8 @@
  *   GET /dispatch-efficiency          — 7-day rolling window
  *   GET /dispatch-efficiency?days=30  — configurable window
  *   GET /health                       — basic liveness check
+ *   GET /investigations               — research investigation feed (issue #140)
+ *   GET /investigations?limit=20&offset=0&status=done
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
@@ -24,6 +26,9 @@ export const DEFAULT_METRICS_PORT = 3472;
 
 /** Maximum rolling-window size operators may request (days). */
 const MAX_WINDOW_DAYS = 90;
+
+/** Maximum number of investigation items per page. */
+const MAX_INVESTIGATIONS_LIMIT = 100;
 
 /**
  * JSON response shape for GET /dispatch-efficiency.
@@ -48,6 +53,40 @@ export interface DispatchEfficiencyResponse {
     block_rate_pct: number | null;
   }>;
   /** ISO timestamp of when this response was generated */
+  generated_at: string;
+}
+
+/**
+ * A single investigation item in the feed response.
+ * Long `result` fields are truncated to 500 chars to keep payloads lean.
+ */
+export interface InvestigationFeedItem {
+  id: string;
+  title: string;
+  description: string | null;
+  status: string;
+  agent_name: string | null;
+  verification_status: string | null;
+  quality_score: number | null;
+  /** First 500 chars of the result, or null. */
+  result_excerpt: string | null;
+  source_ref: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * JSON response shape for GET /investigations.
+ */
+export interface InvestigationFeedResponse {
+  /** Total number of matching investigations (across all pages). */
+  total: number;
+  /** Items on this page. */
+  items: InvestigationFeedItem[];
+  /** Pagination metadata. */
+  limit: number;
+  offset: number;
+  /** ISO timestamp of when this response was generated. */
   generated_at: string;
 }
 
@@ -143,6 +182,47 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /investigations ───────────────────────────────────────────────────
+    if (url.pathname === "/investigations") {
+      const rawLimit = parseInt(url.searchParams.get("limit") ?? "20", 10);
+      const rawOffset = parseInt(url.searchParams.get("offset") ?? "0", 10);
+      const statusFilter = url.searchParams.get("status") ?? undefined;
+
+      const limit = isNaN(rawLimit) || rawLimit < 1 ? 20 : Math.min(rawLimit, MAX_INVESTIGATIONS_LIMIT);
+      const offset = isNaN(rawOffset) || rawOffset < 0 ? 0 : rawOffset;
+
+      try {
+        const { total, items } = store.getInvestigationFeed(limit, offset, statusFilter);
+        const feedItems: InvestigationFeedItem[] = items.map((t) => ({
+          id: t.id,
+          title: t.title,
+          description: t.description,
+          status: t.status,
+          agent_name: t.agent_name,
+          verification_status: t.verification_status,
+          quality_score: t.quality_score,
+          result_excerpt: t.result ? t.result.slice(0, 500) : null,
+          source_ref: t.source_ref,
+          created_at: t.created_at,
+          updated_at: t.updated_at,
+        }));
+        const body: InvestigationFeedResponse = {
+          total,
+          items: feedItems,
+          limit,
+          offset,
+          generated_at: new Date().toISOString(),
+        };
+        sendJson(res, 200, body);
+      } catch (err) {
+        log.warn("Failed to fetch investigation feed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to fetch investigations" });
+      }
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -151,7 +231,10 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
   });
 
   server.listen(port, "127.0.0.1", () => {
-    log.info("Metrics server started", { port, endpoints: ["/health", "/dispatch-efficiency", "/semantic-memory-effectiveness"] });
+    log.info("Metrics server started", {
+      port,
+      endpoints: ["/health", "/dispatch-efficiency", "/semantic-memory-effectiveness", "/investigations"],
+    });
   });
 
   return server;

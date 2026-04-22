@@ -2543,6 +2543,62 @@ export class StateStore {
   }
 
   /**
+   * Return a paginated feed of research investigation tasks for dashboard display.
+   *
+   * Excludes internal bookkeeping tasks created by the research linker
+   * (source_ref LIKE 'research-link:%') and health-check incident tasks
+   * (source_ref LIKE 'health-check-fail:%') so only user-visible investigations
+   * appear in the feed.
+   *
+   * @param limit   Max rows to return (capped at 100).
+   * @param offset  Pagination offset.
+   * @param status  Optional status filter; omit to return all statuses.
+   */
+  getInvestigationFeed(
+    limit = 20,
+    offset = 0,
+    status?: string,
+  ): { total: number; items: Task[] } {
+    const cap = Math.min(limit, 100);
+    const statusClause = status ? "AND status = ?" : "";
+    const params: (string | number)[] = [];
+    if (status) params.push(status);
+    params.push(cap, offset);
+
+    const items = this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE task_type = 'research'
+           AND (source_ref IS NULL
+                OR (source_ref NOT LIKE 'research-link:%'
+                    AND source_ref NOT LIKE 'health-check-fail:%'))
+           AND parent_task_id IS NULL
+           ${statusClause}
+         ORDER BY created_at DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(...params) as Task[];
+
+    const countParams: string[] = [];
+    if (status) countParams.push(status);
+    const total = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM tasks
+           WHERE task_type = 'research'
+             AND (source_ref IS NULL
+                  OR (source_ref NOT LIKE 'research-link:%'
+                      AND source_ref NOT LIKE 'health-check-fail:%'))
+             AND parent_task_id IS NULL
+             ${statusClause}`,
+        )
+        .get(...countParams) as { n: number }
+    ).n;
+
+    return { total, items };
+  }
+
+  /**
    * Return failed tasks that are eligible for retry: their `next_retry_at` has
    * elapsed and they haven't yet reached `maxRetries` attempts.
    * Results are ordered by `next_retry_at` ascending (oldest due first).
