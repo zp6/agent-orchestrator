@@ -963,6 +963,7 @@ export {
 export type {
   Investigation,
   InvestigationStatus,
+  InvestigationsSummary,
   RegisterInvestigationRequest,
   CompleteInvestigationRequest,
   ResearchInvestigationClientOptions,

@@ -66,6 +66,28 @@ export interface Investigation {
   updated_at: string;
 }
 
+/**
+ * Concise snapshot returned by GET /api/investigations/summary.
+ *
+ * Added in research-agent#140 — provides a lightweight alternative to
+ * fetching the full investigation list when only high-level counts are needed
+ * (e.g. dashboard card headers, Telegram status lines).
+ */
+export interface InvestigationsSummary {
+  /** Number of investigations currently in pending or active state. */
+  active_count: number;
+  /**
+   * The most recently completed investigation.
+   * `null` when no investigation has been completed yet.
+   */
+  last_completed: { title: string; result_issue_url: string | null } | null;
+  /**
+   * Age in milliseconds of the oldest pending/active investigation.
+   * `null` when there are no in-flight investigations.
+   */
+  oldest_in_flight_age: number | null;
+}
+
 /** Payload for registering a new investigation (POST /api/investigations). */
 export interface RegisterInvestigationRequest {
   /** Short human-readable title, e.g. "Evaluate prompt-caching strategies". */
@@ -193,6 +215,26 @@ export class ResearchInvestigationClient {
       action: "cancel",
       ...(reason ? { finding_summary: reason } : {}),
     });
+  }
+
+  /**
+   * Fetch a concise summary snapshot from GET /api/investigations/summary.
+   *
+   * Returns an `InvestigationsSummary` on success, or `null` when the
+   * research agent is unreachable or returns a non-2xx status (e.g. running
+   * an older version that does not yet expose this endpoint).
+   *
+   * Callers should degrade gracefully on `null` — the full `list()` endpoint
+   * is always available as a fallback.
+   *
+   * @example
+   *   const summary = await client.summary();
+   *   if (summary) {
+   *     log.info('investigations', { active: summary.active_count });
+   *   }
+   */
+  async summary(): Promise<InvestigationsSummary | null> {
+    return this.request<InvestigationsSummary>("GET", "/api/investigations/summary");
   }
 
   /**

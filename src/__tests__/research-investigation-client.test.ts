@@ -276,6 +276,78 @@ describe("ResearchInvestigationClient — list()", () => {
   });
 });
 
+describe("ResearchInvestigationClient — summary()", () => {
+  let client: ResearchInvestigationClient;
+
+  beforeEach(() => {
+    client = new ResearchInvestigationClient({ baseUrl: "http://localhost:3478" });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("GETs /api/investigations/summary and returns the summary snapshot", async () => {
+    const summaryPayload = {
+      active_count: 2,
+      last_completed: {
+        title: "Evaluate prompt-caching strategies",
+        result_issue_url: "https://github.com/rapartlu/agent-orchestrator/issues/55",
+      },
+      oldest_in_flight_age: 3_600_000,
+    };
+    const fetchSpy = mockFetch(200, summaryPayload);
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await client.summary();
+
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://localhost:3478/api/investigations/summary");
+    expect(init.method).toBe("GET");
+    expect(result).not.toBeNull();
+    expect(result!.active_count).toBe(2);
+    expect(result!.last_completed?.title).toBe("Evaluate prompt-caching strategies");
+    expect(result!.oldest_in_flight_age).toBe(3_600_000);
+  });
+
+  it("returns summary with null fields when no investigations exist", async () => {
+    const summaryPayload = {
+      active_count: 0,
+      last_completed: null,
+      oldest_in_flight_age: null,
+    };
+    vi.stubGlobal("fetch", mockFetch(200, summaryPayload));
+
+    const result = await client.summary();
+
+    expect(result).not.toBeNull();
+    expect(result!.active_count).toBe(0);
+    expect(result!.last_completed).toBeNull();
+    expect(result!.oldest_in_flight_age).toBeNull();
+  });
+
+  it("returns null when the research agent returns 404 (old version without summary endpoint)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        text: () => Promise.resolve("Not Found"),
+      }),
+    );
+
+    const result = await client.summary();
+
+    expect(result).toBeNull();
+  });
+
+  it("returns null and does not throw when fetch rejects", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
+
+    await expect(client.summary()).resolves.toBeNull();
+  });
+});
+
 describe("ResearchInvestigationClient — timeout behaviour", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
