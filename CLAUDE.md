@@ -47,7 +47,7 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 - **Semantic task memory** — FTS5-based knowledge store; top-3 similar past successes injected into dispatch context at runtime; auto-tunes `min_quality_score` threshold via FTS5 query analysis with per-agent breakdown (issues #1011, #1033)
 - **Dispatch cascade analyzer** — tracks parent→child task relationships; enforces per-trigger follow-up depth cap to prevent unbounded task spawning
 - **Post-merge regression detector** — validates merged PRs in staging; auto-files revert tasks on regressions
-- **Metrics server** — embedded HTTP server on port 3472 exposing `/dispatch-efficiency` and `/health` for dashboard polling
+- **Metrics server** — embedded HTTP server on port 3472 exposing `/dispatch-efficiency`, `/health`, `/semantic-memory-effectiveness`, `/investigations`, and `/misrouting` for dashboard and operator polling
 - **Housekeeping triage schemas** — verifier enforces structured JSON blocks in housekeeping PR bodies (`TRIAGE_HOUSEKEEPING_SCHEMA`, `TRIAGE_CROSS_REPO_SCHEMA`); missing fields trigger immediate revision
 - **Prompt caching** — all static LLM system prompts cached via Anthropic `cache_control: { type: 'ephemeral' }`; dynamic config portions kept variable to avoid cache invalidation; reduces token spend on repeated supervisor/verifier calls (issue #1037)
 - **Dispatch waste rate alerting** — `getDispatchWasteMetrics24h()` tracks per-hour rolling window; Telegram alert fires when waste rate exceeds 15% in the most recent hour (`DISPATCH_WASTE_RATE_THRESHOLD = 0.15`) (issue #991)
@@ -55,6 +55,7 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 - **Dispatch flood gate** — after the PR existence guard fires for a given issue, subsequent guard re-fires within a 60-minute cooldown window (`GUARD_FLOOD_GATE_WINDOW_MS = 3_600_000`) are silently dropped — no task created, no block recorded, no Telegram alert; only the first hit within the window creates a task and sends an alert (issue #1060)
 - **Resilient team meetings** — if all agents return connection errors in a standup (e.g. Docker outage), the meeting is abandoned without saving to the DB, so the time-based scheduler retries on the next cycle rather than waiting the full 24-hour cooldown (issue #1053)
 - **Live meeting context injection** — before each standup, open issues (up to 15/repo), open PRs (up to 10/repo), and 7-day task stats are queried via `gh` CLI and injected into meeting context; prevents agents citing stale or closed issues during standups (issue #1069)
+- **Research agent misrouting enforcement** — `capability_tags: ["research-only"]` set on `claude-research-agent` in `agents.yaml`; implementation tasks dispatched to the research agent are blocked and rerouted at dispatch time; `GET /misrouting` metrics endpoint and Slack digest alert for observability (issue #1077)
 
 ## CRITICAL: NEVER Push Directly to Main
 
