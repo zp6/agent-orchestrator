@@ -1,6 +1,6 @@
 # Agent Orchestrator — Roadmap
 
-This is the prioritised backlog for `rapartlu/agent-orchestrator`. Updated 2026-04-22.
+This is the prioritised backlog for `rapartlu/agent-orchestrator`. Updated 2026-04-22 (pass 2).
 
 ---
 
@@ -54,6 +54,8 @@ Worth tracking but not yet scoped or prioritised.
 
 Key features merged since last triage:
 
+- **#1065** — `/investigations` endpoint on metrics server (port 3472): paginated research task feed with `?limit`, `?offset`, `?status` filters; powers dashboard research panel (2026-04-22)
+- **#1069** — inject live issue/PR state into meeting context: each standup now receives up-to-date open issues, open PRs, and 7-day task stats to prevent agents citing stale or closed items (2026-04-22)
 - **#1060/#1062** — dispatch flood gate: blocks same-issue guard re-fires within 60-minute cooldown window; only first hit creates a task and Telegram alert (2026-04-22)
 - **#1053** — resilient team meetings: zero-response meetings (all Docker connection errors) abandoned without DB save, so scheduler retries next cycle rather than waiting 24h (2026-04-21)
 - **#1057** — add waste/guard/metric topics to orchestrator owns_topics (eliminates coverage gap detector noise) (2026-04-22)

@@ -54,6 +54,7 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 - **Cross-repo PR guard** — pre-dispatch validator checks all peer agent repos (`config.agents[*].github`) for open non-draft PRs before dispatching; blocks with failure code `open_pr_exists_cross_repo` (issue #991)
 - **Dispatch flood gate** — after the PR existence guard fires for a given issue, subsequent guard re-fires within a 60-minute cooldown window (`GUARD_FLOOD_GATE_WINDOW_MS = 3_600_000`) are silently dropped — no task created, no block recorded, no Telegram alert; only the first hit within the window creates a task and sends an alert (issue #1060)
 - **Resilient team meetings** — if all agents return connection errors in a standup (e.g. Docker outage), the meeting is abandoned without saving to the DB, so the time-based scheduler retries on the next cycle rather than waiting the full 24-hour cooldown (issue #1053)
+- **Live meeting context injection** — before each standup, open issues (up to 15/repo), open PRs (up to 10/repo), and 7-day task stats are queried via `gh` CLI and injected into meeting context; prevents agents citing stale or closed issues during standups (issue #1069)
 
 ## CRITICAL: NEVER Push Directly to Main
 
