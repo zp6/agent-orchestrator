@@ -87,6 +87,7 @@ When this container is used for LLM PR reviews:
 - Meta-quality gate: stricter approval floor for tasks whose scope is quality enforcement or calibration
 - PR scope pre-flight check: deterministic bundling detection before LLM review is triggered
 - Semantic task memory: daily Telegram digest summarising the semantic task memory index; `/memory` command
+- Research investigation client: HTTP client for the research agent's investigation feed API (`/api/investigations`); registers new investigations when research tasks are dispatched, activates them when work begins, completes them with findings + result issue URL after `analyzeResearchFindings()` converts a report into a GitHub issue
 - Real-time low-score approval alerter: Telegram notification when a task is approved with score < 0.70
 - Score-zero approval alerter: dedicated real-time Telegram alert for catastrophic score ≤ 0.05 approvals with full dimension breakdown
 - Low-score approved task feed: `/api/low-score-approved` payload builder for operator audit
@@ -168,6 +169,7 @@ src/
     misrouting-digest.ts            — daily Telegram digest of implementation tasks dispatched to reviewer; /misrouting [hours] on-demand command
     bypass-audit.ts                 — /api/bypass-audit payload + BypassAuditScheduler daily Telegram digest for sub-0.60-floor approvals; IBypassAuditStore
     universal-quality-gate.ts       — checkApprovalQualityGate() + UniversalQualityGateMonitor; sub-0.80 alert for ALL task types across ALL approval paths
+    research-investigation-client.ts — HTTP client for research agent /api/investigations feed; register/activate/complete/cancel lifecycle; used by improvement-detector when dispatching research tasks
   integration/
     orchestrator-adapter.ts         — createReviewerInstances() adapter for orchestrator import
   service/

@@ -922,6 +922,32 @@ export type {
   UniversalQualityGateConfig,
 } from "./reviewer/universal-quality-gate.js";
 
+// Research Investigation Client — HTTP client for the research agent's investigation feed API
+// (coordinated change rapartlu/research-agent#128).
+//
+// The improvement detector uses this client to register research investigations,
+// activate them when the research agent starts, and complete them with findings
+// + the resulting GitHub issue URL after `analyzeResearchFindings()` runs.
+//
+//   const client = createResearchInvestigationClient();
+//
+//   // Register when dispatching a research task:
+//   const inv = await client.register({ title: '...', research_question: '...' });
+//
+//   // Complete after findings are analysed and an issue is filed:
+//   await client.complete(inv.id, { finding_summary: '...', score: 91, result_issue_url: '...' });
+export {
+  ResearchInvestigationClient,
+  createResearchInvestigationClient,
+} from "./reviewer/research-investigation-client.js";
+export type {
+  Investigation,
+  InvestigationStatus,
+  RegisterInvestigationRequest,
+  CompleteInvestigationRequest,
+  ResearchInvestigationClientOptions,
+} from "./reviewer/research-investigation-client.js";
+
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
 
