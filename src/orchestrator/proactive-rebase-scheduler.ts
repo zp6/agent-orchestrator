@@ -18,6 +18,7 @@
  */
 
 import { execSync } from "node:child_process";
+import { resolve } from "node:path";
 import { createLogger } from "../service/logger.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore } from "../state/store.js";
@@ -112,7 +113,7 @@ function tryRebase(localPath: string, branch: string): Omit<RebaseOutcome, "skip
 function findLocalPath(config: OrchestratorConfig, repo: string): string | null {
   for (const [, agentCfg] of Object.entries(config.agents)) {
     if (agentCfg.github === repo && agentCfg.dir) {
-      return agentCfg.dir;
+      return resolve(config.base_dir, agentCfg.dir);
     }
   }
   return null;
@@ -260,7 +261,7 @@ export async function runScheduledRebases(
 
   for (const [, agentCfg] of Object.entries(config.agents)) {
     const repo = agentCfg.github;
-    const localPath = agentCfg.dir ?? null;
+    const localPath = agentCfg.dir ? resolve(config.base_dir, agentCfg.dir) : null;
     if (!repo) continue;
 
     let branches: string[] = [];
