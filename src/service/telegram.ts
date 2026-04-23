@@ -786,10 +786,84 @@ issue <idea> — create issue from rough idea
 dispatch <agent> <msg> — send task
 /reassign <issue> <agent> — reroute issue now
 /prioritize <issue> — move issue to front next cycle
+/pause <task-id> — pause an in-flight task
+/resume <task-id> — resume a paused task
+/redirect <task-id> <agent> — redirect task to different agent
+/inject <task-id> <text> — inject directive into task context
+/controls — list recent operator controls
 ack|dismiss|resolve <ref|all> — de-escalate an active alert or task
 escalated — list active escalations
 deescalate <ref|all> — unblock escalated tasks
 help — this message`;
+  }
+
+  // /pause <task-id> — pause an in-flight task
+  if (cmd.startsWith("pause ") || cmd.startsWith("/pause ")) {
+    const parts = text.trim().split(/\s+/);
+    const taskId = parts[1];
+    if (!taskId) return "Usage: /pause <task-id>";
+    const task = ctx.store.getTask(taskId);
+    if (!task) return `❌ Task \`${taskId}\` not found.`;
+    const from = (ctx as TelegramContext & { _from?: string })._from ?? "operator";
+    ctx.store.addOperatorControl({ task_id: taskId, control_type: "pause", operator: from });
+    return `✅ Task \`${taskId}\` paused — will be skipped until resumed`;
+  }
+
+  // /resume <task-id> — resume a paused task
+  if (cmd.startsWith("resume ") || cmd.startsWith("/resume ")) {
+    const parts = text.trim().split(/\s+/);
+    const taskId = parts[1];
+    if (!taskId) return "Usage: /resume <task-id>";
+    const task = ctx.store.getTask(taskId);
+    if (!task) return `❌ Task \`${taskId}\` not found.`;
+    const from = (ctx as TelegramContext & { _from?: string })._from ?? "operator";
+    ctx.store.addOperatorControl({ task_id: taskId, control_type: "resume", operator: from });
+    return `✅ Task \`${taskId}\` resumed — queued for dispatch`;
+  }
+
+  // /redirect <task-id> <agent-name> — redirect task to a different agent
+  if (cmd.startsWith("redirect ") || cmd.startsWith("/redirect ")) {
+    const parts = text.trim().split(/\s+/);
+    const taskId = parts[1];
+    const agentName = parts[2];
+    if (!taskId || !agentName) return "Usage: /redirect <task-id> <agent-name>";
+    const task = ctx.store.getTask(taskId);
+    if (!task) return `❌ Task \`${taskId}\` not found.`;
+    if (!ctx.config.agents[agentName]) return `❌ Unknown agent. Available: ${Object.keys(ctx.config.agents).join(", ")}`;
+    const from = (ctx as TelegramContext & { _from?: string })._from ?? "operator";
+    ctx.store.addOperatorControl({ task_id: taskId, control_type: "redirect", value: agentName, operator: from });
+    return `✅ Task \`${taskId}\` redirected to \`${agentName}\``;
+  }
+
+  // /inject <task-id> <directive text...> — inject additional context into a task
+  if (cmd.startsWith("inject ") || cmd.startsWith("/inject ")) {
+    const parts = text.trim().split(/\s+/);
+    const taskId = parts[1];
+    const directive = parts.slice(2).join(" ");
+    if (!taskId || !directive) return "Usage: /inject <task-id> <directive text...>";
+    const task = ctx.store.getTask(taskId);
+    if (!task) return `❌ Task \`${taskId}\` not found.`;
+    const from = (ctx as TelegramContext & { _from?: string })._from ?? "operator";
+    ctx.store.addOperatorControl({ task_id: taskId, control_type: "inject", value: directive, operator: from });
+    return `✅ Directive injected into task \`${taskId}\``;
+  }
+
+  // /controls — list recent operator controls (last 10)
+  if (cmd === "controls" || cmd === "/controls") {
+    const controls = ctx.store.getOperatorControls(10);
+    if (controls.length === 0) return "🎛 No operator controls recorded yet.";
+    const lines = controls.map((c) => {
+      const shortId = c.task_id.slice(0, 8);
+      const typeLabel = c.control_type === "redirect" && c.value
+        ? `redirect→${c.value}`
+        : c.control_type;
+      const statusIcon = c.status === "applied" ? "✅" : c.status === "failed" ? "❌" : "⏳";
+      const ts = c.applied_at
+        ? new Date(c.applied_at).toISOString().slice(0, 16).replace("T", " ")
+        : new Date(c.created_at).toISOString().slice(0, 16).replace("T", " ");
+      return `  • ${statusIcon} ${shortId} | ${typeLabel} | ${c.status} | ${ts}`;
+    });
+    return `🎛 *Operator Controls* (last 10)\n\n${lines.join("\n")}`;
   }
 
   // Default: treat as directive (fire-and-forget)
@@ -1154,6 +1228,12 @@ async function buildSummary(ctx: TelegramContext): Promise<string> {
   }));
   const openPRs = prCounts.reduce((a, b) => a + b, 0);
 
+  // Pending operator controls
+  const pendingControls = ctx.store.getPendingOperatorControls();
+  const controlsLine = pendingControls.length > 0
+    ? ` | 🎛 ${pendingControls.length} pending control(s)`
+    : "";
+
   return `${healthLine}
 
 🚀 *Shipped (last 2h)*
@@ -1165,7 +1245,7 @@ ${attentionSection}
 🔄 *Working now*
 ${workingSection}
 
-📊 ${totalDone} done | ${successRate}% success | ${openPRs} open PRs | ${recentMerges.length} merged (2h)`;
+📊 ${totalDone} done | ${successRate}% success | ${openPRs} open PRs | ${recentMerges.length} merged (2h)${controlsLine}`;
 }
 
 /**

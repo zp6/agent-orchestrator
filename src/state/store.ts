@@ -113,7 +113,27 @@ export class DuplicateTaskIdError extends Error {
   }
 }
 
-export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed" | "escalated" | "result_missing" | "superseded";
+export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed" | "escalated" | "result_missing" | "superseded" | "paused";
+
+// ── Operator Controls types ───────────────────────────────────────────────────
+
+export type OperatorControlType = "pause" | "resume" | "redirect" | "inject" | "merge";
+export type OperatorControlStatus = "pending" | "applied" | "failed";
+
+export interface OperatorControlInput {
+  task_id: string;
+  control_type: OperatorControlType;
+  value?: string;
+  operator?: string;
+}
+
+export interface OperatorControl extends OperatorControlInput {
+  id: string;
+  status: OperatorControlStatus;
+  applied_at: string | null;
+  failure_reason: string | null;
+  created_at: string;
+}
 export type TaskSource = "github" | "linear" | "slack" | "manual" | "pr-feedback";
 /**
  * Identifies the kind of work a task represents.
@@ -1643,6 +1663,7 @@ export class StateStore {
     this.runDispatchBlocksMigration();
     this.runProactiveRebaseLogMigration();
     this.runSemanticMemoryMigration();
+    this.runOperatorControlsMigration();
   }
 
   private runPhase2Migration(): void {
@@ -10419,6 +10440,101 @@ export class StateStore {
 
     // Sort by total_dispatches descending (most active agents first)
     return results.sort((a, b) => b.total_dispatches - a.total_dispatches);
+  }
+
+  // ── Operator Controls ─────────────────────────────────────────────────────
+
+  runOperatorControlsMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS operator_controls (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        control_type TEXT NOT NULL,
+        value TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        applied_at TEXT,
+        failure_reason TEXT,
+        operator TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_operator_controls_task_id ON operator_controls(task_id);
+      CREATE INDEX IF NOT EXISTS idx_operator_controls_status ON operator_controls(status, created_at);
+    `);
+  }
+
+  addOperatorControl(input: OperatorControlInput): string {
+    this.runOperatorControlsMigration();
+    const id = generateId();
+    this.db.prepare(`
+      INSERT INTO operator_controls (id, task_id, control_type, value, status, operator, created_at)
+      VALUES (?, ?, ?, ?, 'pending', ?, ?)
+    `).run(
+      id,
+      input.task_id,
+      input.control_type,
+      input.value ?? null,
+      input.operator ?? null,
+      new Date().toISOString(),
+    );
+    return id;
+  }
+
+  getPendingOperatorControls(): OperatorControl[] {
+    this.runOperatorControlsMigration();
+    return this.db.prepare(`
+      SELECT * FROM operator_controls WHERE status = 'pending' ORDER BY created_at ASC
+    `).all() as OperatorControl[];
+  }
+
+  getOperatorControls(limit = 20): OperatorControl[] {
+    this.runOperatorControlsMigration();
+    return this.db.prepare(`
+      SELECT * FROM operator_controls ORDER BY created_at DESC LIMIT ?
+    `).all(limit) as OperatorControl[];
+  }
+
+  markOperatorControlApplied(id: string): void {
+    this.db.prepare(`
+      UPDATE operator_controls SET status = 'applied', applied_at = ? WHERE id = ?
+    `).run(new Date().toISOString(), id);
+  }
+
+  markOperatorControlFailed(id: string, reason: string): void {
+    this.db.prepare(`
+      UPDATE operator_controls SET status = 'failed', failure_reason = ? WHERE id = ?
+    `).run(reason, id);
+  }
+
+  pauseTask(taskId: string): void {
+    this.db.prepare(`
+      UPDATE tasks SET status = 'paused', updated_at = ? WHERE id = ?
+    `).run(new Date().toISOString(), taskId);
+  }
+
+  resumeTask(taskId: string): void {
+    this.db.prepare(`
+      UPDATE tasks SET status = 'pending', updated_at = ? WHERE id = ? AND status = 'paused'
+    `).run(new Date().toISOString(), taskId);
+  }
+
+  redirectTask(taskId: string, newAgent: string): void {
+    const task = this.getTask(taskId);
+    if (!task) return;
+    const newStatus = task.status === "in_progress" ? "pending" : task.status;
+    this.db.prepare(`
+      UPDATE tasks SET agent_name = ?, status = ?, updated_at = ? WHERE id = ?
+    `).run(newAgent, newStatus, new Date().toISOString(), taskId);
+  }
+
+  injectTaskDirective(taskId: string, directive: string): void {
+    const task = this.getTask(taskId);
+    if (!task) return;
+    const existing = task.description ?? "";
+    const separator = existing ? "\n\n---\n[Operator Directive]\n" : "[Operator Directive]\n";
+    const updated = existing + separator + directive;
+    this.db.prepare(`
+      UPDATE tasks SET description = ?, updated_at = ? WHERE id = ?
+    `).run(updated, new Date().toISOString(), taskId);
   }
 }
 

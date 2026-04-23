@@ -33,6 +33,7 @@ import { buildHealthPostmortem, renderPostmortemBlock } from "./health-postmorte
 import { setRecencyWindowHours } from "../triggers/duplicate-guard.js";
 import { DuplicateIdDetector, checkDbForDuplicateIds } from "../state/duplicate-id-detector.js";
 import { startTelegramPolling, stopTelegramPolling, pollTelegram } from "./telegram.js";
+import { OperatorControlProcessor } from "./operator-controls.js";
 import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.js";
 import { maybeRunDailySecurityScan, type SecurityScanState } from "../orchestrator/security-scanner.js";
 import { runTeamMeeting } from "../orchestrator/team-meeting.js";
@@ -692,6 +693,19 @@ export class Daemon {
     let registeredAgents: Set<string> = new Set();
 
     try {
+      // ── Operator controls: apply before any dispatch/verify ─────────────
+      try {
+        const processor = new OperatorControlProcessor(this.store);
+        const applied = await processor.applyPendingControls();
+        if (applied > 0) {
+          this.log.info(`Applied ${applied} operator control(s)`);
+        }
+      } catch (ctrlErr) {
+        this.log.warn("Operator control processor failed", {
+          error: ctrlErr instanceof Error ? ctrlErr.message : String(ctrlErr),
+        });
+      }
+
       // ── Sequential: must be first ──────────────────────────────────────
       registeredAgents = await this.deployer.getRegisteredAgents();
 
