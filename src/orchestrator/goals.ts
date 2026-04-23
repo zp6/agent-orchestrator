@@ -118,42 +118,19 @@ export interface GoalProgress {
  */
 function evaluateMetric(metric: string, store: StateStore): number | null {
   try {
+    // Handle "== true" as a boolean check
+    const boolMatch = metric.match(/^(\w+)\s*==\s*true$/);
+    if (boolMatch) {
+      const boolValue = evaluateMetricValue(boolMatch[1], store);
+      return boolValue !== null && boolValue > 0 ? 1.0 : 0;
+    }
+
     const match = metric.match(/^(\w+)\s*(>=|<=|>|<|==)\s*([\d.]+)$/);
     if (!match) return null;
 
     const [, name, op, thresholdStr] = match;
     const threshold = parseFloat(thresholdStr);
-    const stats = store.getAgentStats(168); // 7-day window
-
-    let value: number | null = null;
-
-    switch (name) {
-      case "first_pass_rate": {
-        const total = stats.reduce((s, a) => s + a.done + a.failed, 0);
-        const done = stats.reduce((s, a) => s + a.done, 0);
-        value = total > 0 ? done / total : null;
-        break;
-      }
-      case "escalation_rate": {
-        const tasks = store.getTasksByStatus("escalated").length;
-        const total = stats.reduce((s, a) => s + a.total, 0);
-        value = total > 0 ? tasks / total : 0;
-        break;
-      }
-      case "tasks_completed": {
-        value = stats.reduce((s, a) => s + a.done, 0);
-        break;
-      }
-      case "avg_quality_score": {
-        const scored = stats.filter((a) => a.avg_score !== null);
-        value = scored.length > 0
-          ? scored.reduce((s, a) => s + (a.avg_score ?? 0), 0) / scored.length
-          : null;
-        break;
-      }
-      default:
-        return null;
-    }
+    const value = evaluateMetricValue(name, store);
 
     if (value === null) return null;
 
@@ -168,6 +145,69 @@ function evaluateMetric(metric: string, store: StateStore): number | null {
     }
   } catch {
     return null;
+  }
+}
+
+/**
+ * Resolve a metric name to its current value from store data.
+ * Add new metric names here as goals evolve.
+ */
+function evaluateMetricValue(name: string, store: StateStore): number | null {
+  const stats = store.getAgentStats(168); // 7-day window
+  const totalDone = stats.reduce((s, a) => s + a.done, 0);
+  const totalFailed = stats.reduce((s, a) => s + a.failed, 0);
+  const totalAll = totalDone + totalFailed;
+
+  switch (name) {
+    // Original metrics
+    case "first_pass_rate":
+      return totalAll > 0 ? totalDone / totalAll : null;
+    case "escalation_rate": {
+      const escalated = store.getTasksByStatus("escalated").length;
+      const total = stats.reduce((s, a) => s + a.total, 0);
+      return total > 0 ? escalated / total : 0;
+    }
+    case "tasks_completed":
+      return totalDone;
+    case "avg_quality_score": {
+      const scored = stats.filter((a) => a.avg_score !== null);
+      return scored.length > 0
+        ? scored.reduce((s, a) => s + (a.avg_score ?? 0), 0) / scored.length
+        : null;
+    }
+
+    // Scale/throughput metrics
+    case "weekly_tasks_completed":
+      return totalDone;
+    case "failure_rate":
+      return totalAll > 0 ? totalFailed / totalAll : null;
+    case "first_pass_verification_rate":
+      return totalAll > 0 ? totalDone / totalAll : null;
+    case "active_agents": {
+      try {
+        // Count agents with at least one task in the last 7 days
+        return stats.filter((a) => a.total > 0).length;
+      } catch { return null; }
+    }
+
+    // Meeting facilitator metrics
+    case "meeting_facilitator_deployed": {
+      try {
+        const { execSync } = require("node:child_process") as typeof import("node:child_process");
+        const count = execSync("gh api repos/rapartlu/meeting-facilitator-agent/contents/src --jq length 2>/dev/null || echo 0", { encoding: "utf-8", timeout: 10_000 }).trim();
+        return parseInt(count) > 0 ? 1 : 0;
+      } catch { return 0; }
+    }
+    case "meetings_facilitated": {
+      try {
+        // Count non-standup/non-bluesky meetings from getMeetings
+        const meetings = store.getMeetings(100);
+        return meetings.filter((m) => m.type !== "standup" && m.type !== "bluesky").length;
+      } catch { return 0; }
+    }
+
+    default:
+      return null;
   }
 }
 
