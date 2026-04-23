@@ -85,8 +85,11 @@ const STANDUP_ROUND1 = `You are in a daily standup. Share your perspective conci
 2. **Opportunities**: What improvements could make the biggest impact in your domain?
 3. **Suggestions for the team**: What should other agents know?
 4. **Coverage gaps**: Are there tasks in your domain that a more specialised agent should handle?
+5. **Meeting request** (optional): If there's a cross-cutting topic that needs structured discussion beyond this standup, you can request an ad-hoc meeting. Add a section like:
+   **REQUEST MEETING:** <topic> [format: rfc|retrospective|design-review|triage|incident-postmortem|investigation-spike]
+   The meeting facilitator will evaluate and schedule it. Only request one if the topic genuinely needs multi-agent structured discussion.
 
-Be specific — reference actual issues, PRs, or patterns.`;
+Be specific — reference actual issues, PRs, or patterns. ONLY reference issues and PRs listed in the Live Fleet State section above.`;
 
 const STANDUP_ROUND2 = `Round 2: You've seen what every other agent said. Now react (under 150 words):
 
@@ -506,6 +509,9 @@ export async function runTeamMeeting(
     log.warn("Failed to save meeting to store", { error: err instanceof Error ? err.message : String(err) });
   }
 
+  // Extract meeting requests from agent responses and write as signals
+  extractMeetingRequests(store, rounds);
+
   // Record action-item dispositions to the dashboard (issue #798).
   // Fire-and-forget: dashboard outages must not block standup processing.
   void flushStandupDispositions(config, summary);
@@ -578,6 +584,58 @@ async function flushStandupDispositions(
     log.warn("Failed to flush standup dispositions to dashboard", {
       error: err instanceof Error ? err.message : String(err),
     });
+  }
+}
+
+// ── Meeting request extraction ────────────────────────────────────────────
+
+const MEETING_REQUEST_RE = /\*\*REQUEST MEETING:\*\*\s*(.+?)(?:\[format:\s*([\w-]+)\])?$/gmi;
+
+/**
+ * Scan agent responses for "REQUEST MEETING: <topic>" blocks and write
+ * them as meeting_request signals for the facilitator to evaluate.
+ */
+function extractMeetingRequests(store: StateStore, rounds: MeetingRound[]): void {
+  for (const round of rounds) {
+    for (const entry of round.entries) {
+      if (!entry.response) continue;
+
+      // Reset regex state
+      MEETING_REQUEST_RE.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = MEETING_REQUEST_RE.exec(entry.response)) !== null) {
+        const topic = match[1].trim();
+        const format = match[2]?.trim() ?? undefined;
+        if (!topic) continue;
+
+        const key = `meeting-request-${Date.now()}-${entry.agentName}`;
+        try {
+          store.writeSignal({
+            agent: entry.agentName,
+            signal_type: "meeting_request",
+            key,
+            value: {
+              topic,
+              suggestedFormat: format,
+              suggestedParticipants: [],
+              urgency: "normal",
+              context: `Requested by ${entry.agentName} during standup round ${round.roundNumber}`,
+            },
+            confidence: 0.8,
+            ttl_hours: 168,
+          });
+          log.info("Meeting request extracted from standup", {
+            agent: entry.agentName,
+            topic,
+            format,
+          });
+        } catch (err) {
+          log.warn("Failed to write meeting request signal", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
   }
 }
 
