@@ -164,27 +164,44 @@ export function runGitHubPreDispatchValidation(params: {
   }
 
   if (agent.github !== issue.repo) {
-    const failed = makeFailedResult(
-      base,
-      "issue_ownership",
-      "issue_not_owned_by_agent",
-      `issue ${sourceRef} belongs to ${issue.repo}, but agent "${agentName}" is configured for ${agent.github}`,
-    );
-    store.addDispatchValidation({
-      source,
-      source_ref: sourceRef,
-      agent_name: agentName,
-      repo: issue.repo,
-      issue_number: issue.number,
-      outcome: failed.outcome,
-      failure_check: failed.failureCheck,
-      failure_code: failed.failureCode,
-      failure_reason: failed.failureReason,
-      checklist: failed.checks,
-    });
-    return failed;
+    // Exception: pr-feedback tasks rerouted by capability enforcement are
+    // allowed to cross repo boundaries.  The original agent was restricted
+    // (review-only / research-only) so the dispatcher re-targeted the
+    // orchestrator, which is the only capable fallback.  Blocking it here
+    // would deadlock the PR revision loop permanently (issue #1098).
+    if (source === "pr-feedback") {
+      checks.push(
+        makePassedCheck(
+          "issue_ownership",
+          "cross_repo_pr_feedback_allowed",
+          `pr-feedback rerouted to ${agentName} — issue_not_owned_by_agent bypassed for cross-repo feedback`,
+        ),
+      );
+    } else {
+      const failed = makeFailedResult(
+        base,
+        "issue_ownership",
+        "issue_not_owned_by_agent",
+        `issue ${sourceRef} belongs to ${issue.repo}, but agent "${agentName}" is configured for ${agent.github}`,
+      );
+      store.addDispatchValidation({
+        source,
+        source_ref: sourceRef,
+        agent_name: agentName,
+        repo: issue.repo,
+        issue_number: issue.number,
+        outcome: failed.outcome,
+        failure_check: failed.failureCheck,
+        failure_code: failed.failureCode,
+        failure_reason: failed.failureReason,
+        checklist: failed.checks,
+      });
+      return failed;
+    }
   }
-  checks.push(makePassedCheck("issue_ownership", "owned_by_agent", `issue belongs to ${agent.github}`));
+  if (agent.github === issue.repo) {
+    checks.push(makePassedCheck("issue_ownership", "owned_by_agent", `issue belongs to ${agent.github}`));
+  }
 
   if (store.hasActiveTask(agentName)) {
     const failed = makeFailedResult(
