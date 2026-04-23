@@ -705,6 +705,30 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
   }
 
   /**
+   * Return the ISO-8601 `expires_at` timestamp for the active PR guard cooldown
+   * entry for `(repo, issueNumber)`, or `null` when no active entry exists.
+   *
+   * Used by `getCooldownCheckPayload()` to build the per-issue check endpoint
+   * response (`GET /api/pr-guard-cooldown/check`), which the orchestrator calls
+   * *before* dispatching — blocking redundant tasks at the source rather than
+   * reactively inside the reviewer.
+   *
+   * @param repo         - Repository in "owner/repo" format
+   * @param issueNumber  - GitHub issue number
+   * @returns ISO-8601 expires_at string when active, null otherwise
+   */
+  getActivePRGuardCooldown(repo: string, issueNumber: number): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT expires_at FROM pr_guard_cooldown
+         WHERE repo = ? AND issue_number = ? AND expires_at > datetime('now')
+         LIMIT 1`,
+      )
+      .get(repo, issueNumber) as { expires_at: string } | undefined;
+    return row?.expires_at ?? null;
+  }
+
+  /**
    * Delete expired cooldown rows.
    *
    * Call this periodically (e.g. alongside other prune tasks in the daemon

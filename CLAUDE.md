@@ -103,6 +103,7 @@ When this container is used for LLM PR reviews:
 - Investigations feed: `/investigations` Telegram command shows research agent investigation feed (active, pending, done, cancelled) via `investigations-feed.ts`
 - Meeting-facilitator goal widget: monthly goal tracking for the meeting-facilitator agent (`meeting-facilitator-goal.ts`) — `core_logic_shipped` and `meetings_facilitated` targets surfaced to operators
 - PR guard cooldown feed: `listActivePRGuardCooldowns()` bulk query + `/api/pr-guard-cooldowns` REST endpoint (`pr-guard-cooldown-feed.ts`) for dashboard-level flood gate visibility
+- PR guard cooldown check endpoint: `GET /api/pr-guard-cooldown/check?repo=...&issue=N` returns `{ active, expires_at, ttl_remaining_seconds }` for a single (repo, issue) pair; enables orchestrator/proxy to gate dispatch proactively before task creation (`pr-guard-cooldown-check.ts`)
 - Low-quality PR labeler: `LowQualityPRLabeler` adds/removes the `low-quality` GitHub label on PRs when tasks score below 0.80; integrates with the universal quality gate path (`low-quality-pr-labeler.ts`)
 - Triage-health consecutive-failure cross-link: `fetchConsecutiveFailureBlocks()` async helper checks dashboard `/api/consecutive-failure-detector/blocks`; when an agent has `failure_rate > 50%` and an active block, `/triage-health` appends a warning with a link to the consecutive-failure-detector panel
 
@@ -180,6 +181,7 @@ src/
     investigations-feed.ts          — `/investigations` Telegram command: `getInvestigationsFeedPayload()` + `formatInvestigationsForTelegram()`; research feed grouped by status (active/pending/done/cancelled)
     meeting-facilitator-goal.ts     — meeting-facilitator monthly goal widget: `getMeetingFacilitatorGoalWidget()` tracking `core_logic_shipped` (target 1) and `meetings_facilitated` (target 5); `IMeetingFacilitatorGoalStore` wired into `ITelegramStateStore`
     pr-guard-cooldown-feed.ts       — `listActivePRGuardCooldowns(repo?)` bulk query returning all non-expired cooldown entries; `getPRGuardCooldownFeedPayload()` REST payload for `/api/pr-guard-cooldowns` endpoint
+    pr-guard-cooldown-check.ts      — `getCooldownCheckPayload()` + `parseCooldownCheckParams()` for `GET /api/pr-guard-cooldown/check?repo=...&issue=N`; per-issue proactive dispatch gate
     triage-health.ts                — per-agent schema failure rates and triage validation stats; powers `/triage-health` Telegram command; reads from `triage_validator_calls` table
     triage-schema-validator.ts      — `POST /api/validate-triage-schema` pre-submission self-check; `validateTriageSchema()` callable by agents before submitting housekeeping results to avoid revision cycles
     low-quality-pr-labeler.ts       — `LowQualityPRLabeler` adds/removes `low-quality` GitHub label on PRs when tasks score below 0.80; hooks into the universal quality gate path

@@ -334,6 +334,27 @@ export type {
   IPRGuardCooldownFeedStore,
 } from "./reviewer/pr-guard-cooldown-feed.js";
 
+// Per-issue PR guard cooldown check endpoint (issue #1112) — allows the orchestrator/proxy
+// to query whether a (repo, issue) pair is under cooldown BEFORE dispatching, eliminating
+// redundant task creation for issues already under review.
+//
+// Mount in the orchestrator or reviewer HTTP server:
+//   app.get('/api/pr-guard-cooldown/check', (req, res) => {
+//     const r = parseCooldownCheckParams(req.query);
+//     if (!r.ok) return res.status(400).json(formatCooldownCheckError(r.error));
+//     res.json(getCooldownCheckPayload(store, r.params.repo, r.params.issueNumber));
+//   });
+export {
+  getCooldownCheckPayload,
+  parseCooldownCheckParams,
+  formatCooldownCheckError,
+} from "./reviewer/pr-guard-cooldown-check.js";
+export type {
+  IPRGuardCooldownCheckStore,
+  PRGuardCooldownCheckPayload,
+  CooldownCheckParams,
+} from "./reviewer/pr-guard-cooldown-check.js";
+
 // Duplicate-dispatch surge detector (issue #262) — Telegram alert when >= 3 already-in-review
 // blocks occur within a 30-minute window; 2-hour cooldown prevents alert fatigue.
 export { DuplicateDispatchSurgeDetector } from "./reviewer/duplicate-dispatch-surge-detector.js";
