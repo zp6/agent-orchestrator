@@ -16,6 +16,12 @@ vi.mock("./github.js", () => ({
   validateGhAuth: vi.fn().mockReturnValue({ ok: true }),
 }));
 
+// Mock PR guard cooldown client (issue #1112): default = no active cooldown
+vi.mock("../client/pr-guard-cooldown-client.js", () => ({
+  queryPRGuardCooldown: vi.fn().mockResolvedValue({ status: "inactive" }),
+  DEFAULT_REVIEWER_URL: "http://localhost:3474",
+}));
+
 vi.mock("./reporters.js", () => ({
   reportResult: vi.fn(),
   DEFAULT_ESCALATION_RETRY_LIMIT: 3,
@@ -36,6 +42,7 @@ vi.mock("./issue-state-bridge.js", () => ({
 import { fetchOpenIssues, findApprovedPRForIssue, findBranchForIssue, findExistingPRsForIssue, isIssueOpen, validateGhAuth } from "./github.js";
 import { cachedGetIssueState } from "./issue-state-bridge.js";
 import { sendTelegramAlert } from "../service/telegram.js";
+import { queryPRGuardCooldown } from "../client/pr-guard-cooldown-client.js";
 const mockSendTelegramAlert = vi.mocked(sendTelegramAlert);
 const mockFetchIssues = vi.mocked(fetchOpenIssues);
 const mockFindApprovedPR = vi.mocked(findApprovedPRForIssue);
@@ -44,6 +51,7 @@ const mockFindExistingPRs = vi.mocked(findExistingPRsForIssue);
 const mockIsIssueOpen = vi.mocked(isIssueOpen);
 const mockValidateGhAuth = vi.mocked(validateGhAuth);
 const mockCachedGetIssueState = vi.mocked(cachedGetIssueState);
+const mockQueryPRGuardCooldown = vi.mocked(queryPRGuardCooldown);
 
 const config: OrchestratorConfig = {
   proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 5000 },
@@ -2676,5 +2684,118 @@ describe("PR guard surge alert (issue #1082)", () => {
 
   it("PR_GUARD_SURGE_THRESHOLD exported constant equals 5", () => {
     expect(PR_GUARD_SURGE_THRESHOLD).toBe(5);
+  });
+
+  // ── PR guard cooldown pre-dispatch check (issue #1112) ──────────────────────
+
+  it("suppresses dispatch when reviewer has active PR guard cooldown", async () => {
+    // Atomic PR guard cooldown lock (issue #1095)
+    (mockStore.tryAcquirePRGuardLock as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 440, title: "Feature", body: "", url: "", labels: [] },
+    ]);
+    const expiresAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    mockQueryPRGuardCooldown.mockResolvedValueOnce({
+      status: "active",
+      expires_at: expiresAt,
+      blocking_pr: 441,
+    });
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    // Dispatch must not be called when cooldown is active
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("does not suppress dispatch when reviewer cooldown is inactive", async () => {
+    // Atomic PR guard cooldown lock (issue #1095)
+    (mockStore.tryAcquirePRGuardLock as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    // Use a unique issue number to avoid collision with inFlightDispatches from earlier tests
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 11120, title: "Feature", body: "", url: "", labels: [] },
+    ]);
+    // Ensure no open PRs are found (previous surge tests may have overridden this mock)
+    mockFindExistingPRs.mockReturnValue([]);
+    mockFindApprovedPR.mockReturnValue(null);
+    // Default mock already returns inactive, but be explicit
+    mockQueryPRGuardCooldown.mockResolvedValueOnce({ status: "inactive" });
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledOnce();
+  });
+
+  it("proceeds with dispatch when reviewer cooldown check is unavailable (fail-open)", async () => {
+    // Atomic PR guard cooldown lock (issue #1095)
+    (mockStore.tryAcquirePRGuardLock as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    // Use a unique issue number to avoid collision with inFlightDispatches from earlier tests
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 11121, title: "Feature", body: "", url: "", labels: [] },
+    ]);
+    // Ensure no open PRs are found (previous surge tests may have overridden this mock)
+    mockFindExistingPRs.mockReturnValue([]);
+    mockFindApprovedPR.mockReturnValue(null);
+    mockQueryPRGuardCooldown.mockResolvedValueOnce({
+      status: "unavailable",
+      error: "connect ECONNREFUSED 127.0.0.1:3474",
+    });
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // Reviewer unreachable → fail open → dispatch proceeds
+    expect(result.dispatched).toBe(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledOnce();
+  });
+
+  it("calls queryPRGuardCooldown with the correct repo and issue number", async () => {
+    // Atomic PR guard cooldown lock (issue #1095)
+    (mockStore.tryAcquirePRGuardLock as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    // Use a unique issue number to avoid collision with inFlightDispatches from earlier tests
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 11122, title: "Bug fix", body: "", url: "", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([]);
+    mockFindApprovedPR.mockReturnValue(null);
+    mockQueryPRGuardCooldown.mockResolvedValueOnce({ status: "inactive" });
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(mockQueryPRGuardCooldown).toHaveBeenCalledWith(
+      "owner/my-repo",
+      11122,
+      expect.any(String), // reviewerUrl
+    );
+  });
+
+  it("suppresses dispatch for every issue in a surge scenario (11-dispatch protection)", async () => {
+    // Simulates the rapartlu/agent-proxy#440 scenario: 11 dispatch attempts
+    // all blocked because reviewer has an active cooldown for PR #441.
+    (mockStore.tryAcquirePRGuardLock as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    const expiresAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    // Return an active cooldown for each of the 11 calls
+    mockQueryPRGuardCooldown.mockResolvedValue({
+      status: "active",
+      expires_at: expiresAt,
+      blocking_pr: 441,
+    });
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 440, title: "Feature A", body: "", url: "", labels: [] },
+    ]);
+
+    // Run dispatchGitHubIssues 11 times (simulating 11 poll cycles)
+    let totalDispatched = 0;
+    let totalSkipped = 0;
+    for (let i = 0; i < 11; i++) {
+      const r = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+      totalDispatched += r.dispatched;
+      totalSkipped += r.skipped;
+    }
+
+    expect(totalDispatched).toBe(0);
+    expect(totalSkipped).toBe(11);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
   });
 });

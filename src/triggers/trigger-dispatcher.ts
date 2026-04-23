@@ -6,6 +6,7 @@ import type { OrchestratorConfig } from "../config/schema.js";
 import { createLogger } from "../service/logger.js";
 import { scoreIssuePriority } from "../orchestrator/priority-scorer.js";
 import { sendTelegramAlert } from "../service/telegram.js";
+import { queryPRGuardCooldown, DEFAULT_REVIEWER_URL } from "../client/pr-guard-cooldown-client.js";
 
 /**
  * Default TTL for issue claims: 2 hours (matches agents.yaml stale_timeout_ms conventions).
@@ -566,6 +567,49 @@ export async function dispatchGitHubIssues(
         });
         result.skipped++;
         continue;
+      }
+
+      // Cross-repo PR guard cooldown check (issue #1112): query the reviewer
+      // for an active cooldown before running the full pre-dispatch validation.
+      // When the reviewer previously blocked this (repo, issue) as
+      // "already-in-review", it persists a TTL cooldown entry.  Checking here
+      // — before the gh CLI calls in runGitHubPreDispatchValidation — prevents
+      // redundant GitHub API calls and eliminates the repeated dispatch surge
+      // seen when the local pre-dispatch validator races ahead of the reviewer.
+      //
+      // Failure mode: non-blocking.  If the reviewer is unreachable the check
+      // returns `{ status: 'unavailable' }` and dispatch proceeds normally.
+      {
+        const reviewerUrl =
+          (config as { reviewer_url?: string }).reviewer_url ?? DEFAULT_REVIEWER_URL;
+        const cooldown = await queryPRGuardCooldown(issue.repo, issue.number, reviewerUrl);
+        if (cooldown.status === "active") {
+          log.info(
+            "PR guard cooldown active (reviewer): suppressing dispatch",
+            {
+              sourceRef,
+              agentName,
+              expiresAt: cooldown.expires_at,
+              blockingPR: cooldown.blocking_pr,
+            },
+          );
+          reportDashboardSkip({
+            issue_id: sourceRef,
+            agent_name: agentName,
+            skip_reason: "pr_guard_cooldown",
+            condition_value: [
+              `cooldown_active=true`,
+              `expires=${cooldown.expires_at}`,
+              cooldown.blocking_pr ? `pr=#${cooldown.blocking_pr}` : undefined,
+            ]
+              .filter(Boolean)
+              .join(","),
+            context:
+              "Pre-dispatch PR guard cooldown check: reviewer has active cooldown for this issue",
+          });
+          result.skipped++;
+          continue;
+        }
       }
 
       const validation = runGitHubPreDispatchValidation({
