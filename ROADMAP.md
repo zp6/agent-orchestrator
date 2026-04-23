@@ -1,6 +1,6 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-22 (triage cycle 9)_
+_Last updated: 2026-04-23 (triage cycle 11)_
 
 ## Completed (recent)
 
@@ -56,11 +56,7 @@ _Last updated: 2026-04-22 (triage cycle 9)_
 - **#364 — Hard quality floor with mandatory override audit trail** _(high)_ — Hard floor at 0.10 blocking sub-floor approvals; Telegram escalation with `/approve-override` and `/reject-override`; `score_floor_overrides` audit table.
 - **#368 — Auto-file GitHub issues for improvements identified across 3+ consecutive batches** _(medium)_ — `ImprovementRecurrenceTracker` records patterns by normalized title hash across distinct batches; auto-files `chronic` + `improvement` tagged issue when threshold is reached.
 - **#340 — Persist proactive rebase stats to SQLite** _(medium)_ — `rebase_events` table, `IRebaseStore` interface, `/rebase-stats` Telegram command, and `/rebase-stats` HTTP endpoint for dashboard.
-- **#221 — Improvement detector deduplication against existing GitHub issues** _(medium)_ — `ImprovementDetector` creates GitHub issues without checking for existing open duplicates. Add `gh issue list` pre-check with title-similarity filter before filing.
 - **#232 — Quality scores missing from task feed** _(high)_ — Despite `ensureScoresPopulated()` and backfill commands, recent tasks still show `quality_score: null`. Need a startup/daemon check that warns when >10% of recent approved tasks have null scores.
-- **#222 — `/help` Telegram command** _(medium)_ — List all 20+ bot commands with one-line descriptions so operators can self-serve during incidents without reading source code.
-- **#189 — PR-feedback task scoring model** _(medium)_ — PR-feedback tasks receive null scores because no `PR_FEEDBACK_SYSTEM_PROMPT` exists. Add scoring on three dimensions: correctness, completeness, approval-bias adherence.
-- **#89 — Second-pass outcome tracking** _(low)_ — Record whether borderline (0.70–0.79) second-pass reviews improve final outcomes. Metric: upgrade rate, reject rate, merged quality delta.
 
 ## Ideas
 
@@ -71,6 +67,8 @@ _Last updated: 2026-04-22 (triage cycle 9)_
 - **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
 
 ## Triage notes
+
+- **2026-04-23 cycle 11**: No duplicate issues (10 open, all distinct). No stale issues (oldest #232 is 6 days old). Open PR #437 correctly closes #436. ROADMAP.md: removed 4 closed issues from Planned (#89, #189, #221, #222 — all closed). CLAUDE.md: verified accurate, no drift detected. Issues remaining: 10 open, all within 14-day window.
 
 - **2026-04-22 cycle 9**: No duplicate issues found (12 open, all distinct). No stale issues (oldest #221 is 6 days old). No open PRs (none to audit for orphan links). Completed since cycle 8: #428 (PR #429 merged — LowQualityPRLabeler), #382 (PR #431 merged — research agent misrouting section in digest), #432 (PR #433 merged — triage-health cross-link to consecutive-failure-detector). CLAUDE.md: added `low-quality-pr-labeler.ts` to Scope and Source Layout; added consecutive-failure cross-link description to `triage-health.ts` scope entry. ROADMAP.md: promoted #428/#382/#432 to Completed; added #427 (PR-level dispatch lock) to Next up position 1; renumbered prior items 1–5 → 2–6 with #232 dropping to 6.
 
