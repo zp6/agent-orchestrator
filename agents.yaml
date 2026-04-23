@@ -146,6 +146,22 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
+  codex-agent-orchestrator:
+    dir: "claude-agent-orchestrator"
+    repo: "git@github.com:rapartlu/agent-orchestrator.git"
+    provider: "openai"
+    model: "gpt-5.4-mini"
+    pool: "orchestrator"
+    description: "Core orchestration infrastructure (Codex). Parallel throughput for orchestrator pool."
+    capabilities: ["typescript", "orchestration", "sqlite"]
+    github: "rapartlu/agent-orchestrator"
+    owns_topics: ["orchestrator", "daemon", "routing", "dispatcher", "planner", "deployer", "state", "triggers", "sync"]
+    docker:
+      port: 3480
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
   # ── Reviewer ────────────────────────────────────────────────────
   claude-orchestrator-reviewer:
     dir: "claude-orchestrator-reviewer"
@@ -166,6 +182,22 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
+  codex-orchestrator-reviewer:
+    dir: "claude-orchestrator-reviewer"
+    repo: "git@github.com:rapartlu/agent-reviewer.git"
+    provider: "openai"
+    model: "gpt-5.4-mini"
+    pool: "reviewer"
+    description: "PR reviewer, verifier, supervisor (Codex). Parallel throughput for reviewer pool."
+    capabilities: ["typescript", "llm", "review", "verification"]
+    github: "rapartlu/agent-reviewer"
+    owns_topics: ["review", "verification", "supervisor", "improvement", "escalation", "telegram", "quality"]
+    docker:
+      port: 3481
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
   # ── Dashboard ───────────────────────────────────────────────────
   claude-orchestrator-dashboard:
     dir: "claude-orchestrator-dashboard"
@@ -181,6 +213,22 @@ agents:
     housekeeping_offset_cycles: 20
     docker:
       port: 3473
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
+  codex-orchestrator-dashboard:
+    dir: "claude-orchestrator-dashboard"
+    repo: "git@github.com:rapartlu/agent-dashboard.git"
+    provider: "openai"
+    model: "gpt-5.4-mini"
+    pool: "dashboard"
+    description: "Dashboard, CLI commands, observability UI (Codex). Parallel throughput for dashboard pool."
+    capabilities: ["typescript", "html", "css", "express", "dashboard"]
+    github: "rapartlu/agent-dashboard"
+    owns_topics: ["dashboard", "cli", "status", "health", "metrics", "activity", "ui", "escalation-ui"]
+    docker:
+      port: 3482
       api_key: "cheese"
       permissions: "bypassPermissions"
       session: "fresh"
@@ -219,6 +267,23 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
+  codex-research-agent:
+    dir: "claude-research-agent"
+    repo: "git@github.com:rapartlu/research-agent.git"
+    provider: "openai"
+    model: "gpt-5.4-mini"
+    pool: "research"
+    description: "Research agent (Codex). Parallel throughput for research pool."
+    capabilities: ["research", "web-search", "documentation", "analysis"]
+    capability_tags: ["research-only"]
+    github: "rapartlu/research-agent"
+    owns_topics: ["research", "investigation", "comparison", "evaluation", "exploration", "temporal", "architecture"]
+    docker:
+      port: 3483
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
   # ── Proxy ───────────────────────────────────────────────────────
   claude-proxy:
     dir: "claude-proxy"
@@ -234,6 +299,22 @@ agents:
     housekeeping_offset_cycles: 40
     docker:
       port: 3471
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
+  codex-proxy:
+    dir: "claude-proxy"
+    repo: "git@github.com:rapartlu/agent-proxy.git"
+    provider: "openai"
+    model: "gpt-5.4-mini"
+    pool: "proxy"
+    description: "Proxy server (Codex). Parallel throughput for proxy pool."
+    capabilities: ["typescript", "docker", "proxy", "api", "infrastructure"]
+    github: "rapartlu/agent-proxy"
+    owns_topics: ["proxy", "docker", "container", "infrastructure", "auth", "ssh"]
+    docker:
+      port: 3484
       api_key: "cheese"
       permissions: "bypassPermissions"
       session: "fresh"
