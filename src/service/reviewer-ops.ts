@@ -113,6 +113,14 @@ export async function verifyTask(
       decayAppliedRules(store, taskId);
     }
 
+    // Update failure interception outcome so the metrics panel can compute
+    // prevention_rate (issue #1086).
+    try {
+      store.updateFailureInterceptionOutcome(taskId, result.approved ? "passed" : "failed");
+    } catch {
+      // Non-fatal — the interception table may not exist yet on old DBs.
+    }
+
     return result;
   } catch (err) {
     verifierLog.error("Verification failed", {

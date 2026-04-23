@@ -48,6 +48,10 @@ import {
 } from "./capability-enforcer.js";
 import { checkAndRebaseBeforeDispatch } from "./proactive-rebase-scheduler.js";
 import { buildSemanticMemoryBlock } from "./semantic-memory.js";
+import {
+  FailureInterceptor,
+  FAILURE_INTERCEPTION_ALERT_THRESHOLD,
+} from "./failure-interceptor.js";
 
 /**
  * Walk the parent_task_id chain upward from `taskId` (or a parent task id) and
@@ -1424,6 +1428,72 @@ export class Dispatcher {
         agent_name: agentName,
         content: `[antibody-flagged] Matched ${antibodyCheck.matches.length} risk pattern(s): ${matchSummary}`,
       });
+    }
+
+    // Failure interception: score task against recent failures and inject lessons
+    // as context when similarity >= threshold (issue #1086).
+    {
+      const interceptor = new FailureInterceptor(this.store);
+      const interception = interceptor.check(
+        options?.title ?? task.title,
+        taskType,
+        agentName,
+      );
+
+      if (interception.intercepted) {
+        const lessonsBlock = interceptor.buildLessonsContext(interception.lessons);
+        messageToSend = messageToSend + lessonsBlock;
+
+        this.log.warn("[failure-interceptor] task matched similar failures — injecting lessons", {
+          taskId: task.id,
+          agentName,
+          similarity: interception.similarity_score.toFixed(3),
+          lessonCount: interception.lessons.length,
+          matchedTaskIds: interception.matched_task_ids,
+        });
+
+        this.store.addLog({
+          task_id: task.id,
+          direction: "system",
+          agent_name: agentName,
+          content:
+            `[failure-interceptor] similarity=${(interception.similarity_score * 100).toFixed(0)}% ` +
+            `lessons=${interception.lessons.length} ` +
+            `matched=${interception.matched_task_ids.join(",")}`,
+        });
+
+        // Record the interception for the metrics panel
+        this.store.recordFailureInterception({
+          task_id: task.id,
+          similar_task_ids: JSON.stringify(interception.matched_task_ids),
+          similarity_score: interception.similarity_score,
+          lessons_injected: interception.lessons.length,
+          model_upgraded: interception.suggest_model_upgrade ? 1 : 0,
+          final_outcome: null,
+        });
+
+        // Log model upgrade suggestion (don't auto-change model; flag it)
+        if (interception.suggest_model_upgrade) {
+          this.log.info("[failure-interceptor] model tier upgrade suggested for high-risk task", {
+            taskId: task.id,
+            agentName,
+            similarity: interception.similarity_score.toFixed(3),
+          });
+        }
+
+        // Telegram alert for high-confidence matches
+        if (interception.similarity_score >= FAILURE_INTERCEPTION_ALERT_THRESHOLD) {
+          const titleTrunc = task.title.slice(0, 60);
+          notifyOperator(
+            "Failure Interceptor fired",
+            `🛡 *Failure Interceptor* fired for task \`${task.id.slice(-8)}\`\n` +
+              `Similarity: ${(interception.similarity_score * 100).toFixed(0)}% | Lessons injected: ${interception.lessons.length}\n` +
+              `Task: ${titleTrunc}${task.title.length > 60 ? "…" : ""}`,
+            "warning",
+            `failure-interceptor:${task.id}`,
+          );
+        }
+      }
     }
 
     // Log the outgoing message

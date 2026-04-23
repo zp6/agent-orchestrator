@@ -48,6 +48,7 @@ import { registerReviewSaturationCommand } from "./commands/review-saturation.js
 import { registerMemoryCommand } from "./commands/memory.js";
 import { registerControlsCommand } from "./commands/controls.js";
 import { registerDagCommand } from "./commands/dag.js";
+import { registerFailureInterceptionsCommand } from "./commands/failure-interceptions.js";
 
 const program = new Command();
 
@@ -105,5 +106,6 @@ registerReviewSaturationCommand(program);
 registerMemoryCommand(program);
 registerControlsCommand(program);
 registerDagCommand(program);
+registerFailureInterceptionsCommand(program);
 
 program.parse();

@@ -18,7 +18,7 @@
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import { StateStore, type DispatchBlockMetrics, type SemanticMemoryEffectivenessResult } from "../state/store.js";
+import { StateStore, type DispatchBlockMetrics, type SemanticMemoryEffectivenessResult, type FailureInterceptionStats } from "../state/store.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("metrics-server");
@@ -113,6 +113,28 @@ export interface MisroutingTaskItem {
   quality_score: number | null;
   status: string;
   created_at: string;
+}
+
+/**
+ * JSON response shape for GET /failure-interceptions.
+ */
+export interface FailureInterceptionsResponse {
+  /** Look-back window in days. */
+  days: number;
+  /** Total interceptions recorded in the window. */
+  total_interceptions: number;
+  /** Average similarity score across all interceptions (0–1). */
+  avg_similarity: number;
+  /** Number of interceptions where a model upgrade was suggested. */
+  model_upgrades_suggested: number;
+  /** Intercepted tasks that subsequently passed verification. */
+  intercepted_tasks_passed: number;
+  /** Intercepted tasks that subsequently failed verification. */
+  intercepted_tasks_failed: number;
+  /** Fraction of resolved interceptions that passed (0–1). */
+  prevention_rate: number;
+  /** ISO timestamp of when this response was generated. */
+  generated_at: string;
 }
 
 /**
@@ -299,6 +321,34 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /failure-interceptions ─────────────────────────────────────────────
+    if (url.pathname === "/failure-interceptions") {
+      const days = parseWindowDays(req);
+      try {
+        const stats: FailureInterceptionStats = store.getFailureInterceptionStats(days);
+        const entries = store.getFailureInterceptions(500, days);
+        const passed = entries.filter((e) => e.final_outcome === "passed").length;
+        const failed = entries.filter((e) => e.final_outcome === "failed").length;
+        const body: FailureInterceptionsResponse = {
+          days,
+          total_interceptions: stats.total,
+          avg_similarity: stats.avg_similarity,
+          model_upgrades_suggested: stats.model_upgrades,
+          intercepted_tasks_passed: passed,
+          intercepted_tasks_failed: failed,
+          prevention_rate: stats.prevention_rate,
+          generated_at: new Date().toISOString(),
+        };
+        sendJson(res, 200, body);
+      } catch (err) {
+        log.warn("Failed to compute failure interception metrics", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to compute metrics" });
+      }
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -309,7 +359,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
   server.listen(port, "127.0.0.1", () => {
     log.info("Metrics server started", {
       port,
-      endpoints: ["/health", "/dispatch-efficiency", "/semantic-memory-effectiveness", "/investigations", "/misrouting"],
+      endpoints: ["/health", "/dispatch-efficiency", "/semantic-memory-effectiveness", "/investigations", "/misrouting", "/failure-interceptions"],
     });
   });
 

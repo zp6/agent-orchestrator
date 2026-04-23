@@ -170,6 +170,33 @@ export interface DagNode {
   updated_at: string;
 }
 
+// ── Failure Interception types (issue #1086) ──────────────────────────────────
+
+/** A single failure interception event recorded at pre-dispatch time. */
+export interface FailureInterceptionEntry {
+  id: string;
+  task_id: string;
+  /** JSON array of matched failed task IDs. */
+  similar_task_ids: string;
+  /** Top Jaccard similarity score (0–1). */
+  similarity_score: number;
+  /** Number of failure lessons injected into the dispatch prompt. */
+  lessons_injected: number;
+  /** 1 if model tier upgrade was suggested, 0 otherwise. */
+  model_upgraded: number;
+  /** 'passed' | 'failed' | null (pending). */
+  final_outcome: "passed" | "failed" | null;
+  created_at: string;
+}
+
+/** Aggregate stats for the failure interception panel. */
+export interface FailureInterceptionStats {
+  total: number;
+  avg_similarity: number;
+  model_upgrades: number;
+  prevention_rate: number;
+}
+
 export type TaskSource = "github" | "linear" | "slack" | "manual" | "pr-feedback";
 /**
  * Identifies the kind of work a task represents.
@@ -1701,6 +1728,7 @@ export class StateStore {
     this.runSemanticMemoryMigration();
     this.runOperatorControlsMigration();
     this.runDagMigration();
+    this.runFailureInterceptionMigration();
   }
 
   private runPhase2Migration(): void {
@@ -10831,6 +10859,130 @@ export class StateStore {
       ORDER BY e.created_at DESC
       LIMIT ?
     `).all(limit) as Array<DagExecution & { node_count: number; done_count: number }>;
+  }
+
+  // ── Failure Interception (issue #1086) ────────────────────────────────────────
+
+  /**
+   * Create the failure_interceptions table for pre-dispatch similarity tracking.
+   * Called once at startup via the constructor migration chain.
+   */
+  runFailureInterceptionMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS failure_interceptions (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        similar_task_ids TEXT NOT NULL,
+        similarity_score REAL NOT NULL,
+        lessons_injected INTEGER NOT NULL DEFAULT 0,
+        model_upgraded INTEGER NOT NULL DEFAULT 0,
+        final_outcome TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_failure_interceptions_task_id ON failure_interceptions(task_id);
+      CREATE INDEX IF NOT EXISTS idx_failure_interceptions_created_at ON failure_interceptions(created_at);
+    `);
+  }
+
+  /** Record a new failure interception event. */
+  recordFailureInterception(entry: Omit<FailureInterceptionEntry, "id" | "created_at">): void {
+    this.runFailureInterceptionMigration();
+    const id = generateId();
+    this.db.prepare(`
+      INSERT INTO failure_interceptions
+        (id, task_id, similar_task_ids, similarity_score, lessons_injected, model_upgraded, final_outcome, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      entry.task_id,
+      entry.similar_task_ids,
+      entry.similarity_score,
+      entry.lessons_injected,
+      entry.model_upgraded,
+      entry.final_outcome ?? null,
+      new Date().toISOString(),
+    );
+  }
+
+  /** Fetch recent failure interceptions, newest first. */
+  getFailureInterceptions(limit = 50, daysBack = 7): FailureInterceptionEntry[] {
+    this.runFailureInterceptionMigration();
+    const cutoff = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
+    return this.db.prepare(`
+      SELECT * FROM failure_interceptions
+      WHERE created_at >= ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(cutoff, limit) as FailureInterceptionEntry[];
+  }
+
+  /** Compute aggregate stats for the failure interception panel. */
+  getFailureInterceptionStats(daysBack = 7): FailureInterceptionStats {
+    this.runFailureInterceptionMigration();
+    const cutoff = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
+    const row = this.db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        AVG(similarity_score) AS avg_similarity,
+        SUM(model_upgraded) AS model_upgrades,
+        SUM(CASE WHEN final_outcome = 'passed' THEN 1 ELSE 0 END) AS passed,
+        SUM(CASE WHEN final_outcome IS NOT NULL THEN 1 ELSE 0 END) AS resolved
+      FROM failure_interceptions
+      WHERE created_at >= ?
+    `).get(cutoff) as {
+      total: number;
+      avg_similarity: number | null;
+      model_upgrades: number;
+      passed: number;
+      resolved: number;
+    };
+
+    const total = row.total ?? 0;
+    const resolved = row.resolved ?? 0;
+    const passed = row.passed ?? 0;
+    return {
+      total,
+      avg_similarity: row.avg_similarity ?? 0,
+      model_upgrades: row.model_upgrades ?? 0,
+      prevention_rate: resolved > 0 ? passed / resolved : 0,
+    };
+  }
+
+  /** Update the final outcome of an interception record once the task completes verification. */
+  updateFailureInterceptionOutcome(taskId: string, outcome: "passed" | "failed"): void {
+    this.runFailureInterceptionMigration();
+    this.db.prepare(`
+      UPDATE failure_interceptions SET final_outcome = ? WHERE task_id = ? AND final_outcome IS NULL
+    `).run(outcome, taskId);
+  }
+
+  /**
+   * Fetch recent failed tasks suitable for similarity matching.
+   * Returns tasks with status='failed' OR quality_score < 0.5 (rejected).
+   * Limited to last N days and up to `limit` rows.
+   */
+  getRecentFailedTasksForSimilarity(daysBack = 14, limit = 50): Array<{
+    id: string;
+    title: string;
+    result: string | null;
+    agent: string;
+  }> {
+    const cutoff = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
+    // Check columns defensively (old DBs may not have quality_score)
+    const cols = this.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+    const colSet = new Set(cols.map((c) => c.name));
+    const qualityClause = colSet.has("quality_score")
+      ? "OR (quality_score IS NOT NULL AND quality_score < 0.5)"
+      : "";
+    return this.db.prepare(`
+      SELECT id, title, result, agent_name AS agent
+      FROM tasks
+      WHERE created_at >= ?
+        AND (status = 'failed' ${qualityClause})
+        AND title IS NOT NULL
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(cutoff, limit) as Array<{ id: string; title: string; result: string | null; agent: string }>;
   }
 }
 
