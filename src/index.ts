@@ -342,6 +342,21 @@ export type {
   SurgeAlertConfig,
 } from "./reviewer/duplicate-dispatch-surge-detector.js";
 
+// PR guard surge detector (issue #442) — Telegram alert when the same (repo, issue) pair
+// triggers already-in-review >= 3 times within a 60-minute window; deduped to one alert
+// per surge event (60-minute cooldown).  Alert includes repo, issue number, blocking PR URL,
+// and hit count.  Leading indicator of cooldown-table failures or dispatcher polling loops.
+export {
+  PRGuardSurgeDetector,
+  PR_GUARD_SURGE_THRESHOLD,
+  PR_GUARD_SURGE_WINDOW_MS,
+  PR_GUARD_SURGE_COOLDOWN_MS,
+} from "./reviewer/pr-guard-surge-detector.js";
+export type {
+  PRGuardHit,
+  PRGuardSurgeConfig,
+} from "./reviewer/pr-guard-surge-detector.js";
+
 // Cross-agent in-flight duplicate dispatch guard (issue #336) — blocks dispatch when
 // another agent already has an active task for the same GitHub issue, preventing
 // competing agents from implementing the same feature simultaneously.
