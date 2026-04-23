@@ -3437,9 +3437,12 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
             // Check state before dispatching to avoid wasted cycles on already-merged PRs.
             if (!this.prReviewer.isPROpen(repo, prNumber)) {
               this.log.info("Skipped PR feedback dispatch: PR no longer open (no-op)", { agentName, repo, prNumber });
-            } else if (prBodyHasIssueRef(prBody) && /missing.*issue|issue.*reference|Closes #N/i.test(result.reason)) {
+            } else if (prBodyHasIssueRef(prBody) && /missing.*issue|issue.*reference|Closes #N/i.test(result.reason) && !/(?:Housekeeping|Cross-repo triage).*JSON metadata schema/i.test(result.reason)) {
               // The review flagged a missing Closes #N, but the PR body already has one —
               // agent must have updated it between review cycles. No dispatch needed.
+              // Exception: if this is a housekeeping/cross-repo schema validation failure,
+              // always dispatch feedback even if the body has an issue ref, because the
+              // problem is not the missing Closes #N but the missing JSON schema fields.
               this.log.info("Skipping PR feedback dispatch: PR body already has issue ref", { agentName, repo, prNumber });
             } else if (this.store.hasActiveTask(agentName)) {
               this.log.info("Skipping PR feedback dispatch: agent busy", { agentName, repo, prNumber });
