@@ -1,31 +1,36 @@
 /**
- * PR guard surge detector — issue #442
+ * PR guard surge detector — issue #442 / dispatch suppression — issue #1113
  *
  * Monitors "already-in-review" guard events fired by the PR existence guard
- * and sends a Telegram alert when the *same* (repo, issue) pair triggers
- * already-in-review three or more times within a 60-minute window.
+ * and:
+ *
+ *   1. Sends a Telegram alert when the *same* (repo, issue) pair triggers
+ *      already-in-review three or more times within a 60-minute window
+ *      (surge detection — original behaviour from issue #442).
+ *
+ *   2. Writes a 2-hour dispatch suppression entry and sends a dedicated
+ *      Telegram alert (with "dispatch suppressed until HH:MM") when the
+ *      same pair triggers ≥5 times within a 30-minute window
+ *      (auto-suppression — issue #1113).
  *
  * This is a leading indicator that:
  *   - The cooldown table is not being respected by the dispatcher, or
  *   - The orchestrator has a polling loop bug that keeps re-queuing the same issue.
  *
- * Currently operators have no visibility into this failure mode — tasks all
- * score 1.0 and look healthy.  After this feature, an operator receiving:
+ * After the suppression feature, when an operator receives:
  *
- *   ⚠️ /pr-guard-surge: research-agent#133 hit 3x in 60min, PR #162
+ *   🚫 /pr-guard-suppression: research-agent#133 hit 5x in 30min, PR #162
+ *   Dispatch suppressed until 14:25 UTC — no action needed.
  *
- * can immediately investigate the dispatch loop.
- *
- * Acceptance criteria (issue #442):
- *   - Alert fires when hit_count >= 3 within 60 min for same (repo, issue) pair.
- *   - Alert is deduped: at most one alert per surge event (60-min cooldown per issue).
- *   - Alert includes repo, issue number, blocking PR URL, and hit count.
+ * they know the orchestrator has automatically stopped re-queueing the issue
+ * for two hours, so no manual intervention is required.
  *
  * Usage:
  *
  *   const detector = new PRGuardSurgeDetector({
  *     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN!,
  *     telegramChatId:   process.env.TELEGRAM_CHAT_ID!,
+ *     suppressionStore: cooldownStore, // IPRGuardCooldownStore
  *   });
  *
  *   // Call from the PR existence guard onShortCircuit callback:
@@ -38,22 +43,44 @@
  */
 
 import { createLogger } from "../service/logger.js";
+import type { IPRGuardCooldownStore } from "./pr-existence-guard.js";
 
 const log = createLogger("pr-guard-surge-detector");
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-/** Default minimum hit count within the window before an alert is sent. */
+/** Default minimum hit count within the window before a surge alert is sent. */
 export const PR_GUARD_SURGE_THRESHOLD = 3;
 
-/** Default rolling window duration in milliseconds (60 minutes). */
+/** Default rolling window duration in milliseconds for surge detection (60 minutes). */
 export const PR_GUARD_SURGE_WINDOW_MS = 60 * 60 * 1000;
 
 /**
- * Default cooldown duration in milliseconds (60 minutes).
- * At most one alert per surge event per (repo, issue) pair.
+ * Default cooldown duration in milliseconds after a surge alert fires.
+ * At most one surge alert per (repo, issue) pair within this window.
  */
 export const PR_GUARD_SURGE_COOLDOWN_MS = 60 * 60 * 1000;
+
+/**
+ * Default hit count threshold to trigger automatic dispatch suppression.
+ * When the same (repo, issue) pair reaches this many 'already-in-review' hits
+ * within {@link PR_GUARD_SUPPRESSION_WINDOW_MS}, a 2-hour suppression entry is
+ * written and a Telegram alert is sent.
+ */
+export const PR_GUARD_SUPPRESSION_THRESHOLD = 5;
+
+/**
+ * Rolling window duration in milliseconds for suppression evaluation (30 minutes).
+ * Suppression is triggered when ≥ {@link PR_GUARD_SUPPRESSION_THRESHOLD} hits
+ * occur within this window.
+ */
+export const PR_GUARD_SUPPRESSION_WINDOW_MS = 30 * 60 * 1000;
+
+/**
+ * How long (in minutes) a dispatch suppression entry blocks re-queuing.
+ * Written via {@link IPRGuardCooldownStore.setPRGuardCooldown} with this TTL.
+ */
+export const PR_GUARD_SUPPRESSION_TTL_MINUTES = 120;
 
 // ── Public types ───────────────────────────────────────────────────────────────
 
@@ -76,20 +103,47 @@ export interface PRGuardSurgeConfig {
   telegramChatId: string;
   /**
    * Minimum number of guard hits for the same (repo, issue) pair within the
-   * window before an alert fires.  Default: {@link PR_GUARD_SURGE_THRESHOLD} (3).
+   * surge window before a surge alert fires.
+   * Default: {@link PR_GUARD_SURGE_THRESHOLD} (3).
    */
   surgeThreshold?: number;
   /**
-   * Rolling window duration in milliseconds.
+   * Rolling window duration in milliseconds for surge detection.
    * Default: {@link PR_GUARD_SURGE_WINDOW_MS} (60 minutes).
    */
   windowMs?: number;
   /**
-   * Cooldown duration in milliseconds after an alert fires.
-   * At most one alert per (repo, issue) pair within this window.
+   * Cooldown duration in milliseconds after a surge alert fires.
+   * At most one surge alert per (repo, issue) pair within this window.
    * Default: {@link PR_GUARD_SURGE_COOLDOWN_MS} (60 minutes).
    */
   cooldownMs?: number;
+  /**
+   * Minimum number of guard hits within {@link suppressionWindowMs} that trigger
+   * automatic dispatch suppression and a dedicated Telegram alert.
+   * Default: {@link PR_GUARD_SUPPRESSION_THRESHOLD} (5).
+   */
+  suppressionThreshold?: number;
+  /**
+   * Rolling window duration in milliseconds for suppression evaluation.
+   * Default: {@link PR_GUARD_SUPPRESSION_WINDOW_MS} (30 minutes).
+   */
+  suppressionWindowMs?: number;
+  /**
+   * How long (in minutes) the suppression entry blocks re-queuing.
+   * Written via {@link suppressionStore.setPRGuardCooldown} with this TTL.
+   * Default: {@link PR_GUARD_SUPPRESSION_TTL_MINUTES} (120 minutes).
+   */
+  suppressionTtlMinutes?: number;
+  /**
+   * State store used to persist the dispatch suppression entry.
+   * When provided and the suppression threshold is reached, a cooldown entry
+   * with TTL = {@link suppressionTtlMinutes} is written, blocking further
+   * dispatch until the TTL expires.
+   *
+   * If omitted, no suppression entry is written (Telegram alert still fires).
+   */
+  suppressionStore?: IPRGuardCooldownStore;
 }
 
 // ── Detector ───────────────────────────────────────────────────────────────────
@@ -98,72 +152,170 @@ export class PRGuardSurgeDetector {
   private readonly surgeThreshold: number;
   private readonly windowMs: number;
   private readonly cooldownMs: number;
+  private readonly suppressionThreshold: number;
+  private readonly suppressionWindowMs: number;
+  private readonly suppressionTtlMinutes: number;
 
   /** All recorded hits (never pruned; window filtering applied on read). */
   private hits: PRGuardHit[] = [];
 
   /**
    * When the last surge alert was sent per issue key (`${repo}#${issueNumber}`).
-   * Used to enforce the per-issue dedup cooldown.
+   * Used to enforce the per-issue dedup cooldown for the surge (3-hit) alert.
    */
   private alertSentAt = new Map<string, Date>();
 
+  /**
+   * When the last suppression alert was sent per issue key.
+   * A suppression alert fires at most once per (repo, issue) pair until the
+   * suppression TTL expires — tracked independently from the surge alert cooldown.
+   */
+  private suppressionSentAt = new Map<string, Date>();
+
   constructor(private readonly config: PRGuardSurgeConfig) {
-    this.surgeThreshold = config.surgeThreshold ?? PR_GUARD_SURGE_THRESHOLD;
-    this.windowMs = config.windowMs ?? PR_GUARD_SURGE_WINDOW_MS;
-    this.cooldownMs = config.cooldownMs ?? PR_GUARD_SURGE_COOLDOWN_MS;
+    this.surgeThreshold       = config.surgeThreshold        ?? PR_GUARD_SURGE_THRESHOLD;
+    this.windowMs             = config.windowMs               ?? PR_GUARD_SURGE_WINDOW_MS;
+    this.cooldownMs           = config.cooldownMs             ?? PR_GUARD_SURGE_COOLDOWN_MS;
+    this.suppressionThreshold = config.suppressionThreshold   ?? PR_GUARD_SUPPRESSION_THRESHOLD;
+    this.suppressionWindowMs  = config.suppressionWindowMs    ?? PR_GUARD_SUPPRESSION_WINDOW_MS;
+    this.suppressionTtlMinutes = config.suppressionTtlMinutes ?? PR_GUARD_SUPPRESSION_TTL_MINUTES;
   }
 
   /**
    * Record an "already-in-review" guard hit for a specific (repo, issue) pair.
    *
-   * When the rolling window hit count for the same pair reaches
-   * `surgeThreshold`, a Telegram alert is sent — unless the pair is already
-   * within its post-alert cooldown window (dedup).
+   * Two checks run independently:
    *
-   * This method never throws — alert failures are logged and swallowed so
+   * 1. **Surge alert** — when rolling-window hits reach `surgeThreshold` (default 3)
+   *    within `windowMs` (default 60 min), a Telegram alert fires (deduped by
+   *    `cooldownMs`).
+   *
+   * 2. **Suppression** — when rolling-window hits reach `suppressionThreshold`
+   *    (default 5) within `suppressionWindowMs` (default 30 min):
+   *      - A 2-hour cooldown entry is written via `suppressionStore` (if provided).
+   *      - A Telegram alert is sent with "dispatch suppressed until HH:MM".
+   *
+   * This method never throws — alert/store failures are logged and swallowed so
    * that guard logic is never interrupted.
    */
   async recordHit(hit: PRGuardHit): Promise<void> {
     this.hits.push(hit);
 
     const key = makeKey(hit.repo, hit.issueNumber);
-    const windowHits = this.getWindowHits(hit.repo, hit.issueNumber, hit.timestamp);
 
-    if (windowHits.length < this.surgeThreshold) {
-      return; // below threshold — nothing to do yet
+    // ── 1. Surge alert check (60-min window, threshold 3) ───────────────────────
+    const surgeWindowHits = this.getWindowHitsInMs(hit.repo, hit.issueNumber, hit.timestamp, this.windowMs);
+
+    if (surgeWindowHits.length >= this.surgeThreshold) {
+      if (this.isInCooldown(hit.repo, hit.issueNumber, hit.timestamp)) {
+        log.info("PR guard surge threshold reached but surge alert suppressed by cooldown", {
+          key,
+          windowHitCount: surgeWindowHits.length,
+          threshold: this.surgeThreshold,
+          lastAlertAt: this.alertSentAt.get(key)?.toISOString(),
+        });
+      } else {
+        // Record before sending to avoid leaving cooldown unset on throw.
+        this.alertSentAt.set(key, hit.timestamp);
+        try {
+          await this.sendSurgeAlert(hit.repo, hit.issueNumber, hit.prUrl, surgeWindowHits.length);
+        } catch (err) {
+          log.error("Failed to send PR guard surge alert", {
+            key,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
     }
 
-    if (this.isInCooldown(hit.repo, hit.issueNumber, hit.timestamp)) {
-      log.info("PR guard surge threshold reached but alert suppressed by cooldown", {
-        key,
-        windowHitCount: windowHits.length,
-        threshold: this.surgeThreshold,
-        lastAlertAt: this.alertSentAt.get(key)?.toISOString(),
-      });
-      return;
-    }
+    // ── 2. Suppression check (30-min window, threshold 5) ───────────────────────
+    const suppressionWindowHits = this.getWindowHitsInMs(
+      hit.repo, hit.issueNumber, hit.timestamp, this.suppressionWindowMs,
+    );
 
-    // Record before sending so a throw doesn't leave the cooldown unset.
-    this.alertSentAt.set(key, hit.timestamp);
+    if (suppressionWindowHits.length >= this.suppressionThreshold) {
+      if (this.isSuppressionActive(hit.repo, hit.issueNumber, hit.timestamp)) {
+        log.info("Suppression threshold reached but suppression already active", {
+          key,
+          windowHitCount: suppressionWindowHits.length,
+          threshold: this.suppressionThreshold,
+          suppressionSentAt: this.suppressionSentAt.get(key)?.toISOString(),
+        });
+      } else {
+        // Compute when the suppression expires so the alert can display HH:MM.
+        const suppressedUntil = new Date(
+          hit.timestamp.getTime() + this.suppressionTtlMinutes * 60 * 1000,
+        );
 
-    try {
-      await this.sendAlert(hit.repo, hit.issueNumber, hit.prUrl, windowHits.length);
-    } catch (err) {
-      // Never let alert failure propagate — guard must not block dispatch decisions.
-      log.error("Failed to send PR guard surge alert", {
-        key,
-        error: err instanceof Error ? err.message : String(err),
-      });
+        // Write suppression entry to block dispatch for suppressionTtlMinutes.
+        if (this.config.suppressionStore) {
+          try {
+            this.config.suppressionStore.setPRGuardCooldown(
+              hit.repo,
+              hit.issueNumber,
+              this.suppressionTtlMinutes,
+            );
+            log.info("Dispatch suppression written", {
+              key,
+              ttlMinutes: this.suppressionTtlMinutes,
+              suppressedUntil: suppressedUntil.toISOString(),
+            });
+          } catch (storeErr) {
+            log.error("Failed to write dispatch suppression entry", {
+              key,
+              error: storeErr instanceof Error ? storeErr.message : String(storeErr),
+            });
+          }
+        } else {
+          log.warn(
+            "Suppression threshold reached but no suppressionStore configured — " +
+            "Telegram alert will fire but dispatch is NOT blocked in state.db",
+            { key },
+          );
+        }
+
+        // Record before sending so a throw doesn't leave suppressionSentAt unset.
+        this.suppressionSentAt.set(key, hit.timestamp);
+
+        try {
+          await this.sendSuppressionAlert(
+            hit.repo,
+            hit.issueNumber,
+            hit.prUrl,
+            suppressionWindowHits.length,
+            suppressedUntil,
+          );
+        } catch (err) {
+          log.error("Failed to send dispatch suppression alert", {
+            key,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
     }
   }
 
   /**
    * Returns all hits for the given (repo, issueNumber) pair within the rolling
    * window ending at the given reference time (defaults to `Date.now()`).
+   *
+   * Uses the configured `windowMs` (60-minute surge window).
    */
   getWindowHits(repo: string, issueNumber: number, now: Date = new Date()): PRGuardHit[] {
-    const cutoff = now.getTime() - this.windowMs;
+    return this.getWindowHitsInMs(repo, issueNumber, now, this.windowMs);
+  }
+
+  /**
+   * Returns all hits for the given (repo, issueNumber) pair within the
+   * specified window duration in milliseconds.
+   */
+  getWindowHitsInMs(
+    repo: string,
+    issueNumber: number,
+    now: Date,
+    windowMs: number,
+  ): PRGuardHit[] {
+    const cutoff = now.getTime() - windowMs;
     return this.hits.filter(
       (h) =>
         h.repo === repo &&
@@ -182,27 +334,51 @@ export class PRGuardSurgeDetector {
     return now.getTime() - lastSent.getTime() < this.cooldownMs;
   }
 
+  /**
+   * Returns true if a suppression alert has been sent for the given
+   * (repo, issueNumber) pair within the suppression TTL window.
+   */
+  isSuppressionActive(repo: string, issueNumber: number, now: Date = new Date()): boolean {
+    const lastSent = this.suppressionSentAt.get(makeKey(repo, issueNumber));
+    if (!lastSent) return false;
+    return now.getTime() - lastSent.getTime() < this.suppressionTtlMinutes * 60 * 1000;
+  }
+
   // ── Private helpers ──────────────────────────────────────────────────────────
 
-  private async sendAlert(
+  private async sendSurgeAlert(
     repo: string,
     issueNumber: number,
     prUrl: string,
     hitCount: number,
   ): Promise<void> {
     const message = this.buildAlertMessage(repo, issueNumber, prUrl, hitCount);
-    log.info("Sending PR guard surge alert", {
+    log.info("Sending PR guard surge alert", { repo, issueNumber, prUrl, hitCount });
+    await this.sendTelegram(message);
+  }
+
+  private async sendSuppressionAlert(
+    repo: string,
+    issueNumber: number,
+    prUrl: string,
+    hitCount: number,
+    suppressedUntil: Date,
+  ): Promise<void> {
+    const message = this.buildSuppressionAlertMessage(
+      repo, issueNumber, prUrl, hitCount, suppressedUntil,
+    );
+    log.info("Sending dispatch suppression alert", {
       repo,
       issueNumber,
       prUrl,
       hitCount,
-      threshold: this.surgeThreshold,
+      suppressedUntil: suppressedUntil.toISOString(),
     });
     await this.sendTelegram(message);
   }
 
   /**
-   * Build the Telegram alert message.
+   * Build the Telegram surge alert message (fires at surgeThreshold hits).
    *
    * Format (matching the example in issue #442):
    *   ⚠️ /pr-guard-surge: research-agent#133 hit 3x in 60min, PR #162
@@ -221,7 +397,6 @@ export class PRGuardSurgeDetector {
   ): string {
     const repoShort = repo.split("/")[1] ?? repo;
     const windowMin = Math.round(this.windowMs / 60_000);
-    // Extract PR number from URL for the compact headline, e.g. ".../pull/162" → "#162"
     const prNumberMatch = prUrl.match(/\/pull\/(\d+)/);
     const prRef = prNumberMatch ? `PR #${prNumberMatch[1]}` : prUrl;
 
@@ -238,11 +413,49 @@ export class PRGuardSurgeDetector {
     return lines.join("\n");
   }
 
+  /**
+   * Build the Telegram suppression alert message (fires at suppressionThreshold hits).
+   *
+   * Format:
+   *   🚫 /pr-guard-suppression: research-agent#133 hit 5x in 30min, PR #162
+   *   Repo: rapartlu/research-agent
+   *   Blocking PR: <prUrl>
+   *   Hit count: 5 times in 30 minutes
+   *   Dispatch suppressed until 14:25 UTC — no action needed.
+   */
+  buildSuppressionAlertMessage(
+    repo: string,
+    issueNumber: number,
+    prUrl: string,
+    hitCount: number,
+    suppressedUntil: Date,
+  ): string {
+    const repoShort = repo.split("/")[1] ?? repo;
+    const windowMin = Math.round(this.suppressionWindowMs / 60_000);
+    const prNumberMatch = prUrl.match(/\/pull\/(\d+)/);
+    const prRef = prNumberMatch ? `PR #${prNumberMatch[1]}` : prUrl;
+
+    // Format suppression time as HH:MM UTC for operator readability.
+    const hh = String(suppressedUntil.getUTCHours()).padStart(2, "0");
+    const mm = String(suppressedUntil.getUTCMinutes()).padStart(2, "0");
+    const suppressedUntilStr = `${hh}:${mm} UTC`;
+
+    const lines: string[] = [
+      `🚫 /pr-guard-suppression: ${repoShort}#${issueNumber} hit ${hitCount}x in ${windowMin}min, ${prRef}`,
+      `Repo: ${repo}`,
+      `Blocking PR: ${prUrl}`,
+      `Hit count: ${hitCount} times in ${windowMin} minutes`,
+      `dispatch suppressed until ${suppressedUntilStr} — no action needed.`,
+    ];
+
+    return lines.join("\n");
+  }
+
   private async sendTelegram(text: string): Promise<void> {
     const { telegramBotToken, telegramChatId } = this.config;
 
     if (!telegramBotToken || !telegramChatId) {
-      log.warn("Telegram not configured — PR guard surge alert not sent");
+      log.warn("Telegram not configured — PR guard alert not sent");
       return;
     }
 
