@@ -134,6 +134,42 @@ export interface OperatorControl extends OperatorControlInput {
   failure_reason: string | null;
   created_at: string;
 }
+// ── DAG Execution types (issue #1085) ─────────────────────────────────────────
+
+/** Status of an entire DAG execution (one per complex multi-agent task). */
+export type DagExecutionStatus = "running" | "done" | "failed";
+
+/** An individual step/node within a DAG execution. */
+export type DagNodeStatus = "pending" | "dispatching" | "dispatched" | "done" | "failed";
+
+/** Persisted record of a multi-agent DAG execution plan. */
+export interface DagExecution {
+  id: string;
+  parent_task_id: string;
+  plan_json: string;
+  status: DagExecutionStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Persisted state for a single node/step within a DAG execution. */
+export interface DagNode {
+  id: string;
+  dag_id: string;
+  step_id: string;
+  /** Null until the node is dispatched and a task record is created. */
+  task_id: string | null;
+  agent_name: string | null;
+  instruction: string;
+  /** JSON-encoded string[] of step_ids that must complete before this node. */
+  depends_on_json: string;
+  status: DagNodeStatus;
+  /** Populated from the associated task result when the node reaches "done". */
+  result: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export type TaskSource = "github" | "linear" | "slack" | "manual" | "pr-feedback";
 /**
  * Identifies the kind of work a task represents.
@@ -1664,6 +1700,7 @@ export class StateStore {
     this.runProactiveRebaseLogMigration();
     this.runSemanticMemoryMigration();
     this.runOperatorControlsMigration();
+    this.runDagMigration();
   }
 
   private runPhase2Migration(): void {
@@ -10535,6 +10572,149 @@ export class StateStore {
     this.db.prepare(`
       UPDATE tasks SET description = ?, updated_at = ? WHERE id = ?
     `).run(updated, new Date().toISOString(), taskId);
+  }
+
+  // ── DAG Execution (issue #1085) ───────────────────────────────────────────
+
+  runDagMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS dag_executions (
+        id          TEXT PRIMARY KEY,
+        parent_task_id TEXT NOT NULL REFERENCES tasks(id),
+        plan_json   TEXT NOT NULL,
+        status      TEXT NOT NULL DEFAULT 'running',
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_dag_executions_parent ON dag_executions(parent_task_id);
+      CREATE INDEX IF NOT EXISTS idx_dag_executions_status ON dag_executions(status);
+
+      CREATE TABLE IF NOT EXISTS dag_nodes (
+        id              TEXT PRIMARY KEY,
+        dag_id          TEXT NOT NULL REFERENCES dag_executions(id),
+        step_id         TEXT NOT NULL,
+        task_id         TEXT REFERENCES tasks(id),
+        agent_name      TEXT,
+        instruction     TEXT NOT NULL,
+        depends_on_json TEXT NOT NULL DEFAULT '[]',
+        status          TEXT NOT NULL DEFAULT 'pending',
+        result          TEXT,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_dag_nodes_dag_id ON dag_nodes(dag_id);
+      CREATE INDEX IF NOT EXISTS idx_dag_nodes_task_id ON dag_nodes(task_id);
+    `);
+  }
+
+  createDagExecution(params: {
+    id: string;
+    parent_task_id: string;
+    plan_json: string;
+    status: DagExecutionStatus;
+  }): DagExecution {
+    this.runDagMigration();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO dag_executions (id, parent_task_id, plan_json, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(params.id, params.parent_task_id, params.plan_json, params.status, now, now);
+    return this.getDagExecution(params.id)!;
+  }
+
+  createDagNode(params: {
+    id: string;
+    dag_id: string;
+    step_id: string;
+    task_id: string | null;
+    agent_name: string | null;
+    instruction: string;
+    depends_on_json: string;
+    status: DagNodeStatus;
+    result: string | null;
+  }): DagNode {
+    this.runDagMigration();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO dag_nodes
+        (id, dag_id, step_id, task_id, agent_name, instruction, depends_on_json, status, result, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      params.id, params.dag_id, params.step_id, params.task_id, params.agent_name,
+      params.instruction, params.depends_on_json, params.status, params.result, now, now,
+    );
+    return this.getDagNode(params.id)!;
+  }
+
+  getDagExecution(id: string): DagExecution | undefined {
+    this.runDagMigration();
+    return this.db.prepare("SELECT * FROM dag_executions WHERE id = ?").get(id) as DagExecution | undefined;
+  }
+
+  getDagExecutionByParentTask(parentTaskId: string): DagExecution | undefined {
+    this.runDagMigration();
+    return this.db.prepare(
+      "SELECT * FROM dag_executions WHERE parent_task_id = ? ORDER BY created_at DESC LIMIT 1",
+    ).get(parentTaskId) as DagExecution | undefined;
+  }
+
+  getPendingDagExecutions(): DagExecution[] {
+    this.runDagMigration();
+    return this.db.prepare(
+      "SELECT * FROM dag_executions WHERE status = 'running' ORDER BY created_at ASC",
+    ).all() as DagExecution[];
+  }
+
+  getDagNodes(dagId: string): DagNode[] {
+    this.runDagMigration();
+    return this.db.prepare(
+      "SELECT * FROM dag_nodes WHERE dag_id = ? ORDER BY created_at ASC",
+    ).all(dagId) as DagNode[];
+  }
+
+  getDagNode(id: string): DagNode | undefined {
+    this.runDagMigration();
+    return this.db.prepare("SELECT * FROM dag_nodes WHERE id = ?").get(id) as DagNode | undefined;
+  }
+
+  updateDagNode(id: string, updates: Partial<Pick<DagNode, "status" | "task_id" | "agent_name" | "result">>): void {
+    const fields: string[] = [];
+    const values: unknown[] = [];
+    if (updates.status !== undefined) { fields.push("status = ?"); values.push(updates.status); }
+    if (updates.task_id !== undefined) { fields.push("task_id = ?"); values.push(updates.task_id); }
+    if (updates.agent_name !== undefined) { fields.push("agent_name = ?"); values.push(updates.agent_name); }
+    if (updates.result !== undefined) { fields.push("result = ?"); values.push(updates.result); }
+    if (fields.length === 0) return;
+    fields.push("updated_at = ?");
+    values.push(new Date().toISOString());
+    values.push(id);
+    this.db.prepare(`UPDATE dag_nodes SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+  }
+
+  updateDagExecution(id: string, updates: Partial<Pick<DagExecution, "status">>): void {
+    const fields: string[] = [];
+    const values: unknown[] = [];
+    if (updates.status !== undefined) { fields.push("status = ?"); values.push(updates.status); }
+    if (fields.length === 0) return;
+    fields.push("updated_at = ?");
+    values.push(new Date().toISOString());
+    values.push(id);
+    this.db.prepare(`UPDATE dag_executions SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+  }
+
+  /** Return all DAG executions (for CLI display). */
+  listDagExecutions(limit = 20): Array<DagExecution & { node_count: number; done_count: number }> {
+    this.runDagMigration();
+    return this.db.prepare(`
+      SELECT e.*,
+        COUNT(n.id) AS node_count,
+        SUM(CASE WHEN n.status = 'done' THEN 1 ELSE 0 END) AS done_count
+      FROM dag_executions e
+      LEFT JOIN dag_nodes n ON n.dag_id = e.id
+      GROUP BY e.id
+      ORDER BY e.created_at DESC
+      LIMIT ?
+    `).all(limit) as Array<DagExecution & { node_count: number; done_count: number }>;
   }
 }
 

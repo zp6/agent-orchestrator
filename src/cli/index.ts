@@ -47,6 +47,7 @@ import { registerRoutingMismatchesCommand } from "./commands/routing-mismatches.
 import { registerReviewSaturationCommand } from "./commands/review-saturation.js";
 import { registerMemoryCommand } from "./commands/memory.js";
 import { registerControlsCommand } from "./commands/controls.js";
+import { registerDagCommand } from "./commands/dag.js";
 
 const program = new Command();
 
@@ -103,5 +104,6 @@ registerFollowupChainsCommand(program);
 registerReviewSaturationCommand(program);
 registerMemoryCommand(program);
 registerControlsCommand(program);
+registerDagCommand(program);
 
 program.parse();

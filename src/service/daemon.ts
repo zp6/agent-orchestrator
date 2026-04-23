@@ -62,6 +62,8 @@ import {
 } from "./reviewer-ops.js";
 import { queueForApproval } from "./telegram-approval-queue.js";
 import { executeCoordinatedMerge } from "../orchestrator/multi-repo-coordinator.js";
+import { DagRuntime } from "../orchestrator/dag-runtime.js";
+import { Planner } from "../orchestrator/planner.js";
 import { pollVerificationOutcomes } from "../orchestrator/verification-outcome-poller.js";
 import { startMetricsServer, DEFAULT_METRICS_PORT } from "./metrics-server.js";
 import type { Server } from "node:http";
@@ -260,6 +262,7 @@ export class Daemon {
   private deployer: Deployer;
   private prReviewer: PRReviewer;
   private prRetryQueue: PRCreationRetryQueue;
+  private dagRuntime: DagRuntime;
   private pollInterval: number;
   private cycleCount = 0;
   private log = createLogger("daemon");
@@ -372,6 +375,7 @@ export class Daemon {
     this.deployer = new Deployer(this.config);
     this.prReviewer = new PRReviewer(this.config, this.store, this.reviewerClient);
     this.prRetryQueue = new PRCreationRetryQueue(this.store);
+    this.dagRuntime = new DagRuntime(this.store, this.dispatcher, new Planner(this.config, this.store));
     this.pollInterval = pollIntervalMs ?? this.config.daemon?.poll_interval_ms ?? DEFAULT_POLL_INTERVAL_MS;
   }
 
@@ -747,6 +751,7 @@ export class Daemon {
         this.dispatchTriggers(time, registeredAgents),
         this.verifyCompleted(time),
         this.dispatchPendingCoordinationGroups(time),
+        this.advancePendingDags(time),
       ]);
 
       // ── Sequential: depends on dispatch/verify results ────────────────
@@ -3621,6 +3626,29 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
           ` (${childEntries.length} child task(s) dispatched)`,
         );
       }
+    }
+  }
+
+  /**
+   * Advance all running DAG executions by one cycle.
+   *
+   * Checks which DAG nodes have completed (by inspecting their backing task
+   * status), dispatches newly-unblocked nodes in parallel (fire-and-forget),
+   * and marks the parent task done when all nodes complete.
+   *
+   * Runs in Batch 2 every poll cycle alongside dispatchTriggers.
+   */
+  private async advancePendingDags(time: string): Promise<void> {
+    try {
+      const dags = this.store.getPendingDagExecutions();
+      if (dags.length === 0) return;
+      console.log(`[${time}] DAG runtime: advancing ${dags.length} running DAG(s)`);
+      await this.dagRuntime.advanceAll();
+    } catch (err) {
+      // Table may not exist on fresh deployments — fail silently.
+      this.log.debug("advancePendingDags: skipped (table may not exist)", {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
