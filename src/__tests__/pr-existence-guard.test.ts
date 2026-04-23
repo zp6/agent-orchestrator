@@ -437,3 +437,163 @@ describe("checkPRExistenceBeforeDispatch — cooldownStore (issue #390)", () => 
     expect(result.resolution).toBe("already-in-review");
   });
 });
+
+// ── Cooldown enforcement — early skip (issue #441) ────────────────────────────
+//
+// When isPRGuardCooldownActive() returns true, checkPRExistenceBeforeDispatch
+// must return skip=true / cooldown-active BEFORE making any gh CLI call.
+// This eliminates redundant tasks for issues already under the 60-min cooldown.
+
+describe("checkPRExistenceBeforeDispatch — cooldown enforcement (issue #441)", () => {
+  it("returns skip=true with 'cooldown-active' when cooldown is active", async () => {
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    mockExecSync.mockClear();
+
+    const cooldownStore = {
+      setPRGuardCooldown: vi.fn(),
+      isPRGuardCooldownActive: vi.fn().mockReturnValue(true),
+    };
+
+    const result = await checkPRExistenceBeforeDispatch(
+      "owner/repo",
+      42,
+      undefined, // no cache — would require gh CLI call if cooldown not respected
+      { cooldownStore },
+    );
+
+    expect(result.skip).toBe(true);
+    expect(result.resolution).toBe("cooldown-active");
+    expect(result.prNumber).toBeNull();
+    expect(result.prUrl).toBeNull();
+    expect(result.reason).toContain("#42");
+    expect(result.reason).toContain("cooldown");
+  });
+
+  it("does NOT call gh CLI (fetchOpenPRs) when cooldown is active", async () => {
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    mockExecSync.mockClear();
+
+    const cooldownStore = {
+      setPRGuardCooldown: vi.fn(),
+      isPRGuardCooldownActive: vi.fn().mockReturnValue(true),
+    };
+
+    await checkPRExistenceBeforeDispatch("owner/repo", 42, undefined, { cooldownStore });
+
+    expect(mockExecSync).not.toHaveBeenCalled();
+  });
+
+  it("does NOT call gh CLI (execSync) when cooldown is active, even with no cache", async () => {
+    const mockExecSync = execSync as unknown as ReturnType<typeof vi.fn>;
+    mockExecSync.mockClear();
+
+    const cooldownStore = {
+      setPRGuardCooldown: vi.fn(),
+      isPRGuardCooldownActive: vi.fn().mockReturnValue(true),
+    };
+
+    // Pass neither a prListCache nor a stub — if the guard calls gh, execSync would throw
+    await checkPRExistenceBeforeDispatch("rapartlu/agent-reviewer", 364, undefined, {
+      cooldownStore,
+    });
+
+    expect(mockExecSync).not.toHaveBeenCalled();
+  });
+
+  it("invokes onShortCircuit for cooldown-active hits when taskId is provided", async () => {
+    const onShortCircuit = vi.fn();
+    const cooldownStore = {
+      setPRGuardCooldown: vi.fn(),
+      isPRGuardCooldownActive: vi.fn().mockReturnValue(true),
+    };
+
+    const result = await checkPRExistenceBeforeDispatch(
+      "owner/repo",
+      42,
+      undefined,
+      { cooldownStore, taskId: "task-cooldown", onShortCircuit },
+    );
+
+    expect(result.resolution).toBe("cooldown-active");
+    expect(onShortCircuit).toHaveBeenCalledOnce();
+    expect(onShortCircuit).toHaveBeenCalledWith(
+      "task-cooldown",
+      "no_action_needed",
+      expect.stringContaining("cooldown"),
+    );
+  });
+
+  it("swallows onShortCircuit throw for cooldown-active (guard must not block)", async () => {
+    const onShortCircuit = vi.fn().mockImplementationOnce(() => {
+      throw new Error("scoring failure");
+    });
+    const cooldownStore = {
+      setPRGuardCooldown: vi.fn(),
+      isPRGuardCooldownActive: vi.fn().mockReturnValue(true),
+    };
+
+    // Must not throw even if scoring callback throws
+    const result = await checkPRExistenceBeforeDispatch(
+      "owner/repo",
+      42,
+      undefined,
+      { cooldownStore, taskId: "task-err", onShortCircuit },
+    );
+
+    expect(result.skip).toBe(true);
+    expect(result.resolution).toBe("cooldown-active");
+  });
+
+  it("proceeds normally when cooldown is NOT active", async () => {
+    const cooldownStore = {
+      setPRGuardCooldown: vi.fn(),
+      isPRGuardCooldownActive: vi.fn().mockReturnValue(false),
+    };
+
+    // Cache provided so no actual gh call needed; cooldown inactive → goes through normal path
+    const result = await checkPRExistenceBeforeDispatch(
+      "owner/repo",
+      42,
+      mockPRs,
+      { cooldownStore },
+    );
+
+    expect(result.resolution).toBe("already-in-review");
+    expect(result.prNumber).toBe(201);
+  });
+
+  it("proceeds normally (no cooldown check) when cooldownStore is not provided", async () => {
+    // No cooldownStore — should fall through to cache-based check
+    const result = await checkPRExistenceBeforeDispatch("owner/repo", 42, mockPRs);
+
+    expect(result.resolution).toBe("already-in-review");
+    expect(result.prNumber).toBe(201);
+  });
+
+  it("does NOT write setPRGuardCooldown for cooldown-active hits (already written)", async () => {
+    const cooldownStore = {
+      setPRGuardCooldown: vi.fn(),
+      isPRGuardCooldownActive: vi.fn().mockReturnValue(true),
+    };
+
+    await checkPRExistenceBeforeDispatch("owner/repo", 42, undefined, { cooldownStore });
+
+    // The cooldown was already written on the previous cycle — no need to refresh
+    expect(cooldownStore.setPRGuardCooldown).not.toHaveBeenCalled();
+  });
+});
+
+// ── formatPRCheckResult — cooldown-active (issue #441) ───────────────────────
+
+describe("formatPRCheckResult — cooldown-active resolution", () => {
+  it("formats 'cooldown-active' as 'cooldown-active'", () => {
+    const result = formatPRCheckResult({
+      skip: true,
+      resolution: "cooldown-active",
+      prNumber: null,
+      prUrl: null,
+      reason: "cooldown active",
+    });
+    expect(result).toBe("cooldown-active");
+  });
+});

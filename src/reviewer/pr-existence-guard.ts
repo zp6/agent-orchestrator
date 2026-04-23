@@ -89,6 +89,7 @@ export interface PRExistenceGuardOptions {
 
 export type PRExistenceResolution =
   | "already-in-review" // open PR found — skip re-dispatch
+  | "cooldown-active"   // cooldown table hit — skip gh CLI call, re-dispatch blocked (issue #441)
   | "no-existing-pr"    // no open PR found — proceed with dispatch
   | "check-failed";     // guard threw — fail-open, proceed with dispatch
 
@@ -138,6 +139,37 @@ export async function checkPRExistenceBeforeDispatch(
   prListCache?: OpenPRSummary[],
   opts?: PRExistenceGuardOptions,
 ): Promise<PRExistenceCheckResult> {
+  // ── Early cooldown check (issue #441) ────────────────────────────────────────
+  // If a cooldown was written by a previous cycle's guard hit, skip the
+  // expensive gh CLI call entirely and return skip=true immediately.
+  // This prevents redundant tasks from being enqueued for issues already
+  // under a 60-min cooldown, eliminating the "already-in-review" spam.
+  if (opts?.cooldownStore?.isPRGuardCooldownActive(repo, issueNumber)) {
+    const reason =
+      `Issue #${issueNumber} (${repo}) is under PR guard cooldown — ` +
+      `skipping gh CLI call; re-dispatch blocked until cooldown expires`;
+    log.info("PR guard cooldown active — short-circuiting before gh CLI call", {
+      repo,
+      issueNumber,
+    });
+
+    if (opts.taskId && opts.onShortCircuit) {
+      try {
+        opts.onShortCircuit(opts.taskId, "no_action_needed", reason);
+      } catch {
+        // Scoring failure must not block the guard decision.
+      }
+    }
+
+    return {
+      skip: true,
+      resolution: "cooldown-active",
+      prNumber: null,
+      prUrl: null,
+      reason,
+    };
+  }
+
   try {
     const openPRs = prListCache ?? fetchOpenPRs(repo);
     const match = findMatchingPR(openPRs, issueNumber);
@@ -287,6 +319,9 @@ export function extractRepoFromSourceRef(
 export function formatPRCheckResult(result: PRExistenceCheckResult): string {
   if (result.resolution === "already-in-review" && result.prNumber !== null) {
     return `open PR #${result.prNumber}`;
+  }
+  if (result.resolution === "cooldown-active") {
+    return "cooldown-active";
   }
   if (result.resolution === "check-failed") {
     return "check-failed";
