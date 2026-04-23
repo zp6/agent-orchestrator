@@ -253,6 +253,8 @@ The `orch` CLI is built from `src/cli/index.ts`. Key command groups:
 | `orch fleet` | Fleet scaling observability |
 | `orch supervisor-log` | Supervisor decision log |
 | `orch antibodies` | Antibody filter management |
+| `orch dag` | DAG parallel subtask execution management — list, show, and inspect node status for DAG executions |
+| `orch controls` | Operator control plane — list, pause, resume, and redirect in-flight tasks via Telegram-issued directives |
 | `orch lineage` | Task lineage and cascade explorer |
 | `orch followup-chains` | Follow-up chain depth tracker |
 | `orch skip-blockers` | Chronically skipped issue tracker |
