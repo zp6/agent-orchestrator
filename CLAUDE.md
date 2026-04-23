@@ -56,6 +56,9 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 - **Resilient team meetings** — if all agents return connection errors in a standup (e.g. Docker outage), the meeting is abandoned without saving to the DB, so the time-based scheduler retries on the next cycle rather than waiting the full 24-hour cooldown (issue #1053)
 - **Live meeting context injection** — before each standup, open issues (up to 15/repo), open PRs (up to 10/repo), and 7-day task stats are queried via `gh` CLI and injected into meeting context; prevents agents citing stale or closed issues during standups (issue #1069)
 - **Research agent misrouting enforcement** — `capability_tags: ["research-only"]` set on `claude-research-agent` in `agents.yaml`; implementation tasks dispatched to the research agent are blocked and rerouted at dispatch time; `GET /misrouting` metrics endpoint and Slack digest alert for observability (issue #1077)
+- **Predictive failure interception** — before every dispatch, scores incoming task title against recent failed tasks via token-overlap Jaccard similarity; injects top-3 failure post-mortems as "Lessons from Similar Failed Tasks" when similarity ≥ 0.6 (`FAILURE_INTERCEPTION_THRESHOLD`); sends Telegram alert at ≥ 0.75; records hits to `failure_interception_logs` table; `GET /failure-interceptions` metrics endpoint (issue #1086/#1093)
+- **DAG-based parallel subtask execution** — `DagRuntime` in `src/orchestrator/dag-runtime.ts` decomposes complex multi-agent tasks into a persistent dependency graph (`dag_executions` + `dag_nodes` tables); dispatches independent leaf nodes in parallel (up to 4); gates downstream nodes on upstream completions; non-blocking — `advanceAll()` is called each daemon cycle without blocking the poll loop (issue #1085/#1094)
+- **Live operator control plane** — `OperatorControlProcessor` in `src/service/operator-controls.ts` applies pending Telegram-issued directives (pause, resume, redirect, inject, merge) at the start of each daemon cycle before other work is dispatched; directives are persisted to `operator_controls` table and marked applied/failed per execution (issue #1087/#1092)
 
 ## CRITICAL: NEVER Push Directly to Main
 
@@ -221,6 +224,7 @@ An embedded HTTP server starts alongside the daemon on port **3472** (same as th
 | `GET /semantic-memory-effectiveness` | Semantic memory effectiveness metrics (match rates, latency, usefulness) over configurable window (`?days=N`) |
 | `GET /investigations` | Research investigation feed — paginated task list with status/quality filters (`?limit=N&offset=N&status=done`) |
 | `GET /misrouting` | Research agent implementation-task misroute feed — count + quality histogram for tasks dispatched to research-only agents (`?agent=claude-research-agent&days=N`) |
+| `GET /failure-interceptions` | Predictive failure interception feed — interception events with similarity scores, lesson counts, model upgrade suggestions, and final outcomes (`?days=N`) |
 
 The dashboard agent polls `/dispatch-efficiency` to populate the dispatch efficiency panel without needing CLI access.
 
@@ -258,6 +262,7 @@ The `orch` CLI is built from `src/cli/index.ts`. Key command groups:
 | `orch health-checks` | Health check storm effectiveness panel: dispatched vs suppressed events (24h rolling) |
 | `orch agent-gaps` | Coverage gap detection: unowned topics, scope overload, low-confidence routing |
 | `orch cost` | Token usage and billing |
+| `orch failure-interceptions` | Failure interception panel: pre-dispatch similarity filter hits, lesson injection counts, model upgrade suggestions, and pass/fail outcomes |
 
 Run `orch --help` for the full list. All commands accept `--json` for machine-readable output.
 
