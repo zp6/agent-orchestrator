@@ -800,6 +800,30 @@ export type {
   CapabilityCheckResult,
 } from "./reviewer/capability-check.js";
 
+// Fleet-wide capability check endpoint (research-agent#178 cross-repo) —
+// any agent in the fleet calls GET /api/fleet-capability-check before starting
+// a task to confirm they are the correct handler. Prevents misrouted tasks
+// (e.g. implementation tasks dispatched to the research agent) from doing
+// partial work before discovering the mismatch.
+//
+// Mount on the reviewer HTTP server:
+//   app.get('/api/fleet-capability-check', (req, res) => {
+//     res.json(handleFleetCapabilityCheck(req.query as Record<string, string>));
+//   });
+export {
+  FLEET_CAPABILITY_MAP,
+  evaluateFleetCapability,
+  handleFleetCapabilityCheck,
+  parseFleetCapabilityCheckQuery,
+  findCapableAgents,
+  extractRepoFromSourceRef as extractRepoFromSourceRefFleet,
+} from "./reviewer/fleet-capability-check.js";
+export type {
+  AgentCapabilityEntry,
+  FleetCapabilityCheckRequest,
+  FleetCapabilityCheckResponse,
+} from "./reviewer/fleet-capability-check.js";
+
 // Semantic Task Memory — daily digest + /memory Telegram command (issue #369).
 //
 // The MemoryDigestScheduler fires a Telegram summary once per day at 09:00 UTC
