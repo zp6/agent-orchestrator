@@ -375,6 +375,7 @@ export {
   PR_GUARD_SUPPRESSION_THRESHOLD,
   PR_GUARD_SUPPRESSION_WINDOW_MS,
   PR_GUARD_SUPPRESSION_TTL_MINUTES,
+  PR_GUARD_PREFLIGHT_REQUIRED,
 } from "./reviewer/pr-guard-surge-detector.js";
 export type {
   PRGuardHit,

@@ -5,13 +5,15 @@
  * and:
  *
  *   1. Sends a Telegram alert when the *same* (repo, issue) pair triggers
- *      already-in-review three or more times within a 60-minute window
- *      (surge detection — original behaviour from issue #442).
+ *      already-in-review two or more times within a 60-minute window
+ *      (surge detection — original behaviour from issue #442; threshold lowered
+ *      from 3 → 2 in issue #451 to fire earlier).
  *
  *   2. Writes a 2-hour dispatch suppression entry and sends a dedicated
  *      Telegram alert (with "dispatch suppressed until HH:MM") when the
- *      same pair triggers ≥5 times within a 30-minute window
- *      (auto-suppression — issue #1113).
+ *      same pair triggers ≥3 times within a 15-minute window
+ *      (auto-suppression — issue #1113; threshold lowered from 5 → 3 and
+ *      window shortened from 30 → 15 min in issue #451).
  *
  * This is a leading indicator that:
  *   - The cooldown table is not being respected by the dispatcher, or
@@ -50,7 +52,7 @@ const log = createLogger("pr-guard-surge-detector");
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 /** Default minimum hit count within the window before a surge alert is sent. */
-export const PR_GUARD_SURGE_THRESHOLD = 3;
+export const PR_GUARD_SURGE_THRESHOLD = 2;
 
 /** Default rolling window duration in milliseconds for surge detection (60 minutes). */
 export const PR_GUARD_SURGE_WINDOW_MS = 60 * 60 * 1000;
@@ -66,15 +68,30 @@ export const PR_GUARD_SURGE_COOLDOWN_MS = 60 * 60 * 1000;
  * When the same (repo, issue) pair reaches this many 'already-in-review' hits
  * within {@link PR_GUARD_SUPPRESSION_WINDOW_MS}, a 2-hour suppression entry is
  * written and a Telegram alert is sent.
+ *
+ * Lowered from 5 → 3 so suppression fires earlier, before the dispatcher queues
+ * many redundant tasks.
  */
-export const PR_GUARD_SUPPRESSION_THRESHOLD = 5;
+export const PR_GUARD_SUPPRESSION_THRESHOLD = 3;
 
 /**
- * Rolling window duration in milliseconds for suppression evaluation (30 minutes).
+ * Rolling window duration in milliseconds for suppression evaluation (15 minutes).
  * Suppression is triggered when ≥ {@link PR_GUARD_SUPPRESSION_THRESHOLD} hits
  * occur within this window.
+ *
+ * Shortened from 30 min → 15 min for tighter burst detection.
  */
-export const PR_GUARD_SUPPRESSION_WINDOW_MS = 30 * 60 * 1000;
+export const PR_GUARD_SUPPRESSION_WINDOW_MS = 15 * 60 * 1000;
+
+/**
+ * Flag indicating that the PR guard pre-flight cooldown check is mandatory on
+ * **all** dispatch paths.  Consumers (orchestrator, proxy) should gate every
+ * GitHub-issue dispatch through `isPRGuardCooldownActive()` before creating a
+ * task — not just on the paths that historically called the guard.
+ *
+ * Set to `true` as part of the coordinated change in agent-proxy#450.
+ */
+export const PR_GUARD_PREFLIGHT_REQUIRED = true;
 
 /**
  * How long (in minutes) a dispatch suppression entry blocks re-queuing.
@@ -186,12 +203,12 @@ export class PRGuardSurgeDetector {
    *
    * Two checks run independently:
    *
-   * 1. **Surge alert** — when rolling-window hits reach `surgeThreshold` (default 3)
+   * 1. **Surge alert** — when rolling-window hits reach `surgeThreshold` (default 2)
    *    within `windowMs` (default 60 min), a Telegram alert fires (deduped by
    *    `cooldownMs`).
    *
    * 2. **Suppression** — when rolling-window hits reach `suppressionThreshold`
-   *    (default 5) within `suppressionWindowMs` (default 30 min):
+   *    (default 3) within `suppressionWindowMs` (default 15 min):
    *      - A 2-hour cooldown entry is written via `suppressionStore` (if provided).
    *      - A Telegram alert is sent with "dispatch suppressed until HH:MM".
    *

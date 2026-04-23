@@ -7,6 +7,7 @@ import {
   PR_GUARD_SUPPRESSION_THRESHOLD,
   PR_GUARD_SUPPRESSION_WINDOW_MS,
   PR_GUARD_SUPPRESSION_TTL_MINUTES,
+  PR_GUARD_PREFLIGHT_REQUIRED,
 } from "../reviewer/pr-guard-surge-detector.js";
 import type { PRGuardHit, PRGuardSurgeConfig } from "../reviewer/pr-guard-surge-detector.js";
 import type { IPRGuardCooldownStore } from "../reviewer/pr-existence-guard.js";
@@ -82,8 +83,8 @@ describe("PRGuardSurgeDetector", () => {
 
   // ── Constant values ──────────────────────────────────────────────────────────
 
-  it("exports correct default surge threshold constant (3)", () => {
-    expect(PR_GUARD_SURGE_THRESHOLD).toBe(3);
+  it("exports correct default surge threshold constant (2)", () => {
+    expect(PR_GUARD_SURGE_THRESHOLD).toBe(2);
   });
 
   it("exports correct default surge window constant (60 minutes)", () => {
@@ -94,16 +95,20 @@ describe("PRGuardSurgeDetector", () => {
     expect(PR_GUARD_SURGE_COOLDOWN_MS).toBe(60 * 60 * 1000);
   });
 
-  it("exports correct default suppression threshold constant (5)", () => {
-    expect(PR_GUARD_SUPPRESSION_THRESHOLD).toBe(5);
+  it("exports correct default suppression threshold constant (3)", () => {
+    expect(PR_GUARD_SUPPRESSION_THRESHOLD).toBe(3);
   });
 
-  it("exports correct default suppression window constant (30 minutes)", () => {
-    expect(PR_GUARD_SUPPRESSION_WINDOW_MS).toBe(30 * 60 * 1000);
+  it("exports correct default suppression window constant (15 minutes)", () => {
+    expect(PR_GUARD_SUPPRESSION_WINDOW_MS).toBe(15 * 60 * 1000);
   });
 
   it("exports correct default suppression TTL constant (120 minutes)", () => {
     expect(PR_GUARD_SUPPRESSION_TTL_MINUTES).toBe(120);
+  });
+
+  it("exports PR_GUARD_PREFLIGHT_REQUIRED as true", () => {
+    expect(PR_GUARD_PREFLIGHT_REQUIRED).toBe(true);
   });
 
   // ── Below-threshold: no alert ────────────────────────────────────────────────
