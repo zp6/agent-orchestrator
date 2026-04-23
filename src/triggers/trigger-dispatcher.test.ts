@@ -123,6 +123,10 @@ describe("dispatchGitHubIssues", () => {
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
       // Dispatch flood gate (issue #1060)
       hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      // Atomic PR guard cooldown lock (issue #1095)
+      tryAcquirePRGuardLock: vi.fn().mockReturnValue(true),
+      recordPRGuardDuplicateAttempt: vi.fn(),
+      getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
@@ -371,6 +375,10 @@ describe("pre-dispatch issue state validation", () => {
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
       // Dispatch flood gate (issue #1060)
       hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      // Atomic PR guard cooldown lock (issue #1095)
+      tryAcquirePRGuardLock: vi.fn().mockReturnValue(true),
+      recordPRGuardDuplicateAttempt: vi.fn(),
+      getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -465,6 +473,10 @@ describe("duplicate PR detection before dispatch", () => {
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
       // Dispatch flood gate (issue #1060)
       hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      // Atomic PR guard cooldown lock (issue #1095)
+      tryAcquirePRGuardLock: vi.fn().mockReturnValue(true),
+      recordPRGuardDuplicateAttempt: vi.fn(),
+      getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -694,6 +706,10 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
       // Dispatch flood gate (issue #1060)
       hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      // Atomic PR guard cooldown lock (issue #1095)
+      tryAcquirePRGuardLock: vi.fn().mockReturnValue(true),
+      recordPRGuardDuplicateAttempt: vi.fn(),
+      getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -826,6 +842,10 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
       // Dispatch flood gate (issue #1060)
       hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      // Atomic PR guard cooldown lock (issue #1095)
+      tryAcquirePRGuardLock: vi.fn().mockReturnValue(true),
+      recordPRGuardDuplicateAttempt: vi.fn(),
+      getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -1180,6 +1200,10 @@ describe("dispatchIdleAgentBacklog", () => {
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
       // Dispatch flood gate (issue #1060)
       hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      // Atomic PR guard cooldown lock (issue #1095)
+      tryAcquirePRGuardLock: vi.fn().mockReturnValue(true),
+      recordPRGuardDuplicateAttempt: vi.fn(),
+      getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -1450,6 +1474,10 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
       // Dispatch flood gate (issue #1060)
       hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      // Atomic PR guard cooldown lock (issue #1095)
+      tryAcquirePRGuardLock: vi.fn().mockReturnValue(true),
+      recordPRGuardDuplicateAttempt: vi.fn(),
+      getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -1601,6 +1629,10 @@ describe("in-flight branch detection", () => {
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
       // Dispatch flood gate (issue #1060)
       hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      // Atomic PR guard cooldown lock (issue #1095)
+      tryAcquirePRGuardLock: vi.fn().mockReturnValue(true),
+      recordPRGuardDuplicateAttempt: vi.fn(),
+      getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
 
@@ -1663,6 +1695,10 @@ describe("in-flight branch detection", () => {
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
       // Dispatch flood gate (issue #1060)
       hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      // Atomic PR guard cooldown lock (issue #1095)
+      tryAcquirePRGuardLock: vi.fn().mockReturnValue(true),
+      recordPRGuardDuplicateAttempt: vi.fn(),
+      getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
 
@@ -1726,6 +1762,10 @@ describe("in-flight branch detection", () => {
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
       // Dispatch flood gate (issue #1060)
       hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      // Atomic PR guard cooldown lock (issue #1095)
+      tryAcquirePRGuardLock: vi.fn().mockReturnValue(true),
+      recordPRGuardDuplicateAttempt: vi.fn(),
+      getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
 
@@ -1784,6 +1824,10 @@ describe("in-flight branch detection", () => {
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
       // Dispatch flood gate (issue #1060)
       hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      // Atomic PR guard cooldown lock (issue #1095)
+      tryAcquirePRGuardLock: vi.fn().mockReturnValue(true),
+      recordPRGuardDuplicateAttempt: vi.fn(),
+      getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
 
@@ -1844,6 +1888,10 @@ describe("approved PR skip logic", () => {
       // recordAlreadyInReviewTask silently fails (caught), preserving the
       // "does NOT mark processed" assertion for approved_pr_waiting.
       hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      // Atomic PR guard cooldown lock (issue #1095)
+      tryAcquirePRGuardLock: vi.fn().mockReturnValue(true),
+      recordPRGuardDuplicateAttempt: vi.fn(),
+      getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -2009,6 +2057,10 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
       // Dispatch flood gate (issue #1060)
       hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      // Atomic PR guard cooldown lock (issue #1095)
+      tryAcquirePRGuardLock: vi.fn().mockReturnValue(true),
+      recordPRGuardDuplicateAttempt: vi.fn(),
+      getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -2259,6 +2311,10 @@ describe("dispatch flood gate (issue #1060)", () => {
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
       // Flood gate methods
       hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      // Atomic PR guard cooldown lock (issue #1095)
+      tryAcquirePRGuardLock: vi.fn().mockReturnValue(true),
+      recordPRGuardDuplicateAttempt: vi.fn(),
+      getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
@@ -2293,37 +2349,38 @@ describe("dispatch flood gate (issue #1060)", () => {
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
   });
 
-  it("silently drops dispatch when flood gate is ACTIVE (duplicate fire within window)", async () => {
+  it("silently drops dispatch when atomic lock is NOT acquired (duplicate fire within window)", async () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Feature", body: "Do it", url: "https://...", labels: [] },
     ]);
     mockFindExistingPRs.mockReturnValue([
       { number: 99, title: "Fix Feature", url: "https://github.com/owner/my-repo/pull/99", state: "open", isDraft: false },
     ]);
-    // Flood gate IS active — duplicate fire
-    (mockStore.hasRecentGuardBlock as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    // Cooldown lock already held — duplicate fire suppressed atomically
+    (mockStore.tryAcquirePRGuardLock as ReturnType<typeof vi.fn>).mockReturnValue(false);
 
     const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
     // Entire dispatch is dropped — no task, no block event recorded
     expect(mockStore.createTask).not.toHaveBeenCalled();
     expect(mockStore.recordDispatchBlock).not.toHaveBeenCalled();
+    // Duplicate attempt is recorded for the 24h digest (AC #2)
+    expect(mockStore.recordPRGuardDuplicateAttempt).toHaveBeenCalledWith("owner/my-repo#42", 99);
     expect(result.skipped).toBeGreaterThanOrEqual(1);
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
   });
 
-  it("hasRecentGuardBlock is called with the correct sourceRef and window", async () => {
+  it("tryAcquirePRGuardLock is called with the correct sourceRef and window", async () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 7, title: "Issue 7", body: "body", url: "https://...", labels: [] },
     ]);
     mockFindExistingPRs.mockReturnValue([
       { number: 55, title: "PR 55", url: "https://github.com/owner/my-repo/pull/55", state: "open", isDraft: false },
     ]);
-    (mockStore.hasRecentGuardBlock as ReturnType<typeof vi.fn>).mockReturnValue(false);
 
     await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
-    expect(mockStore.hasRecentGuardBlock).toHaveBeenCalledWith(
+    expect(mockStore.tryAcquirePRGuardLock).toHaveBeenCalledWith(
       "owner/my-repo#7",
       3_600_000, // GUARD_FLOOD_GATE_WINDOW_MS
     );
@@ -2435,6 +2492,10 @@ describe("PR guard surge alert (issue #1082)", () => {
       removeInFlightReservation: vi.fn(),
       cleanExpiredInFlightReservations: vi.fn().mockReturnValue(0),
       hasRecentGuardBlock: vi.fn().mockReturnValue(false),
+      // Atomic PR guard cooldown lock (issue #1095)
+      tryAcquirePRGuardLock: vi.fn().mockReturnValue(true),
+      recordPRGuardDuplicateAttempt: vi.fn(),
+      getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),

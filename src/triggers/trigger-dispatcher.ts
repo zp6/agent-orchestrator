@@ -39,6 +39,23 @@ export const PR_GUARD_SURGE_THRESHOLD = 5;
  */
 export const prGuardSurgeAlertSentAt = new Map<string, number>();
 
+/**
+ * Look-back window for the PR guard duplicate-attempt Telegram alert (issue #1095, AC #2).
+ * When the atomic PR guard lock suppresses at least one duplicate this cycle, a
+ * Telegram digest lists all source refs with suppressed attempts within this window,
+ * so operators can verify the dedup lock is working correctly.
+ * Default: 24 hours.
+ */
+export const PR_GUARD_DUPLICATE_ALERT_WINDOW_MS = 86_400_000;
+
+/**
+ * In-memory per-cycle flag: set to true when at least one duplicate PR guard fire
+ * is suppressed by tryAcquirePRGuardLock() this cycle.  Cleared at cycle start.
+ * Used to decide whether to query getRecentPRGuardDuplicates() post-loop.
+ * Module-level so it is visible to both the inner loop and the post-loop flush.
+ */
+let prGuardDuplicateSuppressedThisCycle = false;
+
 import { runGitHubPreDispatchValidation } from "../orchestrator/pre-dispatch-validator.js";
 import { looksLikeStandupTask, extractStandupIssueNumber, shouldSkipStandupDispatch } from "./standup-dispatch-guard.js";
 
@@ -440,6 +457,9 @@ export async function dispatchGitHubIssues(
     return count;
   }
 
+  // Reset per-cycle PR guard duplicate flag (issue #1095).
+  prGuardDuplicateSuppressedThisCycle = false;
+
   // Evict expired claims, dispatch locks, and in-flight reservations at the
   // start of each cycle so stale entries from crashed agents never permanently
   // block an issue.
@@ -578,23 +598,28 @@ export async function dispatchGitHubIssues(
         // re-implementation waste by providing a visible audit trail instead of
         // silently skipping.
         //
-        // Dispatch flood gate (issue #1060): if this guard already fired for the
-        // same source_ref within the last 60 minutes, silently drop the event —
-        // no task, no block record, no Telegram notification.  Only the *first*
-        // fire within the window creates a task and sends an alert.
+        // Atomic PR guard cooldown lock (issue #1095): replace the previous
+        // read-then-write flood gate (issue #1060) with a single INSERT OR IGNORE
+        // that is both the check and the lock acquisition.  SQLite serialises the
+        // insert, so even when the same issue appears in overlapping or consecutive
+        // poll cycles only one caller sees changes() > 0; the loser is suppressed
+        // before any task is created — closing the TOCTOU race.
         if (
           (validation.failureCode === "open_pr_exists" || validation.failureCode === "approved_pr_waiting") &&
           validation.blockingPRNumber
         ) {
-          const isFloodGateActive = store.hasRecentGuardBlock(sourceRef, GUARD_FLOOD_GATE_WINDOW_MS);
-          if (isFloodGateActive) {
-            log.info("Dispatch flood gate: suppressing duplicate guard fire within cooldown window", {
+          const lockAcquired = store.tryAcquirePRGuardLock(sourceRef, GUARD_FLOOD_GATE_WINDOW_MS);
+          if (!lockAcquired) {
+            log.info("PR guard cooldown lock active: suppressing duplicate guard fire", {
               sourceRef,
               blockingPRNumber: validation.blockingPRNumber,
               failureCode: validation.failureCode,
               windowMs: GUARD_FLOOD_GATE_WINDOW_MS,
             });
-            // Surge counting (issue #1082, AC #3): flood-gated hits still count
+            // Record the suppressed attempt for the 24h Telegram digest (issue #1095, AC #2).
+            store.recordPRGuardDuplicateAttempt(sourceRef, validation.blockingPRNumber);
+            prGuardDuplicateSuppressedThisCycle = true;
+            // Surge counting (issue #1082, AC #3): suppressed hits still count
             // toward the blocking PR's total so the surge alert message is accurate.
             const floodPrKey = `${issue.repo}#${validation.blockingPRNumber}`;
             const floodEntry = prGuardAccumulator.get(floodPrKey);
@@ -613,9 +638,10 @@ export async function dispatchGitHubIssues(
             continue;
           }
 
-          // First guard fire within the window — record the task and persist the
-          // block event. Telegram alert is deferred to the post-loop surge flush
-          // (issue #1082) so we can consolidate when many issues hit the same PR.
+          // Lock acquired — first guard fire within the window.  Record the task
+          // and persist the block event.  Telegram alert is deferred to the
+          // post-loop surge flush (issue #1082) so we can consolidate when many
+          // issues hit the same PR.
           recordAlreadyInReviewTask(store, {
             sourceRef,
             agentName,
@@ -876,6 +902,38 @@ export async function dispatchGitHubIssues(
           );
         }
       }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // PR guard duplicate-attempt digest (issue #1095, AC #2)
+  // ---------------------------------------------------------------------------
+  // When the atomic lock suppressed at least one duplicate this cycle, send a
+  // Telegram alert listing all source refs with suppressed attempts in the last
+  // 24 h so operators can verify the dedup is working correctly.
+  if (prGuardDuplicateSuppressedThisCycle) {
+    try {
+      const duplicates = store.getRecentPRGuardDuplicates(PR_GUARD_DUPLICATE_ALERT_WINDOW_MS);
+      if (duplicates.length > 0) {
+        const total24h = duplicates.reduce((s, d) => s + d.count, 0);
+        const displayItems = duplicates.slice(0, 5);
+        const remaining = duplicates.length - displayItems.length;
+        const dupList = displayItems
+          .map((d) => `\`${d.source_ref}\` (${d.count}×)`)
+          .join(", ") + (remaining > 0 ? ` +${remaining} more` : "");
+        sendTelegramAlert(
+          `🔒 *PR guard dedup working* — duplicate guard-hit suppressed this cycle.\n` +
+          `24h affected issues: ${dupList} (${total24h} total suppressed).`,
+        );
+        log.info("PR guard duplicate-attempt digest sent", {
+          distinctIssues: duplicates.length,
+          total24h,
+        });
+      }
+    } catch (digestErr) {
+      log.warn("Failed to send PR guard duplicate-attempt digest", {
+        error: digestErr instanceof Error ? digestErr.message : String(digestErr),
+      });
     }
   }
 

@@ -9538,6 +9538,122 @@ export class StateStore {
     return row !== undefined;
   }
 
+  // ── PR Guard Cooldown Locks (issue #1095) ────────────────────────────────────
+  //
+  // Atomic lock table for PR guard deduplication.  The existing dispatch_blocks
+  // pattern (read hasRecentGuardBlock → create task → write recordDispatchBlock)
+  // has a TOCTOU race: when the same issue appears in overlapping or consecutive
+  // poll cycles both workers read a clean DB state before either writes the block
+  // row, producing two "already-in-review" tasks for the same issue.
+  //
+  // Fix: INSERT OR IGNORE into pr_guard_cooldown_locks with UNIQUE(source_ref).
+  // SQLite serialises the insert, so only one caller can succeed — the loser
+  // sees changes() == 0 and drops the duplicate before any task is created.
+
+  private runPRGuardCooldownLocksMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pr_guard_cooldown_locks (
+        source_ref  TEXT    NOT NULL,
+        locked_at   TEXT    NOT NULL,
+        expires_at  TEXT    NOT NULL,
+        UNIQUE (source_ref)
+      );
+      CREATE INDEX IF NOT EXISTS idx_pr_guard_cooldown_locks_expires
+        ON pr_guard_cooldown_locks(expires_at);
+
+      CREATE TABLE IF NOT EXISTS pr_guard_duplicate_attempts (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_ref          TEXT    NOT NULL,
+        blocking_pr_number  INTEGER,
+        attempted_at        TEXT    NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_pr_guard_duplicate_attempts_at
+        ON pr_guard_duplicate_attempts(attempted_at);
+    `);
+  }
+
+  /**
+   * Atomically try to acquire a PR guard cooldown lock for the given source ref.
+   *
+   * Uses `INSERT OR IGNORE` with a `UNIQUE (source_ref)` constraint so the
+   * check-and-lock is a single SQLite operation — no TOCTOU race between reading
+   * the cooldown state and writing the lock, even when the same issue appears in
+   * overlapping or consecutive poll cycles.
+   *
+   * Expired locks are evicted inside the same call (before the INSERT) so a
+   * re-fire after the TTL succeeds cleanly without manual cleanup.
+   *
+   * @param sourceRef  Issue ref, e.g. "rapartlu/research-agent#133"
+   * @param windowMs   Lock TTL in milliseconds (default: 60 min, matches GUARD_FLOOD_GATE_WINDOW_MS)
+   * @returns `true`  — lock newly acquired; caller may create the guard-hit task.
+   *          `false` — lock already held; caller must suppress the duplicate task.
+   */
+  tryAcquirePRGuardLock(sourceRef: string, windowMs = 3_600_000): boolean {
+    this.runPRGuardCooldownLocksMigration();
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const expiresAt = new Date(now.getTime() + windowMs).toISOString();
+
+    // Evict expired locks so a legitimate re-fire after the TTL can succeed.
+    this.db.prepare(`DELETE FROM pr_guard_cooldown_locks WHERE expires_at < ?`).run(nowIso);
+
+    // Atomic try-insert: INSERT OR IGNORE silently skips if source_ref already
+    // has a non-expired lock.  We detect success via the changes() count.
+    const result = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO pr_guard_cooldown_locks (source_ref, locked_at, expires_at)
+         VALUES (?, ?, ?)`,
+      )
+      .run(sourceRef, nowIso, expiresAt);
+
+    return (result.changes as number) > 0;
+  }
+
+  /**
+   * Record a suppressed duplicate PR guard attempt for operator observability.
+   *
+   * Called when `tryAcquirePRGuardLock()` returns `false` — i.e. a second task
+   * creation was blocked because the atomic lock was already held.  These rows
+   * are queried by `getRecentPRGuardDuplicates()` to produce the 24h Telegram
+   * digest (issue #1095, AC #2).
+   *
+   * @param sourceRef          Issue ref, e.g. "rapartlu/research-agent#133"
+   * @param blockingPRNumber   Blocking PR number (for context in the digest)
+   */
+  recordPRGuardDuplicateAttempt(sourceRef: string, blockingPRNumber?: number): void {
+    this.runPRGuardCooldownLocksMigration();
+    this.db
+      .prepare(
+        `INSERT INTO pr_guard_duplicate_attempts (source_ref, blocking_pr_number, attempted_at)
+         VALUES (?, ?, ?)`,
+      )
+      .run(sourceRef, blockingPRNumber ?? null, new Date().toISOString());
+  }
+
+  /**
+   * Return PR guard duplicate attempts aggregated by source_ref within the given
+   * time window, sorted descending by count.
+   *
+   * Used by the post-dispatch-loop Telegram digest (issue #1095, AC #2) so
+   * operators can verify that the atomic deduplication lock is preventing
+   * duplicate guard-hit task creation.
+   *
+   * @param windowMs  Look-back window in milliseconds (default: 24 hours)
+   */
+  getRecentPRGuardDuplicates(windowMs = 86_400_000): Array<{ source_ref: string; count: number }> {
+    this.runPRGuardCooldownLocksMigration();
+    const cutoff = new Date(Date.now() - windowMs).toISOString();
+    return this.db
+      .prepare(
+        `SELECT source_ref, COUNT(*) AS count
+         FROM pr_guard_duplicate_attempts
+         WHERE attempted_at >= ?
+         GROUP BY source_ref
+         ORDER BY count DESC`,
+      )
+      .all(cutoff) as Array<{ source_ref: string; count: number }>;
+  }
+
   /**
    * Return per-day dispatch block rate metrics over a rolling window.
    *
