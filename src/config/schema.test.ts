@@ -212,6 +212,15 @@ describe("ProviderConfig", () => {
 
   it("agent provider field is set for all agents", () => {
     const config = loadConfig(configPath);
+    const validProviders = new Set(Object.keys(config.providers ?? {}));
+
+    expect(validProviders.has("openai")).toBe(true);
+
+    for (const [name, agent] of Object.entries(config.agents)) {
+      expect(agent.provider, `${name} missing provider`).toBeTruthy();
+      expect(validProviders.has(agent.provider ?? ""), `${name} has unknown provider "${agent.provider}"`).toBe(true);
+    }
+
     expect(config.agents["claude-agent-orchestrator"].provider).toBe("claude");
     // Every agent must declare a provider and that provider must exist in the
     // top-level providers map — guards against typos and orphaned provider refs.
