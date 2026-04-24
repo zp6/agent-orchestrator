@@ -77,6 +77,8 @@ import type {
   IMeetingFacilitatorGoalStore,
   MeetingFacilitatorGoalWidget,
   MeetingFacilitatorGoalItem,
+  IImprovementBatchDeduplicationStore,
+  ImprovementAnalysisRun,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -92,7 +94,7 @@ import { ulid } from "../util/ulid.js";
  */
 export const APPROVAL_SCORE_FLOOR = 0.60;
 
-export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore, IMeetingFacilitatorGoalStore {
+export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore, IMeetingFacilitatorGoalStore, IImprovementBatchDeduplicationStore {
   private db: Database.Database;
 
   constructor(dbPath: string = process.env.STATE_DB_PATH ?? "state.db") {
@@ -664,6 +666,24 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
 
       CREATE INDEX IF NOT EXISTS idx_triage_validator_calls_created_at
         ON triage_validator_calls (created_at DESC);
+    `);
+
+    // Improvement-detector batch deduplication log (issue #458).
+    // Stores a SHA-256 content hash for each task-batch submitted to the
+    // improvement detector.  Before running analysis, the detector checks
+    // whether an identical (unskipped) run exists within the last 6 hours
+    // and skips if so, preventing redundant LLM calls and duplicate issues.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS improvement_analysis_runs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_hash  TEXT    NOT NULL,
+        task_count  INTEGER NOT NULL,
+        skipped     INTEGER NOT NULL DEFAULT 0,
+        created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_improvement_analysis_runs_hash_created
+        ON improvement_analysis_runs (batch_hash, created_at DESC);
     `);
   }
 
@@ -4358,6 +4378,72 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       all_goals_met: allGoalsMet,
       goals,
     };
+  }
+
+  // ── Improvement-detector batch deduplication (issue #458) ─────────────────
+
+  /**
+   * Persist a record of an improvement-analysis run (or skip).
+   *
+   * Callers pass `skipped = true` when the batch hash was already seen within
+   * the deduplication window and the LLM call was omitted.
+   */
+  recordImprovementAnalysisRun(batchHash: string, taskCount: number, skipped: boolean): void {
+    this.db
+      .prepare(
+        `INSERT INTO improvement_analysis_runs (batch_hash, task_count, skipped)
+         VALUES (?, ?, ?)`,
+      )
+      .run(batchHash, taskCount, skipped ? 1 : 0);
+  }
+
+  /**
+   * Return `true` if an *unskipped* analysis for `batchHash` was recorded
+   * within the last `windowHours` hours (default 6).
+   *
+   * Only runs where `skipped = 0` count — a previous skip does not prevent
+   * the next genuine analysis from executing.
+   */
+  hasRecentImprovementAnalysisRun(batchHash: string, windowHours = 6): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM improvement_analysis_runs
+         WHERE batch_hash = ?
+           AND skipped    = 0
+           AND created_at >= datetime('now', ?)
+         LIMIT 1`,
+      )
+      .get(batchHash, `-${windowHours} hours`) as { 1: number } | undefined;
+    return row !== undefined;
+  }
+
+  /**
+   * Return recent improvement-analysis run records, newest first.
+   *
+   * @param limit - Maximum rows to return (default 50).
+   */
+  getRecentImprovementAnalysisRuns(limit = 50): ImprovementAnalysisRun[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, batch_hash, task_count, skipped, created_at
+         FROM improvement_analysis_runs
+         ORDER BY id DESC
+         LIMIT ?`,
+      )
+      .all(limit) as Array<{
+      id: number;
+      batch_hash: string;
+      task_count: number;
+      skipped: number;
+      created_at: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      batch_hash: r.batch_hash,
+      task_count: r.task_count,
+      skipped: r.skipped === 1,
+      created_at: r.created_at,
+    }));
   }
 
   /**

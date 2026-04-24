@@ -7,10 +7,11 @@
  *   - Config replaced with ReviewerConfig (agents map only needed for name validation)
  */
 
+import { createHash } from "node:crypto";
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
-import type { IStateStore, Task } from "../state/types.js";
+import type { IStateStore, Task, IImprovementBatchDeduplicationStore } from "../state/types.js";
 
 export interface DetectedImprovement {
   title: string;
@@ -88,12 +89,30 @@ Respond with ONLY a JSON array (no markdown, no code fences):
 
 If no actionable proposals are found, return an empty array: []`;
 
+/**
+ * Compute a deterministic SHA-256 hex digest for a task batch.
+ *
+ * Sorts tasks by ID before hashing so the result is order-independent.
+ * Each task contributes a `<id>:<status>` segment so that the same IDs
+ * with different statuses produce a different hash.
+ *
+ * Exported so tests can verify the hashing logic independently.
+ */
+export function computeBatchHash(tasks: Task[]): string {
+  const entries = tasks
+    .slice()
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .map((t) => `${t.id}:${t.status}`)
+    .join(",");
+  return createHash("sha256").update(entries).digest("hex");
+}
+
 export class ImprovementDetector {
   private log = createLogger("improvement-detector");
 
   constructor(
     private config: ReviewerConfig,
-    private store?: IStateStore,
+    private store?: (IStateStore & IImprovementBatchDeduplicationStore) | IStateStore,
   ) {}
 
   async analyze(recentTasks: Task[]): Promise<DetectedImprovement[]> {
@@ -102,7 +121,24 @@ export class ImprovementDetector {
     const implTasks = recentTasks.filter((t) => t.task_type !== "research");
     if (implTasks.length === 0) return [];
 
-    const client = createLLMClient();
+    // Batch deduplication guard (issue #458): skip identical task-batches
+    // that were already analysed within the last 6 hours to prevent redundant
+    // LLM calls and duplicate improvement issues across daemon cycles.
+    const dedupStore = this.asDedupStore();
+    if (dedupStore) {
+      const batchHash = computeBatchHash(implTasks);
+      if (dedupStore.hasRecentImprovementAnalysisRun(batchHash)) {
+        this.log.warn("Skipping improvement analysis — duplicate batch within 6h window", {
+          batch_hash: batchHash.slice(0, 16),
+          task_count: implTasks.length,
+        });
+        dedupStore.recordImprovementAnalysisRun(batchHash, implTasks.length, true);
+        return [];
+      }
+      // Record the (non-skipped) run before calling the LLM so that a crash
+      // mid-analysis still counts as "seen" and prevents a retry loop.
+      dedupStore.recordImprovementAnalysisRun(batchHash, implTasks.length, false);
+    }
 
     const taskSummaries = implTasks.map((t) => ({
       id: t.id.slice(0, 8),
@@ -122,6 +158,7 @@ export class ImprovementDetector {
     const timer = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
     const callStart = Date.now();
     try {
+      const client = createLLMClient();
       let response;
       try {
         response = await client.messages.create(
@@ -177,7 +214,20 @@ export class ImprovementDetector {
     );
     if (researchTasks.length === 0) return [];
 
-    const client = createLLMClient();
+    // Batch deduplication guard (issue #458): same protection as analyze().
+    const dedupStore = this.asDedupStore();
+    if (dedupStore) {
+      const batchHash = computeBatchHash(researchTasks);
+      if (dedupStore.hasRecentImprovementAnalysisRun(batchHash)) {
+        this.log.warn("Skipping research-findings analysis — duplicate batch within 6h window", {
+          batch_hash: batchHash.slice(0, 16),
+          task_count: researchTasks.length,
+        });
+        dedupStore.recordImprovementAnalysisRun(batchHash, researchTasks.length, true);
+        return [];
+      }
+      dedupStore.recordImprovementAnalysisRun(batchHash, researchTasks.length, false);
+    }
 
     const taskSummaries = researchTasks.map((t) => ({
       id: t.id.slice(0, 8),
@@ -195,6 +245,7 @@ export class ImprovementDetector {
     const timer = setTimeout(() => abortController.abort(), LLM_TIMEOUT_MS);
     const callStart = Date.now();
     try {
+      const client = createLLMClient();
       let response;
       try {
         response = await client.messages.create(
@@ -234,6 +285,22 @@ export class ImprovementDetector {
       });
       return [];
     }
+  }
+
+  /**
+   * Type-narrow `this.store` to `IImprovementBatchDeduplicationStore` if the
+   * store implements the required methods.  Returns `null` when the store is
+   * absent or does not support deduplication (e.g. in minimal test stubs).
+   */
+  private asDedupStore(): IImprovementBatchDeduplicationStore | null {
+    if (
+      this.store &&
+      typeof (this.store as IImprovementBatchDeduplicationStore).hasRecentImprovementAnalysisRun ===
+        "function"
+    ) {
+      return this.store as IImprovementBatchDeduplicationStore;
+    }
+    return null;
   }
 
   private parseResponse(

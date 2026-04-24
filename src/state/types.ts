@@ -1931,7 +1931,8 @@ export interface ITelegramStateStore
     IFirstPassRateStore,
     ILowScoreFeedStore,
     IScoreViolationsStore,
-    IMeetingFacilitatorGoalStore {
+    IMeetingFacilitatorGoalStore,
+    IImprovementBatchDeduplicationStore {
   // System flags (pause/resume, operator overrides)
   getSystemFlag(key: string): string | null;
   setSystemFlag(key: string, value: string): void;
@@ -2180,4 +2181,62 @@ export interface IMeetingFacilitatorGoalStore {
    *   Defaults to `'%meeting-facilitator%'`.
    */
   getMeetingFacilitatorGoalWidget(agentNamePattern?: string): MeetingFacilitatorGoalWidget;
+}
+
+// ── Improvement detector batch deduplication types (issue #458) ───────────
+
+/**
+ * A single record of an improvement-detector analysis run, persisted to
+ * `improvement_analysis_runs` in state.db.
+ */
+export interface ImprovementAnalysisRun {
+  /** Auto-incremented row id. */
+  id: number;
+  /**
+   * SHA-256 hex digest of sorted `<taskId>:<status>` entries for the batch.
+   * Used as the deduplication key.
+   */
+  batch_hash: string;
+  /** Number of tasks in the batch. */
+  task_count: number;
+  /**
+   * `true`  — analysis was skipped because an identical batch was already
+   *           analysed within the deduplication window.
+   * `false` — analysis ran normally and results were returned.
+   */
+  skipped: boolean;
+  /** ISO-8601 UTC timestamp of this record. */
+  created_at: string;
+}
+
+/**
+ * Store interface for the improvement-detector batch deduplication guard.
+ *
+ * Implemented by the reviewer's StateStore.
+ */
+export interface IImprovementBatchDeduplicationStore {
+  /**
+   * Persist a record of an analysis run (or skip) for a given batch hash.
+   *
+   * @param batchHash  - SHA-256 hex of the sorted `<id>:<status>` list.
+   * @param taskCount  - Number of tasks in the batch.
+   * @param skipped    - `true` if the run was skipped due to deduplication.
+   */
+  recordImprovementAnalysisRun(batchHash: string, taskCount: number, skipped: boolean): void;
+
+  /**
+   * Return `true` if an *unskipped* analysis for `batchHash` was recorded
+   * within the last `windowHours` hours (default 6).
+   *
+   * Only unskipped (i.e. actually-executed) runs count as "seen" — a previous
+   * skip does not prevent the next real run from executing.
+   */
+  hasRecentImprovementAnalysisRun(batchHash: string, windowHours?: number): boolean;
+
+  /**
+   * Return recent analysis run records, newest first.
+   *
+   * @param limit - Maximum rows to return (default 50).
+   */
+  getRecentImprovementAnalysisRuns(limit?: number): ImprovementAnalysisRun[];
 }

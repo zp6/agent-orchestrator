@@ -255,7 +255,7 @@ export type {
   IssueAgeEscalationCandidate,
 } from "./reviewer/issue-age.js";
 
-export { ImprovementDetector } from "./reviewer/improvement-detector.js";
+export { ImprovementDetector, computeBatchHash } from "./reviewer/improvement-detector.js";
 export type { DetectedImprovement } from "./reviewer/improvement-detector.js";
 
 // Health incident routing (issue #104) — routes diagnostic incidents to Telegram
@@ -1072,6 +1072,12 @@ export type {
   MeetingFacilitatorGoalWidget,
   MeetingFacilitatorGoalItem,
   IMeetingFacilitatorGoalStore,
+} from "./state/types.js";
+
+// Improvement-detector batch deduplication (issue #458)
+export type {
+  ImprovementAnalysisRun,
+  IImprovementBatchDeduplicationStore,
 } from "./state/types.js";
 
 // Low-quality PR labeler (issue #428)

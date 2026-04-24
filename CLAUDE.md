@@ -56,7 +56,7 @@ When this container is used for LLM PR reviews:
 - PR reviewer: review diffs, approve/request-changes/escalate, auto-rebase
 - Task verifier: score completed tasks, approve/reject, dispatch revisions
 - Supervisor: strategic reasoning about system state, dispatch decisions
-- Improvement detector: analyze task patterns, create issues for improvements
+- Improvement detector: analyze task patterns, create issues for improvements; batch deduplication guard prevents identical task-batches from triggering redundant LLM analysis within 6h (`improvement_analysis_runs` table, `computeBatchHash()`)
 - Escalation system: Telegram notifications, dashboard alert queue
 - Score calibrator: close feedback loop between scores and actual PR outcomes
 - Calibration drift monitor: alert when score distributions shift significantly
