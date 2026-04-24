@@ -213,9 +213,17 @@ describe("ProviderConfig", () => {
   it("agent provider field is set for all agents", () => {
     const config = loadConfig(configPath);
     expect(config.agents["claude-agent-orchestrator"].provider).toBe("claude");
-    // Codex agents were removed (out of tokens) — verify all remaining agents are claude
+    // Every agent must declare a provider and that provider must exist in the
+    // top-level providers map — guards against typos and orphaned provider refs.
+    const knownProviders = new Set(Object.keys(config.providers ?? {}));
     for (const [name, agent] of Object.entries(config.agents)) {
-      expect(agent.provider, `agent ${name} should have provider "claude"`).toBe("claude");
+      expect(agent.provider, `agent ${name} is missing provider field`).toBeTruthy();
+      if (knownProviders.size > 0) {
+        expect(
+          knownProviders.has(agent.provider!),
+          `agent ${name} has unknown provider "${agent.provider}" (known: ${[...knownProviders].join(", ")})`,
+        ).toBe(true);
+      }
     }
   });
 });

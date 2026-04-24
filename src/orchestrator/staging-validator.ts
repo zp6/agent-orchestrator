@@ -161,13 +161,11 @@ async function handleFailedValidation(
   }
 
   if (!priorPassed) {
+    // Tests were already failing before this merge — skip revert and skip the
+    // Telegram warning. Notifying on every PR merge for a pre-existing failure
+    // creates noise that masks real regressions. The log entry below is
+    // sufficient for operators to investigate when they choose to.
     log.warn("Tests were already failing before this merge — not reverting", { repo, prNumber });
-    notifyOperator(
-      `Post-merge validation failed: ${repo}#${prNumber}`,
-      `Tests failed after merge, but they were already failing before. Not reverting.\n\nOutput:\n${testOutput.slice(0, 300)}`,
-      "warning",
-      `staging-fail:${repo}#${prNumber}`,
-    ).catch(() => {});
     return;
   }
 
