@@ -1,6 +1,6 @@
 # Agent Orchestrator — Roadmap
 
-This is the prioritised backlog for `rapartlu/agent-orchestrator`. Updated 2026-04-23 (pass 8 — triage PR).
+This is the prioritised backlog for `rapartlu/agent-orchestrator`. Updated 2026-04-24 (pass 9 — triage PR).
 
 ---
 
@@ -11,15 +11,15 @@ These are the most impactful items — highest signal-to-noise for the fleet.
 | # | Issue | What & Why |
 |---|-------|-----------|
 | 1 | [#1040](https://github.com/rapartlu/agent-orchestrator/issues/1040) | **CI failing on main** — auto-detected CI failure; P1-high bug requiring investigation and fix to unblock PR merges |
-| 2 | [#1121](https://github.com/rapartlu/agent-orchestrator/issues/1121) | **Preventive restart blocks on disabled Codex agents** — `no_port` health-check failures on disabled Codex agents loop the preventive-restart cycle; skip restart for agents with no configured port |
-| 3 | [#1096](https://github.com/rapartlu/agent-orchestrator/issues/1096) | **PR merge does not clear blocked issue backlog** — after a PR merges, issues immediately re-block on the next open PR; need to auto-resolve referenced issues at merge time |
-| 4 | [#1106](https://github.com/rapartlu/agent-orchestrator/issues/1106) | **Cross-repo follow-up: all orchestrator dispatches failing with 405** — dispatch endpoint returning 405 on every task; highest-impact blocker |
-| 5 | [#1113](https://github.com/rapartlu/agent-orchestrator/issues/1113) | **Dispatch surge auto-suppression** — alerting alone insufficient after 11-task flood; extend surge detector to block further dispatch for 2h after N≥5 already-in-review responses within 30 min |
-| 6 | [#1075](https://github.com/rapartlu/agent-orchestrator/issues/1075) | **PR guard cooldown keyed by PR number** — cooldown is per-issue; 12+ issues blocked by same PR each re-queue independently; re-key by PR number to collapse storm into one entry |
-| 7 | [#1061](https://github.com/rapartlu/agent-orchestrator/issues/1061) | **Hard quality floor for cross-repo triage follow-ups** — cross-repo housekeeping tasks scoring 0.42–0.51 are being approved; enforce minimum 0.60 floor for triage schema compliance |
-| 8 | [#938](https://github.com/rapartlu/agent-orchestrator/issues/938) | **Dispatch safety audit log** — unified guard event feed for all pre-dispatch safety decisions; critical for debugging misroutes and blocked dispatches |
-| 9 | [#929](https://github.com/rapartlu/agent-orchestrator/issues/929) | **Pre-dispatch semantic duplicate detection** — LLM-based dedup of open issues before dispatching; prevents agents implementing the same feature twice under different titles |
-| 10 | [#911](https://github.com/rapartlu/agent-orchestrator/issues/911) | **Score coverage backfill endpoint** — expose `/api/tasks/backfill-scores` in daemon loop to retroactively score tasks missing quality data |
+| 2 | [#1131](https://github.com/rapartlu/agent-orchestrator/issues/1131) | **Wire failure genome into live routing** — shadow-mode vaccination prototype (in agent-proxy) has been running; once accuracy >60% is confirmed, promote genome similarity results from log-only to live dispatch suppression |
+| 3 | [#1121](https://github.com/rapartlu/agent-orchestrator/issues/1121) | **Preventive restart blocks on disabled Codex agents** — `no_port` health-check failures on disabled Codex agents loop the preventive-restart cycle; skip restart for agents with no configured port |
+| 4 | [#1096](https://github.com/rapartlu/agent-orchestrator/issues/1096) | **PR merge does not clear blocked issue backlog** — after a PR merges, issues immediately re-block on the next open PR; need to auto-resolve referenced issues at merge time |
+| 5 | [#1106](https://github.com/rapartlu/agent-orchestrator/issues/1106) | **Cross-repo follow-up: all orchestrator dispatches failing with 405** — dispatch endpoint returning 405 on every task; highest-impact blocker |
+| 6 | [#1113](https://github.com/rapartlu/agent-orchestrator/issues/1113) | **Dispatch surge auto-suppression** — alerting alone insufficient after 11-task flood; extend surge detector to block further dispatch for 2h after N≥5 already-in-review responses within 30 min |
+| 7 | [#1075](https://github.com/rapartlu/agent-orchestrator/issues/1075) | **PR guard cooldown keyed by PR number** — cooldown is per-issue; 12+ issues blocked by same PR each re-queue independently; re-key by PR number to collapse storm into one entry |
+| 8 | [#1061](https://github.com/rapartlu/agent-orchestrator/issues/1061) | **Hard quality floor for cross-repo triage follow-ups** — cross-repo housekeeping tasks scoring 0.42–0.51 are being approved; enforce minimum 0.60 floor for triage schema compliance |
+| 9 | [#938](https://github.com/rapartlu/agent-orchestrator/issues/938) | **Dispatch safety audit log** — unified guard event feed for all pre-dispatch safety decisions; critical for debugging misroutes and blocked dispatches |
+| 10 | [#929](https://github.com/rapartlu/agent-orchestrator/issues/929) | **Pre-dispatch semantic duplicate detection** — LLM-based dedup of open issues before dispatching; prevents agents implementing the same feature twice under different titles |
 
 ---
 
@@ -29,11 +29,13 @@ Solid ideas, scoped and ready when Next Up clears.
 
 | # | Issue | What & Why |
 |---|-------|-----------|
-| 11 | [#869](https://github.com/rapartlu/agent-orchestrator/issues/869) | **Auto-route blocked dispatches to PR review queue** — when a dispatch is blocked, immediately surface it for review rather than losing it silently |
-| 12 | [#992](https://github.com/rapartlu/agent-orchestrator/issues/992) | **Cross-repo security propagation tracker** — detect when a security fix in one agent repo hasn't been applied to peer repos; auto-file propagation issues |
-| 13 | [#1025](https://github.com/rapartlu/agent-orchestrator/issues/1025) | **Quality floor bypass alerts in Telegram bot** — persist bypass events to SQLite; `/quality-bypasses` command returns last 10 bypass events; daily summary includes bypass count |
-| 14 | [#1038](https://github.com/rapartlu/agent-orchestrator/issues/1038) | **Prompt cache hit rate dashboard widget** — dashboard panel + Telegram `cache` command + auto-tuning alert; closes the loop on token spend reduction from issue #1037 |
-| 15 | [#1122](https://github.com/rapartlu/agent-orchestrator/issues/1122) | **Orphan branch cleanup** — 5 auto-detected branches with no open PR; prune to reduce repo noise |
+| 11 | [#911](https://github.com/rapartlu/agent-orchestrator/issues/911) | **Score coverage backfill endpoint** — expose `/api/tasks/backfill-scores` in daemon loop to retroactively score tasks missing quality data |
+| 12 | [#869](https://github.com/rapartlu/agent-orchestrator/issues/869) | **Auto-route blocked dispatches to PR review queue** — when a dispatch is blocked, immediately surface it for review rather than losing it silently |
+| 13 | [#992](https://github.com/rapartlu/agent-orchestrator/issues/992) | **Cross-repo security propagation tracker** — detect when a security fix in one agent repo hasn't been applied to peer repos; auto-file propagation issues |
+| 14 | [#1025](https://github.com/rapartlu/agent-orchestrator/issues/1025) | **Quality floor bypass alerts in Telegram bot** — persist bypass events to SQLite; `/quality-bypasses` command returns last 10 bypass events; daily summary includes bypass count |
+| 15 | [#1038](https://github.com/rapartlu/agent-orchestrator/issues/1038) | **Prompt cache hit rate dashboard widget** — dashboard panel + Telegram `cache` command + auto-tuning alert; closes the loop on token spend reduction from issue #1037 |
+| 16 | [#1132](https://github.com/rapartlu/agent-orchestrator/issues/1132) | **Improvement detector batch deduplication guard** — prevent the improvement detector from queuing the same improvement issue multiple times in a single scan batch |
+| 17 | [#1122](https://github.com/rapartlu/agent-orchestrator/issues/1122) | **Orphan branch cleanup** — 5 auto-detected branches with no open PR; prune to reduce repo noise |
 
 ---
 
@@ -52,6 +54,9 @@ Worth tracking but not yet scoped or prioritised.
 
 Key features merged since last triage:
 
+- **#1133** (PR #1137) — ULID collision detection, retry, and `/api/ulid-collisions` endpoint: `createTask()` retries with fresh ULID on collision; `ulid_collision_log` table persists every event for operator audit (2026-04-24)
+- **Agent meeting requests** (PR #1115) — standup Round 1 prompts now include `REQUEST MEETING: <topic>` instructions; `extractMeetingRequests()` writes `meeting_request` signals to the stigmergy table for the meeting facilitator to evaluate (2026-04-23)
+- **June goal metric evaluators** (PR #1116) — enables real progress tracking in the dashboard for June objectives (2026-04-23)
 - **#1120** — restored 5 Codex agents to all pools (infrastructure; no issue ref) (2026-04-23)
 - **#1112** — cross-repo PR guard cooldown enforcement at dispatch time: query reviewer's `/api/pr-guard-cooldowns` before dispatching; suppress entirely if cooldown active (2026-04-23)
 - **#1086/#1093** — predictive failure interception: pre-dispatch task similarity scoring; top-3 failure post-mortems injected when similarity ≥ 0.6 (2026-04-23)
