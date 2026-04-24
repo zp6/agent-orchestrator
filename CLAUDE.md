@@ -110,6 +110,7 @@ When this container is used for LLM PR reviews:
 - PR guard cooldown pre-flight: early cooldown check in `checkPRExistenceBeforeDispatch` returns `skip=true / cooldown-active` before any `gh` CLI call when a 60-min cooldown is active, preventing redundant guard tasks across daemon cycles (`pr-existence-guard.ts`)
 - Fleet-wide capability check endpoint: `GET /api/fleet-capability-check?agent=...&task_type=...&source_ref=...` — any fleet agent calls this before starting a task; returns `{ accept, reason, suggested_agents }` from `FLEET_CAPABILITY_MAP`; enables the research agent (and others) to reject implementation tasks before doing any work (`fleet-capability-check.ts`)
 - Fork-from dispatch payload protocol: canonical spec and types for `fork_from: conversation_id` in dispatch payloads; enables the proxy to clone warm parent sessions into independent child sessions for parallel subtask fan-out and Fleet Immune System vaccination; Phase 1 (spec + DB column + verifier awareness, shadow-mode only) (`fork-protocol.ts`)
+- Meeting outcome client: HTTP client for the meeting-facilitator agent's structured outcome API (`/api/meeting/:id/outcome`, `/api/meetings/outcomes`, `/api/meetings/outcomes/summary`); `MeetingOutcomeClient` fetches `PriorityRankingEntry[]`, `SequencingConstraint[]`, and follow-up recommendation so the supervisor can act on meeting intelligence without polling the facilitator manually; `extractSupervisorIntelligence()` helper parses the ranked issue list and ordering constraints into an immediately actionable structure (`meeting-outcome-client.ts`)
 
 **Out of scope (belongs to orchestrator-core):**
 - Daemon loop, state store, dispatching infrastructure
@@ -192,6 +193,7 @@ src/
     pr-guard-surge-detector.ts      — `PRGuardSurgeDetector`: surge alert at ≥3 hits/60min; auto-suppression (2h block + Telegram alert with "dispatch suppressed until HH:MM UTC") at ≥5 hits/30min via `IPRGuardCooldownStore`
     fleet-capability-check.ts       — `FLEET_CAPABILITY_MAP` + `evaluateFleetCapability()` + `GET /api/fleet-capability-check`; fleet-wide pre-work capability gate callable by any agent (research-agent#178)
     fork-protocol.ts                — canonical spec and types for `fork_from: conversation_id` dispatch payload field; `DispatchForkSpec`, `buildForkSpec()`, `parseForkFrom()`, `serialiseForkFrom()`, `isExploratoryFork()`, `KNOWN_FORK_LABELS`, `FORK_FROM_MIGRATION_SQL`; Phase 1 shadow-mode spec for session-fork infrastructure (issue #454)
+    meeting-outcome-client.ts       — HTTP client for meeting-facilitator agent outcome API (port 3485); `MeetingOutcomeClient` with `fetchOutcome()`, `listOutcomes()`, `summary()`, `extractSupervisorIntelligence()`; `IssueRef`, `PriorityRankingEntry`, `SequencingConstraint`, `MeetingOutcome`, `MeetingOutcomeSummary` types; factory `createMeetingOutcomeClient()` (issue #460)
   integration/
     orchestrator-adapter.ts         — createReviewerInstances() adapter for orchestrator import
   service/

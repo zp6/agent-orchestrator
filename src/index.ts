@@ -1116,6 +1116,21 @@ export type {
   KnownForkLabel,
 } from "./reviewer/fork-protocol.js";
 
+// Meeting outcome client — HTTP client for meeting-facilitator agent outcome API (issue #460)
+export {
+  MeetingOutcomeClient,
+  createMeetingOutcomeClient,
+} from "./reviewer/meeting-outcome-client.js";
+export type {
+  MeetingOutcomeStatus,
+  IssueRef,
+  PriorityRankingEntry,
+  SequencingConstraint,
+  MeetingOutcome,
+  MeetingOutcomeSummary,
+  MeetingOutcomeClientOptions,
+} from "./reviewer/meeting-outcome-client.js";
+
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
 export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";
