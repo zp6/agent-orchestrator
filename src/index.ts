@@ -1131,6 +1131,20 @@ export type {
   MeetingOutcomeClientOptions,
 } from "./reviewer/meeting-outcome-client.js";
 
+// Meeting priority dispatcher — rule-based fast-path for auto-dispatch from outcome signals (issue #463)
+export {
+  MeetingPriorityDispatcher,
+  createMeetingPriorityDispatcher,
+  evaluateAutoDispatch,
+} from "./reviewer/meeting-priority-dispatcher.js";
+export type {
+  DispatchRuleId,
+  DispatchAction,
+  PriorityDispatchDecision,
+  DispatchEvaluationContext,
+  MeetingPriorityDispatcherOptions,
+} from "./reviewer/meeting-priority-dispatcher.js";
+
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
 export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";
