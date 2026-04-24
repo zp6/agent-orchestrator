@@ -18,7 +18,13 @@
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import { StateStore, type DispatchBlockMetrics, type SemanticMemoryEffectivenessResult, type FailureInterceptionStats } from "../state/store.js";
+import {
+  StateStore,
+  type DispatchBlockMetrics,
+  type SemanticMemoryEffectivenessResult,
+  type FailureInterceptionStats,
+  type VerificationCalibrationRecommendationRow,
+} from "../state/store.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("metrics-server");
@@ -135,6 +141,18 @@ export interface FailureInterceptionsResponse {
   prevention_rate: number;
   /** ISO timestamp of when this response was generated. */
   generated_at: string;
+}
+
+/**
+ * JSON response shape for GET /verification-calibration.
+ */
+export interface VerificationCalibrationResponse {
+  /** ISO timestamp of when this response was generated. */
+  generated_at: string;
+  /** Applied thresholds keyed by verifier agent. */
+  applied_thresholds: Record<string, number>;
+  /** Most recent calibration recommendations, newest first. */
+  recommendations: VerificationCalibrationRecommendationRow[];
 }
 
 /**
@@ -321,6 +339,24 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /verification-calibration ───────────────────────────────────────
+    if (url.pathname === "/verification-calibration") {
+      try {
+        const body: VerificationCalibrationResponse = {
+          generated_at: new Date().toISOString(),
+          applied_thresholds: store.getAppliedVerificationCalibrationThresholds(),
+          recommendations: store.getVerificationCalibrationRecommendations(50),
+        };
+        sendJson(res, 200, body);
+      } catch (err) {
+        log.warn("Failed to fetch verification calibration data", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to fetch calibration data" });
+      }
+      return;
+    }
+
     // ── GET /failure-interceptions ─────────────────────────────────────────────
     if (url.pathname === "/failure-interceptions") {
       const days = parseWindowDays(req);
@@ -389,7 +425,16 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
   server.listen(port, "127.0.0.1", () => {
     log.info("Metrics server started", {
       port,
-      endpoints: ["/health", "/dispatch-efficiency", "/semantic-memory-effectiveness", "/investigations", "/misrouting", "/failure-interceptions", "/api/ulid-collisions"],
+      endpoints: [
+        "/health",
+        "/dispatch-efficiency",
+        "/semantic-memory-effectiveness",
+        "/investigations",
+        "/misrouting",
+        "/verification-calibration",
+        "/failure-interceptions",
+        "/api/ulid-collisions",
+      ],
     });
   });
 

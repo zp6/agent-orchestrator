@@ -33,6 +33,10 @@ export interface CalibrationRecommendation {
   verifierAgent: string;
   currentThreshold: number;
   suggestedThreshold: number;
+  confidence: number;
+  taskCount: number;
+  mergeRate: number;
+  changesRequestedCount: number;
   reason: string;
 }
 
@@ -48,10 +52,12 @@ export function buildCalibrationReport(
   store: StateStore,
   minScoreThreshold = 0.7,
 ): CalibrationReport {
+  const generatedAt = new Date().toISOString();
+
   // Get all verified tasks from the last 30 days
   const tasks = store.getRecentVerified(500, 0);
   if (tasks.length === 0) {
-    return { buckets: [], recommendations: [], generatedAt: new Date().toISOString() };
+    return { buckets: [], recommendations: [], generatedAt };
   }
 
   // Group by verifier agent and score bucket
@@ -62,7 +68,7 @@ export function buildCalibrationReport(
   }>();
 
   for (const task of tasks) {
-    if (!task.quality_score || !task.agent_name) continue;
+    if (task.quality_score === null || !task.agent_name) continue;
 
     const score = task.quality_score;
     const bucket = scoreToBucket(score);
@@ -108,13 +114,29 @@ export function buildCalibrationReport(
   // Generate recommendations
   const recommendations = generateRecommendations(buckets, minScoreThreshold);
 
+  // Persist recommendations so they can be reviewed and, when confidence is
+  // high enough, feed back into the daemon's threshold checks.
+  try {
+    const result = store.recordVerificationCalibrationRecommendations(recommendations, generatedAt);
+    if (result.persisted > 0) {
+      log.info("Calibration recommendations persisted", {
+        persisted: result.persisted,
+        autoApplied: result.autoApplied,
+      });
+    }
+  } catch (err) {
+    log.warn("Failed to persist calibration recommendations", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   log.info("Calibration report built", {
     totalTasks: tasks.length,
     buckets: buckets.length,
     recommendations: recommendations.length,
   });
 
-  return { buckets, recommendations, generatedAt: new Date().toISOString() };
+  return { buckets, recommendations, generatedAt };
 }
 
 function scoreToBucket(score: number): string {
@@ -147,10 +169,12 @@ function generateRecommendations(
       .sort((a, b) => a.scoreRange.localeCompare(b.scoreRange));
 
     let suggestedThreshold = currentThreshold;
+    let selectedBucket: CalibrationBucket | undefined;
     for (const bucket of sorted) {
       const lowerBound = parseFloat(bucket.scoreRange.split("-")[0]);
       if (bucket.mergeRate >= 0.8) {
         suggestedThreshold = lowerBound;
+        selectedBucket = bucket;
         break;
       }
     }
@@ -163,23 +187,51 @@ function generateRecommendations(
 
     if (suggestedThreshold !== currentThreshold) {
       const direction = suggestedThreshold < currentThreshold ? "lower" : "raise";
+      const supportingTasks = sorted.reduce((sum, bucket) => sum + bucket.taskCount, 0);
+      const selectedMergeRate = selectedBucket?.mergeRate ?? 0;
+      const confidence = computeRecommendationConfidence(supportingTasks, selectedBucket ?? null, currentThreshold, suggestedThreshold);
+      const matchBucket = scoreToBucket(suggestedThreshold);
+      const matchRate = sorted.find((b) => b.scoreRange === matchBucket)?.mergeRate ?? 0;
       recommendations.push({
         verifierAgent: verifier,
         currentThreshold,
         suggestedThreshold,
-        reason: `${direction} threshold: score range ${scoreToBucket(suggestedThreshold)} has ${(sorted.find((b) => b.scoreRange === scoreToBucket(suggestedThreshold))?.mergeRate ?? 0 * 100).toFixed(0)}% merge rate`,
+        confidence,
+        taskCount: supportingTasks,
+        mergeRate: selectedMergeRate,
+        changesRequestedCount: sorted.reduce((sum, bucket) => sum + bucket.changesRequestedCount, 0),
+        reason: `${direction} threshold: score range ${matchBucket} has ${(matchRate * 100).toFixed(0)}% merge rate`,
       });
     } else if (belowThreshold.length > 0) {
+      const supportingTasks = sorted.reduce((sum, bucket) => sum + bucket.taskCount, 0);
+      const suggestedThreshold = Math.min(0.95, currentThreshold + 0.05);
       recommendations.push({
         verifierAgent: verifier,
         currentThreshold,
-        suggestedThreshold: currentThreshold + 0.05,
+        suggestedThreshold,
+        confidence: computeRecommendationConfidence(supportingTasks, null, currentThreshold, suggestedThreshold),
+        taskCount: supportingTasks,
+        mergeRate: belowThreshold[0]?.mergeRate ?? 0,
+        changesRequestedCount: sorted.reduce((sum, bucket) => sum + bucket.changesRequestedCount, 0),
         reason: `raise threshold: scores below ${currentThreshold} have <50% merge rate for this verifier`,
       });
     }
   }
 
   return recommendations;
+}
+
+function computeRecommendationConfidence(
+  taskCount: number,
+  bucket: CalibrationBucket | null,
+  currentThreshold: number,
+  suggestedThreshold: number,
+): number {
+  const supportScore = Math.min(1, taskCount / 20);
+  const mergeSignal = bucket ? Math.min(1, Math.abs(bucket.mergeRate - 0.8) / 0.2) : 0;
+  const stepSize = Math.min(1, Math.abs(suggestedThreshold - currentThreshold) / 0.1);
+  const raw = 0.35 + supportScore * 0.4 + mergeSignal * 0.2 + stepSize * 0.05;
+  return Math.max(0, Math.min(1, Math.round(raw * 100) / 100));
 }
 
 /**
@@ -210,7 +262,7 @@ export function formatCalibrationForTelegram(report: CalibrationReport): string 
   if (report.recommendations.length > 0) {
     lines.push("  *Recommendations:*");
     for (const r of report.recommendations) {
-      lines.push(`    ${r.verifierAgent}: ${r.currentThreshold} → ${r.suggestedThreshold} (${r.reason})`);
+      lines.push(`    ${r.verifierAgent}: ${r.currentThreshold} → ${r.suggestedThreshold} (${Math.round(r.confidence * 100)}% confidence, ${r.reason})`);
     }
   }
 

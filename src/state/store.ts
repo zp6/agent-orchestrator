@@ -1555,6 +1555,22 @@ export interface DispatchBlockMetrics {
   trend: "improving" | "worsening" | "stable" | "insufficient_data";
 }
 
+export interface VerificationCalibrationRecommendationRow {
+  id: number;
+  verifier_agent: string;
+  current_threshold: number;
+  suggested_threshold: number;
+  confidence: number;
+  task_count: number;
+  merge_rate: number;
+  changes_requested_count: number;
+  reason: string;
+  status: "pending" | "applied" | "skipped";
+  generated_at: string;
+  applied_at: string | null;
+  review_notes: string | null;
+}
+
 /**
  * SQL WHERE clauses that exclude infrastructure/transient failures from
  * retry-budget counts.  Centralised so all consumers stay in sync when
@@ -1722,6 +1738,7 @@ export class StateStore {
     this.runHealthCheckEventsMigration();
     this.runStagingValidationsMigration();
     this.runVerificationOutcomesMigration();
+    this.runVerificationCalibrationMigration();
     this.runInFlightReservationsMigration();
     this.runDispatchBlocksMigration();
     this.runProactiveRebaseLogMigration();
@@ -9188,6 +9205,37 @@ export class StateStore {
   }
 
   /**
+   * Create the persisted verification calibration recommendation ledger.
+   *
+   * Each build of the calibration report writes a new row so operators can
+   * inspect recommendation history and the daemon can consume the latest
+   * applied thresholds without relying on Telegram output alone.
+   */
+  private runVerificationCalibrationMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS verification_calibration_recommendations (
+        id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+        verifier_agent        TEXT NOT NULL,
+        current_threshold     REAL NOT NULL,
+        suggested_threshold   REAL NOT NULL,
+        confidence            REAL NOT NULL,
+        task_count            INTEGER NOT NULL,
+        merge_rate            REAL NOT NULL,
+        changes_requested_count INTEGER NOT NULL,
+        reason                TEXT NOT NULL,
+        status                TEXT NOT NULL DEFAULT 'pending',
+        generated_at          TEXT NOT NULL,
+        applied_at            TEXT,
+        review_notes          TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_vcr_status_generated
+        ON verification_calibration_recommendations(status, generated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_vcr_verifier_generated
+        ON verification_calibration_recommendations(verifier_agent, generated_at DESC);
+    `);
+  }
+
+  /**
    * Insert a new verification outcome log entry when a task is verified.
    * The `pr_outcome` and related fields are left NULL until the PR events
    * poller resolves the terminal state.
@@ -9288,6 +9336,120 @@ export class StateStore {
       merge_rate: number;
       stddev: number;
     }>;
+  }
+
+  /**
+   * Persist a batch of calibration recommendations for later review and
+   * threshold application.
+   *
+   * Recommendations are written as history rows. High-confidence rows are
+   * auto-applied by marking them "applied" immediately so daemon checks can
+   * pick them up on the next cycle.
+   */
+  recordVerificationCalibrationRecommendations(
+    recommendations: Array<{
+      verifierAgent: string;
+      currentThreshold: number;
+      suggestedThreshold: number;
+      confidence: number;
+      taskCount: number;
+      mergeRate: number;
+      changesRequestedCount: number;
+      reason: string;
+    }>,
+    generatedAt = new Date().toISOString(),
+  ): {
+    persisted: number;
+    autoApplied: number;
+  } {
+    this.runVerificationCalibrationMigration();
+    if (recommendations.length === 0) {
+      return { persisted: 0, autoApplied: 0 };
+    }
+
+    const insert = this.db.prepare(`
+      INSERT INTO verification_calibration_recommendations (
+        verifier_agent,
+        current_threshold,
+        suggested_threshold,
+        confidence,
+        task_count,
+        merge_rate,
+        changes_requested_count,
+        reason,
+        status,
+        generated_at,
+        applied_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const shouldAutoApply = (confidence: number, taskCount: number): boolean =>
+      confidence >= 0.85 && taskCount >= 10;
+
+    let autoApplied = 0;
+    const txn = this.db.transaction(() => {
+      for (const rec of recommendations) {
+        const status: VerificationCalibrationRecommendationRow["status"] =
+          shouldAutoApply(rec.confidence, rec.taskCount) ? "applied" : "pending";
+        const appliedAt = status === "applied" ? generatedAt : null;
+        insert.run(
+          rec.verifierAgent,
+          rec.currentThreshold,
+          rec.suggestedThreshold,
+          rec.confidence,
+          rec.taskCount,
+          rec.mergeRate,
+          rec.changesRequestedCount,
+          rec.reason,
+          status,
+          generatedAt,
+          appliedAt,
+        );
+        if (status === "applied") autoApplied++;
+      }
+    });
+
+    txn();
+    return { persisted: recommendations.length, autoApplied };
+  }
+
+  /**
+   * Return the most recent calibration recommendations, newest first.
+   */
+  getVerificationCalibrationRecommendations(limit = 50): VerificationCalibrationRecommendationRow[] {
+    this.runVerificationCalibrationMigration();
+    return this.db.prepare(`
+      SELECT *
+      FROM verification_calibration_recommendations
+      ORDER BY generated_at DESC, id DESC
+      LIMIT ?
+    `).all(limit) as VerificationCalibrationRecommendationRow[];
+  }
+
+  /**
+   * Return the latest applied threshold override per verifier agent.
+   * These values are merged over config thresholds by the daemon.
+   */
+  getAppliedVerificationCalibrationThresholds(): Record<string, number> {
+    this.runVerificationCalibrationMigration();
+    const rows = this.db.prepare(`
+      SELECT r.verifier_agent, r.suggested_threshold
+      FROM verification_calibration_recommendations r
+      INNER JOIN (
+        SELECT verifier_agent, MAX(id) AS id
+        FROM verification_calibration_recommendations
+        WHERE status = 'applied'
+        GROUP BY verifier_agent
+      ) latest
+        ON latest.verifier_agent = r.verifier_agent
+       AND latest.id = r.id
+    `).all() as Array<{ verifier_agent: string; suggested_threshold: number }>;
+
+    const thresholds: Record<string, number> = {};
+    for (const row of rows) {
+      thresholds[row.verifier_agent] = row.suggested_threshold;
+    }
+    return thresholds;
   }
 
   /**

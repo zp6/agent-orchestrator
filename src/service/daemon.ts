@@ -2068,35 +2068,6 @@ export class Daemon {
               });
             }
 
-            // Stigmergy: write a pattern_risk signal on verification failure
-            // so other agents can read it before touching the same repo (issue #689).
-            if (!result.approved && task.agent_name) {
-              try {
-                const repo = this.extractRepoFromTask(task);
-                this.store.writeSignal({
-                  agent: "claude-agent-orchestrator",
-                  signal_type: "pattern_risk",
-                  key: task.source_ref ?? task.id,
-                  value: {
-                    task_id: task.id,
-                    task_title: task.title,
-                    agent: task.agent_name,
-                    score: result.score,
-                    notes: result.notes ?? null,
-                    revision_hint: result.revision ? result.revision.slice(0, 300) : null,
-                  },
-                  repo: repo ?? undefined,
-                  confidence: Math.max(0, 1 - result.score),
-                  ttl_hours: 168,
-                });
-              } catch (sigErr) {
-                this.log.warn("Failed to write pattern_risk signal", {
-                  taskId: task.id,
-                  error: sigErr instanceof Error ? sigErr.message : String(sigErr),
-                });
-              }
-            }
-
             // Meta-review guard (issue #545): a reviewer-pool task that is
             // approved but scores below the calibration threshold indicates
             // shallow review work.  Alert the operator immediately and dispatch
@@ -2268,6 +2239,7 @@ export class Daemon {
 
     const globalThreshold  = verification.min_score ?? 0.70;
     const perAgentThresholds = verification.per_agent_quality_thresholds ?? {};
+    const calibrationThresholds = this.store.getAppliedVerificationCalibrationThresholds();
     const windowTasks = verification.quality_sla_window_tasks ?? DEFAULT_QUALITY_SLA_WINDOW_TASKS;
 
     // Gather agent names that have at least one scored task AND still exist
@@ -2285,9 +2257,10 @@ export class Daemon {
 
     for (const agentName of agentNames) {
       const threshold =
-        agentName in perAgentThresholds
+        calibrationThresholds[agentName] ??
+        (agentName in perAgentThresholds
           ? perAgentThresholds[agentName]
-          : globalThreshold;
+          : globalThreshold);
 
       // A threshold of 0 means the operator explicitly silenced alerts.
       if (threshold <= 0) continue;
