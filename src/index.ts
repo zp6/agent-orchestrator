@@ -363,10 +363,12 @@ export type {
   SurgeAlertConfig,
 } from "./reviewer/duplicate-dispatch-surge-detector.js";
 
-// PR guard surge detector (issue #442) — Telegram alert when the same (repo, issue) pair
-// triggers already-in-review >= 3 times within a 60-minute window; deduped to one alert
-// per surge event (60-minute cooldown).  Alert includes repo, issue number, blocking PR URL,
-// and hit count.  Leading indicator of cooldown-table failures or dispatcher polling loops.
+// PR guard surge detector (issues #442 / #1113, coordinated change 01KQ0HZ3D8YZ3SMKEW2N71AFX2)
+// — Telegram alert when the same (repo, issue) pair triggers already-in-review ≥ 2 times
+// within a 60-minute window (surge alert, deduped by 60-min cooldown).  When the same pair
+// triggers ≥ 5 times within a 30-minute window, a 2-hour dispatch suppression entry is written
+// via IPRGuardCooldownStore and a dedicated alert fires with "dispatch suppressed until HH:MM UTC
+// — no action needed."  Leading indicator of cooldown-table failures or dispatcher polling loops.
 export {
   PRGuardSurgeDetector,
   PR_GUARD_SURGE_THRESHOLD,

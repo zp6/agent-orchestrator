@@ -95,12 +95,12 @@ describe("PRGuardSurgeDetector", () => {
     expect(PR_GUARD_SURGE_COOLDOWN_MS).toBe(60 * 60 * 1000);
   });
 
-  it("exports correct default suppression threshold constant (3)", () => {
-    expect(PR_GUARD_SUPPRESSION_THRESHOLD).toBe(3);
+  it("exports correct default suppression threshold constant (5)", () => {
+    expect(PR_GUARD_SUPPRESSION_THRESHOLD).toBe(5);
   });
 
-  it("exports correct default suppression window constant (15 minutes)", () => {
-    expect(PR_GUARD_SUPPRESSION_WINDOW_MS).toBe(15 * 60 * 1000);
+  it("exports correct default suppression window constant (30 minutes)", () => {
+    expect(PR_GUARD_SUPPRESSION_WINDOW_MS).toBe(30 * 60 * 1000);
   });
 
   it("exports correct default suppression TTL constant (120 minutes)", () => {

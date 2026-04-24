@@ -10,10 +10,9 @@
  *      from 3 → 2 in issue #451 to fire earlier).
  *
  *   2. Writes a 2-hour dispatch suppression entry and sends a dedicated
- *      Telegram alert (with "dispatch suppressed until HH:MM") when the
- *      same pair triggers ≥3 times within a 15-minute window
- *      (auto-suppression — issue #1113; threshold lowered from 5 → 3 and
- *      window shortened from 30 → 15 min in issue #451).
+ *      Telegram alert (with "dispatch suppressed until HH:MM UTC") when the
+ *      same pair triggers ≥5 times within a 30-minute window
+ *      (auto-suppression — issue #1113 / coordinated change 01KQ0HZ3D8YZ3SMKEW2N71AFX2).
  *
  * This is a leading indicator that:
  *   - The cooldown table is not being respected by the dispatcher, or
@@ -69,19 +68,22 @@ export const PR_GUARD_SURGE_COOLDOWN_MS = 60 * 60 * 1000;
  * within {@link PR_GUARD_SUPPRESSION_WINDOW_MS}, a 2-hour suppression entry is
  * written and a Telegram alert is sent.
  *
- * Lowered from 5 → 3 so suppression fires earlier, before the dispatcher queues
- * many redundant tasks.
+ * Set to 5 per the coordinated change spec (rapartlu/agent-orchestrator#1113 /
+ * coordinated change 01KQ0HZ3D8YZ3SMKEW2N71AFX2).  Callers may override this
+ * via {@link PRGuardSurgeConfig.suppressionThreshold} for tighter burst detection.
  */
-export const PR_GUARD_SUPPRESSION_THRESHOLD = 3;
+export const PR_GUARD_SUPPRESSION_THRESHOLD = 5;
 
 /**
- * Rolling window duration in milliseconds for suppression evaluation (15 minutes).
+ * Rolling window duration in milliseconds for suppression evaluation (30 minutes).
  * Suppression is triggered when ≥ {@link PR_GUARD_SUPPRESSION_THRESHOLD} hits
  * occur within this window.
  *
- * Shortened from 30 min → 15 min for tighter burst detection.
+ * Set to 30 min per the coordinated change spec (rapartlu/agent-orchestrator#1113 /
+ * coordinated change 01KQ0HZ3D8YZ3SMKEW2N71AFX2).  Callers may override this
+ * via {@link PRGuardSurgeConfig.suppressionWindowMs} for tighter burst detection.
  */
-export const PR_GUARD_SUPPRESSION_WINDOW_MS = 15 * 60 * 1000;
+export const PR_GUARD_SUPPRESSION_WINDOW_MS = 30 * 60 * 1000;
 
 /**
  * Flag indicating that the PR guard pre-flight cooldown check is mandatory on
