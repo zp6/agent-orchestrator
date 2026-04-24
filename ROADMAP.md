@@ -1,6 +1,6 @@
 # Agent Orchestrator — Roadmap
 
-This is the prioritised backlog for `rapartlu/agent-orchestrator`. Updated 2026-04-24 (pass 9 — triage PR).
+This is the prioritised backlog for `rapartlu/agent-orchestrator`. Updated 2026-04-24 (pass 10 — orphan branch cleanup PR).
 
 ---
 
@@ -35,7 +35,7 @@ Solid ideas, scoped and ready when Next Up clears.
 | 14 | [#1025](https://github.com/rapartlu/agent-orchestrator/issues/1025) | **Quality floor bypass alerts in Telegram bot** — persist bypass events to SQLite; `/quality-bypasses` command returns last 10 bypass events; daily summary includes bypass count |
 | 15 | [#1038](https://github.com/rapartlu/agent-orchestrator/issues/1038) | **Prompt cache hit rate dashboard widget** — dashboard panel + Telegram `cache` command + auto-tuning alert; closes the loop on token spend reduction from issue #1037 |
 | 16 | [#1132](https://github.com/rapartlu/agent-orchestrator/issues/1132) | **Improvement detector batch deduplication guard** — prevent the improvement detector from queuing the same improvement issue multiple times in a single scan batch |
-| 17 | [#1122](https://github.com/rapartlu/agent-orchestrator/issues/1122) | **Orphan branch cleanup** — 5 auto-detected branches with no open PR; prune to reduce repo noise |
+| 17 | [#1145](https://github.com/rapartlu/agent-orchestrator/issues/1145) | **Orphan branch cleanup** — 6 auto-detected branches with no open PR; prune to reduce repo noise |
 
 ---
 
