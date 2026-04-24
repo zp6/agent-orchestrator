@@ -512,6 +512,10 @@ export async function runTeamMeeting(
   // Extract meeting requests from agent responses and write as signals
   extractMeetingRequests(store, rounds);
 
+  // Extract structured priority outcomes (issue rankings, sequencing constraints)
+  // and write them as signals for the supervisor to consume next cycle.
+  extractPriorityOutcomes(store, summary, options?.topic);
+
   // Record action-item dispositions to the dashboard (issue #798).
   // Fire-and-forget: dashboard outages must not block standup processing.
   void flushStandupDispositions(config, summary);
@@ -582,6 +586,136 @@ async function flushStandupDispositions(
     // Should never reach here — StandupActionClient swallows errors — but
     // belt-and-suspenders: standup must not fail due to dashboard issues.
     log.warn("Failed to flush standup dispositions to dashboard", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+// ── Meeting priority outcome extraction ──────────────────────────────────────
+
+/**
+ * Structured priority outcome extracted from a meeting synthesis.
+ * Written as a `meeting_priority_outcome` stigmergy signal so the supervisor
+ * can consume it during the next dispatch cycle.
+ */
+export interface MeetingPriorityOutcome {
+  /** Ordered list of issue refs from highest to lowest priority (e.g. ["agent-orchestrator#1113", "agent-reviewer#391"]). */
+  priorityRanking: string[];
+  /** Human-readable sequencing constraints (e.g. "#1113 must precede #391"). */
+  sequencingConstraints: string[];
+  /** Whether the meeting concluded that a follow-up coordination meeting is needed before implementation. */
+  followUpMeetingRecommended: boolean;
+  /** Free-form rationale extracted from synthesis. */
+  rationale: string;
+  /** ISO timestamp of the meeting that produced this outcome. */
+  meetingDate: string;
+  /** Topic string if the meeting had an explicit topic. */
+  topic?: string;
+}
+
+// Regex patterns for extracting priority outcomes from synthesis text
+const PRIORITY_RANK_RE = /(?:priority|ranked?|order)[^\n]*?(?:#(\d+)[^\n#]*?){2,}/gi;
+const ISSUE_REF_RE = /(?:(?:[\w-]+)#(\d+)|#(\d+))/g;
+const SEQUENCING_RE = /(?:must|should|needs?\s+to)\s+(?:precede|come\s+before|be\s+done\s+(?:before|first))[^\n.]+/gi;
+const FOLLOWUP_RE = /(?:follow[-\s]?up\s+(?:meeting|coordination|session)|coordination\s+meeting)[^\n.]*(?:recommended|needed|required|before\s+implementation)/gi;
+
+/**
+ * Parse priority ranking from synthesis text.
+ * Looks for ordered issue references in "priority" or "ranking" contexts.
+ * Returns refs in the format "repo#N" or "#N" as found in text.
+ */
+function parsePriorityRanking(synthesis: string): string[] {
+  // Look for numbered list patterns indicating priority order (1. #N, 2. #N ...)
+  const numberedRefs: Array<{ rank: number; ref: string }> = [];
+  const numberedListRE = /^\s*(\d+)[.)]\s+(?:.*?)((?:[\w/-]+)?#(\d+))/gm;
+  let m: RegExpExecArray | null;
+  while ((m = numberedListRE.exec(synthesis)) !== null) {
+    numberedRefs.push({ rank: parseInt(m[1], 10), ref: m[2] });
+  }
+  if (numberedRefs.length >= 2) {
+    return numberedRefs
+      .sort((a, b) => a.rank - b.rank)
+      .map((r) => r.ref);
+  }
+
+  // Fallback: look for issue refs near the word "priority" or "highest"
+  const prioritySection = synthesis.match(
+    /(?:highest\s+priority|priority\s+order|implementation\s+order)[^\n]{0,300}/i,
+  );
+  if (prioritySection) {
+    const refs: string[] = [];
+    ISSUE_REF_RE.lastIndex = 0;
+    while ((m = ISSUE_REF_RE.exec(prioritySection[0])) !== null) {
+      refs.push(m[0]);
+    }
+    if (refs.length > 0) return refs;
+  }
+
+  return [];
+}
+
+/**
+ * Scan meeting synthesis for structured priority outcomes and write them
+ * as `meeting_priority_outcome` signals for the supervisor to consume.
+ *
+ * The function is intentionally lenient — partial extraction is better than
+ * none.  A signal is only written if at least one issue ref is found.
+ */
+export function extractPriorityOutcomes(
+  store: StateStore,
+  summary: MeetingSummary,
+  topic?: string,
+): void {
+  const { synthesis, date } = summary;
+
+  const priorityRanking = parsePriorityRanking(synthesis);
+
+  // Sequencing constraints: "X must precede Y", "X must be done before Y"
+  const sequencingConstraints: string[] = [];
+  SEQUENCING_RE.lastIndex = 0;
+  let sm: RegExpExecArray | null;
+  while ((sm = SEQUENCING_RE.exec(synthesis)) !== null) {
+    sequencingConstraints.push(sm[0].trim());
+  }
+
+  // Follow-up recommendation: explicit mention of follow-up meeting needed
+  FOLLOWUP_RE.lastIndex = 0;
+  const followUpMeetingRecommended = FOLLOWUP_RE.test(synthesis);
+
+  // Only write a signal if we found at least one issue ref (otherwise it's noise)
+  if (priorityRanking.length === 0 && sequencingConstraints.length === 0) {
+    log.debug("No priority outcomes found in meeting synthesis — skipping signal", { date, topic });
+    return;
+  }
+
+  const outcome: MeetingPriorityOutcome = {
+    priorityRanking,
+    sequencingConstraints,
+    followUpMeetingRecommended,
+    rationale: synthesis.slice(0, 600),
+    meetingDate: date,
+    ...(topic ? { topic } : {}),
+  };
+
+  const key = `meeting-priority-outcome-${date}-${Date.now()}`;
+  try {
+    store.writeSignal({
+      agent: "claude-agent-orchestrator",
+      signal_type: "meeting_priority_outcome",
+      key,
+      value: outcome,
+      confidence: 0.85,
+      ttl_hours: 336, // 14 days — priority outcomes stay relevant longer
+    });
+    log.info("Meeting priority outcome extracted and written as signal", {
+      date,
+      topic,
+      priorityRanking,
+      sequencingConstraints: sequencingConstraints.length,
+      followUpMeetingRecommended,
+    });
+  } catch (err) {
+    log.warn("Failed to write meeting priority outcome signal", {
       error: err instanceof Error ? err.message : String(err),
     });
   }

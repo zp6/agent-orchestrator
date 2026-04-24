@@ -713,6 +713,56 @@ export function buildSupervisorContext(config: OrchestratorConfig, store: StateS
     );
   }
 
+  // Meeting priority outcomes — inject the most recent structured outcome so the
+  // supervisor can make goal-aligned routing decisions without re-running a meeting.
+  // Signal type `meeting_priority_outcome` is written by `extractPriorityOutcomes()`
+  // in team-meeting.ts after every meeting that produced a priority ranking.
+  try {
+    const prioritySignals = store.readSignals({
+      signal_type: "meeting_priority_outcome",
+      limit: 3,
+    });
+    if (prioritySignals.length > 0) {
+      const lines: string[] = [];
+      for (const sig of prioritySignals) {
+        const outcome = sig.value ? JSON.parse(sig.value as string) : null;
+        if (!outcome) continue;
+        const rankLine = outcome.priorityRanking?.length > 0
+          ? `Priority order: ${(outcome.priorityRanking as string[]).join(" → ")}`
+          : "No explicit ranking.";
+        const seqLine = outcome.sequencingConstraints?.length > 0
+          ? `Sequencing: ${(outcome.sequencingConstraints as string[]).join("; ")}`
+          : "";
+        const followUp = outcome.followUpMeetingRecommended
+          ? "Follow-up coordination meeting recommended before implementation."
+          : "";
+        const topicLine = outcome.topic ? `Topic: ${outcome.topic}` : "";
+        const rationale = outcome.rationale
+          ? `Rationale: ${(outcome.rationale as string).slice(0, 300)}`
+          : "";
+        lines.push(
+          [
+            `Meeting date: ${outcome.meetingDate ?? sig.created_at?.slice(0, 10)}`,
+            topicLine,
+            rankLine,
+            seqLine,
+            followUp,
+            rationale,
+          ]
+            .filter(Boolean)
+            .join("\n  "),
+        );
+      }
+      if (lines.length > 0) {
+        sections.push(
+          `## Meeting Priority Outcomes (most recent first)\n` +
+          `Use these to prioritise which issues to dispatch next.\n` +
+          lines.join("\n\n"),
+        );
+      }
+    }
+  } catch { /* reading meeting priority signals is optional */ }
+
   // Routing accuracy feedback: per-agent quality breakdown by task type (issue #656).
   // Used to prefer higher-accuracy agents for similar task types.
   const routingStats = store.getRoutingAccuracyStats(30);
