@@ -793,6 +793,7 @@ export class Daemon {
         this.detectHealthIncidentIssues(time);
         batch4.push(this.checkIterationBudgetAlerts(time));
         batch4.push(this.checkMeetingRequests(time));
+        batch4.push(this.checkPriorityOutcomeSignals(time));
         batch4.push(
           learnPatterns(this.config, this.store)
             .then((learned) => { if (learned > 0) console.log(`[${time}] Pattern learner: discovered ${learned} new pattern(s)`); })
@@ -2474,6 +2475,192 @@ export class Daemon {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /**
+   * Auto-dispatch the highest-priority issue identified in a meeting outcome.
+   *
+   * Reads `meeting_priority_outcome` signals (written by `extractPriorityOutcomes()`
+   * in team-meeting.ts after every meeting that produced a priority ranking).
+   * For the first actionable signal, resolves the top-ranked issue ref to a
+   * full `owner/repo#N` source ref, routes to the owning agent, and dispatches
+   * a single implementation task — replacing the round-trip through LLM
+   * supervisor reasoning with a deterministic fast-path.
+   *
+   * Guards (all must pass before dispatch):
+   *  1. Signal has at least one issue ref in `priorityRanking`
+   *  2. Issue ref resolves to a known agent repo in agents.yaml
+   *  3. Issue is NOT already processed (`store.isProcessed("github", sourceRef)`)
+   *  4. Target agent has no tasks in `dispatched` status (agent must be free)
+   *  5. No cascade depth exceeded (issues from meeting signals start at depth 0)
+   *
+   * Consumes one signal per cycle (deletes before dispatch, fire-and-forget).
+   * Remaining signals are processed in subsequent cycles.
+   */
+  private async checkPriorityOutcomeSignals(time: string): Promise<void> {
+    try {
+      const signals = this.store.readSignals({ signal_type: "meeting_priority_outcome", limit: 5 });
+      if (signals.length === 0) return;
+
+      for (const signal of signals) {
+        let outcome: Record<string, unknown> = {};
+        try {
+          outcome = signal.value ? JSON.parse(signal.value as string) : {};
+        } catch {
+          continue;
+        }
+
+        const priorityRanking = Array.isArray(outcome.priorityRanking)
+          ? (outcome.priorityRanking as string[])
+          : [];
+        if (priorityRanking.length === 0) {
+          // Signal has no actionable ranking — clean it up
+          try { this.store.deleteSignal(signal.id); } catch { /* non-critical */ }
+          continue;
+        }
+
+        // Try each ranked ref until we find one we can dispatch
+        let dispatched = false;
+        for (const rawRef of priorityRanking) {
+          const resolved = this.resolvePriorityIssueRef(rawRef);
+          if (!resolved) {
+            this.log.debug("Priority outcome ref could not be resolved — skipping", { rawRef });
+            continue;
+          }
+
+          const { sourceRef, repo, issueNumber, agentName } = resolved;
+
+          // Guard 3: skip if already dispatched/processed
+          if (this.store.isProcessed("github", sourceRef)) {
+            this.log.debug("Priority outcome ref already processed — skipping", { sourceRef });
+            continue;
+          }
+
+          // Guard 4: skip if target agent already has in-flight tasks
+          const activeTasks = this.store.listTasks({ status: "dispatched", agent_name: agentName, limit: 1 });
+          if (activeTasks.length > 0) {
+            this.log.info("Priority outcome dispatch deferred: target agent busy", {
+              agentName,
+              sourceRef,
+              activeTaskId: activeTasks[0].id,
+            });
+            continue;
+          }
+
+          // All guards passed — consume the signal and dispatch
+          try {
+            this.store.deleteSignal(signal.id);
+          } catch {
+            // Non-critical — duplicate dispatch is preferable to a missed dispatch
+          }
+
+          const followUp = outcome.followUpMeetingRecommended
+            ? "\n\nNote: The meeting recommended a follow-up coordination session before implementation begins. Proceed if the scope is clear, otherwise request clarification."
+            : "";
+
+          const rationale = typeof outcome.rationale === "string"
+            ? `\n\nMeeting rationale: ${outcome.rationale.slice(0, 400)}`
+            : "";
+
+          const sequencing = Array.isArray(outcome.sequencingConstraints) && outcome.sequencingConstraints.length > 0
+            ? `\n\nSequencing constraints: ${(outcome.sequencingConstraints as string[]).join("; ")}`
+            : "";
+
+          const message =
+            `Implement ${repo}#${issueNumber} — this was identified as the highest-priority item in a recent team meeting.\n` +
+            `Priority ranking from meeting: ${priorityRanking.join(" → ")}` +
+            sequencing +
+            rationale +
+            followUp;
+
+          console.log(`[${time}] Auto-dispatching priority outcome: ${sourceRef} → ${agentName}`);
+
+          this.dispatcher.dispatch(message, {
+            agentName,
+            source: "github",
+            sourceRef,
+            title: `[priority] Implement ${repo}#${issueNumber} (meeting outcome)`,
+            taskType: "implementation",
+          }).then(() => {
+            this.log.info("Priority outcome dispatched", {
+              agentName,
+              sourceRef,
+              meetingDate: outcome.meetingDate,
+              topic: outcome.topic,
+            });
+          }).catch((err) => {
+            this.log.warn("Priority outcome dispatch failed", {
+              error: err instanceof Error ? err.message : String(err),
+              sourceRef,
+            });
+          });
+
+          dispatched = true;
+          break; // One dispatch per cycle per signal
+        }
+
+        if (dispatched) break; // One signal processed per cycle
+      }
+    } catch (err) {
+      this.log.warn("Priority outcome signal check failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Resolve a raw priority issue ref (e.g. "agent-orchestrator#1113",
+   * "rapartlu/agent-reviewer#391", "#427") to a full dispatch-ready record.
+   *
+   * Resolution strategy:
+   *  1. Full `owner/repo#N` — used verbatim
+   *  2. `repo-name#N` — look up owner from agents config by matching `github` field
+   *  3. `#N` alone — cannot be resolved without repo context; returns null
+   *
+   * Returns null if the ref cannot be resolved to a known agent.
+   */
+  private resolvePriorityIssueRef(rawRef: string): {
+    sourceRef: string;
+    repo: string;
+    issueNumber: number;
+    agentName: string;
+  } | null {
+    // Pattern 1: full "owner/repo#N"
+    const fullMatch = rawRef.match(/^([\w-]+\/[\w-]+)#(\d+)$/);
+    if (fullMatch) {
+      const repo = fullMatch[1];
+      const issueNumber = parseInt(fullMatch[2], 10);
+      const agentName = this.findAgentForRepo(repo);
+      if (!agentName) return null;
+      return { sourceRef: `${repo}#${issueNumber}`, repo, issueNumber, agentName };
+    }
+
+    // Pattern 2: "repo-name#N" — match against known agent repos
+    const shortMatch = rawRef.match(/^([\w-]+)#(\d+)$/);
+    if (shortMatch) {
+      const repoName = shortMatch[1];
+      const issueNumber = parseInt(shortMatch[2], 10);
+      // Find agent whose github field ends with the repo name
+      const entry = Object.entries(this.config.agents).find(
+        ([, a]) => a.github && (a.github === repoName || a.github.endsWith(`/${repoName}`)),
+      );
+      if (!entry) return null;
+      const [agentName, agentConf] = entry;
+      const repo = agentConf.github!;
+      return { sourceRef: `${repo}#${issueNumber}`, repo, issueNumber, agentName };
+    }
+
+    return null; // Bare "#N" or unrecognised format
+  }
+
+  /**
+   * Find the agent name whose configured GitHub repo matches `repo`.
+   * Returns the first matching agent or undefined if none found.
+   */
+  private findAgentForRepo(repo: string): string | undefined {
+    return Object.entries(this.config.agents).find(
+      ([, a]) => a.github === repo,
+    )?.[0];
   }
 
   /**
