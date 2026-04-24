@@ -349,6 +349,36 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /api/ulid-collisions ──────────────────────────────────────────────
+    // Returns all ULID collision events recorded by createTask() (issue #1133).
+    // Each entry is a collision where two tasks shared the same ULID; the
+    // createTask() path retried with a fresh ULID so the second task still
+    // succeeded — these events are informational but indicate ULID generator
+    // anomalies that warrant operator investigation.
+    if (url.pathname === "/api/ulid-collisions") {
+      try {
+        const collisions = store.getUlidCollisions(500);
+        const totalCount = store.getUlidCollisionCount();
+        sendJson(res, 200, {
+          total_collisions: totalCount,
+          collisions: collisions.map((c) => ({
+            id: c.id,
+            colliding_id: c.collidingId,
+            existing_title: c.existingTitle,
+            new_title: c.newTitle,
+            detected_at: c.detectedAt,
+          })),
+          generated_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        log.warn("Failed to fetch ULID collision log", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to fetch ULID collision log" });
+      }
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -359,7 +389,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
   server.listen(port, "127.0.0.1", () => {
     log.info("Metrics server started", {
       port,
-      endpoints: ["/health", "/dispatch-efficiency", "/semantic-memory-effectiveness", "/investigations", "/misrouting", "/failure-interceptions"],
+      endpoints: ["/health", "/dispatch-efficiency", "/semantic-memory-effectiveness", "/investigations", "/misrouting", "/failure-interceptions", "/api/ulid-collisions"],
     });
   });
 

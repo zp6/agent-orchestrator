@@ -125,4 +125,67 @@ describe("MetricsServer", () => {
       expect(status).toBe(404);
     });
   });
+
+  // ── /api/ulid-collisions (issue #1133) ────────────────────────────────────
+
+  describe("GET /api/ulid-collisions", () => {
+    it("returns empty collision list when no collisions recorded", async () => {
+      const { status, body } = await fetchJson(`http://127.0.0.1:${port}/api/ulid-collisions`) as {
+        status: number;
+        body: { total_collisions: number; collisions: unknown[]; generated_at: string };
+      };
+      expect(status).toBe(200);
+      expect(body.total_collisions).toBe(0);
+      expect(Array.isArray(body.collisions)).toBe(true);
+      expect(body.collisions).toHaveLength(0);
+      expect(typeof body.generated_at).toBe("string");
+    });
+
+    it("returns recorded collisions with correct shape", async () => {
+      store.recordUlidCollision({
+        collidingId: "01ABCDEF12",
+        existingTitle: "Existing Task",
+        newTitle: "New Conflicting Task",
+      });
+
+      const { status, body } = await fetchJson(`http://127.0.0.1:${port}/api/ulid-collisions`) as {
+        status: number;
+        body: {
+          total_collisions: number;
+          collisions: Array<{
+            id: number;
+            colliding_id: string;
+            existing_title: string;
+            new_title: string;
+            detected_at: string;
+          }>;
+          generated_at: string;
+        };
+      };
+
+      expect(status).toBe(200);
+      expect(body.total_collisions).toBe(1);
+      expect(body.collisions).toHaveLength(1);
+
+      const collision = body.collisions[0];
+      expect(collision.colliding_id).toBe("01ABCDEF12");
+      expect(collision.existing_title).toBe("Existing Task");
+      expect(collision.new_title).toBe("New Conflicting Task");
+      expect(typeof collision.detected_at).toBe("string");
+    });
+
+    it("returns multiple collisions ordered newest first", async () => {
+      store.recordUlidCollision({ collidingId: "ID001", existingTitle: "Old Task", newTitle: "New Task A" });
+      store.recordUlidCollision({ collidingId: "ID002", existingTitle: "Older Task", newTitle: "New Task B" });
+
+      const { body } = await fetchJson(`http://127.0.0.1:${port}/api/ulid-collisions`) as {
+        body: { total_collisions: number; collisions: Array<{ colliding_id: string }> };
+      };
+
+      expect(body.total_collisions).toBe(2);
+      // Most recent is last-inserted, so ID002 appears first (DESC order)
+      expect(body.collisions[0].colliding_id).toBe("ID002");
+      expect(body.collisions[1].colliding_id).toBe("ID001");
+    });
+  });
 });

@@ -1812,40 +1812,67 @@ export class StateStore {
     lineage_group_id?: string | null;
   }): Task {
     const now = new Date().toISOString();
-    const id = generateId();
 
     // Resolve lineage_group_id:
     // 1. Explicit value from caller (e.g. cross-repo follow-up inheriting lineage)
     // 2. Inherit from parent task (sub-tasks share parent's lineage)
     // 3. Check lineage_mappings table for pre-recorded cross-repo follow-up mappings
     // 4. Default to own id (new top-level task starts its own lineage group)
-    let lineageGroupId = params.lineage_group_id ?? null;
-    if (!lineageGroupId && params.parent_task_id) {
-      const parent = this.getTask(params.parent_task_id);
-      lineageGroupId = parent?.lineage_group_id ?? params.parent_task_id;
-    }
-    if (!lineageGroupId && params.source_ref) {
-      lineageGroupId = this.lookupLineageGroup(params.source_ref) ?? null;
-    }
-    if (!lineageGroupId) {
-      lineageGroupId = id; // self-assign
-    }
+    const resolveLineageGroup = (id: string): string => {
+      let lineageGroupId = params.lineage_group_id ?? null;
+      if (!lineageGroupId && params.parent_task_id) {
+        const parent = this.getTask(params.parent_task_id);
+        lineageGroupId = parent?.lineage_group_id ?? params.parent_task_id;
+      }
+      if (!lineageGroupId && params.source_ref) {
+        lineageGroupId = this.lookupLineageGroup(params.source_ref) ?? null;
+      }
+      return lineageGroupId ?? id;
+    };
 
-    // Collision guard: check for an existing task with the same ID before
-    // attempting the INSERT.  A genuine ULID collision is astronomically
-    // unlikely, but detecting it here means we log at WARN with the conflicting
-    // titles rather than surfacing a cryptic SQLite PRIMARY KEY error upstream.
-    const existing = this.getTask(id);
-    if (existing) {
-      storeLog.warn("Duplicate task ID detected at insertion", {
+    // ── ULID collision detection and retry (issue #1133) ────────────────────
+    // ULIDs are supposed to be globally unique, but a monotonic factory could
+    // theoretically produce a duplicate if the random component wraps around
+    // in a high-throughput burst. On pre-INSERT collision:
+    //  1. Record to ulid_collision_log for operator audit
+    //  2. Log at ERROR level
+    //  3. Retry once with a fresh ULID (fixes the task silently)
+    //  4. If the retry also collides, throw DuplicateTaskIdError so the caller
+    //     (dispatcher) fires the Telegram alert and surfaces the incident.
+    const MAX_ID_RETRIES = 1;
+    let id = generateId();
+    for (let attempt = 0; attempt <= MAX_ID_RETRIES; attempt++) {
+      const existing = this.getTask(id);
+      if (!existing) break; // ID is free — proceed
+
+      // Record the collision
+      storeLog.error("ULID collision detected at createTask", {
+        event: "ulid-collision",
         task_id: id,
         existing_title: existing.title,
         new_title: params.title,
+        attempt,
       });
-      // Re-throw a typed error so callers (and the duplicate-id-detector) can
-      // react without catching a generic SQLite constraint failure.
-      throw new DuplicateTaskIdError(id, existing.title, params.title);
+      try {
+        this.recordUlidCollision({ collidingId: id, existingTitle: existing.title, newTitle: params.title });
+      } catch {
+        // Non-fatal — don't let log persistence block task creation
+      }
+
+      if (attempt < MAX_ID_RETRIES) {
+        // Retry with a freshly generated ID
+        id = generateId();
+        storeLog.warn("Retrying createTask with new ULID after collision", {
+          original_id: existing.id,
+          new_id: id,
+        });
+      } else {
+        // All retries exhausted — throw so dispatcher fires Telegram alert
+        throw new DuplicateTaskIdError(id, existing.title, params.title);
+      }
     }
+
+    const lineageGroupId = resolveLineageGroup(id);
 
     const stmt = this.db.prepare(`
       INSERT INTO tasks (id, title, description, source, source_ref, status, agent_name, parent_task_id, step_id, task_type, lineage_group_id, created_at, updated_at)
@@ -1872,11 +1899,17 @@ export class StateStore {
       // daemon, but defensive).
       if (err instanceof Error && err.message.includes("UNIQUE constraint failed: tasks.id")) {
         const conflict = this.getTask(id);
-        storeLog.warn("Duplicate task ID race-condition on INSERT", {
+        storeLog.warn("ULID collision race-condition on INSERT", {
+          event: "ulid-collision",
           task_id: id,
           existing_title: conflict?.title ?? "<unknown>",
           new_title: params.title,
         });
+        try {
+          this.recordUlidCollision({ collidingId: id, existingTitle: conflict?.title ?? "<unknown>", newTitle: params.title });
+        } catch {
+          // Non-fatal
+        }
         throw new DuplicateTaskIdError(id, conflict?.title ?? "<unknown>", params.title);
       }
       throw err;
@@ -9371,6 +9404,93 @@ export class StateStore {
       SELECT DISTINCT task_id FROM duplicate_id_incidents
     `).all() as Array<{ task_id: string }>;
     return new Set(rows.map((r) => r.task_id));
+  }
+
+  // ── ULID Collision Log (issue #1133) ──────────────────────────────────────
+
+  /**
+   * Lazily create the ulid_collision_log table on first use.
+   * Separate from duplicate_id_incidents so collision events have their own
+   * dedicated feed at `/api/ulid-collisions` without mixing with cycle-level
+   * duplicate detection incidents.
+   */
+  private ensureUlidCollisionLogTable(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS ulid_collision_log (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        colliding_id   TEXT NOT NULL,
+        existing_title TEXT NOT NULL,
+        new_title      TEXT NOT NULL,
+        detected_at    TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_ulid_collision_log_id
+        ON ulid_collision_log(colliding_id);
+      CREATE INDEX IF NOT EXISTS idx_ulid_collision_log_detected_at
+        ON ulid_collision_log(detected_at);
+    `);
+  }
+
+  /**
+   * Persist a ULID collision event detected during createTask().
+   * Called before the retry (or before throwing DuplicateTaskIdError if retries
+   * are exhausted). Non-fatal — callers wrap in try/catch.
+   */
+  recordUlidCollision(params: {
+    collidingId: string;
+    existingTitle: string;
+    newTitle: string;
+  }): void {
+    this.ensureUlidCollisionLogTable();
+    this.db.prepare(`
+      INSERT INTO ulid_collision_log (colliding_id, existing_title, new_title, detected_at)
+      VALUES (?, ?, ?, ?)
+    `).run(params.collidingId, params.existingTitle, params.newTitle, new Date().toISOString());
+  }
+
+  /**
+   * Return all ULID collision events, most recent first.
+   * Capped at 500 rows to keep the result set bounded.
+   * Consumed by the `/api/ulid-collisions` metrics endpoint (issue #1133).
+   */
+  getUlidCollisions(limit = 500): Array<{
+    id: number;
+    collidingId: string;
+    existingTitle: string;
+    newTitle: string;
+    detectedAt: string;
+  }> {
+    this.ensureUlidCollisionLogTable();
+    const rows = this.db.prepare(`
+      SELECT id, colliding_id, existing_title, new_title, detected_at
+      FROM ulid_collision_log
+      ORDER BY detected_at DESC
+      LIMIT ?
+    `).all(limit) as Array<{
+      id: number;
+      colliding_id: string;
+      existing_title: string;
+      new_title: string;
+      detected_at: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      collidingId: r.colliding_id,
+      existingTitle: r.existing_title,
+      newTitle: r.new_title,
+      detectedAt: r.detected_at,
+    }));
+  }
+
+  /**
+   * Return the total number of ULID collision events ever recorded.
+   * Used by the metrics endpoint to surface a summary count.
+   */
+  getUlidCollisionCount(): number {
+    this.ensureUlidCollisionLogTable();
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS cnt FROM ulid_collision_log
+    `).get() as { cnt: number };
+    return row.cnt;
   }
 
   // ── Approval Queue ─────────────────────────────────────────────────────────
