@@ -37,6 +37,7 @@
  *   /misrouting [hours]        → implementation tasks misrouted to reviewer in last N hours (default 24h, max 720h)
  *   /triage-health [agent]     → per-agent triage schema pass/fail rate, missing fields, revision count, and 7-day trend
  *   /investigations            → list pending/active/completed research agent investigations with titles, times, and result issue URLs
+ *   /meeting-goal              → meeting-facilitator-agent monthly goal tracker: core_logic_shipped + meetings_facilitated progress (issue #456)
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -95,6 +96,10 @@ import {
 import {
   createResearchInvestigationClient,
 } from "../reviewer/research-investigation-client.js";
+import {
+  getMeetingFacilitatorGoalPayload,
+} from "../reviewer/meeting-facilitator-goal.js";
+import type { MeetingFacilitatorGoalWidget } from "../state/types.js";
 import type { ReviewerConfig } from "../config.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
@@ -157,7 +162,8 @@ type CommandName =
   | "memory"
   | "misrouting"
   | "triage-health"
-  | "investigations";
+  | "investigations"
+  | "meeting-goal";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -199,6 +205,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "misrouting",
   "triage-health",
   "investigations",
+  "meeting-goal",
 ]);
 
 interface ParsedCommand {
@@ -565,6 +572,11 @@ async function executeCommand(
     case "investigations": {
       // /investigations — list pending/active/completed research investigations.
       return handleInvestigations(reviewerConfig);
+    }
+
+    case "meeting-goal": {
+      // /meeting-goal — monthly goal tracker for meeting-facilitator-agent.
+      return Promise.resolve(handleMeetingGoal(store));
     }
   }
 }
@@ -2390,6 +2402,64 @@ async function handleInvestigations(reviewerConfig?: ReviewerConfig): Promise<st
     const msg = err instanceof Error ? err.message : String(err);
     return `⚠️ *Research Agent Unavailable*\n\nCould not fetch investigation feed from \`${baseUrl}\`.\n\`${msg.slice(0, 200)}\``;
   }
+}
+
+// ── Meeting-facilitator goal handler (issue #456) ────────────────────────────
+
+/**
+ * Format a `MeetingFacilitatorGoalWidget` as Telegram MarkdownV2-safe text.
+ *
+ * Shows both monthly goals (core_logic_shipped + meetings_facilitated) with
+ * progress bars, and an overall banner. When both goals are 0%, highlights in
+ * amber to prompt the operator to dispatch tasks to the meeting facilitator.
+ */
+export function formatMeetingGoalForTelegram(widget: MeetingFacilitatorGoalWidget): string {
+  const lines: string[] = [];
+
+  const monthLabel = widget.month_start.slice(0, 7); // "YYYY-MM"
+  const overallPct = Math.round(widget.overall_progress * 100);
+  const banner = widget.all_goals_met
+    ? "✅ *All goals met\\!*"
+    : overallPct === 0
+      ? "⚠️ *No progress this month — dispatch tasks to meeting\\-facilitator\\-agent*"
+      : `🔄 *In progress \\(${overallPct}% overall\\)*`;
+
+  lines.push(`🗓 *Meeting Facilitator Goals — ${monthLabel}*`);
+  lines.push("");
+  lines.push(banner);
+  lines.push("");
+
+  for (const goal of widget.goals) {
+    const pct = Math.round(goal.progress * 100);
+    const barLen = 10;
+    const filled = Math.round(goal.progress * barLen);
+    const bar = "█".repeat(filled) + "░".repeat(barLen - filled);
+    const icon = goal.met ? "✅" : goal.current === 0 ? "⚠️" : "🔄";
+    const keyLabel = goal.key === "meetings_facilitated"
+      ? "Meetings facilitated"
+      : "Core logic shipped";
+
+    lines.push(`${icon} *${keyLabel}*`);
+    lines.push(`  \`${bar}\` ${pct}% \\(${goal.current}/${goal.target}\\)`);
+    lines.push("");
+  }
+
+  const ts = widget.generated_at.slice(0, 16).replace("T", " ");
+  lines.push(`_Generated: ${ts} UTC_`);
+
+  return lines.join("\n");
+}
+
+/**
+ * Handle the `/meeting-goal` command.
+ *
+ * Reads the meeting-facilitator monthly goal widget from state.db and returns
+ * a formatted Telegram message. When all goals are at 0%, the message prompts
+ * the operator to dispatch tasks to the meeting-facilitator-agent.
+ */
+function handleMeetingGoal(store: ITelegramStateStore): string {
+  const widget = getMeetingFacilitatorGoalPayload(store as Parameters<typeof getMeetingFacilitatorGoalPayload>[0]);
+  return formatMeetingGoalForTelegram(widget);
 }
 
 // ── Quality system health handler (issue #304) ────────────────────────────

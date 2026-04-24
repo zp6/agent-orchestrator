@@ -1,10 +1,11 @@
 /**
- * Tests for the meeting-facilitator monthly goal widget (issue #411).
+ * Tests for the meeting-facilitator monthly goal widget (issue #411, #456).
  *
  * Covers:
  *  - StateStore.getMeetingFacilitatorGoalWidget() — goal structure, progress
  *    calculation, met flags, and overall_progress
  *  - getMeetingFacilitatorGoalPayload() — delegation and option forwarding
+ *  - formatMeetingGoalForTelegram() — Telegram message formatting (issue #456)
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -13,6 +14,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { StateStore } from "../state/store.js";
 import { getMeetingFacilitatorGoalPayload } from "../reviewer/meeting-facilitator-goal.js";
+import { formatMeetingGoalForTelegram } from "../telegram/command-handler.js";
+import type { MeetingFacilitatorGoalWidget } from "../state/types.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -367,5 +370,121 @@ describe("getMeetingFacilitatorGoalPayload", () => {
 
     const meetings = result.goals.find((g) => g.key === "meetings_facilitated")!;
     expect(meetings.met).toBe(true);
+  });
+});
+
+// ── formatMeetingGoalForTelegram (issue #456) ─────────────────────────────
+
+/** Build a synthetic widget for formatter tests — avoids DB setup. */
+function makeWidget(overrides: Partial<MeetingFacilitatorGoalWidget> & {
+  meetingsCurrent?: number;
+  meetingsMet?: boolean;
+  coreCurrent?: number;
+  coreMet?: boolean;
+} = {}): MeetingFacilitatorGoalWidget {
+  const meetingsCurrent = overrides.meetingsCurrent ?? 0;
+  const meetingsTarget = 5;
+  const meetingsMet = overrides.meetingsMet ?? meetingsCurrent >= meetingsTarget;
+  const meetingsProgress = Math.min(meetingsCurrent / meetingsTarget, 1);
+
+  const coreCurrent = overrides.coreCurrent ?? 0;
+  const coreTarget = 1;
+  const coreMet = overrides.coreMet ?? coreCurrent >= coreTarget;
+  const coreProgress = Math.min(coreCurrent / coreTarget, 1);
+
+  const allGoalsMet = meetingsMet && coreMet;
+  const overallProgress = (meetingsProgress + coreProgress) / 2;
+
+  return {
+    month_start: "2026-04-01T00:00:00.000Z",
+    generated_at: "2026-04-24T13:00:00.000Z",
+    overall_progress: overallProgress,
+    all_goals_met: allGoalsMet,
+    goals: [
+      {
+        key: "core_logic_shipped",
+        description: "At least one approved implementation task",
+        target: coreTarget,
+        current: coreCurrent,
+        progress: coreProgress,
+        met: coreMet,
+      },
+      {
+        key: "meetings_facilitated",
+        description: "Five or more facilitated meetings",
+        target: meetingsTarget,
+        current: meetingsCurrent,
+        progress: meetingsProgress,
+        met: meetingsMet,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+describe("formatMeetingGoalForTelegram", () => {
+  it("includes the month label in the header", () => {
+    const output = formatMeetingGoalForTelegram(makeWidget());
+    expect(output).toContain("2026-04");
+  });
+
+  it("shows amber warning banner when overall progress is 0%", () => {
+    const output = formatMeetingGoalForTelegram(makeWidget({ meetingsCurrent: 0, coreCurrent: 0 }));
+    expect(output).toContain("⚠️");
+    expect(output).toContain("No progress this month");
+  });
+
+  it("shows in-progress banner when partial progress exists", () => {
+    const output = formatMeetingGoalForTelegram(makeWidget({ meetingsCurrent: 2, coreCurrent: 0 }));
+    expect(output).toContain("🔄");
+    expect(output).toContain("In progress");
+  });
+
+  it("shows all-goals-met banner when both goals are satisfied", () => {
+    const output = formatMeetingGoalForTelegram(makeWidget({ meetingsCurrent: 5, coreCurrent: 1, meetingsMet: true, coreMet: true }));
+    expect(output).toContain("✅");
+    expect(output).toContain("All goals met");
+  });
+
+  it("shows ⚠️ icon next to a goal with zero progress", () => {
+    const output = formatMeetingGoalForTelegram(makeWidget({ meetingsCurrent: 0 }));
+    expect(output).toContain("⚠️");
+    // Meetings facilitated line should show ⚠️ for 0 progress
+    expect(output).toContain("Meetings facilitated");
+  });
+
+  it("shows ✅ icon next to a met goal", () => {
+    const output = formatMeetingGoalForTelegram(makeWidget({ meetingsCurrent: 5, meetingsMet: true }));
+    expect(output).toContain("✅");
+    expect(output).toContain("Meetings facilitated");
+  });
+
+  it("shows progress fraction for each goal", () => {
+    const output = formatMeetingGoalForTelegram(makeWidget({ meetingsCurrent: 3, coreCurrent: 0 }));
+    expect(output).toContain("3/5"); // meetings 3 of 5
+    expect(output).toContain("0/1"); // core 0 of 1
+  });
+
+  it("includes a generated timestamp", () => {
+    const output = formatMeetingGoalForTelegram(makeWidget());
+    expect(output).toContain("Generated");
+    expect(output).toContain("2026-04-24");
+  });
+
+  it("labels both goal keys in human-readable form", () => {
+    const output = formatMeetingGoalForTelegram(makeWidget());
+    expect(output).toContain("Meetings facilitated");
+    expect(output).toContain("Core logic shipped");
+  });
+
+  it("renders a progress bar string for each goal", () => {
+    const output = formatMeetingGoalForTelegram(makeWidget({ meetingsCurrent: 0 }));
+    // Progress bar uses block characters
+    expect(output).toMatch(/░{10}/); // all empty when at 0%
+  });
+
+  it("renders a full progress bar when goal is met", () => {
+    const output = formatMeetingGoalForTelegram(makeWidget({ meetingsCurrent: 5, meetingsMet: true }));
+    expect(output).toMatch(/█{10}/); // all filled when at 100%
   });
 });
