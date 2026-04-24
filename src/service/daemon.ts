@@ -1,4 +1,4 @@
-import { loadConfig, type OrchestratorConfig } from "../config/schema.js";
+import { loadConfig, type OrchestratorConfig, getAgentBaseUrl } from "../config/schema.js";
 import { validateConfig } from "../config/validator.js";
 import { ConfigWatcher, type ConfigChange } from "../config/watcher.js";
 import { StateStore, type DispatchRationale, type ConfigReloadTrigger, type DaemonLifecycleEvent } from "../state/store.js";
@@ -38,6 +38,7 @@ import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.
 import { maybeRunDailySecurityScan, type SecurityScanState } from "../orchestrator/security-scanner.js";
 import { runTeamMeeting } from "../orchestrator/team-meeting.js";
 import { StandupActionClient } from "../orchestrator/standup-action-client.js";
+import { MeetingIntakeClient } from "../client/meeting-intake-client.js";
 import { seedFromClaudeMd } from "../orchestrator/learned-rules.js";
 import { checkAgedIssues } from "../orchestrator/issue-age-monitor.js";
 import { runProactiveScan } from "../orchestrator/proactive-scanner.js";
@@ -2450,6 +2451,24 @@ export class Daemon {
       }
 
       console.log(`[${time}] Dispatching meeting request to facilitator: "${payload.topic ?? request.key}"`);
+
+      // Record the intake in the facilitator's state.db via the HTTP endpoint.
+      // Fire-and-forget: a facilitator outage must not block signal dispatch.
+      const facilitatorBaseUrl = getAgentBaseUrl(this.config, facilitatorName) ?? "";
+      const intakeClient = new MeetingIntakeClient(facilitatorBaseUrl);
+      void intakeClient
+        .create({
+          title: String(payload.topic ?? request.key),
+          participants: Array.isArray(payload.suggestedParticipants)
+            ? (payload.suggestedParticipants as string[])
+            : [],
+          agenda_items: [],
+        })
+        .then((meetingId) => {
+          if (meetingId) {
+            this.log.info("Meeting intake record created", { meeting_id: meetingId });
+          }
+        });
 
       this.dispatcher.dispatch(
         `Meeting request: ${payload.topic ?? request.key}\n\nFormat suggestion: ${payload.suggestedFormat ?? "auto"}\nRequested by: ${request.agent}\nContext: ${payload.context ?? "none"}\nUrgency: ${payload.urgency ?? "normal"}`,
