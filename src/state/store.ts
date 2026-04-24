@@ -564,6 +564,15 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       // Column already exists — ignore
     }
 
+    // Add fork_from column to tasks table (idempotent — issue #454).
+    // Stores the JSON-serialised DispatchForkSpec when a task was dispatched
+    // with a fork_from session spec. Null for fresh/resumed sessions.
+    try {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN fork_from TEXT");
+    } catch {
+      // Column already exists — ignore
+    }
+
     // Semantic task memory table (idempotent — issue #369).
     // Stores knowledge entries indexed by normalised topic label.
     // Parent-before-child INSERT order required: tasks row must exist before

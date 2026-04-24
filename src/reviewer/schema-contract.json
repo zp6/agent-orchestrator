@@ -29,7 +29,8 @@
         "rollup_policy",
         "subtask_complexity_hint",
         "issue_priority",
-        "bypass_reason"
+        "bypass_reason",
+        "fork_from"
       ]
     },
     {

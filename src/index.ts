@@ -1091,6 +1091,25 @@ export type { LowQualityPRLabelerOptions, PrRef } from "./reviewer/low-quality-p
 // LLM client
 export { createLLMClient, resetLLMClient } from "./client/llm-client.js";
 
+// Fork-from dispatch payload protocol — canonical spec (issue #454)
+export {
+  parseForkFrom,
+  serialiseForkFrom,
+  isValidForkConversationId,
+  buildForkSpec,
+  isExploratoryFork,
+  KNOWN_FORK_LABELS,
+  FORK_FROM_MIGRATION_SQL,
+  FORK_FROM_COLUMN,
+} from "./reviewer/fork-protocol.js";
+export type {
+  DispatchForkSpec,
+  DispatchOptionsWithFork,
+  ForkDispatchOutcome,
+  TaskForkFrom,
+  KnownForkLabel,
+} from "./reviewer/fork-protocol.js";
+
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
 export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";

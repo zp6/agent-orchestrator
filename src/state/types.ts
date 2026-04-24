@@ -124,6 +124,19 @@ export interface Task {
    * Null when the task was not a sub-0.60 approval or has not been classified.
    */
   bypass_reason?: string | null;
+  /**
+   * JSON-serialised `DispatchForkSpec` — set when this task was dispatched
+   * with a `fork_from` session spec (agent-reviewer#454).
+   *
+   * Null when the task used a fresh session or resumed its own prior session.
+   * Non-null when the proxy was asked to clone a warm parent session as the
+   * starting context for this task.
+   *
+   * Parse with `parseForkFrom()` from `reviewer/fork-protocol.ts` to get the
+   * typed `DispatchForkSpec` (which includes `conversation_id` and optional
+   * `fork_label`).
+   */
+  fork_from?: string | null;
   created_at: string;
   updated_at: string;
 }
