@@ -18,14 +18,15 @@
 import { AgentClient } from "../client/agent-client.js";
 import { createLLMClient, getLLMModel } from "../client/llm-client.js";
 import { IssueCreator } from "./issue-creator.js";
-import { loadGoals, measureGoalProgress, buildGoalsContext } from "./goals.js";
+import { loadGoals, measureGoalProgress, buildGoalsContext, type GoalsConfig, findGoalsPath } from "./goals.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { StateStore } from "../state/store.js";
 import { createLogger } from "../service/logger.js";
 import { cacheableSystemPrompt } from "../utils/prompt-cache.js";
 import { execSync } from "node:child_process";
 import { StandupActionClient, type StandupActionItemInput } from "../client/standup-action-client.js";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -516,6 +517,14 @@ export async function runTeamMeeting(
   // and write them as signals for the supervisor to consume next cycle.
   extractPriorityOutcomes(store, summary, options?.topic);
 
+  // File high-priority action items as GitHub issues so they enter the dispatch pipeline
+  fileActionItemsAsIssues(config, summary);
+
+  // Apply goal adjustments from the meeting synthesis to goals.yaml
+  if (goalAdjustments.length > 0) {
+    applyGoalAdjustments(goalAdjustments, config.orchestrator_dir);
+  }
+
   // Record action-item dispositions to the dashboard (issue #798).
   // Fire-and-forget: dashboard outages must not block standup processing.
   void flushStandupDispositions(config, summary);
@@ -770,6 +779,131 @@ function extractMeetingRequests(store: StateStore, rounds: MeetingRound[]): void
         }
       }
     }
+  }
+}
+
+// ── GitHub issue filing ─────────────────────────────────────────────────────
+
+// ── Action item → GitHub issue pipeline ───────────────────────────────────
+
+/**
+ * File high-priority action items from meeting synthesis as GitHub issues
+ * so they enter the normal dispatch pipeline. Only files items with
+ * priority "high" to avoid flooding repos with low-priority chores.
+ *
+ * Targets the repo based on the action item's owner field — maps agent
+ * pool names to their GitHub repos. Falls back to agent-orchestrator.
+ */
+function fileActionItemsAsIssues(config: OrchestratorConfig, summary: MeetingSummary): void {
+  const highPriority = summary.actionItems.filter((item) => item.priority === "high");
+  if (highPriority.length === 0) return;
+
+  const issueCreator = new IssueCreator(config);
+  let filed = 0;
+
+  for (const item of highPriority) {
+    const repo = resolveRepoForOwner(config, item.owner);
+    const title = `[${summary.type}] ${item.description.slice(0, 100)}`;
+    const body = `## Action Item (from ${summary.type} meeting ${summary.date})\n\n` +
+      `**Priority:** ${item.priority}\n` +
+      `**Owner:** ${item.owner}\n\n` +
+      `${item.description}\n\n` +
+      `---\n*Auto-filed from ${summary.type} meeting synthesis.*`;
+
+    try {
+      issueCreator.createIssue(repo, title, body, ["meeting-action", summary.type]);
+      filed++;
+    } catch (err) {
+      log.warn("Failed to file action item as issue", {
+        description: item.description.slice(0, 80),
+        repo,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (filed > 0) {
+    log.info("Filed meeting action items as GitHub issues", { filed, total: highPriority.length, type: summary.type });
+  }
+}
+
+/**
+ * Map an action item owner (agent name or pool name) to a GitHub repo.
+ * Falls back to agent-orchestrator for unknown owners.
+ */
+function resolveRepoForOwner(config: OrchestratorConfig, owner: string): string {
+  const ownerLower = owner.toLowerCase();
+
+  // Direct agent name match
+  const agent = config.agents[owner] ?? config.agents[ownerLower];
+  if (agent?.github) return agent.github;
+
+  // Pool name match — find the first agent in that pool
+  for (const a of Object.values(config.agents)) {
+    if (a.pool === ownerLower && a.github) return a.github;
+  }
+
+  // Keyword match
+  if (ownerLower.includes("dashboard")) return "rapartlu/agent-dashboard";
+  if (ownerLower.includes("reviewer")) return "rapartlu/agent-reviewer";
+  if (ownerLower.includes("research")) return "rapartlu/research-agent";
+  if (ownerLower.includes("proxy")) return "rapartlu/agent-proxy";
+  if (ownerLower.includes("facilitator")) return "rapartlu/meeting-facilitator-agent";
+
+  return "rapartlu/agent-orchestrator";
+}
+
+// ── Goal adjustment application ───────────────────────────────────────────
+
+/**
+ * Apply goal adjustments proposed by meeting synthesis to goals.yaml.
+ * Appends adjustments as new key results to the most relevant goal,
+ * or adds a note to the goals file if no matching goal is found.
+ */
+function applyGoalAdjustments(adjustments: string[], orchestratorDir?: string): void {
+  try {
+    const goalsPath = findGoalsPath(orchestratorDir);
+    if (!goalsPath) {
+      log.warn("Cannot apply goal adjustments — goals.yaml not found");
+      return;
+    }
+
+    const raw = readFileSync(goalsPath, "utf-8");
+    const goals = parseYaml(raw) as GoalsConfig;
+    if (!goals?.goals?.length) return;
+
+    let applied = 0;
+    for (const adj of adjustments) {
+      const adjLower = adj.toLowerCase();
+
+      // Find the best matching goal by keyword overlap
+      let bestGoal = goals.goals[0];
+      let bestScore = 0;
+      for (const goal of goals.goals) {
+        const goalWords = `${goal.id} ${goal.title} ${goal.target}`.toLowerCase().split(/\s+/);
+        const adjWords = adjLower.split(/\s+/);
+        const overlap = adjWords.filter((w) => w.length > 4 && goalWords.some((gw) => gw.includes(w))).length;
+        if (overlap > bestScore) {
+          bestScore = overlap;
+          bestGoal = goal;
+        }
+      }
+
+      // Add as a new key result
+      bestGoal.key_results.push({
+        description: adj,
+      });
+      applied++;
+    }
+
+    if (applied > 0) {
+      writeFileSync(goalsPath, stringifyYaml(goals, { lineWidth: 120 }));
+      log.info("Applied goal adjustments from meeting", { applied, path: goalsPath });
+    }
+  } catch (err) {
+    log.warn("Failed to apply goal adjustments", {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 

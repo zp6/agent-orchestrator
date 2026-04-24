@@ -452,7 +452,7 @@ function getNextMonth(): string {
   return next.toISOString().slice(0, 7);
 }
 
-function findGoalsPath(orchestratorDir?: string): string | null {
+export function findGoalsPath(orchestratorDir?: string): string | null {
   const paths = [
     resolve(process.cwd(), "goals.yaml"),
     orchestratorDir ? resolve(orchestratorDir, "goals.yaml") : null,
