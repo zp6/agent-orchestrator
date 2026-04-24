@@ -1147,6 +1147,15 @@ export type {
   MeetingPriorityDispatcherOptions,
 } from "./reviewer/meeting-priority-dispatcher.js";
 
+// Pattern risk signal consumer — reads daemon-written pattern_risk signals and
+// surfaces them as additional LLM context in the improvement detector (issue #1149).
+export { PatternRiskConsumer } from "./reviewer/pattern-risk-consumer.js";
+export type {
+  PatternRiskSignal,
+  AgentPatternRiskSummary,
+  IPatternRiskStore,
+} from "./state/types.js";
+
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
 export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";

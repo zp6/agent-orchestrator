@@ -2240,3 +2240,90 @@ export interface IImprovementBatchDeduplicationStore {
    */
   getRecentImprovementAnalysisRuns(limit?: number): ImprovementAnalysisRun[];
 }
+
+// ── Pattern risk signal types (issue #1149) ───────────────────────────────
+
+/**
+ * A single `pattern_risk` signal written by the daemon on verification failure.
+ *
+ * The daemon writes these to `state.db` whenever a task fails verification and
+ * a recurring risk pattern is detected (e.g. repeated low scores, same failure
+ * dimension multiple cycles in a row).  They were previously orphaned — no code
+ * consumed them.  The pattern-risk consumer in the reviewer now reads these and
+ * surfaces them as additional context for the improvement detector.
+ */
+export interface PatternRiskSignal {
+  /** Auto-incremented row id. */
+  id: number;
+  /** Task that triggered this signal. */
+  task_id: string;
+  /** Agent that produced the failing task. */
+  agent_id: string;
+  /**
+   * Category of the detected pattern, e.g.:
+   * - `"repeated_failure"` — same agent failed ≥3 consecutive tasks
+   * - `"low_score_streak"` — rolling average below 0.70 for ≥5 tasks
+   * - `"dimension_gap"` — a specific quality dimension (correctness,
+   *   completeness, test_coverage, code_quality) is consistently low
+   */
+  pattern_type: string;
+  /**
+   * Severity of the risk on a 0–1 scale.
+   * Computed by the daemon from the depth/recency of the pattern.
+   */
+  risk_score: number;
+  /** Human-readable description of the detected pattern. */
+  detail: string;
+  /** ISO-8601 UTC timestamp when the signal was recorded. */
+  recorded_at: string;
+}
+
+/**
+ * Aggregated view of pattern_risk signals for a single agent.
+ *
+ * Built by the `PatternRiskConsumer` from the raw `pattern_risk` table rows.
+ * Passed to the improvement detector as additional context so the LLM can
+ * generate more targeted suggestions.
+ */
+export interface AgentPatternRiskSummary {
+  /** Agent name. */
+  agent_id: string;
+  /** Most recent risk score recorded for this agent. */
+  latest_risk_score: number;
+  /** Mean risk score across all signals in the look-back window. */
+  mean_risk_score: number;
+  /** All distinct pattern types seen in the window. */
+  pattern_types: string[];
+  /** Most recent detail text (from the highest-risk signal). */
+  top_detail: string;
+  /** Number of signals in the window. */
+  signal_count: number;
+}
+
+/**
+ * Store interface for reading pattern_risk signals.
+ *
+ * Implemented by the reviewer's StateStore.  The daemon (in agent-orchestrator)
+ * writes the rows; this interface provides read-only access for the reviewer's
+ * pattern-risk consumer.
+ */
+export interface IPatternRiskStore {
+  /**
+   * Return raw pattern_risk signals recorded within the last `windowHours`
+   * hours, ordered by `recorded_at DESC`.
+   *
+   * @param windowHours - Look-back window in hours.  Default: 48.
+   * @param limit       - Maximum rows to return.  Default: 200.
+   */
+  getRecentPatternRiskSignals(windowHours?: number, limit?: number): PatternRiskSignal[];
+
+  /**
+   * Return pattern_risk signals aggregated per agent for the look-back window.
+   *
+   * Agents with no signals in the window are omitted.  Results are sorted by
+   * `mean_risk_score DESC` so the most at-risk agents appear first.
+   *
+   * @param windowHours - Look-back window in hours.  Default: 48.
+   */
+  getAgentPatternRiskSummaries(windowHours?: number): AgentPatternRiskSummary[];
+}

@@ -11,7 +11,8 @@ import { createHash } from "node:crypto";
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
-import type { IStateStore, Task, IImprovementBatchDeduplicationStore } from "../state/types.js";
+import type { IStateStore, Task, IImprovementBatchDeduplicationStore, IPatternRiskStore } from "../state/types.js";
+import { PatternRiskConsumer } from "./pattern-risk-consumer.js";
 
 export interface DetectedImprovement {
   title: string;
@@ -112,7 +113,7 @@ export class ImprovementDetector {
 
   constructor(
     private config: ReviewerConfig,
-    private store?: (IStateStore & IImprovementBatchDeduplicationStore) | IStateStore,
+    private store?: (IStateStore & IImprovementBatchDeduplicationStore & IPatternRiskStore) | (IStateStore & IImprovementBatchDeduplicationStore) | IStateStore,
   ) {}
 
   async analyze(recentTasks: Task[]): Promise<DetectedImprovement[]> {
@@ -151,7 +152,19 @@ export class ImprovementDetector {
       result_preview: t.result?.slice(0, 200),
     }));
 
-    const prompt = `Analyze these ${implTasks.length} recent tasks and identify cross-cutting improvements:\n\n${JSON.stringify(taskSummaries, null, 2)}`;
+    // Enrich the prompt with pattern_risk signals when the store supports it
+    // (issue #1149).  These are written by the daemon on verification failure
+    // and were previously orphaned — consuming them here gives the LLM
+    // concrete evidence of systemic quality gaps beyond what the task summaries
+    // alone convey.
+    const riskCtx = this.asPatternRiskStore()
+      ? new PatternRiskConsumer(this.asPatternRiskStore()!).buildRiskContext()
+      : "";
+
+    const prompt =
+      `Analyze these ${implTasks.length} recent tasks and identify cross-cutting improvements:\n\n` +
+      JSON.stringify(taskSummaries, null, 2) +
+      riskCtx;
 
     const LLM_TIMEOUT_MS = 5 * 60 * 1000;
     const abortController = new AbortController();
@@ -299,6 +312,21 @@ export class ImprovementDetector {
         "function"
     ) {
       return this.store as IImprovementBatchDeduplicationStore;
+    }
+    return null;
+  }
+
+  /**
+   * Cast the store to `IPatternRiskStore` when it exposes the pattern-risk
+   * read methods.  Returns null when the store is absent or does not support
+   * pattern-risk reads (e.g. in minimal test stubs).
+   */
+  private asPatternRiskStore(): IPatternRiskStore | null {
+    if (
+      this.store &&
+      typeof (this.store as IPatternRiskStore).getAgentPatternRiskSummaries === "function"
+    ) {
+      return this.store as IPatternRiskStore;
     }
     return null;
   }

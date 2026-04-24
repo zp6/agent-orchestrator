@@ -79,6 +79,9 @@ import type {
   MeetingFacilitatorGoalItem,
   IImprovementBatchDeduplicationStore,
   ImprovementAnalysisRun,
+  IPatternRiskStore,
+  PatternRiskSignal,
+  AgentPatternRiskSummary,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -94,7 +97,7 @@ import { ulid } from "../util/ulid.js";
  */
 export const APPROVAL_SCORE_FLOOR = 0.60;
 
-export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore, IMeetingFacilitatorGoalStore, IImprovementBatchDeduplicationStore {
+export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore, IMeetingFacilitatorGoalStore, IImprovementBatchDeduplicationStore, IPatternRiskStore {
   private db: Database.Database;
 
   constructor(dbPath: string = process.env.STATE_DB_PATH ?? "state.db") {
@@ -684,6 +687,30 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
 
       CREATE INDEX IF NOT EXISTS idx_improvement_analysis_runs_hash_created
         ON improvement_analysis_runs (batch_hash, created_at DESC);
+    `);
+
+    // Pattern risk signal table (issue #1149).
+    // Written by the daemon on verification failure when a recurring risk pattern
+    // is detected.  The reviewer's PatternRiskConsumer reads these signals and
+    // surfaces them as additional context for the improvement detector.
+    // The CREATE TABLE is idempotent; the daemon may have already created it
+    // before the reviewer starts (shared state.db).
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pattern_risk (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id      TEXT    NOT NULL,
+        agent_id     TEXT    NOT NULL,
+        pattern_type TEXT    NOT NULL,
+        risk_score   REAL    NOT NULL,
+        detail       TEXT    NOT NULL DEFAULT '',
+        recorded_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pattern_risk_agent_recorded
+        ON pattern_risk (agent_id, recorded_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_pattern_risk_recorded
+        ON pattern_risk (recorded_at DESC);
     `);
   }
 
@@ -4444,6 +4471,88 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       skipped: r.skipped === 1,
       created_at: r.created_at,
     }));
+  }
+
+  // ── Pattern risk signals (issue #1149) ──────────────────────────────────
+
+  /**
+   * Return raw `pattern_risk` signals recorded within the last `windowHours`
+   * hours, ordered by `recorded_at DESC`.
+   *
+   * The daemon writes these rows on verification failure when it detects a
+   * recurring risk pattern (e.g. repeated low scores, consecutive failures).
+   * Previously these signals were written but never consumed — this method
+   * wires them into the reviewer's improvement-detector pipeline.
+   *
+   * @param windowHours - Look-back window in hours.  Default: 48.
+   * @param limit       - Maximum rows to return.  Default: 200.
+   */
+  getRecentPatternRiskSignals(windowHours = 48, limit = 200): PatternRiskSignal[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, task_id, agent_id, pattern_type, risk_score, detail, recorded_at
+         FROM pattern_risk
+         WHERE recorded_at >= datetime('now', ?)
+         ORDER BY recorded_at DESC
+         LIMIT ?`,
+      )
+      .all(`-${windowHours} hours`, limit) as Array<{
+      id: number;
+      task_id: string;
+      agent_id: string;
+      pattern_type: string;
+      risk_score: number;
+      detail: string;
+      recorded_at: string;
+    }>;
+    return rows;
+  }
+
+  /**
+   * Return `pattern_risk` signals aggregated per agent for the look-back window.
+   *
+   * Each returned entry summarises all signals for one agent: mean risk score,
+   * distinct pattern types, top detail, and signal count.  Agents with no
+   * signals in the window are omitted.  Results are sorted by `mean_risk_score
+   * DESC` so the most at-risk agents appear first.
+   *
+   * @param windowHours - Look-back window in hours.  Default: 48.
+   */
+  getAgentPatternRiskSummaries(windowHours = 48): AgentPatternRiskSummary[] {
+    // Fetch raw signals and aggregate in TypeScript to avoid complex
+    // GROUP_CONCAT portability concerns with SQLite versions.
+    const signals = this.getRecentPatternRiskSignals(windowHours, 1000);
+    if (signals.length === 0) return [];
+
+    const byAgent = new Map<string, PatternRiskSignal[]>();
+    for (const s of signals) {
+      const bucket = byAgent.get(s.agent_id) ?? [];
+      bucket.push(s);
+      byAgent.set(s.agent_id, bucket);
+    }
+
+    const summaries: AgentPatternRiskSummary[] = [];
+    for (const [agentId, agentSignals] of byAgent) {
+      const scores = agentSignals.map((s) => s.risk_score);
+      const meanScore = scores.reduce((a, b) => a + b, 0) / scores.length;
+      const latestScore = agentSignals[0]?.risk_score ?? 0; // already sorted DESC
+      const topSignal = agentSignals.reduce((best, s) =>
+        s.risk_score > best.risk_score ? s : best,
+      );
+      const patternTypes = [...new Set(agentSignals.map((s) => s.pattern_type))];
+
+      summaries.push({
+        agent_id: agentId,
+        latest_risk_score: latestScore,
+        mean_risk_score: Math.round(meanScore * 1000) / 1000,
+        pattern_types: patternTypes,
+        top_detail: topSignal.detail,
+        signal_count: agentSignals.length,
+      });
+    }
+
+    summaries.sort((a, b) => b.mean_risk_score - a.mean_risk_score);
+    return summaries;
   }
 
   /**
