@@ -1,9 +1,19 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-23 (triage cycle 11)_
+_Last updated: 2026-04-24 (triage cycle 13)_
 
 ## Completed (recent)
 
+- **#391 / PRs #443 #452** — `PRGuardSurgeDetector`: per-issue surge alert at ≥2 hits/60min; dispatch suppression at ≥3 hits/15min (thresholds lowered from 3/5 by PR #452)
+- **#392 / PRs #444 #449** — PR guard cooldown pre-flight: early cooldown check + `GET /api/pr-guard-cooldown/check` endpoint for proactive dispatch gate
+- **#441 / PR #444** — Enforce PR guard cooldown before any `gh` CLI call (`cooldown-active` resolution)
+- **#442 / PR #443** — `PRGuardSurgeDetector` Telegram alert with per-issue hit count
+- **#1113 / PR #448** — Dispatch surge auto-suppression: 2-hour block at ≥3 hits/15min with dedicated Telegram alert
+- **#454 / PR #455** — Fork-from dispatch payload protocol: canonical spec + types for `fork_from: conversation_id` (Phase 1 shadow-mode)
+- **#456 / PR #457** — `/meeting-goal` Telegram command surfacing monthly goal widget
+- **#458 / PR #459** — Improvement detector batch deduplication guard: `computeBatchHash()` + `improvement_analysis_runs` table prevents redundant LLM analysis within 6h
+- **#460 / PR #461** — `MeetingOutcomeClient`: HTTP client for meeting-facilitator outcome API; `extractSupervisorIntelligence()` for ranked issue list + sequencing constraints
+- **#463 / PR #464** — `MeetingPriorityDispatcher`: 7-rule fast-path for auto-dispatch from meeting outcome signals without LLM judgment
 - **#432 / PR #433** — `/triage-health` cross-link to consecutive-failure-detector: `fetchConsecutiveFailureBlocks()` shows warning when agent `failure_rate > 50%` and has active consecutive-failure blocks
 - **#428 / PR #429** — `LowQualityPRLabeler`: adds/removes `low-quality` GitHub label on PRs when tasks score below 0.80 (`low-quality-pr-labeler.ts`)
 - **#382 / PR #431** — Research agent implementation tasks section added to misrouting digest: `getMisroutingReport()` + `recordMisrouting()` methods on `ResearchInvestigationClient`
@@ -43,20 +53,20 @@ _Last updated: 2026-04-23 (triage cycle 11)_
 
 1. **#427 — PR-level dispatch lock to prevent same-PR guard storms** _(high)_ — Write a PR-level lock (keyed by blocking PR URL) atomically before dispatch and check it for all issues in the same daemon batch; eliminates 12+ wasted task dispatches when multiple issues point to the same blocking PR.
 
-2. **#391 — Per-issue dispatch surge alerter** _(high)_ — Extend `duplicate-dispatch-surge-detector.ts` to key on `(repo, issue_number)` and fire a Telegram alert when any single issue accumulates ≥3 dispatches within a 15-minute window; deduplicate at most once per 30 min per issue.
+2. **#414 — Bookkeeping task type: score 'close-by-reference' outcomes appropriately** _(high)_ — Tasks that close issues by reference (e.g. "Closes #N" in a PR they reviewed) should receive a quality score reflecting the outcome rather than a null or defaulted score.
 
-3. **#392 — Orchestrator pre-dispatch gate: hard-block issues with open PRs** _(high)_ — Enforce a hard block at dispatch time when a PR already exists for the issue; stricter than the soft existing guard which can be bypassed.
+3. **#359 — Daily agent quality digest with degradation callouts** _(high)_ — Scheduled Telegram message summarising each agent's 24-hour score average, trend direction, and flagging any agent that degraded >10% day-over-day.
 
-4. **#414 — Bookkeeping task type: score 'close-by-reference' outcomes appropriately** _(high)_ — Tasks that close issues by reference (e.g. "Closes #N" in a PR they reviewed) should receive a quality score reflecting the outcome rather than a null or defaulted score.
+4. **#453 — Reviewer-side guard: alert when staging validator fires for pre-existing failures repeatedly (>3 distinct PRs)** _(high)_ — When the staging validator fires for the same failure pattern across >3 distinct PRs, alert operators; prevents silent accumulation of pre-existing failures.
 
-5. **#359 — Daily agent quality digest with degradation callouts** _(high)_ — Scheduled Telegram message summarising each agent's 24-hour score average, trend direction, and flagging any agent that degraded >10% day-over-day.
+5. **#445 — Sub-0.60 approval audit entry gap** _(high)_ — Score 0.52 was approved without a bypass-audit entry; investigate the path that bypasses bypass-audit recording and add the missing hook.
 
 ## Planned
 
 - **#364 — Hard quality floor with mandatory override audit trail** _(high)_ — Hard floor at 0.10 blocking sub-floor approvals; Telegram escalation with `/approve-override` and `/reject-override`; `score_floor_overrides` audit table.
 - **#368 — Auto-file GitHub issues for improvements identified across 3+ consecutive batches** _(medium)_ — `ImprovementRecurrenceTracker` records patterns by normalized title hash across distinct batches; auto-files `chronic` + `improvement` tagged issue when threshold is reached.
 - **#340 — Persist proactive rebase stats to SQLite** _(medium)_ — `rebase_events` table, `IRebaseStore` interface, `/rebase-stats` Telegram command, and `/rebase-stats` HTTP endpoint for dashboard.
-- **#232 — Quality scores missing from task feed** _(high)_ — Despite `ensureScoresPopulated()` and backfill commands, recent tasks still show `quality_score: null`. Need a startup/daemon check that warns when >10% of recent approved tasks have null scores.
+- **#440 — Improvement issues not being dispatched due to guard flood** _(high)_ — Improvement issues filed by `ImprovementRecurrenceTracker` are being blocked by the cross-repo PR guard; investigate and add an exemption path for orchestrator-generated improvement issues.
 
 ## Ideas
 
@@ -67,6 +77,8 @@ _Last updated: 2026-04-23 (triage cycle 11)_
 - **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
 
 ## Triage notes
+
+- **2026-04-24 cycle 13**: Closed #391 (done by PRs #443/#452 — PRGuardSurgeDetector), #392 (done by PRs #444/#449 — cooldown pre-flight + check endpoint), #446 (cross-repo triage completed in comment), #462 (orphan branch cleanup completed). No duplicate issues (9 remaining open, all distinct). No stale issues (all ≤5 days). No open PRs to audit. CLAUDE.md: fixed stale surge-detector threshold values (3→2 hits for alert, 5 hits/30min→3 hits/15min for suppression — PR #452). ROADMAP.md: added 10 completed items; removed closed #232 from Planned; updated Next up.
 
 - **2026-04-23 cycle 11**: No duplicate issues (10 open, all distinct). No stale issues (oldest #232 is 6 days old). Open PR #437 correctly closes #436. ROADMAP.md: removed 4 closed issues from Planned (#89, #189, #221, #222 — all closed). CLAUDE.md: verified accurate, no drift detected. Issues remaining: 10 open, all within 14-day window.
 
