@@ -136,6 +136,10 @@ describe("dispatchGitHubIssues", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch surge suppression (issue #1113)
+      getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
+      recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
     } as unknown as StateStore;
@@ -388,6 +392,10 @@ describe("pre-dispatch issue state validation", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch surge suppression (issue #1113)
+      getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
+      recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -486,6 +494,10 @@ describe("duplicate PR detection before dispatch", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch surge suppression (issue #1113)
+      getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
+      recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -719,6 +731,10 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch surge suppression (issue #1113)
+      getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
+      recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -855,6 +871,10 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch surge suppression (issue #1113)
+      getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
+      recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1213,6 +1233,10 @@ describe("dispatchIdleAgentBacklog", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch surge suppression (issue #1113)
+      getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
+      recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1487,6 +1511,10 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch surge suppression (issue #1113)
+      getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
+      recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1642,6 +1670,10 @@ describe("in-flight branch detection", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch surge suppression (issue #1113)
+      getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
+      recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
 
     vi.mocked(mockStore.hasActiveTask).mockReturnValue(false);
@@ -1708,6 +1740,10 @@ describe("in-flight branch detection", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch surge suppression (issue #1113)
+      getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
+      recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
 
     await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1775,6 +1811,10 @@ describe("in-flight branch detection", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch surge suppression (issue #1113)
+      getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
+      recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
 
     const result = await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1837,6 +1877,10 @@ describe("in-flight branch detection", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch surge suppression (issue #1113)
+      getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
+      recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
 
     await dispatchIdleAgentBacklog(branchConfig, mockStore, mockDispatcher);
@@ -1901,6 +1945,10 @@ describe("approved PR skip logic", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch surge suppression (issue #1113)
+      getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
+      recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -2070,6 +2118,10 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch surge suppression (issue #1113)
+      getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
+      recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -2324,6 +2376,10 @@ describe("dispatch flood gate (issue #1060)", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch surge suppression (issue #1113)
+      getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
+      recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
     } as unknown as StateStore;
@@ -2505,6 +2561,10 @@ describe("PR guard surge alert (issue #1082)", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch surge suppression (issue #1113)
+      getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
+      recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
       ...overrides,
@@ -2797,5 +2857,177 @@ describe("PR guard surge alert (issue #1082)", () => {
     expect(totalDispatched).toBe(0);
     expect(totalSkipped).toBe(11);
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Dispatch surge auto-suppression (issue #1113)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  it("blocks dispatch when dispatch surge suppression is active", async () => {
+    // Setup: issue is under active surge suppression
+    const suppressedUntil = new Date(Date.now() + 60 * 60_000).toISOString();
+    (mockStore.getDispatchSurgeStatus as ReturnType<typeof vi.fn>).mockReturnValue({
+      active: true,
+      expiresAt: suppressedUntil,
+    });
+    // Make sure PR guard cooldown is inactive so we reach the surge check
+    mockQueryPRGuardCooldown.mockResolvedValue({ status: "inactive" });
+    mockCachedGetIssueState.mockReturnValue({
+      state: "open",
+      hasOpenPR: false,
+      hasMergedPR: false,
+    });
+
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 123, title: "Surge Test", body: "", url: "", labels: [] },
+    ]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // Dispatch should be completely skipped
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+    expect(mockStore.getDispatchSurgeStatus).toHaveBeenCalledWith("owner/my-repo", 123);
+  });
+
+  it("records surge event and triggers suppression when count reaches 5", async () => {
+    // Setup: fifth already-in-review response triggers suppression
+    (mockStore.tryAcquirePRGuardLock as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    const suppressedUntil = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+    (mockStore.recordDispatchSurgeEvent as ReturnType<typeof vi.fn>).mockReturnValue({
+      suppressed: true,
+      expiresAt: suppressedUntil,
+    });
+    mockQueryPRGuardCooldown.mockResolvedValue({ status: "inactive" });
+    mockCachedGetIssueState.mockReturnValue({
+      state: "open",
+      hasOpenPR: true,
+      hasMergedPR: false,
+    });
+    mockFindExistingPRs.mockReturnValue([
+      {
+        number: 445,
+        url: "https://github.com/owner/my-repo/pull/445",
+        title: "WIP: Surge trigger",
+        isDraft: false,
+        state: "open",
+      },
+    ]);
+
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 445, title: "Surge trigger", body: "", url: "", labels: [] },
+    ]);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // Should record the surge event
+    expect(mockStore.recordDispatchSurgeEvent).toHaveBeenCalledWith("owner/my-repo", 445);
+    // Should send Telegram alert about suppression
+    expect(mockSendTelegramAlert).toHaveBeenCalledWith(
+      expect.stringContaining("Dispatch surge suppressed"),
+    );
+  });
+
+  it("does not record surge event when suppression is not triggered", async () => {
+    // Setup: only 3 already-in-review responses (below threshold)
+    (mockStore.tryAcquirePRGuardLock as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (mockStore.recordDispatchSurgeEvent as ReturnType<typeof vi.fn>).mockReturnValue({
+      suppressed: false,
+    });
+    mockQueryPRGuardCooldown.mockResolvedValue({ status: "inactive" });
+    mockCachedGetIssueState.mockReturnValue({
+      state: "open",
+      hasOpenPR: true,
+      hasMergedPR: false,
+    });
+    mockFindExistingPRs.mockReturnValue([
+      {
+        number: 446,
+        url: "https://github.com/owner/my-repo/pull/446",
+        title: "No surge yet",
+        isDraft: false,
+        state: "open",
+      },
+    ]);
+
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 446, title: "No surge yet", body: "", url: "", labels: [] },
+    ]);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // Should record the event
+    expect(mockStore.recordDispatchSurgeEvent).toHaveBeenCalledWith("owner/my-repo", 446);
+    // Should NOT send suppression alert (suppressed: false)
+    const suppressionAlerts = mockSendTelegramAlert.mock.calls.filter((call) =>
+      call[0].includes("Dispatch surge suppressed"),
+    );
+    expect(suppressionAlerts.length).toBe(0);
+  });
+
+  it("blocks dispatch in idle pickup when surge suppression is active", async () => {
+    // Setup: issue is under active surge suppression during idle pickup
+    const suppressedUntil = new Date(Date.now() + 60 * 60_000).toISOString();
+    (mockStore.getDispatchSurgeStatus as ReturnType<typeof vi.fn>).mockReturnValue({
+      active: true,
+      expiresAt: suppressedUntil,
+    });
+    // Simulate an idle agent with a completed task
+    (mockStore.hasActiveTask as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    (mockStore.getTask as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: "task-old",
+      status: "done",
+      agent_name: "my-agent",
+      created_at: new Date(Date.now() - 30 * 60_000).toISOString(),
+    });
+
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 447, title: "Idle surge test", body: "", url: "", labels: [] },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    // Should skip this issue even in idle pickup
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("includes suppression expiry in Telegram alert message", async () => {
+    // Setup: triggering suppression
+    (mockStore.tryAcquirePRGuardLock as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    const suppressedUntil = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+    (mockStore.recordDispatchSurgeEvent as ReturnType<typeof vi.fn>).mockReturnValue({
+      suppressed: true,
+      expiresAt: suppressedUntil,
+    });
+    mockQueryPRGuardCooldown.mockResolvedValue({ status: "inactive" });
+    mockCachedGetIssueState.mockReturnValue({
+      state: "open",
+      hasOpenPR: true,
+      hasMergedPR: false,
+    });
+    mockFindExistingPRs.mockReturnValue([
+      {
+        number: 448,
+        url: "https://github.com/owner/my-repo/pull/448",
+        title: "Alert test",
+        isDraft: false,
+        state: "open",
+      },
+    ]);
+
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 448, title: "Alert test", body: "", url: "", labels: [] },
+    ]);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // Alert should include time format
+    const alertCall = mockSendTelegramAlert.mock.calls.find((call) =>
+      call[0].includes("Dispatch surge suppressed"),
+    );
+    expect(alertCall).toBeDefined();
+    expect(alertCall![0]).toMatch(/\d{2}:\d{2}/); // HH:MM format
   });
 });

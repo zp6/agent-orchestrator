@@ -612,6 +612,30 @@ export async function dispatchGitHubIssues(
         }
       }
 
+      // Dispatch surge auto-suppression (issue #1113): check if an issue is under
+      // 2-hour suppression due to a surge of "already-in-review" responses.
+      // This prevents repeated dispatch attempts from clogging the system when the
+      // same issue is repeatedly detected as having an open PR within a short window.
+      {
+        const surgeStatus = store.getDispatchSurgeStatus(issue.repo, issue.number);
+        if (surgeStatus.active) {
+          log.info("Dispatch suppressed by surge suppression mechanism", {
+            sourceRef,
+            agentName,
+            expiresAt: surgeStatus.expiresAt,
+          });
+          reportDashboardSkip({
+            issue_id: sourceRef,
+            agent_name: agentName,
+            skip_reason: "dispatch_surge_suppressed",
+            condition_value: `suppression_active=true,expires=${surgeStatus.expiresAt}`,
+            context: "Dispatch surge auto-suppression: issue has ≥5 already-in-review responses in 30 min",
+          });
+          result.skipped++;
+          continue;
+        }
+      }
+
       const validation = runGitHubPreDispatchValidation({
         config,
         store,
@@ -694,6 +718,27 @@ export async function dispatchGitHubIssues(
             failureCode: validation.failureCode,
             repo: issue.repo,
           });
+
+          // Dispatch surge auto-suppression (issue #1113): record this "already-in-review"
+          // event and check if suppression should trigger.
+          const surgeResult = store.recordDispatchSurgeEvent(issue.repo, issue.number);
+          if (surgeResult.suppressed) {
+            log.info("Dispatch surge suppression triggered", {
+              sourceRef,
+              repo: issue.repo,
+              issueNumber: issue.number,
+              expiresAt: surgeResult.expiresAt,
+            });
+            sendTelegramAlert(
+              `⚠️ *Dispatch surge suppressed* — \`${issue.repo}#${issue.number}\` has ` +
+              `≥5 already-in-review responses in 30 min. Further dispatches blocked until ` +
+              `${new Date(surgeResult.expiresAt!).toLocaleTimeString("en-US", {
+                hour: "2-digit",
+                minute: "2-digit",
+                timeZone: "America/New_York",
+              })} ET.`,
+            );
+          }
 
           // Dispatch efficiency tracking (issue #976): persist a block event
           // so operators can measure how many dispatches are wasted on issues
@@ -1122,6 +1167,20 @@ export async function dispatchIdleAgentBacklog(
         continue;
       }
 
+      // Dispatch surge auto-suppression (issue #1113) — idle pickup path
+      {
+        const idleSurgeStatus = store.getDispatchSurgeStatus(issue.repo, issue.number);
+        if (idleSurgeStatus.active) {
+          log.info("Idle pickup: dispatch suppressed by surge suppression mechanism", {
+            sourceRef,
+            agentName,
+            expiresAt: idleSurgeStatus.expiresAt,
+          });
+          result.skipped++;
+          continue;
+        }
+      }
+
       const validation = runGitHubPreDispatchValidation({
         config,
         store,
@@ -1158,6 +1217,28 @@ export async function dispatchIdleAgentBacklog(
             failureCode: validation.failureCode,
             repo: issue.repo,
           });
+
+          // Dispatch surge auto-suppression (issue #1113) — idle pickup path:
+          // record event and check if suppression should trigger.
+          const idleSurgeResult = store.recordDispatchSurgeEvent(issue.repo, issue.number);
+          if (idleSurgeResult.suppressed) {
+            log.info("Idle pickup: dispatch surge suppression triggered", {
+              sourceRef,
+              repo: issue.repo,
+              issueNumber: issue.number,
+              expiresAt: idleSurgeResult.expiresAt,
+            });
+            sendTelegramAlert(
+              `⚠️ *Dispatch surge suppressed* — \`${issue.repo}#${issue.number}\` has ` +
+              `≥5 already-in-review responses in 30 min. Further dispatches blocked until ` +
+              `${new Date(idleSurgeResult.expiresAt!).toLocaleTimeString("en-US", {
+                hour: "2-digit",
+                minute: "2-digit",
+                timeZone: "America/New_York",
+              })} ET.`,
+            );
+          }
+
           // Priority review fast-lane (issue #871) — idle pickup path: same as
           // the primary dispatch path, route blocking PRs into the priority queue.
           const routeOutcome = routeBlockingPRToQueue(store, {

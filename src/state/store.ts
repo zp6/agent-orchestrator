@@ -9964,6 +9964,186 @@ export class StateStore {
       .all(cutoff) as Array<{ source_ref: string; count: number }>;
   }
 
+  // ── Dispatch Surge Suppression (issue #1113) ──────────────────────────────
+
+  private runDispatchSurgeSuppressionMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS dispatch_surge_events (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo            TEXT    NOT NULL,
+        issue_number    INTEGER NOT NULL,
+        event_at        TEXT    NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_dispatch_surge_events_repo_issue
+        ON dispatch_surge_events(repo, issue_number);
+      CREATE INDEX IF NOT EXISTS idx_dispatch_surge_events_at
+        ON dispatch_surge_events(event_at);
+
+      CREATE TABLE IF NOT EXISTS dispatch_surge_suppressions (
+        repo            TEXT    NOT NULL,
+        issue_number    INTEGER NOT NULL,
+        suppressed_at   TEXT    NOT NULL,
+        expires_at      TEXT    NOT NULL,
+        event_count     INTEGER NOT NULL,
+        PRIMARY KEY (repo, issue_number)
+      );
+      CREATE INDEX IF NOT EXISTS idx_dispatch_surge_suppressions_expires
+        ON dispatch_surge_suppressions(expires_at);
+    `);
+  }
+
+  /**
+   * Record a dispatch surge event (when "already-in-review" task is created).
+   *
+   * Checks if this issue has ≥5 events in the rolling 30-minute window.
+   * If yes, creates a 2-hour suppression entry that blocks further dispatch.
+   *
+   * @param repo            Repository slug, e.g. "rapartlu/agent-orchestrator"
+   * @param issueNumber     GitHub issue number
+   * @returns               `{ suppressed: true, expiresAt: <ISO> }` if suppression just triggered,
+   *                        `{ suppressed: false }` otherwise
+   */
+  recordDispatchSurgeEvent(repo: string, issueNumber: number): { suppressed: boolean; expiresAt?: string } {
+    this.runDispatchSurgeSuppressionMigration();
+    const now = new Date();
+    const nowIso = now.toISOString();
+
+    // Record the event
+    this.db
+      .prepare(
+        `INSERT INTO dispatch_surge_events (repo, issue_number, event_at)
+         VALUES (?, ?, ?)`,
+      )
+      .run(repo, issueNumber, nowIso);
+
+    // Clean up old events outside the 30-minute window
+    const thirtyMinutesAgo = new Date(now.getTime() - 30 * 60 * 1000).toISOString();
+    this.db
+      .prepare(
+        `DELETE FROM dispatch_surge_events
+         WHERE repo = ? AND issue_number = ? AND event_at < ?`,
+      )
+      .run(repo, issueNumber, thirtyMinutesAgo);
+
+    // Count events in the rolling 30-minute window
+    const eventCount = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS count FROM dispatch_surge_events
+           WHERE repo = ? AND issue_number = ? AND event_at >= ?`,
+        )
+        .get(repo, issueNumber, thirtyMinutesAgo) as { count: number }
+    ).count;
+
+    // Check if suppression should be triggered (≥5 events)
+    const SURGE_THRESHOLD = 5;
+    if (eventCount >= SURGE_THRESHOLD) {
+      // Check if suppression is already active
+      const existingSuppression = this.db
+        .prepare(
+          `SELECT expires_at FROM dispatch_surge_suppressions
+           WHERE repo = ? AND issue_number = ? AND expires_at > ?`,
+        )
+        .get(repo, issueNumber, nowIso);
+
+      if (!existingSuppression) {
+        // Create new suppression (2-hour duration)
+        const expiresAt = new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString();
+        this.db
+          .prepare(
+            `INSERT INTO dispatch_surge_suppressions
+             (repo, issue_number, suppressed_at, expires_at, event_count)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .run(repo, issueNumber, nowIso, expiresAt, eventCount);
+
+        return { suppressed: true, expiresAt };
+      }
+    }
+
+    return { suppressed: false };
+  }
+
+  /**
+   * Check if dispatch surge suppression is active for an issue.
+   *
+   * @param repo            Repository slug, e.g. "rapartlu/agent-orchestrator"
+   * @param issueNumber     GitHub issue number
+   * @returns               `{ active: true, expiresAt: <ISO> }` if suppression active,
+   *                        `{ active: false }` otherwise
+   */
+  getDispatchSurgeStatus(repo: string, issueNumber: number): { active: boolean; expiresAt?: string } {
+    this.runDispatchSurgeSuppressionMigration();
+    const nowIso = new Date().toISOString();
+
+    // Clean up expired suppressions
+    this.db
+      .prepare(
+        `DELETE FROM dispatch_surge_suppressions WHERE expires_at < ?`,
+      )
+      .run(nowIso);
+
+    // Check if suppression is active
+    const suppression = this.db
+      .prepare(
+        `SELECT expires_at FROM dispatch_surge_suppressions
+         WHERE repo = ? AND issue_number = ? AND expires_at > ?`,
+      )
+      .get(repo, issueNumber, nowIso) as { expires_at: string } | undefined;
+
+    if (suppression) {
+      return { active: true, expiresAt: suppression.expires_at };
+    }
+
+    return { active: false };
+  }
+
+  /**
+   * Get all active dispatch surge suppressions for status/dashboard visibility.
+   *
+   * @returns Array of active suppressions with repo, issue, and expiry info
+   */
+  getActiveDispatchSuppressions(): Array<{
+    repo: string;
+    issue_number: number;
+    suppressed_at: string;
+    expires_at: string;
+    event_count: number;
+    minutes_remaining: number;
+  }> {
+    this.runDispatchSurgeSuppressionMigration();
+    const nowIso = new Date().toISOString();
+    const now = Date.now();
+
+    // Clean up expired suppressions
+    this.db
+      .prepare(
+        `DELETE FROM dispatch_surge_suppressions WHERE expires_at < ?`,
+      )
+      .run(nowIso);
+
+    // Get active suppressions
+    const suppressions = this.db
+      .prepare(
+        `SELECT repo, issue_number, suppressed_at, expires_at, event_count
+         FROM dispatch_surge_suppressions
+         WHERE expires_at > ?
+         ORDER BY expires_at ASC`,
+      )
+      .all(nowIso) as Array<{
+        repo: string;
+        issue_number: number;
+        suppressed_at: string;
+        expires_at: string;
+        event_count: number;
+      }>;
+
+    return suppressions.map((s) => ({
+      ...s,
+      minutes_remaining: Math.ceil((new Date(s.expires_at).getTime() - now) / (60 * 1000)),
+    }));
+  }
+
   /**
    * Return per-day dispatch block rate metrics over a rolling window.
    *

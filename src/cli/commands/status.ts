@@ -781,6 +781,26 @@ export function registerStatusCommand(program: Command): void {
             }
           }
 
+          // Dispatch surge suppressions (issue #1113)
+          const surgeSuppressions = store.getActiveDispatchSuppressions();
+          if (surgeSuppressions.length > 0) {
+            console.log(chalk.bold.yellow(`\n⚠️ Dispatch Surge Suppressions (${surgeSuppressions.length})\n`));
+            const header = `  ${"Repo".padEnd(36)} ${"Issue".padStart(8)} ${"Events".padStart(7)} ${"Expires in".padStart(11)}`;
+            console.log(chalk.dim(header));
+            console.log(chalk.dim("  " + "─".repeat(68)));
+            for (const sup of surgeSuppressions) {
+              const repo = chalk.cyan(sup.repo.slice(0, 34).padEnd(36));
+              const issue = chalk.yellow(`#${sup.issue_number}`.padStart(8));
+              const events = String(sup.event_count).padStart(7);
+              const expiresStr = sup.minutes_remaining > 60
+                ? `${(sup.minutes_remaining / 60).toFixed(1)}h`
+                : `${sup.minutes_remaining}m`;
+              const expiresLabel = chalk.dim(expiresStr.padStart(11));
+              console.log(`  ${repo} ${issue} ${events} ${expiresLabel}`);
+            }
+            console.log(chalk.dim("\nDispatch is blocked for these issues until suppression expires (triggered by ≥5 already-in-review responses in 30 min)."));
+          }
+
           // Surface stuck issues (revision_count >= 2)
           const stuckIssues = store.getStuckIssues(2);
           if (stuckIssues.length > 0) {
