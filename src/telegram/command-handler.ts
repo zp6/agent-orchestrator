@@ -34,6 +34,7 @@
  *   /quality-summary           → rolling 24h approval-quality digest: total approvals, marginal rate, worst agent
  *   /backfill-bypass-reasons   → backfill bypass_reason for historical sub-0.60 approved tasks (idempotent)
  *   /low-score [threshold] [limit] → approved tasks with quality score below threshold (default 0.75), with dimension breakdown
+ *   /marginal-approvals [days] [limit] → tasks approved in 0.60–0.79 marginal band; per-agent summary and marginal_reason coaching (default 14d)
  *   /memory [expand <topic>|digest] → semantic task memory digest or full topic expansion
  *   /misrouting [hours]        → implementation tasks misrouted to reviewer in last N hours (default 24h, max 720h)
  *   /triage-health [agent]     → per-agent triage schema pass/fail rate, missing fields, revision count, and 7-day trend
@@ -78,6 +79,11 @@ import {
   formatLowScoreFeedForTelegram,
   LOW_SCORE_FEED_THRESHOLD,
 } from "../reviewer/low-score-feed.js";
+import {
+  getMarginalApprovalsFeed,
+  formatMarginalApprovalsForTelegram,
+  MARGINAL_APPROVALS_DEFAULT_DAYS,
+} from "../reviewer/marginal-approvals-feed.js";
 import {
   buildQualitySummaryReport,
   formatQualitySummaryForTelegram,
@@ -177,7 +183,9 @@ type CommandName =
   | "triage-health"
   | "investigations"
   | "meeting-goal"
-  | "supervisor-dispatches";
+  | "supervisor-dispatches"
+  | "marginal-approvals"
+  | "marginal";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -222,6 +230,8 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "investigations",
   "meeting-goal",
   "supervisor-dispatches",
+  "marginal-approvals",
+  "marginal",
 ]);
 
 interface ParsedCommand {
@@ -550,6 +560,29 @@ async function executeCommand(
         : 50;
 
       return handleLowScoreFeed(store, threshold, limit, dashboardUrl);
+    }
+
+    case "marginal-approvals":
+    case "marginal": {
+      // /marginal-approvals [days] [limit]
+      // days:  lookback window in days (default 14); 0 = all-time
+      // limit: max entries to show (default 10)
+      const daysArg = cmd.args[0]?.trim();
+      const limitArgM = cmd.args[1]?.trim();
+
+      const marginalDays = daysArg
+        ? Math.min(Math.max(parseInt(daysArg, 10) || MARGINAL_APPROVALS_DEFAULT_DAYS, 0), 365)
+        : MARGINAL_APPROVALS_DEFAULT_DAYS;
+
+      const marginalLimit = limitArgM
+        ? Math.min(Math.max(parseInt(limitArgM, 10) || 50, 1), 100)
+        : 50;
+
+      const marginalFeed = getMarginalApprovalsFeed(store, {
+        days: marginalDays,
+        limit: marginalLimit,
+      });
+      return formatMarginalApprovalsForTelegram(marginalFeed, 10, dashboardUrl);
     }
 
     case "memory": {

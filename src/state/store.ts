@@ -87,6 +87,7 @@ import type {
   ICalibrationRecommendationStore,
   CalibrationRecommendation,
   CalibrationRecommendationStatus,
+  IMarginalApprovalsFeedStore,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -102,7 +103,7 @@ import { ulid } from "../util/ulid.js";
  */
 export const APPROVAL_SCORE_FLOOR = 0.60;
 
-export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore, IMeetingFacilitatorGoalStore, IImprovementBatchDeduplicationStore, IPatternRiskStore, ICalibrationRecommendationStore {
+export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore, IMeetingFacilitatorGoalStore, IImprovementBatchDeduplicationStore, IPatternRiskStore, ICalibrationRecommendationStore, IMarginalApprovalsFeedStore {
   private db: Database.Database;
 
   constructor(dbPath: string = process.env.STATE_DB_PATH ?? "state.db") {
@@ -1389,6 +1390,50 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
          LIMIT ?`,
       )
       .all(safeThreshold, safeLimit) as Task[];
+  }
+
+  /**
+   * Return approved tasks with quality_score in [0.60, 0.79] (the marginal
+   * approval band), updated within the last `days` days, ordered from lowest
+   * to highest score (riskiest first).
+   *
+   * Issue #502: feeds the marginal approvals panel and /api/marginal-approvals.
+   *
+   * @param days  - Lookback window in days. 0 = all-time. Default: 14.
+   * @param limit - Maximum rows to return. Default: 50.
+   */
+  getMarginalApprovedTasks(days: number = 14, limit: number = 50): Task[] {
+    const MARGINAL_FLOOR = 0.60;
+    const MARGINAL_CEILING = 0.79;
+    const safeDays = Number.isFinite(days) && days >= 0 ? Math.floor(days) : 14;
+    const safeLimit = Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : 50;
+
+    if (safeDays === 0) {
+      return this.db
+        .prepare(
+          `SELECT * FROM tasks
+           WHERE verification_status = 'approved'
+             AND quality_score IS NOT NULL
+             AND quality_score >= ?
+             AND quality_score <= ?
+           ORDER BY quality_score ASC, updated_at DESC
+           LIMIT ?`,
+        )
+        .all(MARGINAL_FLOOR, MARGINAL_CEILING, safeLimit) as Task[];
+    }
+
+    return this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE verification_status = 'approved'
+           AND quality_score IS NOT NULL
+           AND quality_score >= ?
+           AND quality_score <= ?
+           AND updated_at >= datetime('now', '-' || ? || ' days')
+         ORDER BY quality_score ASC, updated_at DESC
+         LIMIT ?`,
+      )
+      .all(MARGINAL_FLOOR, MARGINAL_CEILING, safeDays, safeLimit) as Task[];
   }
 
   /**

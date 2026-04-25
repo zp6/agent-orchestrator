@@ -2052,7 +2052,8 @@ export interface ITelegramStateStore
     ILowScoreFeedStore,
     IScoreViolationsStore,
     IMeetingFacilitatorGoalStore,
-    IImprovementBatchDeduplicationStore {
+    IImprovementBatchDeduplicationStore,
+    IMarginalApprovalsFeedStore {
   // System flags (pause/resume, operator overrides)
   getSystemFlag(key: string): string | null;
   setSystemFlag(key: string, value: string): void;
@@ -2505,4 +2506,24 @@ export interface IPersistentAnomalyStore {
     first_observed_at: string;
     last_observed_at: string;
   }>;
+}
+
+// ── Marginal approvals feed store (issue #502) ────────────────────────────────
+
+/**
+ * Minimal store interface for the marginal approvals feed.
+ *
+ * Satisfied by `StateStore`. Extracted so the feed builder can be
+ * unit-tested with a lightweight stub.
+ */
+export interface IMarginalApprovalsFeedStore {
+  /**
+   * Return approved tasks with quality_score in [0.60, 0.79] (the marginal
+   * approval band), updated within the last `days` days, ordered by
+   * quality_score ascending (riskiest first).
+   *
+   * @param days  - Lookback window in days. 0 = all-time. Default: 14.
+   * @param limit - Maximum rows to return. Default: 50.
+   */
+  getMarginalApprovedTasks(days?: number, limit?: number): Task[];
 }

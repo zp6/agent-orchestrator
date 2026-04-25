@@ -1253,6 +1253,37 @@ export type {
   IStandupQualityStore,
 } from "./reviewer/standup-quality-trend.js";
 
+// Marginal approvals feed — `/api/marginal-approvals` API payload + `/marginal-approvals` Telegram command (issue #502).
+//
+// Surfaces all tasks approved in the 0.60–0.79 "marginal" band so operators can
+// review them together, compare per-agent trends, and trigger targeted re-dispatch
+// with coaching when the marginal_reason reveals a fixable gap.
+//
+// Mount in the orchestrator or dashboard server:
+//   app.get('/api/marginal-approvals', (req, res) => {
+//     res.json(getMarginalApprovalsFeed(store, {
+//       days:  req.query.days  ? Number(req.query.days)  : undefined,
+//       limit: req.query.limit ? Number(req.query.limit) : undefined,
+//     }));
+//   });
+//
+// Telegram `/marginal-approvals [days] [limit]` command uses formatMarginalApprovalsForTelegram().
+export {
+  getMarginalApprovalsFeed,
+  formatMarginalApprovalsForTelegram,
+  MARGINAL_APPROVALS_FLOOR,
+  MARGINAL_APPROVALS_CEILING,
+  MARGINAL_APPROVALS_DEFAULT_DAYS,
+  MARGINAL_APPROVALS_DEFAULT_LIMIT,
+} from "./reviewer/marginal-approvals-feed.js";
+export type {
+  MarginalApprovalEntry,
+  MarginalApprovalsOptions,
+  MarginalApprovalAgentSummary,
+  MarginalApprovalsFeed,
+} from "./reviewer/marginal-approvals-feed.js";
+export type { IMarginalApprovalsFeedStore } from "./state/types.js";
+
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
 export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";
