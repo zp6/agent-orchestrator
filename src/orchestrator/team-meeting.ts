@@ -322,6 +322,18 @@ async function runRound(
   return { roundNumber, prompt: roundPrompt, entries };
 }
 
+/** Number of LLM synthesis retry attempts after the initial attempt fails. */
+const SYNTHESIS_MAX_RETRIES = 2;
+/** Base delay in ms between synthesis retries (doubles on each attempt). */
+const SYNTHESIS_RETRY_BASE_MS = 2_000;
+
+/**
+ * Wait helper for retry backoff.
+ */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function synthesiseMeeting(
   config: OrchestratorConfig,
   meetingType: MeetingType,
@@ -333,38 +345,71 @@ async function synthesiseMeeting(
   const fullTranscript = formatPriorRounds(rounds);
   const prompt = `${goalsContext}\n\n${fullTranscript}`;
 
-  const abortController = new AbortController();
-  const timer = setTimeout(() => abortController.abort(), DEFAULT_LLM_TIMEOUT_MS);
-
-  try {
-    let response;
-    try {
-      response = await client.messages.create({
-        model: getLLMModel(config, "supervisor") ?? model,
-        max_tokens: 4096,
-        system: cacheableSystemPrompt(SYNTHESIS_PROMPTS[meetingType]),
-        messages: [{ role: "user", content: prompt }],
-      }, { signal: abortController.signal });
-    } finally {
-      clearTimeout(timer);
+  // Attempt LLM synthesis up to (1 + SYNTHESIS_MAX_RETRIES) times with
+  // exponential backoff. Each retry uses a fresh AbortController so the
+  // prior timeout does not bleed into the next attempt.
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= SYNTHESIS_MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const waitMs = SYNTHESIS_RETRY_BASE_MS * Math.pow(2, attempt - 1);
+      log.warn("Meeting synthesis failed — retrying", {
+        attempt,
+        maxRetries: SYNTHESIS_MAX_RETRIES,
+        retryAfterMs: waitMs,
+        error: lastError instanceof Error ? lastError.message : String(lastError),
+      });
+      await delay(waitMs);
     }
 
-    const text = response.content
-      .filter((b) => b.type === "text")
-      .map((b) => "text" in b ? b.text : "")
-      .join("");
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), DEFAULT_LLM_TIMEOUT_MS);
 
-    return parseSynthesis(text);
-  } catch (err) {
-    log.error("Meeting synthesis failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return {
-      synthesis: "Synthesis failed — see round transcripts for raw input.",
-      actionItems: [],
-      goalAdjustments: [],
-    };
+    try {
+      let response;
+      try {
+        response = await client.messages.create({
+          model: getLLMModel(config, "supervisor") ?? model,
+          max_tokens: 4096,
+          system: cacheableSystemPrompt(SYNTHESIS_PROMPTS[meetingType]),
+          messages: [{ role: "user", content: prompt }],
+        }, { signal: abortController.signal });
+      } finally {
+        clearTimeout(timer);
+      }
+
+      const text = response.content
+        .filter((b) => b.type === "text")
+        .map((b) => "text" in b ? b.text : "")
+        .join("");
+
+      const result = parseSynthesis(text);
+      if (attempt > 0) {
+        log.info("Meeting synthesis succeeded after retry", { attempt });
+      }
+      return result;
+    } catch (err) {
+      lastError = err;
+    }
   }
+
+  // All LLM attempts exhausted — fall back to transcript extraction so the
+  // meeting still surfaces at least minimal action items derived from the
+  // raw round responses (issue #1111).
+  log.error("Meeting synthesis failed after all retries — using transcript fallback", {
+    attempts: SYNTHESIS_MAX_RETRIES + 1,
+    error: lastError instanceof Error ? lastError.message : String(lastError),
+  });
+
+  const fallbackItems = extractFallbackActionItems(rounds);
+  const fallbackNote = fallbackItems.length > 0
+    ? `Synthesis failed after ${SYNTHESIS_MAX_RETRIES + 1} attempts. ${fallbackItems.length} action item(s) extracted from round transcripts.`
+    : "Synthesis failed — see round transcripts for raw input.";
+
+  return {
+    synthesis: fallbackNote,
+    actionItems: fallbackItems,
+    goalAdjustments: [],
+  };
 }
 
 function parseSynthesis(text: string): {
@@ -399,6 +444,101 @@ function parseSynthesis(text: string): {
   }
 
   return { synthesis: text.slice(0, 500), actionItems: [], goalAdjustments: [] };
+}
+
+// ── Transcript fallback action item extraction ────────────────────────────
+//
+// When LLM synthesis fails, heuristically parse round transcripts to extract
+// at least some signal. This prevents standup issues from having zero action
+// items when agents actually discussed concrete work (issue #1111).
+//
+// Strategy (in priority order):
+//   1. Extract lines containing action verbs near GitHub issue/PR refs (#N)
+//   2. Attribute each item to the agent who wrote it
+//   3. Cap at FALLBACK_MAX_ITEMS to avoid flooding
+//
+// This is intentionally coarse — the goal is minimal viable signal, not
+// perfect extraction. The full round transcripts are preserved in the DB.
+
+/** Maximum action items produced by the transcript fallback. */
+const FALLBACK_MAX_ITEMS = 5;
+
+/** Action verbs that suggest something concrete was proposed. */
+const ACTION_VERB_RE =
+  /(?:^|[\s(])(?:merge|ship|implement|prioritize|prioritise|fix|close|review|wire|expand|add|create|dispatch|update|refactor)\b/i;
+
+/** GitHub issue or PR reference. */
+const ISSUE_REF_INLINE_RE = /#(\d+)/g;
+
+/**
+ * Extract a capped list of action items from round transcripts when LLM
+ * synthesis is unavailable.
+ *
+ * Scans every line of every agent response for lines that contain both an
+ * action verb and a GitHub issue/PR reference. Deduplicates by normalising
+ * the line and capping per-agent contributions to 2 items so no single agent
+ * dominates the output.
+ */
+export function extractFallbackActionItems(rounds: MeetingRound[]): ActionItem[] {
+  const items: ActionItem[] = [];
+  const seenDescriptions = new Set<string>();
+
+  // Use the last round's responses first (most reactive, most concrete).
+  const orderedRounds = [...rounds].sort((a, b) => b.roundNumber - a.roundNumber);
+
+  for (const round of orderedRounds) {
+    if (items.length >= FALLBACK_MAX_ITEMS) break;
+
+    for (const entry of round.entries) {
+      if (!entry.response || items.length >= FALLBACK_MAX_ITEMS) continue;
+
+      let agentContributions = 0;
+      const lines = entry.response.split("\n");
+
+      for (const rawLine of lines) {
+        if (items.length >= FALLBACK_MAX_ITEMS) break;
+        if (agentContributions >= 2) break;
+
+        // Normalise the line first: strip markdown and leading bullet markers
+        // so that patterns like "**Merge PR #171**" are correctly matched by
+        // ACTION_VERB_RE (which requires word-boundary context around the verb).
+        const line = rawLine
+          .trim()
+          .replace(/^\s*[-*•]\s*/, "")
+          .replace(/\*\*/g, "")
+          .replace(/\*/g, "")
+          .trim();
+        if (!line || line.length < 15) continue;
+
+        // Must contain an action verb
+        if (!ACTION_VERB_RE.test(line)) continue;
+
+        // Must reference at least one GitHub issue or PR
+        ISSUE_REF_INLINE_RE.lastIndex = 0;
+        const refs: string[] = [];
+        let m: RegExpExecArray | null;
+        while ((m = ISSUE_REF_INLINE_RE.exec(line)) !== null) {
+          refs.push(`#${m[1]}`);
+        }
+        if (refs.length === 0) continue;
+
+        // Truncate to 120 chars
+        const description = line.slice(0, 120).trim();
+
+        if (seenDescriptions.has(description.toLowerCase())) continue;
+        seenDescriptions.add(description.toLowerCase());
+
+        items.push({
+          description,
+          owner: entry.agentName,
+          priority: "medium",
+        });
+        agentContributions++;
+      }
+    }
+  }
+
+  return items;
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
