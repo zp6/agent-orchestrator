@@ -113,6 +113,13 @@ describe("validateConfig", () => {
     expect(errors.some((e) => e.path === "dispatch.max_open_prs")).toBe(true);
   });
 
+  it("should catch out-of-range dispatch.failure_genome_risk_threshold", () => {
+    const config = loadConfig(configPath);
+    config.dispatch = { failure_genome_risk_threshold: 1.5 };
+    const errors = validateConfig(config);
+    expect(errors.some((e) => e.path === "dispatch.failure_genome_risk_threshold")).toBe(true);
+  });
+
   it("should catch negative agent.max_open_prs", () => {
     const config = loadConfig(configPath);
     const firstAgentName = Object.keys(config.agents)[0];

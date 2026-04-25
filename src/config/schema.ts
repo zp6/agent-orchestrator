@@ -605,6 +605,15 @@ export interface DispatchConfig {
   max_open_prs?: number;
 
   /**
+   * Genome risk score threshold above which the dispatcher will reroute away
+   * from a candidate route when the failure genome precision is high enough
+   * to trust the signal.
+   *
+   * Defaults to 0.75 when omitted.
+   */
+  failure_genome_risk_threshold?: number;
+
+  /**
    * Repo-to-agent affinity table (issue #928).
    *
    * Maps a GitHub repo (e.g. "rapartlu/agent-orchestrator") to the canonical

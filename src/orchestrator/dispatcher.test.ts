@@ -13,6 +13,7 @@ import {
   extractRepoFromSourceRef,
   buildTargetRepoHeader,
 } from "./dispatcher.js";
+import { FailureInterceptor } from "./failure-interceptor.js";
 import type { AgentHealth } from "../state/store.js";
 import { StateStore } from "../state/store.js";
 import type { OrchestratorConfig } from "../config/schema.js";
@@ -3059,5 +3060,140 @@ describe("dispatch() — repo-to-agent affinity guardrail (issue #928)", () => {
       expect.any(String),
       expect.any(String),
     );
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Genome-risk routing (issue #1131)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("dispatch() — failure genome routing (issue #1131)", () => {
+  let store: StateStore;
+  let genomeSpy: ReturnType<typeof vi.spyOn>;
+
+  const makeGenomeConfig = (): OrchestratorConfig => ({
+    proxy: { url: "http://localhost:3457", manager_url: "http://localhost:3400", timeout_ms: 5000 },
+    orchestrator_dir: "/tmp",
+    base_dir: "/projects",
+    dispatch: {
+      failure_genome_risk_threshold: 0.75,
+    },
+    agents: {
+      "primary-agent": {
+        dir: "primary-agent",
+        description: "Primary implementation agent",
+        capabilities: ["test"],
+        owns_topics: ["genome"],
+        github: "owner/repo",
+        docker: { port: 3457, api_key: "secret" },
+      },
+      "backup-agent": {
+        dir: "backup-agent",
+        description: "Backup implementation agent",
+        capabilities: ["test"],
+        owns_topics: ["genome"],
+        github: "owner/repo",
+        docker: { port: 3458, api_key: "secret" },
+      },
+    },
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+    genomeSpy = vi.spyOn(FailureInterceptor.prototype, "check");
+  });
+
+  afterEach(() => {
+    genomeSpy.mockRestore();
+    store.close();
+  });
+
+  it("reroutes away from a high-risk genome candidate when genome accuracy is above 60%", async () => {
+    vi.spyOn(store, "getAntibodyFilterAccuracy").mockReturnValue({
+      window_days: 30,
+      total_flagged: 12,
+      true_positives: 9,
+      false_positives: 3,
+      operator_overrides: 0,
+      precision: 0.75,
+    });
+
+    genomeSpy.mockImplementation((_title, _taskType, agent) => {
+      if (agent === "primary-agent") {
+        return {
+          intercepted: true,
+          similarity_score: 0.88,
+          risk_score: 0.91,
+          lessons: ["avoid the risky path"],
+          suggest_model_upgrade: true,
+          matched_task_ids: ["task-a"],
+        };
+      }
+      return {
+        intercepted: false,
+        similarity_score: 0.35,
+        risk_score: 0.32,
+        lessons: [],
+        suggest_model_upgrade: false,
+        matched_task_ids: [],
+      };
+    });
+
+    const dispatcher = new Dispatcher(makeGenomeConfig(), store);
+    mockRoute.mockReturnValue([
+      { agentName: "primary-agent", confidence: 0.9, reason: "primary match" },
+      { agentName: "backup-agent", confidence: 0.7, reason: "fallback match" },
+    ]);
+    mockRouteWithFallback.mockResolvedValue([
+      { agentName: "primary-agent", confidence: 0.9, reason: "primary match" },
+      { agentName: "backup-agent", confidence: 0.7, reason: "fallback match" },
+    ]);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+
+    const result = await dispatcher.dispatch("Implement the genome-sensitive fix", {
+      source: "manual",
+    });
+
+    expect(result.agentName).toBe("backup-agent");
+    expect(mockSend).toHaveBeenCalledOnce();
+    expect(mockSend.mock.calls[0][0]).toBe("backup-agent");
+  });
+
+  it("does not query the genome when current accuracy is 60% or lower", async () => {
+    vi.spyOn(store, "getAntibodyFilterAccuracy").mockReturnValue({
+      window_days: 30,
+      total_flagged: 12,
+      true_positives: 6,
+      false_positives: 6,
+      operator_overrides: 0,
+      precision: 0.5,
+    });
+
+    const dispatcher = new Dispatcher(makeGenomeConfig(), store);
+    mockRoute.mockReturnValue([
+      { agentName: "primary-agent", confidence: 0.9, reason: "primary match" },
+      { agentName: "backup-agent", confidence: 0.7, reason: "fallback match" },
+    ]);
+    mockRouteWithFallback.mockResolvedValue([
+      { agentName: "primary-agent", confidence: 0.9, reason: "primary match" },
+      { agentName: "backup-agent", confidence: 0.7, reason: "fallback match" },
+    ]);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+
+    const result = await dispatcher.dispatch("Implement the genome-sensitive fix", {
+      source: "manual",
+    });
+
+    expect(result.agentName).toBe("primary-agent");
+    expect(mockSend).toHaveBeenCalledOnce();
+    expect(mockSend.mock.calls[0][0]).toBe("primary-agent");
   });
 });

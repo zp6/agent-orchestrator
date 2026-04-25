@@ -244,6 +244,14 @@ export const CONFIG_CATALOG: readonly ConfigEntry[] = [
     category: "dispatch",
   },
   {
+    key: "dispatch.failure_genome_risk_threshold",
+    source: "agents.yaml",
+    type: "number",
+    default: "0.75",
+    description: "Genome risk score above which the dispatcher reroutes away from the candidate route.",
+    category: "dispatch",
+  },
+  {
     key: "dispatch.timeout_retry_max",
     source: "hardcoded",
     type: "number",

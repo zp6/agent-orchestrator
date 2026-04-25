@@ -163,6 +163,7 @@ export function validateConfig(config: OrchestratorConfig): ValidationError[] {
   if (config.dispatch) {
     requirePositiveNumber(raw, "dispatch.max_open_prs", errors);
     requireNumberArray(raw, "dispatch.retry_delays_ms", errors);
+    requireNumberInRange(raw, "dispatch.failure_genome_risk_threshold", 0, 1, errors);
   }
 
   // ── LLM ──────────────────────────────────────────────────────────────────

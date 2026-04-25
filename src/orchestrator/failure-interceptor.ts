@@ -68,6 +68,12 @@ export interface InterceptionResult {
   intercepted: boolean;
   /** Top Jaccard similarity score across all candidates (0–1). */
   similarity_score: number;
+  /**
+   * Final risk score used by the dispatcher.  This folds in the similarity
+   * score plus a light agent-history adjustment so candidate routes can be
+   * ranked against each other.
+   */
+  risk_score: number;
   /** Top-3 failure post-mortems formatted as text strings. */
   lessons: string[];
   /** True when similarity >= threshold (recommend higher-tier model). */
@@ -92,10 +98,10 @@ export class FailureInterceptor {
    * Score the incoming task against recently failed tasks.
    *
    * @param taskTitle  Title of the incoming task (primary signal).
-   * @param _taskType  Task type (reserved for future per-type tuning).
-   * @param _agent     Target agent (reserved for future per-agent tuning).
+   * @param taskType   Task type used for agent-history adjustment.
+   * @param agent      Target agent used to bias the risk score by historical success rate.
    */
-  check(taskTitle: string, _taskType: string, _agent: string): InterceptionResult {
+  check(taskTitle: string, taskType: string, agent: string): InterceptionResult {
     const recentFailed = this.store.getRecentFailedTasksForSimilarity(14, 50);
     if (recentFailed.length === 0) {
       return this.emptyResult();
@@ -112,11 +118,13 @@ export class FailureInterceptor {
     // Sort descending, take top matches above threshold
     scored.sort((a, b) => b.similarity - a.similarity);
     const matches = scored.filter((c) => c.similarity >= this.threshold).slice(0, MAX_LESSONS);
+    const riskScore = this.computeRiskScore(scored[0]?.similarity ?? 0, taskType, agent);
 
     if (matches.length === 0) {
       return {
         intercepted: false,
         similarity_score: scored[0]?.similarity ?? 0,
+        risk_score: riskScore,
         lessons: [],
         suggest_model_upgrade: false,
         matched_task_ids: [],
@@ -124,13 +132,15 @@ export class FailureInterceptor {
     }
 
     const topScore = matches[0].similarity;
+    const adjustedRisk = this.computeRiskScore(topScore, taskType, agent);
     const lessons = matches.map((m) => this.extractLesson(m));
 
     return {
       intercepted: true,
       similarity_score: topScore,
+      risk_score: adjustedRisk,
       lessons,
-      suggest_model_upgrade: topScore >= FAILURE_INTERCEPTION_ALERT_THRESHOLD,
+      suggest_model_upgrade: adjustedRisk >= FAILURE_INTERCEPTION_ALERT_THRESHOLD,
       matched_task_ids: matches.map((m) => m.id),
     };
   }
@@ -173,9 +183,18 @@ export class FailureInterceptor {
     return {
       intercepted: false,
       similarity_score: 0,
+      risk_score: 0,
       lessons: [],
       suggest_model_upgrade: false,
       matched_task_ids: [],
     };
+  }
+
+  private computeRiskScore(similarityScore: number, taskType: string, agent: string): number {
+    const history = this.store.getTaskTypeSuccessRates(taskType, [agent])[0];
+    const agentPenalty = history?.success_rate === null || history?.success_rate === undefined
+      ? 0.15
+      : Math.max(0, 1 - history.success_rate);
+    return Math.min(1, similarityScore * 0.8 + agentPenalty * 0.2);
   }
 }

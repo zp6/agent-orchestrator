@@ -1,5 +1,5 @@
 import { AgentClient, type AgentResponse } from "../client/agent-client.js";
-import { Router, LLM_FALLBACK_THRESHOLD } from "./router.js";
+import { Router, LLM_FALLBACK_THRESHOLD, type AgentMatch } from "./router.js";
 import { LLMRouter } from "./llm-router.js";
 import { Planner, type Plan } from "./planner.js";
 import { PlanExecutor, type ExecutionResult } from "./executor.js";
@@ -333,6 +333,7 @@ export class Dispatcher {
   private router: Router;
   private store: StateStore;
   private planner: Planner;
+  private failureInterceptor: FailureInterceptor;
   private log = createLogger("dispatcher");
   /** Optional per-cycle duplicate-ID detector injected by the daemon (issue #935). */
   private duplicateIdDetector: DuplicateIdDetector | null = null;
@@ -346,6 +347,7 @@ export class Dispatcher {
     this.router = new Router(config, llmRouter);
     this.store = store;
     this.planner = new Planner(config, store);
+    this.failureInterceptor = new FailureInterceptor(store);
   }
 
   /**
@@ -527,6 +529,63 @@ export class Dispatcher {
     );
   }
 
+  private maybeApplyGenomeRiskRouting(params: {
+    message: string;
+    taskType: TaskType;
+    candidates: AgentMatch[];
+    selectedAgent: string;
+  }): {
+    selectedAgent: string;
+    redirectReason: string;
+    riskByAgent: Array<{ agentName: string; riskScore: number; similarityScore: number }>;
+  } | null {
+    const genomeAccuracy = this.store.getAntibodyFilterAccuracy(30).precision;
+    if (genomeAccuracy === null || genomeAccuracy <= 0.6) {
+      return null;
+    }
+
+    const threshold = this.config.dispatch?.failure_genome_risk_threshold ?? 0.75;
+    const riskByAgent = params.candidates.map((candidate) => {
+      const result = this.failureInterceptor.check(params.message, params.taskType, candidate.agentName);
+      return {
+        agentName: candidate.agentName,
+        riskScore: result.risk_score,
+        similarityScore: result.similarity_score,
+      };
+    });
+
+    if (riskByAgent.length === 0) {
+      return null;
+    }
+
+    const selected = riskByAgent.find((c) => c.agentName === params.selectedAgent);
+    if (!selected || selected.riskScore <= threshold) {
+      return null;
+    }
+
+    const best = [...riskByAgent].sort((a, b) => a.riskScore - b.riskScore)[0];
+    if (!best || best.agentName === params.selectedAgent || best.riskScore >= selected.riskScore) {
+      return {
+        selectedAgent: params.selectedAgent,
+        redirectReason:
+          `Failure genome accuracy ${(genomeAccuracy * 100).toFixed(0)}% is above the trust gate, ` +
+          `but ${params.selectedAgent} still scored ${(selected.riskScore * 100).toFixed(0)}% risk ` +
+          `against threshold ${(threshold * 100).toFixed(0)}%. No lower-risk alternative was available.`,
+        riskByAgent,
+      };
+    }
+
+    return {
+      selectedAgent: best.agentName,
+      redirectReason:
+        `Failure genome accuracy ${(genomeAccuracy * 100).toFixed(0)}% is above the trust gate; ` +
+        `rerouted from ${params.selectedAgent} ${(selected.riskScore * 100).toFixed(0)}% risk to ` +
+        `${best.agentName} ${(best.riskScore * 100).toFixed(0)}% risk ` +
+        `(threshold ${(threshold * 100).toFixed(0)}%).`,
+      riskByAgent,
+    };
+  }
+
   async dispatch(
     message: string,
     options?: {
@@ -583,6 +642,8 @@ export class Dispatcher {
     let routeMethod: "deterministic" | "llm" | "explicit" | "agent-scope-guard" | "capability-enforcement" = "explicit";
     let routeConfidence: number | null = null;
     let capabilityReroute: CapabilityEnforcementReroute | null = null;
+    let genomeRedirectReason: string | null = null;
+    let routeCandidates: AgentMatch[] = [];
 
     if (!agentName) {
       // Run deterministic routing first to detect if LLM fallback was used
@@ -598,6 +659,7 @@ export class Dispatcher {
         );
       }
       agentName = matches[0].agentName;
+      routeCandidates = matches;
       routeMethod = usedLLM ? "llm" : "deterministic";
       routeConfidence = matches[0].confidence;
       routeReason = `Auto-routed (${matches[0].reason}, confidence: ${matches[0].confidence.toFixed(2)})`;
@@ -630,6 +692,30 @@ export class Dispatcher {
           routeReason =
             `Repo-affinity correction: task from "${affinityTaskRepo}" redirected ` +
             `from auto-routed "${matches[0].agentName}" to canonical agent "${affinityMappedAgent}"`;
+        }
+      }
+
+      const genomeRouting = this.maybeApplyGenomeRiskRouting({
+        message,
+        taskType: options?.taskType ?? "implementation",
+        candidates: routeCandidates.length > 0 ? routeCandidates : matches,
+        selectedAgent: agentName,
+      });
+      if (genomeRouting) {
+        genomeRedirectReason = genomeRouting.redirectReason;
+        if (genomeRouting.selectedAgent !== agentName) {
+          this.log.warn("Failure genome routing: rerouting away from high-risk candidate", {
+            fromAgent: agentName,
+            toAgent: genomeRouting.selectedAgent,
+            sourceRef: options?.sourceRef,
+            redirectReason: genomeRouting.redirectReason,
+            risks: genomeRouting.riskByAgent,
+          });
+          agentName = genomeRouting.selectedAgent;
+          routeReason = `Genome-risk reroute: ${genomeRouting.redirectReason}`;
+          routeConfidence = matches.find((match) => match.agentName === agentName)?.confidence ?? routeConfidence;
+        } else {
+          routeReason = `Genome-risk gate: ${genomeRouting.redirectReason}`;
         }
       }
     }
@@ -1294,7 +1380,7 @@ export class Dispatcher {
       routeMethod,
       routeConfidence,
       sourceRef: options?.sourceRef,
-      redirectReason: capabilityReroute?.redirectReason,
+      redirectReason: capabilityReroute?.redirectReason ?? genomeRedirectReason ?? undefined,
     });
 
     // Prepend the target-repo header so the agent always knows which repo to
