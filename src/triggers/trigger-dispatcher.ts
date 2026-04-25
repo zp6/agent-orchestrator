@@ -593,6 +593,35 @@ export async function dispatchGitHubIssues(
               blockingPR: cooldown.blocking_pr,
             },
           );
+          // Issue #1158: Cross-wire reviewer PR guard cooldown hits to the local
+          // surge suppressor. Each reviewer-side cooldown block counts as an
+          // "already-in-review" event so that repeated reviewer queries within a
+          // 30-minute window eventually trigger the 2-hour local surge suppression.
+          // This means the daemon short-circuits locally after ≥5 reviewer blocks
+          // without querying the reviewer service every cycle indefinitely.
+          {
+            const surgeResult = store.recordDispatchSurgeEvent(issue.repo, issue.number);
+            if (surgeResult.suppressed) {
+              log.info(
+                "Dispatch surge suppression triggered via PR guard cooldown cross-wire (issue #1158)",
+                {
+                  sourceRef,
+                  repo: issue.repo,
+                  issueNumber: issue.number,
+                  expiresAt: surgeResult.expiresAt,
+                },
+              );
+              sendTelegramAlert(
+                `⚠️ *Dispatch surge suppressed* — \`${issue.repo}#${issue.number}\` has ` +
+                `≥5 PR guard cooldown hits in 30 min. Further dispatches blocked until ` +
+                `${new Date(surgeResult.expiresAt!).toLocaleTimeString("en-US", {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  timeZone: "America/New_York",
+                })} ET.`,
+              );
+            }
+          }
           reportDashboardSkip({
             issue_id: sourceRef,
             agent_name: agentName,
@@ -630,6 +659,32 @@ export async function dispatchGitHubIssues(
             skip_reason: "dispatch_surge_suppressed",
             condition_value: `suppression_active=true,expires=${surgeStatus.expiresAt}`,
             context: "Dispatch surge auto-suppression: issue has ≥5 already-in-review responses in 30 min",
+          });
+          result.skipped++;
+          continue;
+        }
+      }
+
+      // Cross-agent inflight guard (issue #1168): if any dispatch surge event was
+      // recorded for this (repo, issue) within the flood-gate window — even below
+      // the 5-event suppression threshold — a prior dispatch attempt (this cycle
+      // or a sibling within the same DB) already encountered an open PR. Skip to
+      // avoid wasting a dispatch slot on a near-certain already-in-review result.
+      // Note: this guards same-DB concurrency; cross-DB dedup (e.g. codex vs
+      // claude orchestrator instances) relies on the GitHub open_pr_exists check
+      // in runGitHubPreDispatchValidation below.
+      {
+        if (store.hasRecentSurgeEvent(issue.repo, issue.number, GUARD_FLOOD_GATE_WINDOW_MS)) {
+          log.info(
+            "Skipping dispatch: recent already-in-review event within flood-gate window (issue #1168)",
+            { sourceRef, agentName, windowMs: GUARD_FLOOD_GATE_WINDOW_MS },
+          );
+          reportDashboardSkip({
+            issue_id: sourceRef,
+            agent_name: agentName,
+            skip_reason: "cross_agent_inflight_guard",
+            condition_value: `recent_surge_event=true,window_ms=${GUARD_FLOOD_GATE_WINDOW_MS}`,
+            context: "Cross-agent inflight guard: recent already-in-review surge event within flood-gate window",
           });
           result.skipped++;
           continue;

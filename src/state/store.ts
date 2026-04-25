@@ -10130,6 +10130,33 @@ export class StateStore {
   }
 
   /**
+   * Check whether any dispatch surge event was recorded for (repo, issueNumber)
+   * within the last `windowMs` milliseconds.
+   *
+   * Used as a cross-agent inflight guard (issue #1168): if a recent
+   * "already-in-review" event exists for this issue (even just one, below the
+   * 5-event suppression threshold), the caller can skip dispatch rather than
+   * waste a slot on a near-certain already-in-review result.
+   *
+   * @param repo         Repository slug, e.g. "rapartlu/agent-orchestrator"
+   * @param issueNumber  GitHub issue number
+   * @param windowMs     Look-back window in milliseconds (default: 60 min)
+   * @returns            true if at least one surge event exists within the window
+   */
+  hasRecentSurgeEvent(repo: string, issueNumber: number, windowMs = 3_600_000): boolean {
+    this.runDispatchSurgeSuppressionMigration();
+    const cutoff = new Date(Date.now() - windowMs).toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM dispatch_surge_events
+         WHERE repo = ? AND issue_number = ? AND event_at >= ?
+         LIMIT 1`,
+      )
+      .get(repo, issueNumber, cutoff);
+    return row !== undefined;
+  }
+
+  /**
    * Check if dispatch surge suppression is active for an issue.
    *
    * @param repo            Repository slug, e.g. "rapartlu/agent-orchestrator"
