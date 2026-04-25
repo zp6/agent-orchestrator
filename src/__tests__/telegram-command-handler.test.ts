@@ -7,6 +7,7 @@ import type {
   IStateStore,
   MergeQueueEntry,
   QualityHealthReport,
+  QualitySummaryReport,
   SupervisorDecisionQuery,
   SupervisorDecisionRecord,
   Task,
@@ -39,8 +40,11 @@ function makeStore(
   opts: {
     verificationRecord?: VerificationResultRecord | null;
     qualityReport?: QualityHealthReport;
+    qualitySummaryReport?: QualitySummaryReport;
   } = {},
-): IStateStore {
+): IStateStore & {
+  getQualitySummaryReport(windowHours?: number, threshold?: number): QualitySummaryReport;
+} {
   const systemFlags = new Map<string, string>();
   const decisions: SupervisorDecisionRecord[] = [];
 
@@ -123,6 +127,17 @@ function makeStore(
         null_score_count: 0,
         below_threshold_count: 0,
         system_avg_score: null,
+        per_agent: [],
+      },
+    getQualitySummaryReport: () =>
+      opts.qualitySummaryReport ?? {
+        generated_at: "2026-04-07T12:00:00.000Z",
+        window_hours: 24,
+        threshold: 0.8,
+        total_approved: 0,
+        below_threshold_count: 0,
+        below_threshold_rate: null,
+        worst_agent: null,
         per_agent: [],
       },
     getTasksInOperatorReview: () => tasks.filter((t) => t.verification_status === "needs_operator_review"),
@@ -590,6 +605,58 @@ describe("/quality command — live quality health snapshot", () => {
 
     expect(reply).toContain("last 20 tasks per agent");
     expect(reply).toContain("No quality scores recorded yet");
+  });
+});
+
+describe("/quality-summary command — rolling approval-quality digest", () => {
+  it("renders total approvals, marginal rate, and the worst agent", async () => {
+    const qualitySummaryReport: QualitySummaryReport = {
+      generated_at: "2026-04-07T12:00:00.000Z",
+      window_hours: 24,
+      threshold: 0.8,
+      total_approved: 5,
+      below_threshold_count: 2,
+      below_threshold_rate: 0.4,
+      worst_agent: {
+        agent_name: "beta",
+        approved_count: 2,
+        below_threshold_count: 2,
+        below_threshold_rate: 1,
+        avg_quality_score: 0.76,
+      },
+      per_agent: [
+        {
+          agent_name: "beta",
+          approved_count: 2,
+          below_threshold_count: 2,
+          below_threshold_rate: 1,
+          avg_quality_score: 0.76,
+        },
+        {
+          agent_name: "gamma",
+          approved_count: 1,
+          below_threshold_count: 0,
+          below_threshold_rate: 0,
+          avg_quality_score: 0.82,
+        },
+        {
+          agent_name: "alpha",
+          approved_count: 2,
+          below_threshold_count: 0,
+          below_threshold_rate: 0,
+          avg_quality_score: 0.93,
+        },
+      ],
+    };
+    const store = makeStore([], { qualitySummaryReport });
+
+    const reply = await runTelegramCommand(store, "/quality-summary");
+
+    expect(reply).toContain("Quality Summary");
+    expect(reply).toContain("Approved scored tasks: *5*");
+    expect(reply).toContain("Below 0.80: *2* (40.0%)");
+    expect(reply).toContain("Worst agent: `beta`");
+    expect(reply).toContain("avg *0.76*");
   });
 });
 

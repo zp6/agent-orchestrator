@@ -31,6 +31,7 @@
  *   /reject <task-id> [note]  → reject a held task from the operator review queue
  *   /routing-violations [n]   → list the last N agent-to-repo routing violations (default 10)
  *   /quality-health            → quality system health: bypass rate, sparkline, and bypassed task list
+ *   /quality-summary           → rolling 24h approval-quality digest: total approvals, marginal rate, worst agent
  *   /backfill-bypass-reasons   → backfill bypass_reason for historical sub-0.60 approved tasks (idempotent)
  *   /low-score [threshold] [limit] → approved tasks with quality score below threshold (default 0.75), with dimension breakdown
  *   /memory [expand <topic>|digest] → semantic task memory digest or full topic expansion
@@ -76,6 +77,12 @@ import {
   formatLowScoreFeedForTelegram,
   LOW_SCORE_FEED_THRESHOLD,
 } from "../reviewer/low-score-feed.js";
+import {
+  buildQualitySummaryReport,
+  formatQualitySummaryForTelegram,
+  QUALITY_SUMMARY_LOOKBACK_HOURS,
+  QUALITY_SUMMARY_THRESHOLD,
+} from "../reviewer/quality-summary.js";
 import type { ISemanticMemoryStore } from "../state/types.js";
 import {
   buildMemoryDigest,
@@ -157,6 +164,7 @@ type CommandName =
   | "reject"
   | "routing-violations"
   | "quality-health"
+  | "quality-summary"
   | "backfill-bypass-reasons"
   | "low-score"
   | "memory"
@@ -199,6 +207,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "reject",
   "routing-violations",
   "quality-health",
+  "quality-summary",
   "backfill-bypass-reasons",
   "low-score",
   "memory",
@@ -506,6 +515,15 @@ async function executeCommand(
 
     case "quality-health":
       return handleQualitySystemHealth(store, dashboardUrl);
+
+    case "quality-summary": {
+      const hours = parseInt(cmd.args[0] ?? String(QUALITY_SUMMARY_LOOKBACK_HOURS), 10);
+      const windowHours = Number.isNaN(hours) || hours < 1 ? QUALITY_SUMMARY_LOOKBACK_HOURS : Math.min(hours, 168);
+      const parsedThreshold = Number.parseFloat(cmd.args[1] ?? String(QUALITY_SUMMARY_THRESHOLD));
+      const threshold =
+        Number.isNaN(parsedThreshold) ? QUALITY_SUMMARY_THRESHOLD : Math.min(Math.max(parsedThreshold, 0), 1);
+      return handleQualitySummary(store, windowHours, threshold);
+    }
 
     case "backfill-bypass-reasons":
       return handleBackfillBypassReasons(store);
@@ -1367,6 +1385,18 @@ function handleQuality(store: ITelegramStateStore, windowTasks: number): string 
   }
 
   return lines.join("\n");
+}
+
+function handleQualitySummary(
+  store: ITelegramStateStore,
+  windowHours: number = QUALITY_SUMMARY_LOOKBACK_HOURS,
+  threshold: number = QUALITY_SUMMARY_THRESHOLD,
+): string {
+  const summaryStore = store as ITelegramStateStore & {
+    getQualitySummaryReport(windowHours?: number, threshold?: number): ReturnType<typeof buildQualitySummaryReport>;
+  };
+  const report = buildQualitySummaryReport(summaryStore, { windowHours, threshold });
+  return formatQualitySummaryForTelegram(report);
 }
 
 // ── /quality tasks handler ────────────────────────────────────────────────

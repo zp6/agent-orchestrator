@@ -733,6 +733,25 @@ export type {
   BypassBand,
 } from "./reviewer/quality-system-health.js";
 
+// Quality Summary — daily Telegram digest + `/quality-summary` command.
+//
+// Reports rolling 24h approval quality: total approvals, count below the
+// 0.80 floor, marginal rate percentage, and the worst-scoring agent.
+export {
+  QualitySummaryScheduler,
+  buildQualitySummaryReport,
+  formatQualitySummaryForTelegram,
+  QUALITY_SUMMARY_THRESHOLD,
+  QUALITY_SUMMARY_LOOKBACK_HOURS,
+  FLAG_LAST_QUALITY_SUMMARY_SENT,
+} from "./reviewer/quality-summary.js";
+export type {
+  QualitySummaryDigestStore,
+  QualitySummaryDigestOptions,
+  QualitySummarySchedulerOptions,
+  IQualitySummaryStore,
+} from "./reviewer/quality-summary.js";
+
 // Bypass-audit endpoint + daily Telegram digest (issue #398).
 // Lists all tasks approved below the 0.60 quality floor in the last 7 days with
 // their bypass_reason (or 'none').  Mount as /api/bypass-audit in the orchestrator;

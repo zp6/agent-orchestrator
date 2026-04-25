@@ -28,6 +28,8 @@ import type {
   CalibrationDriftAlert,
   AgentQualityHealthRow,
   QualityHealthReport,
+  QualitySummaryAgentRow,
+  QualitySummaryReport,
   AgentSLAThreshold,
   LlmCallEvent,
   LlmTokenStats,
@@ -1862,6 +1864,87 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
         allScores.length > 0
           ? allScores.reduce((sum, score) => sum + score, 0) / allScores.length
           : null,
+      per_agent: perAgent,
+    };
+  }
+
+  /**
+   * Return a rolling approval-quality summary over the most recent
+   * `windowHours` hours.
+   *
+   * This powers the Telegram /quality-summary command and daily digest.
+   * Only approved tasks with a non-null quality_score are counted.
+   */
+  getQualitySummaryReport(
+    windowHours: number = 24,
+    threshold: number = 0.80,
+  ): QualitySummaryReport {
+    const lookbackHours = Number.isFinite(windowHours) && windowHours >= 1 ? Math.floor(windowHours) : 24;
+    const qualityThreshold =
+      Number.isFinite(threshold) && threshold >= 0 && threshold <= 1 ? threshold : 0.80;
+
+    type QualitySummaryRow = {
+      agent_name: string;
+      approved_count: number;
+      below_threshold_count: number;
+      avg_quality_score: number | null;
+    };
+
+    const totals = this.db
+      .prepare(
+        `SELECT
+           COUNT(*) AS total_approved,
+           COALESCE(SUM(CASE WHEN quality_score < ? THEN 1 ELSE 0 END), 0) AS below_threshold_count
+         FROM tasks
+         WHERE verification_status = 'approved'
+           AND quality_score IS NOT NULL
+           AND updated_at >= datetime('now', ? || ' hours')`,
+      )
+      .get(qualityThreshold, `-${lookbackHours}`) as
+      | {
+          total_approved: number;
+          below_threshold_count: number;
+        }
+      | undefined;
+
+    const agentRows = this.db
+      .prepare(
+        `SELECT
+           agent_name,
+           COUNT(*) AS approved_count,
+           COALESCE(SUM(CASE WHEN quality_score < ? THEN 1 ELSE 0 END), 0) AS below_threshold_count,
+           AVG(quality_score) AS avg_quality_score
+         FROM tasks
+         WHERE verification_status = 'approved'
+           AND quality_score IS NOT NULL
+           AND agent_name IS NOT NULL
+           AND updated_at >= datetime('now', ? || ' hours')
+         GROUP BY agent_name
+         ORDER BY avg_quality_score ASC, below_threshold_count DESC, approved_count DESC, agent_name ASC`,
+      )
+      .all(qualityThreshold, `-${lookbackHours}`) as QualitySummaryRow[];
+
+    const perAgent: QualitySummaryAgentRow[] = agentRows.map((row) => ({
+      agent_name: row.agent_name,
+      approved_count: row.approved_count,
+      below_threshold_count: row.below_threshold_count,
+      below_threshold_rate:
+        row.approved_count > 0 ? row.below_threshold_count / row.approved_count : 0,
+      avg_quality_score: row.avg_quality_score,
+    }));
+
+    const totalApproved = totals?.total_approved ?? 0;
+    const belowThresholdCount = totals?.below_threshold_count ?? 0;
+
+    return {
+      generated_at: new Date().toISOString(),
+      window_hours: lookbackHours,
+      threshold: qualityThreshold,
+      total_approved: totalApproved,
+      below_threshold_count: belowThresholdCount,
+      below_threshold_rate:
+        totalApproved > 0 ? belowThresholdCount / totalApproved : null,
+      worst_agent: perAgent[0] ?? null,
       per_agent: perAgent,
     };
   }

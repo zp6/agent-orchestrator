@@ -560,6 +560,32 @@ export interface QualityHealthReport {
 }
 
 /**
+ * Per-agent rolling approval quality summary over the last 24h.
+ * Used by the Telegram /quality-summary command and daily digest.
+ */
+export interface QualitySummaryAgentRow {
+  agent_name: string;
+  approved_count: number;
+  below_threshold_count: number;
+  below_threshold_rate: number;
+  avg_quality_score: number | null;
+}
+
+/**
+ * Rolling 24h approval-quality summary returned by `getQualitySummaryReport()`.
+ */
+export interface QualitySummaryReport {
+  generated_at: string;
+  window_hours: number;
+  threshold: number;
+  total_approved: number;
+  below_threshold_count: number;
+  below_threshold_rate: number | null;
+  worst_agent: QualitySummaryAgentRow | null;
+  per_agent: QualitySummaryAgentRow[];
+}
+
+/**
  * Drift alert for a single agent.
  * Compares the recent window mean score to a baseline window mean.
  */
