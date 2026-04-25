@@ -17,6 +17,9 @@
  *   GET /misrouting?agent=claude-research-agent&days=7
  *   GET /supervisor-decisions                         — recent supervisor dispatch decisions (issue #1140)
  *   GET /supervisor-decisions?limit=50&agent=claude-agent-orchestrator&days=7
+ *   GET /marginal-score-tasks                         — tasks with marginal quality scores + trend + per-agent (issue #597)
+ *   GET /marginal-score-tasks?days=30&min_score=0.5&max_score=0.75&agent=<name>&limit=50&offset=0
+ *   POST /marginal-score-tasks/:id/redispatch         — create a re-dispatch task for a marginal-score task
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
@@ -28,6 +31,7 @@ import {
   type VerificationCalibrationRecommendationRow,
   type SupervisorDecisionRecord,
   type StandupQualityAgentTrend,
+  type MarginalScoreTasksResult,
 } from "../state/store.js";
 import { createLogger } from "./logger.js";
 
@@ -195,6 +199,53 @@ export interface StandupQualityResponse {
 }
 
 /**
+ * JSON response shape for GET /marginal-score-tasks (issue #597).
+ * Tasks with quality scores in a configurable marginal range,
+ * plus daily trend data and per-agent breakdown for dashboard rendering.
+ */
+export interface MarginalScoreTasksResponse {
+  /** Rolling window in days. */
+  days: number;
+  /** Lower bound of marginal range (inclusive). */
+  min_score: number;
+  /** Upper bound of marginal range (exclusive). */
+  max_score: number;
+  /** Agent name filter applied (null = all agents). */
+  agent: string | null;
+  /** Total matching tasks across all pages. */
+  total: number;
+  /** Average quality score across all matching tasks. */
+  avg_score: number | null;
+  /** Pagination: max records per page. */
+  limit: number;
+  /** Pagination: offset. */
+  offset: number;
+  /** Task records for this page. */
+  tasks: MarginalScoreTasksResult["tasks"];
+  /** Daily marginal-task counts (oldest first), suitable for sparkline rendering. */
+  trend: MarginalScoreTasksResult["trend"];
+  /** Per-agent count and average score breakdown. */
+  per_agent: MarginalScoreTasksResult["per_agent"];
+  /** ISO timestamp of when this response was generated. */
+  generated_at: string;
+}
+
+/**
+ * JSON response shape for POST /marginal-score-tasks/:id/redispatch.
+ * Confirms creation of a re-dispatch task for the given marginal-score task.
+ */
+export interface MarginalRedispatchResponse {
+  /** ID of the original marginal-score task. */
+  original_task_id: string;
+  /** Newly created re-dispatch task ID. */
+  new_task_id: string;
+  /** Title of the new task. */
+  new_task_title: string;
+  /** ISO timestamp of when the re-dispatch was created. */
+  created_at: string;
+}
+
+/**
  * JSON response shape for GET /misrouting.
  * Returns implementation tasks that were dispatched to a research-only agent.
  */
@@ -254,7 +305,10 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
-    if (req.method !== "GET") {
+    // POST is allowed only for the redispatch action on marginal-score-tasks
+    const isRedispatch =
+      req.method === "POST" && /^\/marginal-score-tasks\/[^/]+\/redispatch$/.test(url.pathname);
+    if (req.method !== "GET" && !isRedispatch) {
       sendJson(res, 405, { error: "Method not allowed" });
       return;
     }
@@ -519,6 +573,108 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /marginal-score-tasks ─────────────────────────────────────────────
+    // Returns tasks with quality scores in the configurable marginal range,
+    // daily trend data for sparkline rendering, and per-agent breakdown.
+    // Supports operator "re-dispatch" workflow (see POST below).
+    //
+    // Query params:
+    //   days=N          — rolling window in days (default 30, max 90)
+    //   min_score=0.50  — lower bound inclusive (default 0.50)
+    //   max_score=0.75  — upper bound exclusive (default 0.75)
+    //   agent=<name>    — filter to a single agent (default: all agents)
+    //   limit=N         — max tasks per page (default 50, max 200)
+    //   offset=N        — pagination offset (default 0)
+    if (req.method === "GET" && url.pathname === "/marginal-score-tasks") {
+      try {
+        const rawDays = parseInt(url.searchParams.get("days") ?? "30", 10);
+        const days = isNaN(rawDays) || rawDays < 1 ? 30 : Math.min(rawDays, MAX_WINDOW_DAYS);
+
+        const rawMin = parseFloat(url.searchParams.get("min_score") ?? "0.5");
+        const rawMax = parseFloat(url.searchParams.get("max_score") ?? "0.75");
+        const minScore = isNaN(rawMin) || rawMin < 0 ? 0.5 : Math.min(rawMin, 1);
+        const maxScore = isNaN(rawMax) || rawMax <= minScore ? minScore + 0.25 : Math.min(rawMax, 1);
+
+        const agent = url.searchParams.get("agent") || null;
+        const rawLimit = parseInt(url.searchParams.get("limit") ?? "50", 10);
+        const limit = isNaN(rawLimit) || rawLimit < 1 ? 50 : Math.min(rawLimit, 200);
+        const rawOffset = parseInt(url.searchParams.get("offset") ?? "0", 10);
+        const offset = isNaN(rawOffset) || rawOffset < 0 ? 0 : rawOffset;
+
+        const result = store.getMarginalScoreTasks(days, minScore, maxScore, agent, limit, offset);
+        const body: MarginalScoreTasksResponse = {
+          days,
+          min_score: minScore,
+          max_score: maxScore,
+          agent,
+          total: result.total,
+          avg_score: result.avg_score,
+          limit,
+          offset,
+          tasks: result.tasks,
+          trend: result.trend,
+          per_agent: result.per_agent,
+          generated_at: new Date().toISOString(),
+        };
+        sendJson(res, 200, body);
+      } catch (err) {
+        log.warn("Failed to fetch marginal-score tasks", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to fetch marginal-score tasks" });
+      }
+      return;
+    }
+
+    // ── POST /marginal-score-tasks/:id/redispatch ─────────────────────────────
+    // Creates a re-dispatch task for the given marginal-score task.
+    // The new task inherits the original's description, agent, and source_ref,
+    // with a [redispatch] prefix in the title for easy identification.
+    //
+    // Query params (same defaults as GET):
+    //   min_score=0.50  — lower bound (must match the marginal range)
+    //   max_score=0.75  — upper bound
+    //
+    // Returns 201 with the new task ID, or 404 if the task is not found /
+    // does not fall within the marginal range.
+    if (isRedispatch) {
+      try {
+        const parts = url.pathname.split("/");
+        // pathname = /marginal-score-tasks/:id/redispatch → parts[2] is the id
+        const taskId = parts[2];
+
+        const rawMin = parseFloat(url.searchParams.get("min_score") ?? "0.5");
+        const rawMax = parseFloat(url.searchParams.get("max_score") ?? "0.75");
+        const minScore = isNaN(rawMin) || rawMin < 0 ? 0.5 : Math.min(rawMin, 1);
+        const maxScore = isNaN(rawMax) || rawMax <= minScore ? minScore + 0.25 : Math.min(rawMax, 1);
+
+        const newTask = store.createMarginalRedispatchTask(taskId, minScore, maxScore);
+        if (!newTask) {
+          sendJson(res, 404, {
+            error: "Task not found or not in the marginal score range",
+            task_id: taskId,
+            min_score: minScore,
+            max_score: maxScore,
+          });
+          return;
+        }
+
+        const body: MarginalRedispatchResponse = {
+          original_task_id: taskId,
+          new_task_id: newTask.id,
+          new_task_title: newTask.title,
+          created_at: newTask.created_at,
+        };
+        sendJson(res, 201, body);
+      } catch (err) {
+        log.warn("Failed to create marginal-score redispatch task", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to create redispatch task" });
+      }
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -540,6 +696,8 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
         "/api/ulid-collisions",
         "/supervisor-decisions",
         "/standup-quality",
+        "/marginal-score-tasks",
+        "POST /marginal-score-tasks/:id/redispatch",
       ],
     });
   });

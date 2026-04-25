@@ -237,6 +237,8 @@ An embedded HTTP server starts alongside the daemon on port **3472** (same as th
 | `GET /api/ulid-collisions` | ULID collision log — events where `createTask()` detected a duplicate ULID before INSERT; `createTask()` retries with a fresh ULID so the task still succeeds, but every collision event is logged here for operator audit; any non-empty result warrants ULID generator investigation (issue #1133) |
 | `GET /supervisor-decisions` | Supervisor dispatch rationale feed — recent supervisor decisions with agent, action, reason, rationale, issue_refs, hard_gates, and outcome; supports `?limit=N&agent=<name>&days=N` filters; unblocks dashboard #570 (issue #1140) |
 | `GET /standup-quality` | Per-agent standup quality trend — chronological score arrays (sparkline-ready), avg/latest scores, trend direction, and low-streak alert flag; supports `?agent=<name>&days=N` (default 30 days); populated by verification loop when standup tasks are scored (issue #591) |
+| `GET /marginal-score-tasks` | Tasks with quality scores in a configurable marginal range (default 0.5–0.75) — task feed, daily trend for sparkline, and per-agent breakdown; supports `?days=N&min_score=X&max_score=Y&agent=<name>&limit=N&offset=N` (issue #597) |
+| `POST /marginal-score-tasks/:id/redispatch` | Create a re-dispatch task for a marginal-score task; copies description and agent with `[redispatch]` prefix; returns 201 with new task ID (issue #597) |
 
 The dashboard agent polls `/dispatch-efficiency` to populate the dispatch efficiency panel without needing CLI access.
 

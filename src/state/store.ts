@@ -197,7 +197,7 @@ export interface FailureInterceptionStats {
   prevention_rate: number;
 }
 
-export type TaskSource = "github" | "linear" | "slack" | "manual" | "pr-feedback";
+export type TaskSource = "github" | "linear" | "slack" | "manual" | "pr-feedback" | "marginal-redispatch";
 /**
  * Identifies the kind of work a task represents.
  * Built-in types: "implementation" | "research" | "facilitation".
@@ -1049,6 +1049,37 @@ export interface InFlightReservation {
   reserved_at: string;
   /** ISO timestamp after which the reservation is considered expired */
   expires_at: string;
+}
+
+/**
+ * Result shape for `getMarginalScoreTasks()`.
+ * Exposed via `GET /marginal-score-tasks`.
+ */
+export interface MarginalScoreTasksResult {
+  /** Total matching tasks (across all pages). */
+  total: number;
+  /** Average quality score across all matching tasks, or null if none. */
+  avg_score: number | null;
+  /** Task records for this page. */
+  tasks: Array<{
+    id: string;
+    title: string;
+    description: string | null;
+    source: string;
+    source_ref: string | null;
+    status: string;
+    agent_name: string | null;
+    quality_score: number;
+    verification_status: string | null;
+    verification_notes: string | null;
+    task_type: string;
+    created_at: string;
+    updated_at: string;
+  }>;
+  /** Daily marginal-score task counts (oldest first), suitable for trend sparkline. */
+  trend: Array<{ day: string; count: number }>;
+  /** Per-agent breakdown: how many marginal tasks each agent produced. */
+  per_agent: Array<{ agent_name: string; count: number; avg_score: number }>;
 }
 
 /**
@@ -11656,6 +11687,175 @@ export class StateStore {
       ORDER BY created_at DESC
       LIMIT ?
     `).all(cutoff, limit) as Array<{ id: string; title: string; result: string | null; agent: string }>;
+  }
+
+  /**
+   * Return tasks with quality scores in the marginal range (minScore ≤ score < maxScore).
+   * Includes per-day trend data and per-agent breakdown for dashboard panels.
+   *
+   * @param days      Rolling window in days (0 = no cutoff)
+   * @param minScore  Lower bound of marginal range (inclusive, default 0.5)
+   * @param maxScore  Upper bound of marginal range (exclusive, default 0.75)
+   * @param agent     Optional agent name filter
+   * @param limit     Max tasks to return (default 50, max 200)
+   * @param offset    Pagination offset (default 0)
+   */
+  getMarginalScoreTasks(
+    days = 30,
+    minScore = 0.5,
+    maxScore = 0.75,
+    agent: string | null = null,
+    limit = 50,
+    offset = 0,
+  ): MarginalScoreTasksResult {
+    const cap = Math.min(limit, 200);
+    const cutoff =
+      days > 0
+        ? new Date(Date.now() - days * 86_400_000).toISOString()
+        : "0000-00-00T00:00:00.000Z";
+
+    const agentFilter = agent ? "AND agent_name = ?" : "";
+    const baseParams: (string | number)[] = [minScore, maxScore, cutoff];
+    if (agent) baseParams.push(agent);
+
+    const tasks = this.db
+      .prepare(
+        `SELECT id, title, description, source, source_ref, status, agent_name,
+                quality_score, verification_status, verification_notes,
+                task_type, created_at, updated_at
+         FROM tasks
+         WHERE quality_score >= ? AND quality_score < ?
+           AND created_at >= ?
+           AND parent_task_id IS NULL
+           ${agentFilter}
+         ORDER BY quality_score ASC, created_at DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(...baseParams, cap, offset) as Array<{
+        id: string;
+        title: string;
+        description: string | null;
+        source: string;
+        source_ref: string | null;
+        status: string;
+        agent_name: string | null;
+        quality_score: number;
+        verification_status: string | null;
+        verification_notes: string | null;
+        task_type: string;
+        created_at: string;
+        updated_at: string;
+      }>;
+
+    const countParams: (string | number)[] = [minScore, maxScore, cutoff];
+    if (agent) countParams.push(agent);
+    const total = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM tasks
+           WHERE quality_score >= ? AND quality_score < ?
+             AND created_at >= ?
+             AND parent_task_id IS NULL
+             ${agentFilter}`,
+        )
+        .get(...countParams) as { n: number }
+    ).n;
+
+    const avgRow = (
+      this.db
+        .prepare(
+          `SELECT AVG(quality_score) AS avg FROM tasks
+           WHERE quality_score >= ? AND quality_score < ?
+             AND created_at >= ?
+             AND parent_task_id IS NULL
+             ${agentFilter}`,
+        )
+        .get(...countParams) as { avg: number | null }
+    );
+
+    // Daily trend: count of marginal tasks per UTC date
+    const trendParams: (string | number)[] = [minScore, maxScore, cutoff];
+    if (agent) trendParams.push(agent);
+    const trendRows = this.db
+      .prepare(
+        `SELECT DATE(created_at) AS day, COUNT(*) AS count
+         FROM tasks
+         WHERE quality_score >= ? AND quality_score < ?
+           AND created_at >= ?
+           AND parent_task_id IS NULL
+           ${agentFilter}
+         GROUP BY day
+         ORDER BY day ASC`,
+      )
+      .all(...trendParams) as Array<{ day: string; count: number }>;
+
+    // Per-agent breakdown
+    const agentParams: (string | number)[] = [minScore, maxScore, cutoff];
+    if (agent) agentParams.push(agent);
+    const agentRows = this.db
+      .prepare(
+        `SELECT agent_name, COUNT(*) AS count, AVG(quality_score) AS avg_score
+         FROM tasks
+         WHERE quality_score >= ? AND quality_score < ?
+           AND created_at >= ?
+           AND parent_task_id IS NULL
+           ${agentFilter}
+         GROUP BY agent_name
+         ORDER BY count DESC`,
+      )
+      .all(...agentParams) as Array<{ agent_name: string | null; count: number; avg_score: number }>;
+
+    return {
+      total,
+      avg_score: avgRow.avg !== null ? Math.round(avgRow.avg * 1000) / 1000 : null,
+      tasks,
+      trend: trendRows,
+      per_agent: agentRows.map((r) => ({
+        agent_name: r.agent_name ?? "(unknown)",
+        count: r.count,
+        avg_score: Math.round(r.avg_score * 1000) / 1000,
+      })),
+    };
+  }
+
+  /**
+   * Create a re-dispatch task for a marginal-score task.
+   * Copies the original task description and title with a `[redispatch]` prefix,
+   * targeting the same agent and source_ref. The original task's ID is stored
+   * as `parent_task_id` for lineage tracking.
+   *
+   * Returns the newly created task or null if the original task is not found
+   * or does not have a marginal quality score.
+   */
+  createMarginalRedispatchTask(
+    originalTaskId: string,
+    minScore = 0.5,
+    maxScore = 0.75,
+  ): Task | null {
+    const original = this.getTask(originalTaskId);
+    if (!original) return null;
+    if (
+      original.quality_score === null ||
+      original.quality_score < minScore ||
+      original.quality_score >= maxScore
+    ) {
+      return null;
+    }
+
+    const scoreStr = original.quality_score.toFixed(2);
+    const newTitle = `[redispatch] ${original.title} (marginal score: ${scoreStr})`;
+
+    return this.createTask({
+      title: newTitle,
+      description: original.description
+        ? `Re-dispatched from marginal-score task ${originalTaskId} (score: ${scoreStr}).\n\n${original.description}`
+        : `Re-dispatched from marginal-score task ${originalTaskId} (score: ${scoreStr}).`,
+      source: "marginal-redispatch",
+      source_ref: original.source_ref ?? undefined,
+      agent_name: original.agent_name ?? undefined,
+      task_type: original.task_type as TaskType,
+      parent_task_id: originalTaskId,
+    });
   }
 }
 
