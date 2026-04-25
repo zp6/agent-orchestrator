@@ -2479,8 +2479,21 @@ export class Daemon {
           }
         });
 
+      // Build signal JSON matching the meeting_request schema the facilitator reads.
+      const signalJson = JSON.stringify({
+        topic: payload.topic ?? request.key,
+        suggestedFormat: payload.suggestedFormat ?? undefined,
+        urgency: payload.urgency ?? "normal",
+        suggestedParticipants: Array.isArray(payload.suggestedParticipants)
+          ? payload.suggestedParticipants
+          : undefined,
+        context: payload.context ?? undefined,
+        key: request.key,
+        agent: request.agent,
+      });
+
       this.dispatcher.dispatch(
-        `Meeting request: ${payload.topic ?? request.key}\n\nFormat suggestion: ${payload.suggestedFormat ?? "auto"}\nRequested by: ${request.agent}\nContext: ${payload.context ?? "none"}\nUrgency: ${payload.urgency ?? "normal"}`,
+        `Process meeting request: ${signalJson}`,
         {
           agentName: facilitatorName,
           source: "manual",

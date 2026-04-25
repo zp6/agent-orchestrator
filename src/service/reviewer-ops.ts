@@ -99,6 +99,21 @@ export async function verifyTask(
       result.notes = `[Quality floor] Approval overridden — score ${result.score.toFixed(2)} is below configured minimum ${minScore}. Original notes: ${result.notes}`;
     }
 
+    // Score provenance guard (reviewer#485): block auto-approval when the score
+    // is a hardcoded default rather than a value parsed from the LLM response.
+    // A default_fallback score means the reviewer could not produce a meaningful
+    // assessment — approving silently in that state is a reliability hole.
+    if (result.approved && result.score_source === "default_fallback") {
+      verifierLog.warn("Default-fallback score intercepted — blocking auto-approval (score provenance guard)", {
+        taskId,
+        score: result.score,
+        score_source: result.score_source,
+        agent: task.agent_name,
+      });
+      result.approved = false;
+      result.notes = `[Score provenance guard] Approval blocked — score originated from a parse-error default, not the reviewer LLM. Original notes: ${result.notes}`;
+    }
+
     verifierLog.info("Verification complete", {
       taskId,
       approved: result.approved,

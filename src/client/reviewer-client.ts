@@ -30,6 +30,15 @@ export interface VerificationResult {
    *  Research: thoroughness, evidence, alternatives, honesty
    *  Facilitation: decision_quality, format_selection, participant_selection, clarity */
   dimensions?: Record<string, number>;
+  /**
+   * Provenance of the score value.
+   *
+   * - `'llm'`              — score was parsed from the reviewer LLM response
+   * - `'default_fallback'` — score is a hardcoded default (parse error, JSON
+   *                          truncation, or unrecognised format); auto-approval
+   *                          MUST be blocked for this provenance
+   */
+  score_source?: "llm" | "default_fallback";
 }
 
 export interface PRReviewResult {
@@ -580,6 +589,7 @@ export class ReviewerClient {
         score,
         notes: String(parsed.notes ?? ""),
         revision: parsed.revision ? String(parsed.revision) : undefined,
+        score_source: "llm",
       };
 
       // Extract per-dimension scores if present
@@ -611,10 +621,11 @@ export class ReviewerClient {
         approved: approvedMatch ? approvedMatch[1].toLowerCase() === "true" : score >= 0.7,
         score: Math.min(Math.max(score, 0), 1),
         notes: text.slice(0, 200),
+        score_source: "default_fallback",
       };
     }
 
-    return { approved: false, score: 0, notes: "Failed to parse verification response" };
+    return { approved: false, score: 0, notes: "Failed to parse verification response", score_source: "default_fallback" };
   }
 
   private parsePRReviewResponse(text: string): PRReviewResult {

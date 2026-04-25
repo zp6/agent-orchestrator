@@ -751,6 +751,21 @@ Steps:
       );
     }
 
+    // Score provenance guard (reviewer#485): warn the operator when the score
+    // came from a parse-error default rather than the reviewer LLM.
+    // Operator can still approve but must provide a reason — the score is not
+    // meaningful and they are taking explicit responsibility.
+    const task = ctx.store.getTask(entry.task_id);
+    const hasProvenanceGuard = task?.verification_notes?.includes("[Score provenance guard]") ?? false;
+    if (hasProvenanceGuard && !reason) {
+      return (
+        `⚠️ This task's score is a parse-error default — the reviewer could not assess it properly.\n` +
+        `Approve only if you have reviewed the work directly. Provide a reason:\n` +
+        `/approve ${shortId} <reason>\n\n` +
+        `Example: /approve ${shortId} "Reviewed PR manually, work is correct"`
+      );
+    }
+
     // Force-approve: mark task as approved and resolve queue entry
     ctx.store.updateTask(entry.task_id, { verification_status: "approved" });
     ctx.store.resolveApprovalQueueEntry(entry.id, "approved", "operator", reason || undefined);
