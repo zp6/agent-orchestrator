@@ -235,7 +235,23 @@ export type {
   AdjustedThreshold,
   RecordOutcomeOpts,
   CalibrationReport,
+  CalibrationRecommendation,
+  CalibrationRecommendationStatus,
 } from "./reviewer/score-calibrator.js";
+
+// Calibration recommendations REST feed — issue #477
+export {
+  getCalibrationRecommendationsFeed,
+  resolveCalibrationRecommendationById,
+} from "./reviewer/calibration-recommendations-feed.js";
+export type {
+  CalibrationRecommendationsFeedOptions,
+  CalibrationRecommendationsSummary,
+  CalibrationRecommendationsFeed,
+  CalibrationResolveOk,
+  CalibrationResolveError,
+  CalibrationResolveResult,
+} from "./reviewer/calibration-recommendations-feed.js";
 
 export {
   classifyIssueAge,
@@ -459,7 +475,7 @@ export type { ReviewerConfig, AgentConfig } from "./config.js";
 // APPROVAL_SCORE_FLOOR is exported separately so callers can reference the
 // hard floor constant without importing the full StateStore class (issue #266).
 export { StateStore, APPROVAL_SCORE_FLOOR } from "./state/store.js";
-export type { ILowScoreFeedStore, IBypassAuditStore } from "./state/types.js";
+export type { ILowScoreFeedStore, IBypassAuditStore, ICalibrationRecommendationStore } from "./state/types.js";
 export type {
   IStateStore,
   IScoreOutcomeStore,

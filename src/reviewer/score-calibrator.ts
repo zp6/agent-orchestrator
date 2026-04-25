@@ -38,14 +38,17 @@
 
 import type {
   IScoreOutcomeStore,
+  ICalibrationRecommendationStore,
   PROutcome,
   ScoreCalibrationRow,
   AdjustedThreshold,
+  CalibrationRecommendation,
+  CalibrationRecommendationStatus,
   TaskType,
 } from "../state/types.js";
 import { createLogger } from "../service/logger.js";
 
-export type { PROutcome, ScoreCalibrationRow, AdjustedThreshold };
+export type { PROutcome, ScoreCalibrationRow, AdjustedThreshold, CalibrationRecommendation, CalibrationRecommendationStatus };
 
 /** Minimum PR outcome records per (agent, task_type) cell before making a recommendation. */
 const MIN_SAMPLE_SIZE = 5;
@@ -55,6 +58,19 @@ const DEFAULT_TARGET_MERGE_RATE = 0.80;
 
 /** Diff threshold: only flag recommendations that move the threshold by more than this much. */
 const THRESHOLD_ACTION_DIFF = 0.05;
+
+/**
+ * Bootstrap threshold for the calibration Phase 2 model (30 samples).
+ * Confidence = min(1.0, sample_count / CALIBRATION_BOOTSTRAP_SAMPLES).
+ * Recommendations at or above AUTO_APPLY_CONFIDENCE_THRESHOLD are auto-applied.
+ */
+const CALIBRATION_BOOTSTRAP_SAMPLES = 30;
+
+/**
+ * Confidence level at or above which a recommendation is auto-applied without
+ * operator review (≥ 0.95 ≈ ≥28/30 samples).
+ */
+const AUTO_APPLY_CONFIDENCE_THRESHOLD = 0.95;
 
 export interface RecordOutcomeOpts {
   taskId: string;
@@ -76,7 +92,10 @@ export interface CalibrationReport {
 export class ScoreCalibrator {
   private log = createLogger("score-calibrator");
 
-  constructor(private store: IScoreOutcomeStore) {}
+  constructor(
+    private store: IScoreOutcomeStore,
+    private recommendationStore?: ICalibrationRecommendationStore,
+  ) {}
 
   /**
    * Record the eventual PR outcome for a verified task.
@@ -115,16 +134,92 @@ export class ScoreCalibrator {
 
   /**
    * Build the full calibration report: calibration table + threshold recommendations.
+   *
+   * Side-effect: persists `action_required` threshold entries to
+   * `calibration_recommendations` (when a `recommendationStore` was supplied)
+   * so the dashboard can surface them for operator review. A deduplication guard
+   * prevents duplicate pending rows for the same `(agent_name, task_type)` pair.
    */
   buildReport(targetMergeRate = DEFAULT_TARGET_MERGE_RATE): CalibrationReport {
     const rows = this.store.getCalibrationData();
     const thresholds = this.store.getAdjustedThresholds(targetMergeRate);
+
+    // Persist action-required recommendations (if store available)
+    if (this.recommendationStore) {
+      for (const t of thresholds) {
+        if (!t.action_required || t.recommended_min_score === null) continue;
+
+        const confidence = Math.min(1.0, t.sample_count / CALIBRATION_BOOTSTRAP_SAMPLES);
+        const status: CalibrationRecommendationStatus =
+          confidence >= AUTO_APPLY_CONFIDENCE_THRESHOLD ? "auto_applied" : "pending";
+
+        try {
+          this.recommendationStore.upsertCalibrationRecommendation({
+            agent_name: t.agent_name,
+            task_type: t.task_type,
+            current_min_score: t.current_min_score,
+            recommended_min_score: t.recommended_min_score,
+            sample_count: t.sample_count,
+            confidence,
+            status,
+          });
+        } catch (err) {
+          this.log.error("Failed to persist calibration recommendation", {
+            agent: t.agent_name,
+            task_type: t.task_type,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
     return {
       generated_at: new Date().toISOString(),
       rows,
       thresholds,
       target_merge_rate: targetMergeRate,
     };
+  }
+
+  /**
+   * Mark all pending recommendations with confidence >= AUTO_APPLY_CONFIDENCE_THRESHOLD
+   * as `auto_applied`.
+   *
+   * Called as a post-build sweep to handle recommendations that were inserted
+   * as `pending` in an earlier cycle and have since accumulated sufficient
+   * samples to cross the confidence threshold.
+   *
+   * @returns number of recommendations auto-applied in this sweep.
+   */
+  autoApplyHighConfidenceRecommendations(): number {
+    if (!this.recommendationStore) return 0;
+
+    const pending = this.recommendationStore.getCalibrationRecommendations("pending");
+    let applied = 0;
+
+    for (const rec of pending) {
+      if (rec.confidence >= AUTO_APPLY_CONFIDENCE_THRESHOLD) {
+        try {
+          const updated = this.recommendationStore.resolveCalibrationRecommendation(
+            rec.id,
+            "auto_applied",
+            `Auto-applied: confidence ${(rec.confidence * 100).toFixed(0)}% >= ${AUTO_APPLY_CONFIDENCE_THRESHOLD * 100}% threshold (${rec.sample_count} samples)`,
+          );
+          if (updated) applied++;
+        } catch (err) {
+          this.log.error("Failed to auto-apply calibration recommendation", {
+            id: rec.id,
+            agent: rec.agent_name,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
+    if (applied > 0) {
+      this.log.info("Auto-applied calibration recommendations", { count: applied });
+    }
+    return applied;
   }
 
   /**

@@ -82,6 +82,9 @@ import type {
   IPatternRiskStore,
   PatternRiskSignal,
   AgentPatternRiskSummary,
+  ICalibrationRecommendationStore,
+  CalibrationRecommendation,
+  CalibrationRecommendationStatus,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -97,7 +100,7 @@ import { ulid } from "../util/ulid.js";
  */
 export const APPROVAL_SCORE_FLOOR = 0.60;
 
-export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore, IMeetingFacilitatorGoalStore, IImprovementBatchDeduplicationStore, IPatternRiskStore {
+export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore, IMeetingFacilitatorGoalStore, IImprovementBatchDeduplicationStore, IPatternRiskStore, ICalibrationRecommendationStore {
   private db: Database.Database;
 
   constructor(dbPath: string = process.env.STATE_DB_PATH ?? "state.db") {
@@ -254,6 +257,31 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
         last_checked_at        TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY (verifier_id, task_type, score_bucket)
       );
+    `);
+
+    // Calibration recommendations table (issue #477) — persisted threshold adjustment
+    // recommendations produced by ScoreCalibrator.buildReport(). One pending row
+    // per (agent_name, task_type) pair is enforced at the application layer.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS calibration_recommendations (
+        id                    TEXT PRIMARY KEY,
+        agent_name            TEXT NOT NULL,
+        task_type             TEXT NOT NULL,
+        current_min_score     REAL NOT NULL,
+        recommended_min_score REAL NOT NULL,
+        sample_count          INTEGER NOT NULL,
+        confidence            REAL NOT NULL,
+        status                TEXT NOT NULL DEFAULT 'pending',
+        created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at           TEXT,
+        resolution_notes      TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_calibration_recommendations_status_created
+        ON calibration_recommendations (status, created_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_calibration_recommendations_agent_type
+        ON calibration_recommendations (agent_name, task_type);
     `);
 
     // Add priority column to tasks if it doesn't exist yet (idempotent)
@@ -2740,6 +2768,111 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
            last_checked_at        = excluded.last_checked_at`,
       )
       .run(state.verifier_id, state.task_type, state.score_bucket, state.consecutive_bad_cycles);
+  }
+
+  // ── Calibration recommendations (issue #477) ─────────────────────────────
+
+  /**
+   * Insert a new calibration recommendation, or skip if a `pending` row
+   * already exists for the same `(agent_name, task_type)` pair.
+   *
+   * Returns the inserted record on success, or null when deduped.
+   */
+  upsertCalibrationRecommendation(
+    rec: Omit<CalibrationRecommendation, "id" | "created_at" | "resolved_at" | "resolution_notes">,
+  ): CalibrationRecommendation | null {
+    // Deduplication guard: skip if a pending row already exists for this pair
+    const existing = this.db
+      .prepare(
+        `SELECT id FROM calibration_recommendations
+         WHERE agent_name = ? AND task_type = ? AND status = 'pending'
+         LIMIT 1`,
+      )
+      .get(rec.agent_name, rec.task_type) as { id: string } | undefined;
+
+    if (existing) return null;
+
+    const id = ulid();
+    this.db
+      .prepare(
+        `INSERT INTO calibration_recommendations
+           (id, agent_name, task_type, current_min_score, recommended_min_score,
+            sample_count, confidence, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        rec.agent_name,
+        rec.task_type,
+        rec.current_min_score,
+        rec.recommended_min_score,
+        rec.sample_count,
+        rec.confidence,
+        rec.status,
+      );
+
+    const inserted = this.db
+      .prepare(
+        `SELECT id, agent_name, task_type, current_min_score, recommended_min_score,
+                sample_count, confidence, status, created_at, resolved_at, resolution_notes
+         FROM calibration_recommendations WHERE id = ?`,
+      )
+      .get(id) as CalibrationRecommendation;
+
+    return inserted;
+  }
+
+  /**
+   * Return calibration recommendations, optionally filtered by status.
+   * Ordered by created_at descending (newest first).
+   */
+  getCalibrationRecommendations(
+    status?: CalibrationRecommendationStatus,
+  ): CalibrationRecommendation[] {
+    if (status !== undefined) {
+      return this.db
+        .prepare(
+          `SELECT id, agent_name, task_type, current_min_score, recommended_min_score,
+                  sample_count, confidence, status, created_at, resolved_at, resolution_notes
+           FROM calibration_recommendations
+           WHERE status = ?
+           ORDER BY created_at DESC`,
+        )
+        .all(status) as CalibrationRecommendation[];
+    }
+
+    return this.db
+      .prepare(
+        `SELECT id, agent_name, task_type, current_min_score, recommended_min_score,
+                sample_count, confidence, status, created_at, resolved_at, resolution_notes
+         FROM calibration_recommendations
+         ORDER BY created_at DESC`,
+      )
+      .all() as CalibrationRecommendation[];
+  }
+
+  /**
+   * Update a recommendation's status to applied / dismissed / auto_applied.
+   * Sets resolved_at and optional resolution_notes.
+   *
+   * @returns true if the row was found and updated, false otherwise.
+   */
+  resolveCalibrationRecommendation(
+    id: string,
+    status: Exclude<CalibrationRecommendationStatus, "pending">,
+    notes?: string,
+  ): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE calibration_recommendations
+         SET status = ?,
+             resolved_at = datetime('now'),
+             resolution_notes = ?
+         WHERE id = ?`,
+      )
+      .run(status, notes ?? null, id);
+
+    return result.changes > 0;
   }
 
   // ── System flags (pause / resume / operator overrides) ───────────────────

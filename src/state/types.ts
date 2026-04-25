@@ -1188,6 +1188,89 @@ export interface IThresholdAdjustmentStore {
   ): void;
 }
 
+// ── Calibration recommendation persistence types (issue #477) ────────────
+
+/**
+ * Lifecycle status of a calibration recommendation.
+ *
+ * - `pending`      — surfaced to the operator dashboard, awaiting review
+ * - `applied`      — operator manually approved and the threshold was updated
+ * - `dismissed`    — operator explicitly dismissed without applying
+ * - `auto_applied` — auto-applied because confidence >= 0.95 (sample_count >= 28)
+ */
+export type CalibrationRecommendationStatus =
+  | "pending"
+  | "applied"
+  | "dismissed"
+  | "auto_applied";
+
+/**
+ * A persisted calibration threshold recommendation, stored in
+ * `calibration_recommendations`.
+ *
+ * Created by `ScoreCalibrator.buildReport()` whenever `action_required` is true
+ * on an `AdjustedThreshold` entry. Deduplication: only one `pending` row is
+ * allowed per `(agent_name, task_type)` pair at a time.
+ */
+export interface CalibrationRecommendation {
+  /** ULID primary key. */
+  id: string;
+  agent_name: string;
+  task_type: TaskType;
+  /** Current min_score at the time the recommendation was generated. */
+  current_min_score: number;
+  /** Recommended new min_score derived from calibration data. */
+  recommended_min_score: number;
+  /** Number of PR outcome records used to derive the recommendation. */
+  sample_count: number;
+  /**
+   * Confidence score: min(1.0, sample_count / 30).
+   * Recommendations with confidence >= 0.95 (sample_count >= 28) are auto-applied.
+   */
+  confidence: number;
+  status: CalibrationRecommendationStatus;
+  /** ISO-8601 timestamp when the recommendation was created. */
+  created_at: string;
+  /** ISO-8601 timestamp when the recommendation was resolved (applied/dismissed). */
+  resolved_at: string | null;
+  /** Human-readable note recorded at resolution time. */
+  resolution_notes: string | null;
+}
+
+/**
+ * Store interface for calibration recommendation persistence (issue #477).
+ */
+export interface ICalibrationRecommendationStore {
+  /**
+   * Insert a new calibration recommendation, or skip if a `pending` row
+   * already exists for the same `(agent_name, task_type)` pair.
+   *
+   * @returns the inserted recommendation, or null if deduped.
+   */
+  upsertCalibrationRecommendation(
+    rec: Omit<CalibrationRecommendation, "id" | "created_at" | "resolved_at" | "resolution_notes">,
+  ): CalibrationRecommendation | null;
+
+  /**
+   * Return recommendations, optionally filtered by status.
+   * Ordered by created_at descending (newest first).
+   */
+  getCalibrationRecommendations(
+    status?: CalibrationRecommendationStatus,
+  ): CalibrationRecommendation[];
+
+  /**
+   * Update the status of a recommendation.
+   *
+   * @returns true if the row was found and updated, false otherwise.
+   */
+  resolveCalibrationRecommendation(
+    id: string,
+    status: Exclude<CalibrationRecommendationStatus, "pending">,
+    notes?: string,
+  ): boolean;
+}
+
 // ── PR iteration tracking types ───────────────────────────────────────────
 
 /**
