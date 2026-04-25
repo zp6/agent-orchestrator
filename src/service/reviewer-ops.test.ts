@@ -142,6 +142,46 @@ describe("reviewer-ops", () => {
     expect(store.getTask(task.id)?.verification_status).toBe("approved");
   });
 
+  it("verifyTask blocks score-0 silent approval: approved=true with score=0 must be rejected", async () => {
+    // This is the core regression test for issue #1061.
+    // The LLM returns a malformed response: approved=true but score=0.
+    // Both the parseVerificationResponse guard and the verifyTask layer
+    // must independently catch and override this to approved=false.
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify({ approved: true, score: 0, notes: "Looks fine" }) }],
+    });
+
+    const task = store.createTask({ title: "Score-zero test", description: "Test task", source: "manual", agent_name: "agent-a" });
+    store.updateTask(task.id, { status: "done", result: "Done" });
+
+    const result = await verifyTask(store, new ReviewerClient(config), task.id, config);
+
+    expect(result.approved).toBe(false);
+    expect(result.score).toBe(0);
+    expect(store.getTask(task.id)?.verification_status).toBe("rejected");
+  });
+
+  it("verifyTask blocks score below configured min_score even when approved=true", async () => {
+    // The configured min_score is 0.7 (default). A score of 0.5 approved=true
+    // should be overridden to rejected.
+    const configWithMinScore: OrchestratorConfig = {
+      ...config,
+      verification: { enabled: true, min_score: 0.7 },
+    };
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify({ approved: true, score: 0.5, notes: "Borderline" }) }],
+    });
+
+    const task = store.createTask({ title: "Below-floor test", description: "Test task", source: "manual", agent_name: "agent-a" });
+    store.updateTask(task.id, { status: "done", result: "Done" });
+
+    const result = await verifyTask(store, new ReviewerClient(configWithMinScore), task.id, configWithMinScore);
+
+    expect(result.approved).toBe(false);
+    expect(result.score).toBe(0.5);
+    expect(store.getTask(task.id)?.verification_status).toBe("rejected");
+  });
+
   it("verifyAndReviseTask defers revision dispatch when the agent is busy", async () => {
     mockCreate.mockResolvedValueOnce({
       content: [{ type: "text", text: JSON.stringify({ approved: false, score: 0.2, notes: "Bad", revision: "Fix it" }) }],

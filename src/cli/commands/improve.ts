@@ -207,7 +207,7 @@ export function registerImproveCommand(program: Command): void {
         process.stdout.write(`  ${chalk.dim(task.id.slice(0, 8))} ${agent} ${task.title.slice(0, 50)}... `);
 
         try {
-          const result = await verifyTask(store, reviewerClient, task.id);
+          const result = await verifyTask(store, reviewerClient, task.id, config);
           const scoreColor = result.score >= 0.7 ? chalk.green : result.score >= 0.5 ? chalk.yellow : chalk.red;
           const status = result.approved ? chalk.green("approved") : chalk.red("rejected");
           console.log(`${status} ${scoreColor(`(${result.score.toFixed(1)})`)}`);

@@ -538,11 +538,46 @@ export class ReviewerClient {
   // ─── Response parsers ──────────────────────────────────────────────────────
 
   private parseVerificationResponse(text: string): VerificationResult {
+    // Minimum quality floor: a score of exactly 0 from the LLM is almost
+    // always a malformed response (parse error, JSON truncation, or the
+    // reviewer hallucinating a 0-100 scale value of "0" instead of "0.0–1.0").
+    // Approving such a response silently corrupts quality metrics and bypasses
+    // every downstream threshold gate.  We hard-block any approval where the
+    // parsed score does not exceed this floor, and emit a warning for observability.
+    const SCORE_ZERO_FLOOR = 0.01;
+    const minConfiguredScore = this.config.verification?.min_score ?? 0.7;
+
     const parsed = extractJSON<Record<string, unknown>>(text, "score");
     if (parsed && typeof parsed.score !== "undefined") {
+      const score = Math.min(Math.max(Number(parsed.score) || 0, 0), 1);
+      const looksApproved = Boolean(parsed.approved);
+
+      // Hard floor: refuse approval when score is effectively zero regardless
+      // of what the LLM's approved field says.
+      const approved = looksApproved && score >= SCORE_ZERO_FLOOR;
+
+      if (looksApproved && !approved) {
+        this.log.warn("Score-0 silent approval blocked — LLM said approved=true but score is effectively zero; overriding to rejected", {
+          rawScore: parsed.score,
+          floor: SCORE_ZERO_FLOOR,
+        });
+      }
+
+      // Secondary floor: warn (but don't hard-block here) when approved=true
+      // but score is below the configured minimum.  Hard enforcement happens
+      // in verifyAndReviseTask via the min_score config gate, but we log early
+      // so operators can correlate reviewer-client warnings with verification
+      // outcome records without waiting for the daemon-level gate to fire.
+      if (approved && score < minConfiguredScore) {
+        this.log.warn("Verification approved below configured min_score — may be rejected by quality gate", {
+          score,
+          minConfiguredScore,
+        });
+      }
+
       const result: VerificationResult = {
-        approved: Boolean(parsed.approved),
-        score: Math.min(Math.max(Number(parsed.score) || 0, 0), 1),
+        approved,
+        score,
         notes: String(parsed.notes ?? ""),
         revision: parsed.revision ? String(parsed.revision) : undefined,
       };

@@ -52,6 +52,7 @@ export async function verifyTask(
   store: StateStore,
   reviewerClient: ReviewerClient,
   taskId: string,
+  config?: OrchestratorConfig,
 ): Promise<VerificationResult> {
   const task = store.getTask(taskId);
   if (!task) {
@@ -65,6 +66,38 @@ export async function verifyTask(
 
   try {
     const result = await reviewerClient.verifyTask(task);
+
+    // Hard quality floor: regardless of what the reviewer client parsed,
+    // a score of 0 (or effectively 0) MUST NOT result in an approved status.
+    // This is the last-resort safety net — the primary guard lives in
+    // parseVerificationResponse inside ReviewerClient, but we add an
+    // independent check here so the two layers cannot both be bypassed.
+    const minScore = config?.verification?.min_score ?? 0.7;
+    const SCORE_ZERO_FLOOR = 0.01;
+    if (result.approved && result.score < SCORE_ZERO_FLOOR) {
+      verifierLog.warn("Score-0 silent approval intercepted at verifyTask layer — forcing rejected", {
+        taskId,
+        score: result.score,
+        floor: SCORE_ZERO_FLOOR,
+        agent: task.agent_name,
+      });
+      result.approved = false;
+      result.notes = `[Score-0 guard] Approval overridden — score ${result.score} is below the zero floor (${SCORE_ZERO_FLOOR}). Original notes: ${result.notes}`;
+    }
+
+    // Secondary floor: hard-reject if score is below configured minimum and
+    // approved=true slipped through anyway (e.g. reviewer LLM hallucinated
+    // a permissive outcome on a borderline task).
+    if (result.approved && result.score < minScore) {
+      verifierLog.warn("Score below configured min_score — forcing rejected at verifyTask layer", {
+        taskId,
+        score: result.score,
+        minScore,
+        agent: task.agent_name,
+      });
+      result.approved = false;
+      result.notes = `[Quality floor] Approval overridden — score ${result.score.toFixed(2)} is below configured minimum ${minScore}. Original notes: ${result.notes}`;
+    }
 
     verifierLog.info("Verification complete", {
       taskId,
@@ -139,7 +172,7 @@ export async function verifyAndReviseTask(
   taskId: string,
   maxRetries = 1,
 ): Promise<VerificationResult> {
-  const result = await verifyTask(store, reviewerClient, taskId);
+  const result = await verifyTask(store, reviewerClient, taskId, config);
 
   if (result.approved || maxRetries <= 0 || !result.revision) {
     return result;
@@ -327,7 +360,7 @@ This issue has been reassigned from ${task.agent_name} to ${autoReroute.agentNam
       }
     }
 
-    return verifyTask(store, reviewerClient, revisionResult.taskId);
+    return verifyTask(store, reviewerClient, revisionResult.taskId, config);
   } catch (err) {
     if (autoReroute) {
       store.addSupervisorDecision({
