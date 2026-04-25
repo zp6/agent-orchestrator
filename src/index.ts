@@ -1172,6 +1172,41 @@ export type {
   IPatternRiskStore,
 } from "./state/types.js";
 
+// Score provenance — /api/score-provenance/:task_id endpoint + default-fallback guard (issue #483)
+export {
+  getScoreProvenancePayload,
+  parseScoreProvenanceParams,
+  formatScoreProvenanceForTelegram,
+  deriveScoreSource,
+  shouldBlockDefaultFallbackApproval,
+  SCORE_PROVENANCE_MIGRATION_SQL,
+  PARSE_FAILURE_NOTES_SENTINEL,
+} from "./reviewer/score-provenance.js";
+export type {
+  ScoreSource,
+  ScoreProvenancePayload,
+  ScoreProvenanceRecord,
+  IScoreProvenanceStore,
+} from "./reviewer/score-provenance.js";
+
+// Persistent anomaly tracker — surface quality anomalies recurring across ≥2 cycles (issue #483)
+export {
+  recordAnomalyObservation,
+  getPersistentAnomaliesPayload,
+  formatPersistentAnomaliesForTelegram,
+  generateCycleId,
+  PERSISTENT_ANOMALIES_MIGRATION_SQL,
+  DEFAULT_MIN_CYCLES,
+  DEFAULT_ANOMALY_LOOKBACK_DAYS,
+} from "./reviewer/persistent-anomalies.js";
+export type {
+  AnomalyObservation,
+  PersistentAnomaly,
+  PersistentAnomaliesPayload,
+  PersistentAnomaliesOptions,
+  IPersistentAnomalyStore,
+} from "./reviewer/persistent-anomalies.js";
+
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
 export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";

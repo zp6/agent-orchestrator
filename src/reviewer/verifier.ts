@@ -164,6 +164,18 @@ export interface VerificationResult {
    * Populated only for low-score approvals; undefined for tasks that score ≥ 0.60.
    */
   bypass_reason?: string;
+  /**
+   * Where the score originated (issue #483).
+   *
+   * - `'llm_parse'`        — score came from a successful JSON parse of an LLM response
+   * - `'default_fallback'` — score defaulted to 0 because the LLM response was unparseable;
+   *                          this task MUST NOT be auto-approved — it signals an infrastructure
+   *                          failure (LLM format regression, context overflow, etc.)
+   * - `'operator_override'`— score was set explicitly by a human operator via `/approve`
+   *
+   * Undefined for legacy results that pre-date this field.
+   */
+  score_source?: "llm_parse" | "default_fallback" | "operator_override";
 }
 
 /**
@@ -2551,6 +2563,7 @@ export class Verifier {
         revision: parsed.revision ? String(parsed.revision) : undefined,
         explanation,
         dimensions,
+        score_source: "llm_parse",
         ...(isMarginalApproval && { marginalApproval: true }),
         ...(marginalReason && { marginalReason }),
         ...(blockedReason && { blockedReason }),
@@ -2560,6 +2573,7 @@ export class Verifier {
         approved: false,
         score: 0,
         notes: "Failed to parse verification response",
+        score_source: "default_fallback",
       };
     }
   }

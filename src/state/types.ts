@@ -1585,6 +1585,17 @@ export interface VerificationResultRecord {
    * Null when the task was not a sub-0.60 approval or has not been classified.
    */
   bypass_reason?: string | null;
+  /**
+   * Where the score originated (issue #483).
+   *
+   * - `'llm_parse'`        — score came from a successful JSON parse of an LLM response
+   * - `'default_fallback'` — score defaulted to 0 because the LLM response was unparseable;
+   *                          tasks with this source must not be auto-approved
+   * - `'operator_override'`— score was set explicitly by a human operator
+   *
+   * Null for legacy records; defaults to `'llm_parse'` in the DB column default.
+   */
+  score_source?: string | null;
 }
 
 /**
@@ -2409,4 +2420,63 @@ export interface IPatternRiskStore {
    * @param windowHours - Look-back window in hours.  Default: 48.
    */
   getAgentPatternRiskSummaries(windowHours?: number): AgentPatternRiskSummary[];
+}
+
+// ── Score provenance store (issue #483) ──────────────────────────────────────
+
+/**
+ * Minimal store interface for the score provenance endpoint.
+ *
+ * Implemented by `StateStore`.  Extracted so the endpoint can be unit-tested
+ * with a lightweight stub without pulling in the full StateStore.
+ *
+ * Note: `getLatestVerificationRecord` is already declared on
+ * `IVerificationResultStore` (see above).  Consumers that hold a
+ * `StateStore` reference automatically satisfy this interface.
+ */
+export interface IScoreProvenanceStore {
+  getLatestVerificationRecord(taskId: string): VerificationResultRecord | null;
+}
+
+// ── Persistent anomaly store (issue #483) ────────────────────────────────────
+
+/**
+ * Store interface for the persistent anomaly tracker.
+ *
+ * Implemented by `StateStore` once `PERSISTENT_ANOMALIES_MIGRATION_SQL`
+ * has been applied to `state.db`.
+ */
+export interface IPersistentAnomalyStore {
+  /**
+   * Insert one anomaly observation into `score_anomaly_observations`.
+   */
+  insertAnomalyObservation(obs: {
+    task_id: string;
+    cycle_id: string;
+    agent_name?: string | null;
+    score?: number;
+    anomaly_type?: string;
+  }): void;
+
+  /**
+   * Return tasks that have been observed as anomalous in ≥ `minCycles` distinct
+   * analysis cycles within the last `days` days.
+   *
+   * @param minCycles - Minimum distinct cycles to qualify. Default: 2.
+   * @param days      - Lookback window in days. Default: 7.
+   * @param limit     - Maximum rows to return. Default: 50.
+   */
+  getPersistentAnomalies(
+    minCycles?: number,
+    days?: number,
+    limit?: number,
+  ): Array<{
+    task_id: string;
+    agent_name: string | null;
+    latest_score: number;
+    cycle_count: number;
+    anomaly_type: string;
+    first_observed_at: string;
+    last_observed_at: string;
+  }>;
 }
