@@ -34,7 +34,11 @@
  * Issue #502.
  */
 
-import type { IMarginalApprovalsFeedStore } from "../state/types.js";
+import type {
+  IMarginalApprovalsFeedStore,
+  IMarginalApprovalsTrendStore,
+  MarginalApprovalDayBucket,
+} from "../state/types.js";
 import type { Task } from "../state/types.js";
 import { parseDimensionsFromNotes, extractPrUrl } from "../telegram/command-handler.js";
 import type { ParsedDimensions } from "../telegram/command-handler.js";
@@ -59,6 +63,9 @@ export const MARGINAL_APPROVALS_DEFAULT_DAYS = 14;
 
 /** Default result cap. */
 export const MARGINAL_APPROVALS_DEFAULT_LIMIT = 50;
+
+/** Default lookback window in days for the trend endpoint. */
+export const MARGINAL_APPROVALS_TREND_DEFAULT_DAYS = 30;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -93,6 +100,16 @@ export interface MarginalApprovalEntry {
    */
   marginal_reason: string | null;
   /**
+   * A short coaching directive synthesised from `marginal_reason` and the
+   * weakest dimension(s), ready to inject into a re-dispatch prompt.
+   * Null only when both `marginal_reason` is absent and no dimensions were
+   * parsed.
+   *
+   * Example: "Focus on improving test_coverage (currently 55%) and fix the
+   * missing error handling described in the marginal_reason."
+   */
+  coaching_prompt: string | null;
+  /**
    * Source reference (e.g. "owner/repo#123" for a GitHub issue).
    * Null when no source_ref was recorded.
    */
@@ -106,6 +123,44 @@ export interface MarginalApprovalEntry {
    * approved, for approved tasks).
    */
   approved_at: string;
+}
+
+// ── Trend types ───────────────────────────────────────────────────────────────
+
+/** Options for `getMarginalApprovalsTrend()`. */
+export interface MarginalApprovalsTrendOptions {
+  /**
+   * Number of calendar days to cover.
+   * Default: 30 (MARGINAL_APPROVALS_TREND_DEFAULT_DAYS).
+   */
+  days?: number;
+}
+
+/**
+ * Full trend payload returned by `getMarginalApprovalsTrend()`.
+ * Intended for `/api/marginal-approvals/trend`.
+ */
+export interface MarginalApprovalsTrend {
+  /** ISO-8601 generation timestamp. */
+  generated_at: string;
+  /** Number of calendar days covered. */
+  days: number;
+  /** Total marginal approvals across the entire window. */
+  total: number;
+  /**
+   * Simple linear trend direction derived from comparing the first and second
+   * halves of the window.
+   *
+   *   "improving"  — second half has fewer marginal approvals than first half
+   *   "worsening"  — second half has more marginal approvals
+   *   "stable"     — within ±10% or both halves are zero
+   */
+  trend_direction: "improving" | "worsening" | "stable";
+  /**
+   * Daily time-series points, one per calendar day in the window.
+   * Includes days with zero approvals so the x-axis is continuous.
+   */
+  daily: MarginalApprovalDayBucket[];
 }
 
 /** Options for `getMarginalApprovalsFeed()`. */
@@ -210,7 +265,45 @@ function extractMarginalReason(task: Task): string | null {
   return null;
 }
 
+/**
+ * Build a short coaching directive for re-dispatch from marginal_reason and
+ * dimension gaps.  The result is injected by the dashboard's re-dispatch button
+ * into the task prompt so the agent knows exactly what to fix.
+ */
+function buildCoachingPrompt(
+  marginalReason: string | null,
+  dimensions: ParsedDimensions | null,
+): string | null {
+  const parts: string[] = [];
+
+  if (marginalReason) {
+    parts.push(`Address the quality gap: ${marginalReason}`);
+  }
+
+  if (dimensions) {
+    const weak: string[] = [];
+    const entries: Array<[string, number | null]> = [
+      ["correctness", dimensions.correctness],
+      ["completeness", dimensions.completeness],
+      ["test_coverage", dimensions.test_coverage],
+      ["code_quality", dimensions.code_quality],
+    ];
+    for (const [dim, val] of entries) {
+      if (val !== null && val < 0.80) {
+        weak.push(`${dim} (${(val * 100).toFixed(0)}%)`);
+      }
+    }
+    if (weak.length > 0) {
+      parts.push(`Improve the following dimensions: ${weak.join(", ")}.`);
+    }
+  }
+
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
 function buildFeedEntry(task: Task): MarginalApprovalEntry {
+  const dimensions = parseDimensionsFromNotes(task.verification_notes);
+  const marginalReason = extractMarginalReason(task);
   return {
     task_id: task.id,
     task_id_short: task.id.slice(0, 8),
@@ -218,8 +311,9 @@ function buildFeedEntry(task: Task): MarginalApprovalEntry {
     agent_name: task.agent_name ?? null,
     task_type: task.task_type,
     quality_score: task.quality_score!,
-    dimensions: parseDimensionsFromNotes(task.verification_notes),
-    marginal_reason: extractMarginalReason(task),
+    dimensions,
+    marginal_reason: marginalReason,
+    coaching_prompt: buildCoachingPrompt(marginalReason, dimensions),
     source_ref: task.source_ref ?? null,
     pr_url: extractPrUrl(task),
     approved_at: task.updated_at,
@@ -308,6 +402,57 @@ export function getMarginalApprovalsFeed(
     marginal_reason_coverage: marginalReasonCoverage,
     tasks: entries,
     per_agent: buildPerAgentSummary(entries),
+  };
+}
+
+// ── Trend builder ─────────────────────────────────────────────────────────────
+
+/**
+ * Build the marginal approvals trend payload for `/api/marginal-approvals/trend`.
+ *
+ * Returns a continuous day-by-day time series over the requested window,
+ * including zero-count days, plus a simple trend direction derived from
+ * comparing the first and second halves of the window.
+ *
+ * @param store  A live IMarginalApprovalsTrendStore (satisfied by StateStore).
+ * @param opts   Optional configuration overrides.
+ */
+export function getMarginalApprovalsTrend(
+  store: IMarginalApprovalsTrendStore,
+  opts: MarginalApprovalsTrendOptions = {},
+): MarginalApprovalsTrend {
+  const days = Number.isFinite(opts.days) && (opts.days ?? 0) >= 1
+    ? Math.floor(opts.days ?? MARGINAL_APPROVALS_TREND_DEFAULT_DAYS)
+    : MARGINAL_APPROVALS_TREND_DEFAULT_DAYS;
+
+  const daily = store.getMarginalApprovalsDailyTrend(days);
+  const total = daily.reduce((sum, d) => sum + d.count, 0);
+
+  // Compare first half vs second half to derive a simple trend direction.
+  const mid = Math.floor(daily.length / 2);
+  const firstHalf = daily.slice(0, mid).reduce((s, d) => s + d.count, 0);
+  const secondHalf = daily.slice(mid).reduce((s, d) => s + d.count, 0);
+
+  let trend_direction: MarginalApprovalsTrend["trend_direction"] = "stable";
+  if (firstHalf === 0 && secondHalf === 0) {
+    trend_direction = "stable";
+  } else if (firstHalf === 0) {
+    trend_direction = "worsening";
+  } else {
+    const delta = (secondHalf - firstHalf) / firstHalf;
+    if (delta < -0.10) {
+      trend_direction = "improving";
+    } else if (delta > 0.10) {
+      trend_direction = "worsening";
+    }
+  }
+
+  return {
+    generated_at: new Date().toISOString(),
+    days,
+    total,
+    trend_direction,
+    daily,
   };
 }
 

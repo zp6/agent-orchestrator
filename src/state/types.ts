@@ -2527,3 +2527,38 @@ export interface IMarginalApprovalsFeedStore {
    */
   getMarginalApprovedTasks(days?: number, limit?: number): Task[];
 }
+
+/**
+ * One calendar-day bucket in the marginal approvals trend series.
+ * Used by `getMarginalApprovalsTrend()` to build the daily time series.
+ */
+export interface MarginalApprovalDayBucket {
+  /** "YYYY-MM-DD" calendar date. */
+  date: string;
+  /** Number of tasks approved in the marginal band on this day. */
+  count: number;
+  /**
+   * Mean quality score across approvals on this day, or null when count is 0.
+   */
+  avg_score: number | null;
+  /** Count of low-marginal (0.60–0.69) approvals on this day. */
+  low_count: number;
+  /** Count of high-marginal (0.70–0.79) approvals on this day. */
+  high_count: number;
+}
+
+/**
+ * Store interface for the marginal approvals trend endpoint.
+ *
+ * Satisfied by `StateStore`. Extracted so the trend builder can be
+ * unit-tested with a lightweight stub.
+ */
+export interface IMarginalApprovalsTrendStore {
+  /**
+   * Return daily marginal-approval counts for the last `days` calendar days,
+   * including days with zero approvals so the chart has a continuous x-axis.
+   *
+   * @param days - Number of calendar days to cover. Default: 30.
+   */
+  getMarginalApprovalsDailyTrend(days?: number): MarginalApprovalDayBucket[];
+}

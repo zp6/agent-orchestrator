@@ -88,6 +88,8 @@ import type {
   CalibrationRecommendation,
   CalibrationRecommendationStatus,
   IMarginalApprovalsFeedStore,
+  IMarginalApprovalsTrendStore,
+  MarginalApprovalDayBucket,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -103,7 +105,7 @@ import { ulid } from "../util/ulid.js";
  */
 export const APPROVAL_SCORE_FLOOR = 0.60;
 
-export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore, IMeetingFacilitatorGoalStore, IImprovementBatchDeduplicationStore, IPatternRiskStore, ICalibrationRecommendationStore, IMarginalApprovalsFeedStore {
+export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore, IMeetingFacilitatorGoalStore, IImprovementBatchDeduplicationStore, IPatternRiskStore, ICalibrationRecommendationStore, IMarginalApprovalsFeedStore, IMarginalApprovalsTrendStore {
   private db: Database.Database;
 
   constructor(dbPath: string = process.env.STATE_DB_PATH ?? "state.db") {
@@ -1434,6 +1436,81 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
          LIMIT ?`,
       )
       .all(MARGINAL_FLOOR, MARGINAL_CEILING, safeDays, safeLimit) as Task[];
+  }
+
+  /**
+   * Return daily counts of marginal-band (0.60–0.79) approved tasks for the
+   * last `days` calendar days, including zero-count days so the caller gets a
+   * continuous time series for trend charting.
+   *
+   * Issue #504: powers `/api/marginal-approvals/trend` for the dashboard panel.
+   *
+   * @param days - Number of calendar days. Default: 30.
+   */
+  getMarginalApprovalsDailyTrend(days: number = 30): MarginalApprovalDayBucket[] {
+    const MARGINAL_FLOOR = 0.60;
+    const LOW_MARGINAL_CEILING = 0.70;
+    const MARGINAL_CEILING = 0.79;
+    const safeDays = Number.isFinite(days) && days >= 1 ? Math.floor(days) : 30;
+
+    // Generate a date spine covering the window so days with 0 approvals appear.
+    type RawRow = {
+      date: string;
+      count: number;
+      avg_score: number | null;
+      low_count: number;
+      high_count: number;
+    };
+
+    const rows = this.db
+      .prepare(
+        `WITH RECURSIVE dates(d) AS (
+           SELECT DATE('now', '-' || (? - 1) || ' days')
+           UNION ALL
+           SELECT DATE(d, '+1 day')
+           FROM dates
+           WHERE d < DATE('now')
+         )
+         SELECT
+           d AS date,
+           COALESCE(t.cnt, 0)       AS count,
+           t.avg_score              AS avg_score,
+           COALESCE(t.low_cnt, 0)   AS low_count,
+           COALESCE(t.high_cnt, 0)  AS high_count
+         FROM dates
+         LEFT JOIN (
+           SELECT
+             DATE(updated_at) AS day,
+             COUNT(*)         AS cnt,
+             AVG(quality_score)                                          AS avg_score,
+             SUM(CASE WHEN quality_score < ? THEN 1 ELSE 0 END)         AS low_cnt,
+             SUM(CASE WHEN quality_score >= ? THEN 1 ELSE 0 END)        AS high_cnt
+           FROM tasks
+           WHERE verification_status = 'approved'
+             AND quality_score IS NOT NULL
+             AND quality_score >= ?
+             AND quality_score <= ?
+             AND updated_at >= DATE('now', '-' || ? || ' days')
+           GROUP BY DATE(updated_at)
+         ) t ON t.day = d
+         ORDER BY d ASC`,
+      )
+      .all(
+        safeDays,
+        LOW_MARGINAL_CEILING,
+        LOW_MARGINAL_CEILING,
+        MARGINAL_FLOOR,
+        MARGINAL_CEILING,
+        safeDays,
+      ) as RawRow[];
+
+    return rows.map((r) => ({
+      date: r.date,
+      count: r.count,
+      avg_score: r.count > 0 ? r.avg_score : null,
+      low_count: r.low_count,
+      high_count: r.high_count,
+    }));
   }
 
   /**

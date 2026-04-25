@@ -1270,19 +1270,27 @@ export type {
 // Telegram `/marginal-approvals [days] [limit]` command uses formatMarginalApprovalsForTelegram().
 export {
   getMarginalApprovalsFeed,
+  getMarginalApprovalsTrend,
   formatMarginalApprovalsForTelegram,
   MARGINAL_APPROVALS_FLOOR,
   MARGINAL_APPROVALS_CEILING,
   MARGINAL_APPROVALS_DEFAULT_DAYS,
   MARGINAL_APPROVALS_DEFAULT_LIMIT,
+  MARGINAL_APPROVALS_TREND_DEFAULT_DAYS,
 } from "./reviewer/marginal-approvals-feed.js";
 export type {
   MarginalApprovalEntry,
   MarginalApprovalsOptions,
   MarginalApprovalAgentSummary,
   MarginalApprovalsFeed,
+  MarginalApprovalsTrendOptions,
+  MarginalApprovalsTrend,
 } from "./reviewer/marginal-approvals-feed.js";
-export type { IMarginalApprovalsFeedStore } from "./state/types.js";
+export type {
+  IMarginalApprovalsFeedStore,
+  IMarginalApprovalsTrendStore,
+  MarginalApprovalDayBucket,
+} from "./state/types.js";
 
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
