@@ -39,6 +39,7 @@
  *   /triage-health [agent]     → per-agent triage schema pass/fail rate, missing fields, revision count, and 7-day trend
  *   /investigations            → list pending/active/completed research agent investigations with titles, times, and result issue URLs
  *   /meeting-goal              → meeting-facilitator-agent monthly goal tracker: core_logic_shipped + meetings_facilitated progress (issue #456)
+ *   /supervisor-dispatches [n] → last N proactive supervisor dispatches with rationale, quality score, and PR outcome (default 10)
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -108,6 +109,10 @@ import {
 } from "../reviewer/meeting-facilitator-goal.js";
 import type { MeetingFacilitatorGoalWidget } from "../state/types.js";
 import type { ReviewerConfig } from "../config.js";
+import {
+  getProactiveDispatches,
+  formatProactiveDispatchesForTelegram,
+} from "../reviewer/proactive-dispatch-log.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
 const log = createLogger("telegram-commands");
@@ -171,7 +176,8 @@ type CommandName =
   | "misrouting"
   | "triage-health"
   | "investigations"
-  | "meeting-goal";
+  | "meeting-goal"
+  | "supervisor-dispatches";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -215,6 +221,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "triage-health",
   "investigations",
   "meeting-goal",
+  "supervisor-dispatches",
 ]);
 
 interface ParsedCommand {
@@ -595,6 +602,13 @@ async function executeCommand(
     case "meeting-goal": {
       // /meeting-goal — monthly goal tracker for meeting-facilitator-agent.
       return Promise.resolve(handleMeetingGoal(store));
+    }
+
+    case "supervisor-dispatches": {
+      // /supervisor-dispatches [n] — last N proactive dispatches with rationale, score, outcome.
+      const n = parseInt(cmd.args[0] ?? "10", 10);
+      const limit = Number.isNaN(n) || n < 1 ? 10 : Math.min(n, 25);
+      return Promise.resolve(handleSupervisorDispatches(store, limit));
     }
   }
 }
@@ -2490,6 +2504,25 @@ export function formatMeetingGoalForTelegram(widget: MeetingFacilitatorGoalWidge
 function handleMeetingGoal(store: ITelegramStateStore): string {
   const widget = getMeetingFacilitatorGoalPayload(store as Parameters<typeof getMeetingFacilitatorGoalPayload>[0]);
   return formatMeetingGoalForTelegram(widget);
+}
+
+// ── Supervisor proactive dispatch log handler (issue #570) ───────────────
+
+/**
+ * Handle the `/supervisor-dispatches [n]` command.
+ *
+ * Shows the last N proactive supervisor dispatches alongside:
+ *   - The structured dispatch rationale (idle signal, confidence, borrow flag)
+ *   - The resulting quality score from task verification
+ *   - Whether the resulting PR was approved/merged
+ *
+ * Usage:
+ *   /supervisor-dispatches         — last 10 dispatches
+ *   /supervisor-dispatches 5       — last 5 dispatches
+ */
+function handleSupervisorDispatches(store: ITelegramStateStore, limit: number): string {
+  const dispatches = getProactiveDispatches(store, limit);
+  return formatProactiveDispatchesForTelegram(dispatches);
 }
 
 // ── Quality system health handler (issue #304) ────────────────────────────

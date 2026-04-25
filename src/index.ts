@@ -1226,6 +1226,13 @@ export type {
   IPersistentAnomalyStore,
 } from "./reviewer/persistent-anomalies.js";
 
+// Proactive dispatch rationale log — /supervisor-dispatches Telegram command (dashboard#570)
+export {
+  getProactiveDispatches,
+  formatProactiveDispatchesForTelegram,
+} from "./reviewer/proactive-dispatch-log.js";
+export type { ProactiveDispatch } from "./reviewer/proactive-dispatch-log.js";
+
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
 export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";

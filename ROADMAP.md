@@ -1,9 +1,10 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-25 (triage cycle 15)_
+_Last updated: 2026-04-25 (triage cycle 16)_
 
 ## Completed (recent)
 
+- **dashboard#570 / PR (this cycle)** — `proactive-dispatch-log.ts`: `getProactiveDispatches()` + `formatProactiveDispatchesForTelegram()` + `/supervisor-dispatches [n]` Telegram command — closes the ROI loop on supervisor idle-agent utilisation by surfacing rationale, quality score, and PR outcome per proactive dispatch.
 - **#484 / PR #484** — score provenance tracking + persistent anomaly digest: distinguishes `default_fallback` score sources from true LLM scores, persists anomaly observations, and exposes `/api/score-provenance/:task_id` + `/api/persistent-anomalies`
 - **#479 / PR #479** — calibration recommendations persistence: stores `ScoreCalibrator` recommendations in SQLite with lifecycle tracking and auto-apply for high-confidence recommendations
 - **#475 / PR #475** — pattern_risk signals into improvement detector: consumed recurring quality-risk signals directly in the improvement prompt
@@ -70,13 +71,15 @@ _Last updated: 2026-04-25 (triage cycle 15)_
 
 1. **#485 — Wire score provenance guard into orchestrator auto-approval path** _(high)_ — Block `score_source='default_fallback'` approvals in the orchestrator and operator override paths; this is the direct follow-up to the just-merged score provenance work.
 
-2. **#473 — Newly shipped surge suppression doesn't cover PR-guard floods** _(high)_ — Add a PR-level suppression axis so batches of different issues blocked by the same PR collapse into one consolidated suppression event.
+2. **#489 — Add /pr-guard-status Telegram command showing active surge suppressions** _(high)_ — Surface which `(repo, issue)` pairs have active surge suppressions so operators can see the PR-guard flood gate in real time; follows directly from the surge suppression work.
 
-3. **#468 — Persist dispatch surge suppression events to SQLite** _(high)_ — Make `PRGuardSurgeDetector` suppression survive restarts and expose the suppression log via REST.
+3. **#473 — Newly shipped surge suppression doesn't cover PR-guard floods** _(high)_ — Add a PR-level suppression axis so batches of different issues blocked by the same PR collapse into one consolidated suppression event.
 
-4. **#445 — Sub-0.60 approval audit entry gap** _(high)_ — Score 0.52 was approved without a bypass-audit entry; investigate the path that bypasses bypass-audit recording and add the missing hook.
+4. **#468 — Persist dispatch surge suppression events to SQLite** _(high)_ — Make `PRGuardSurgeDetector` suppression survive restarts and expose the suppression log via REST.
 
-5. **#453 — Reviewer-side guard: alert when staging validator fires for pre-existing failures repeatedly (>3 distinct PRs)** _(high)_ — When the staging validator fires for the same failure pattern across >3 distinct PRs, alert operators; prevents silent accumulation of pre-existing failures.
+5. **#445 — Sub-0.60 approval audit entry gap** _(high)_ — Score 0.52 was approved without a bypass-audit entry; investigate the path that bypasses bypass-audit recording and add the missing hook.
+
+6. **#453 — Reviewer-side guard: alert when staging validator fires for pre-existing failures repeatedly (>3 distinct PRs)** _(high)_ — When the staging validator fires for the same failure pattern across >3 distinct PRs, alert operators; prevents silent accumulation of pre-existing failures.
 
 ## In flight
 
@@ -84,6 +87,7 @@ _Last updated: 2026-04-25 (triage cycle 15)_
 
 ## Planned
 
+- **#490 — Marginal approval rate digest** _(medium)_ — 3 of 7 real tasks scored below 0.80 in the observed window; surface a weekly Telegram digest of the marginal approval rate trend so operators track quality floor adherence at a glance.
 - **#472 — Meeting facilitator: persist synthesis results to queryable store** _(high)_ — Keep meeting results searchable across daemon cycles so follow-up sessions can retrieve prior synthesis outputs without revision churn.
 - **#440 — Improvement issues filed from analysis are not being dispatched** _(medium)_ — Add a `/stale-improvements` view and/or dispatch exemption path so chronic improvement findings do not stall silently.
 - **#364 — Hard quality floor with mandatory override audit trail** _(high)_ — Hard floor at 0.10 blocking sub-floor approvals; Telegram escalation with `/approve-override` and `/reject-override`; `score_floor_overrides` audit table.
@@ -101,6 +105,30 @@ _Last updated: 2026-04-25 (triage cycle 15)_
 - **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
 
 ## Triage notes
+
+- **2026-04-25 cycle 16**: No duplicate issues found (16 open, all distinct). No stale issues (>14 days) — oldest open issues (#340, #359, #364, #368) are 6 days old, under the 14-day cutoff. Open PRs: #488 (cycle 15 housekeeping) is already merged; no open housekeeping PRs to audit. New issues since cycle 15: #489 (/pr-guard-status command, high priority, added to Next up position 2), #490 (marginal approval rate digest, medium, added to Planned). Priority reordering: #489 promoted to Next up rank 2 (was new/null); #490 added to Planned (new/null). Feature shipped this cycle: `proactive-dispatch-log.ts` + `/supervisor-dispatches` Telegram command (dashboard#570). CLAUDE.md: added `proactive-dispatch-log.ts` module and `/supervisor-dispatches` command to source layout and scope sections. ROADMAP.md: added dashboard#570 to Completed; promoted #489 to Next up rank 2; added #490 to Planned.
+
+```json
+{
+  "duplicates_checked": true,
+  "stale_issues": [],
+  "priority_reordering": [
+    {
+      "issue": 489,
+      "old_rank": null,
+      "new_rank": 2,
+      "reason": "New issue: /pr-guard-status Telegram command is a direct follow-on to the surge suppression work already at rank 3; high operator value."
+    },
+    {
+      "issue": 490,
+      "old_rank": null,
+      "new_rank": null,
+      "reason": "New issue: marginal approval rate digest is medium priority; placed in Planned section."
+    }
+  ],
+  "outcome_summary": "Cycle 16 triage: 16 open issues audited, all distinct, none stale (oldest 6 days). Two new issues added (#489 and #490). Feature shipped: proactive-dispatch-log.ts + /supervisor-dispatches Telegram command. ROADMAP.md and CLAUDE.md updated to reflect the new module and current priority order."
+}
+```
 
 - **2026-04-25 cycle 15**: No duplicate issues found (14 open, all distinct). No stale issues (>14 days) — all open issues are under the cutoff. Open PRs audited: #482 correctly includes `Closes #469`. ROADMAP.md: added the latest merged reviewer features (#408 through #484), refreshed Next up for #485/#473/#468/#445/#453, added an `In flight` note for #469 / PR #482, and corrected the PR-guard surge defaults to 5/30. CLAUDE.md: added the new score-provenance / persistent-anomalies / calibration-recommendations modules and corrected the stale PR-guard threshold text.
 
