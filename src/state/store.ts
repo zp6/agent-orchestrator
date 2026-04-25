@@ -4089,6 +4089,52 @@ export class StateStore {
   }
 
   /**
+   * Return supervisor decisions with optional filtering by agent name and
+   * rolling-window cutoff — designed for the metrics server feed (issue #1140).
+   *
+   * Results are ordered newest-first and capped at `limit`.
+   *
+   * @param limit  - Maximum number of records to return (default 100).
+   * @param agent  - Optional agent name filter (null = all agents).
+   * @param days   - Rolling look-back window in days (0 = no window filter).
+   */
+  getSupervisorDecisionsFeed(
+    limit = 100,
+    agent: string | null = null,
+    days = 0,
+  ): SupervisorDecisionRecord[] {
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+
+    if (agent) {
+      conditions.push("agent_name = ?");
+      params.push(agent);
+    }
+    if (days > 0) {
+      const cutoff = new Date(Date.now() - days * 24 * 3600_000).toISOString();
+      conditions.push("created_at >= ?");
+      params.push(cutoff);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    params.push(limit);
+
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM supervisor_decisions ${where} ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(...params) as Array<Omit<SupervisorDecisionRecord, "issue_refs" | "hard_gates"> & {
+        issue_refs?: string | null;
+        hard_gates?: string | null;
+      }>;
+    return rows.map((row) => ({
+      ...row,
+      issue_refs: parseJsonStringArray(row.issue_refs),
+      hard_gates: parseJsonStringArray(row.hard_gates),
+    }));
+  }
+
+  /**
    * Return routing decisions from the last `hours` hours in ascending
    * chronological order, suitable for rendering a per-agent swimlane timeline.
    *

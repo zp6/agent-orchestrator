@@ -15,6 +15,8 @@
  *   GET /investigations?limit=20&offset=0&status=done
  *   GET /misrouting                   — research agent impl-task misroute feed (issue #1077)
  *   GET /misrouting?agent=claude-research-agent&days=7
+ *   GET /supervisor-decisions                         — recent supervisor dispatch decisions (issue #1140)
+ *   GET /supervisor-decisions?limit=50&agent=claude-agent-orchestrator&days=7
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
@@ -24,6 +26,7 @@ import {
   type SemanticMemoryEffectivenessResult,
   type FailureInterceptionStats,
   type VerificationCalibrationRecommendationRow,
+  type SupervisorDecisionRecord,
 } from "../state/store.js";
 import { createLogger } from "./logger.js";
 
@@ -153,6 +156,25 @@ export interface VerificationCalibrationResponse {
   applied_thresholds: Record<string, number>;
   /** Most recent calibration recommendations, newest first. */
   recommendations: VerificationCalibrationRecommendationRow[];
+}
+
+/**
+ * JSON response shape for GET /supervisor-decisions (issue #1140).
+ * Exposes supervisor dispatch rationale to unblock dashboard #570.
+ */
+export interface SupervisorDecisionsResponse {
+  /** Look-back window in days (0 = no window filter, use limit only). */
+  days: number;
+  /** Maximum number of records returned. */
+  limit: number;
+  /** Optional agent name filter applied (null = all agents). */
+  agent: string | null;
+  /** Total number of decisions returned. */
+  count: number;
+  /** Decision records, newest first. */
+  decisions: SupervisorDecisionRecord[];
+  /** ISO timestamp of when this response was generated. */
+  generated_at: string;
 }
 
 /**
@@ -415,6 +437,42 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /supervisor-decisions ──────────────────────────────────────────────
+    // Exposes supervisor dispatch rationale to unblock dashboard #570 (issue #1140).
+    // The supervisor_decisions table already exists — this endpoint surfaces it
+    // without requiring any new write path on the orchestrator side.
+    //
+    // Query params:
+    //   limit=N  — max records (default 100, max 500)
+    //   agent=X  — filter by agent_name
+    //   days=N   — rolling window cutoff (default 0 = no filter, use limit only)
+    if (url.pathname === "/supervisor-decisions") {
+      try {
+        const rawLimit = parseInt(url.searchParams.get("limit") ?? "100", 10);
+        const limit = isNaN(rawLimit) || rawLimit < 1 ? 100 : Math.min(rawLimit, 500);
+        const agent = url.searchParams.get("agent") || null;
+        const rawDays = parseInt(url.searchParams.get("days") ?? "0", 10);
+        const days = isNaN(rawDays) || rawDays < 0 ? 0 : Math.min(rawDays, MAX_WINDOW_DAYS);
+
+        const decisions = store.getSupervisorDecisionsFeed(limit, agent, days);
+        const body: SupervisorDecisionsResponse = {
+          days,
+          limit,
+          agent,
+          count: decisions.length,
+          decisions,
+          generated_at: new Date().toISOString(),
+        };
+        sendJson(res, 200, body);
+      } catch (err) {
+        log.warn("Failed to fetch supervisor decisions", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to fetch supervisor decisions" });
+      }
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -434,6 +492,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
         "/verification-calibration",
         "/failure-interceptions",
         "/api/ulid-collisions",
+        "/supervisor-decisions",
       ],
     });
   });
