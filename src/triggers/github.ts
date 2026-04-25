@@ -187,7 +187,11 @@ export function findExistingPRsForIssue(repo: string, issueNumber: number): Link
         headRefName: string;
       }>
     )
-      .filter((pr) => !searchByNumber.has(pr.number) && branchPattern.test(pr.headRefName))
+      .filter(
+        (pr) =>
+          !searchByNumber.has(pr.number) &&
+          (branchPattern.test(pr.headRefName) || closingPattern.test(pr.body ?? "")),
+      )
       .map((pr) => ({
         number: pr.number,
         title: pr.title,

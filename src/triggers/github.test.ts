@@ -396,6 +396,36 @@ describe("findExistingPRsForIssue", () => {
     expect(prs).toHaveLength(1);
     expect(prs[0]).toMatchObject({ number: 8, state: "open" });
   });
+
+  it("detects a cross-variant PR with 'Closes #N' in body but non-standard branch (search index lag simulation, issue #1174)", () => {
+    // Simulates a sibling agent (e.g. codex variant) that opened a PR with
+    // "Closes #42" in the body but used a non-standard branch name like
+    // "triage-pass-12-apr-25". The server-side search index has not yet
+    // indexed it (minutes of lag), so searchPRs is empty. The paginated
+    // open-PR list returns the PR with the body keyword — the body-matching
+    // fallback must catch it to prevent a duplicate dispatch.
+    mockPRCalls(
+      [], // search index hasn't indexed the new PR yet (lag)
+      [{ number: 13, title: "Cross-variant fix", url: "url", isDraft: false, body: "Closes #42", headRefName: "triage-pass-12-apr-25" }],
+      [],
+    );
+    const prs = findExistingPRsForIssue("owner/repo", 42);
+    expect(prs).toHaveLength(1);
+    expect(prs[0]).toMatchObject({ number: 13, state: "open" });
+  });
+
+  it("does not false-positive on 'Closes #42' body in a PR already found via search (no duplicate)", () => {
+    // PR #5 appears in both the search results and the open list with a
+    // matching body. The dedup by PR number must prevent it being counted twice.
+    mockPRCalls(
+      [{ number: 5, title: "Fix", url: "url", isDraft: false, headRefName: "fix-something" }],
+      [{ number: 5, title: "Fix", url: "url", isDraft: false, body: "Closes #42", headRefName: "fix-something" }],
+      [],
+    );
+    const prs = findExistingPRsForIssue("owner/repo", 42);
+    expect(prs).toHaveLength(1); // deduplicated — not counted twice
+    expect(prs[0]).toMatchObject({ number: 5, state: "open" });
+  });
 });
 
 describe("validateGhAuth", () => {
