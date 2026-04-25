@@ -1234,6 +1234,7 @@ export {
 export type { ProactiveDispatch } from "./reviewer/proactive-dispatch-log.js";
 
 // Standup quality trend — standup_quality_history persistence + /standup-quality Telegram command (issue #498)
+// Backfill support added in coordinated change 01KQ2ZHKAK9RR15HKV04CP4M48
 export {
   recordStandupQualityScore,
   getStandupQualityTrend,

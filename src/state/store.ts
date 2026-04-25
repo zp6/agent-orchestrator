@@ -742,6 +742,25 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       CREATE INDEX IF NOT EXISTS idx_pattern_risk_recorded
         ON pattern_risk (recorded_at DESC);
     `);
+
+    // Standup quality history table (issue #498).
+    // Records per-agent standup verification scores over time so operators can
+    // detect quality drift via /standup-quality.  Idempotent — safe to run on
+    // existing DBs that already have this table.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS standup_quality_history (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id         TEXT    NOT NULL,
+        date             TEXT    NOT NULL,
+        score            REAL    NOT NULL,
+        action_item_count INTEGER NOT NULL DEFAULT 0,
+        task_id          TEXT    NOT NULL,
+        recorded_at      TEXT    NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_standup_quality_agent_date
+        ON standup_quality_history (agent_id, date DESC);
+    `);
   }
 
   // ── PR guard cooldown (issue #390) ───────────────────────────────────────
@@ -4769,6 +4788,157 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
 
     summaries.sort((a, b) => b.mean_risk_score - a.mean_risk_score);
     return summaries;
+  }
+
+  // ── Standup quality history (issue #498) ─────────────────────────────────
+
+  /**
+   * Persist one standup quality record to `standup_quality_history`.
+   *
+   * Implements `IStandupQualityStore.recordStandupQualityScore`.
+   * Fire-and-forget — callers should swallow errors from this method.
+   */
+  recordStandupQualityScore(record: {
+    agent_id: string;
+    date: string;
+    score: number;
+    action_item_count: number;
+    task_id: string;
+    recorded_at: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO standup_quality_history
+           (agent_id, date, score, action_item_count, task_id, recorded_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.agent_id,
+        record.date,
+        record.score,
+        record.action_item_count,
+        record.task_id,
+        record.recorded_at,
+      );
+  }
+
+  /**
+   * Return standup quality records filtered by agent and lower-bound timestamp.
+   *
+   * Implements `IStandupQualityStore.getStandupQualityRecords`.
+   *
+   * @param agentId - Agent ID filter; null/undefined to return all agents.
+   * @param since   - ISO-8601 lower bound on `recorded_at`. Omit for no lower bound.
+   * @returns Records sorted by `recorded_at` ascending.
+   */
+  getStandupQualityRecords(
+    agentId?: string | null,
+    since?: string,
+  ): Array<{
+    id: number;
+    agent_id: string;
+    date: string;
+    score: number;
+    action_item_count: number;
+    task_id: string;
+    recorded_at: string;
+  }> {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (agentId != null && agentId.trim() !== "") {
+      conditions.push("agent_id = ?");
+      params.push(agentId.trim());
+    }
+    if (since != null) {
+      conditions.push("recorded_at >= ?");
+      params.push(since);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const sql = `
+      SELECT id, agent_id, date, score, action_item_count, task_id, recorded_at
+      FROM standup_quality_history
+      ${where}
+      ORDER BY recorded_at ASC
+    `;
+
+    return this.db.prepare(sql).all(...params) as Array<{
+      id: number;
+      agent_id: string;
+      date: string;
+      score: number;
+      action_item_count: number;
+      task_id: string;
+      recorded_at: string;
+    }>;
+  }
+
+  /**
+   * Backfill `standup_quality_history` from existing verified standup tasks.
+   *
+   * Reads all tasks where `task_type = 'standup'`, `verification_status IN
+   * ('approved', 'rejected')`, and `quality_score IS NOT NULL`, then inserts
+   * a history record for each that does not already have one (idempotent via
+   * `task_id` deduplication).
+   *
+   * Uses `created_at` as the `recorded_at` timestamp and the date portion of
+   * `created_at` as the `date` field.  `action_item_count` defaults to 0 for
+   * historical tasks (the count is not stored on the task row).
+   *
+   * @returns Number of rows inserted.
+   */
+  backfillStandupQualityHistory(): { rows_inserted: number } {
+    // Fetch all verified standup tasks that haven't been recorded yet.
+    const candidates = this.db
+      .prepare(
+        `SELECT t.id, t.agent_name, t.quality_score, t.created_at
+         FROM tasks t
+         WHERE t.task_type = 'standup'
+           AND t.verification_status IN ('approved', 'rejected')
+           AND t.quality_score IS NOT NULL
+           AND t.id NOT IN (
+             SELECT DISTINCT task_id FROM standup_quality_history
+           )
+         ORDER BY t.created_at ASC`,
+      )
+      .all() as Array<{
+      id: string;
+      agent_name: string | null;
+      quality_score: number;
+      created_at: string;
+    }>;
+
+    if (candidates.length === 0) {
+      return { rows_inserted: 0 };
+    }
+
+    const insert = this.db.prepare(
+      `INSERT INTO standup_quality_history
+         (agent_id, date, score, action_item_count, task_id, recorded_at)
+       VALUES (?, ?, ?, 0, ?, ?)`,
+    );
+
+    const insertMany = this.db.transaction(
+      (rows: typeof candidates) => {
+        let count = 0;
+        for (const row of rows) {
+          const agentId = row.agent_name ?? "unknown";
+          // Extract "YYYY-MM-DD" from the stored created_at (ISO-8601 or SQLite datetime).
+          const date = row.created_at.slice(0, 10);
+          const recorded_at = row.created_at.includes("T")
+            ? row.created_at
+            : row.created_at.replace(" ", "T") + "Z";
+          const score = Math.max(0, Math.min(1, row.quality_score));
+          insert.run(agentId, date, score, row.id, recorded_at);
+          count++;
+        }
+        return count;
+      },
+    );
+
+    const rows_inserted = insertMany(candidates) as number;
+    return { rows_inserted };
   }
 
   /**
