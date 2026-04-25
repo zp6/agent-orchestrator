@@ -49,6 +49,7 @@ import { registerMemoryCommand } from "./commands/memory.js";
 import { registerControlsCommand } from "./commands/controls.js";
 import { registerDagCommand } from "./commands/dag.js";
 import { registerFailureInterceptionsCommand } from "./commands/failure-interceptions.js";
+import { registerStandupQualityCommand } from "./commands/standup-quality.js";
 
 const program = new Command();
 
@@ -107,5 +108,6 @@ registerMemoryCommand(program);
 registerControlsCommand(program);
 registerDagCommand(program);
 registerFailureInterceptionsCommand(program);
+registerStandupQualityCommand(program);
 
 program.parse();

@@ -11661,6 +11661,63 @@ export class StateStore {
   }
 
   /**
+   * One-time backfill of `standup_quality_history` from historical tasks.
+   *
+   * Queries `tasks` for rows where:
+   *   - title LIKE '%standup%' (case-insensitive)
+   *   - quality_score IS NOT NULL
+   *   - task_id not already in standup_quality_history (idempotent via LEFT JOIN)
+   *
+   * Extracts the ISO date from `created_at` as `standup_date` and inserts
+   * via INSERT OR IGNORE, so running this multiple times is safe.
+   *
+   * Returns the number of rows inserted.
+   */
+  backfillStandupQualityHistory(): number {
+    this.runStandupQualityMigration();
+
+    // Find historical standup tasks not yet recorded.
+    const candidates = this.db
+      .prepare(
+        `SELECT t.id, t.agent_name, t.quality_score, t.created_at
+         FROM tasks t
+         LEFT JOIN standup_quality_history sqh ON sqh.task_id = t.id
+         WHERE sqh.id IS NULL
+           AND t.quality_score IS NOT NULL
+           AND t.agent_name IS NOT NULL
+           AND LOWER(t.title) LIKE '%standup%'
+         ORDER BY t.created_at ASC`,
+      )
+      .all() as Array<{
+        id: string;
+        agent_name: string;
+        quality_score: number;
+        created_at: string;
+      }>;
+
+    const insert = this.db.prepare(
+      `INSERT OR IGNORE INTO standup_quality_history
+       (agent_name, standup_date, quality_score, action_item_count, task_id, recorded_at)
+       VALUES (?, ?, ?, 0, ?, ?)`,
+    );
+
+    const now = new Date().toISOString();
+    let inserted = 0;
+
+    const runInserts = this.db.transaction(() => {
+      for (const row of candidates) {
+        // Extract date portion from ISO timestamp (e.g. "2026-04-20T14:35:00Z" → "2026-04-20")
+        const standupDate = (row.created_at ?? "").slice(0, 10) || now.slice(0, 10);
+        const result = insert.run(row.agent_name, standupDate, row.quality_score, row.id, now);
+        inserted += result.changes;
+      }
+    });
+
+    runInserts();
+    return inserted;
+  }
+
+  /**
    * Fetch recent failed tasks suitable for similarity matching.
    * Returns tasks with status='failed' OR quality_score < 0.5 (rejected).
    * Limited to last N days and up to `limit` rows.
