@@ -2105,6 +2105,29 @@ export class Daemon {
                 await this.flagLowScoreReviewerApproval(time, task, result.score, threshold);
               }
             }
+
+            // Standup quality history (issue #591): record per-agent quality
+            // scores for standup tasks so operators can track trends over time
+            // via `GET /standup-quality` or the `/standup-quality` Telegram cmd.
+            const isStandupTask =
+              /standup/i.test(task.title) || /\u{1F4CB}/u.test(task.title);
+            if (isStandupTask && task.agent_name) {
+              // Extract YYYY-MM-DD from title (e.g. "Standup Apr 25" → today's date)
+              const dateMatch = task.title.match(/(\d{4}-\d{2}-\d{2})/);
+              const standupDate =
+                dateMatch?.[1] ??
+                new Date(task.created_at ?? Date.now()).toISOString().split("T")[0]!;
+              // Extract action-item count from title (e.g. "— 12 action items")
+              const actionMatch = task.title.match(/(\d+)\s+action\s+item/i);
+              const actionItemCount = actionMatch ? parseInt(actionMatch[1]!, 10) : 0;
+              this.store.recordStandupQualityEvent({
+                agentName: task.agent_name,
+                standupDate,
+                qualityScore: result.score,
+                actionItemCount,
+                taskId: task.id,
+              });
+            }
           }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);

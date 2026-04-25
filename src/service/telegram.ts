@@ -520,6 +520,49 @@ Steps:
     return "🚀 Starting blue sky session — 3 rounds of creative thinking...";
   }
 
+  // Standup quality trend digest (issue #591)
+  // Usage: standup-quality [agent] [days]
+  //   agent — filter to a single agent name (optional, default: all)
+  //   days  — rolling window in days (optional, default: 30)
+  if (cmd === "standup-quality" || cmd === "/standup-quality" || cmd.startsWith("standup-quality ") || cmd.startsWith("/standup-quality ")) {
+    const parts = text.trim().split(/\s+/).slice(1);
+    let agentFilter: string | null = null;
+    let days = 30;
+    // Parse positional args: first non-numeric = agent, first numeric = days
+    for (const part of parts) {
+      if (/^\d+$/.test(part)) {
+        days = Math.min(Math.max(parseInt(part, 10), 1), 90);
+      } else {
+        agentFilter = part;
+      }
+    }
+    const trends = ctx.store.getStandupQualityTrend(agentFilter, days);
+    if (trends.length === 0) {
+      return agentFilter
+        ? `📊 No standup quality data for *${agentFilter}* in the last ${days} days.`
+        : `📊 No standup quality data recorded in the last ${days} days.`;
+    }
+    const lines: string[] = [`📊 *Standup Quality — last ${days} days*\n`];
+    for (const t of trends) {
+      const spark = t.scores.map((s) => {
+        if (s >= 0.9) return "█";
+        if (s >= 0.7) return "▆";
+        if (s >= 0.5) return "▄";
+        return "▂";
+      }).join("");
+      const avgStr = t.avg_score !== null ? t.avg_score.toFixed(2) : "n/a";
+      const latestStr = t.latest_score !== null ? t.latest_score.toFixed(2) : "n/a";
+      const trendIcon = { improving: "📈", stable: "➡️", declining: "📉", insufficient_data: "❓" }[t.trend];
+      const streakFlag = t.low_streak ? " ⚠️ *LOW STREAK* (last 3 < 0.70)" : "";
+      lines.push(
+        `*${t.agent_name}*\n` +
+        `${spark}\n` +
+        `avg: ${avgStr} · latest: ${latestStr} · ${trendIcon} ${t.trend}${streakFlag}`,
+      );
+    }
+    return lines.join("\n\n");
+  }
+
   // Verification calibration report
   if (cmd === "calibrate" || cmd === "/calibrate") {
     const report = buildCalibrationReport(ctx.store);

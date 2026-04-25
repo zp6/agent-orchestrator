@@ -1052,6 +1052,25 @@ export interface InFlightReservation {
 }
 
 /**
+ * Per-agent standup quality trend computed over a rolling window.
+ * Returned by `getStandupQualityTrend()` and exposed via `GET /standup-quality`.
+ */
+export interface StandupQualityAgentTrend {
+  agent_name: string;
+  /** Chronological quality scores (oldest first), suitable for sparkline rendering. */
+  scores: number[];
+  /** Matching YYYY-MM-DD standup dates (parallel with `scores`). */
+  dates: string[];
+  /** Rolling average score across the window, null when no data. */
+  avg_score: number | null;
+  /** Most recent standup score, null when no data. */
+  latest_score: number | null;
+  /** True when the last 3 standups all scored below 0.70 — operator coaching warranted. */
+  low_streak: boolean;
+  trend: "improving" | "stable" | "declining" | "insufficient_data";
+}
+
+/**
  * A single routing decision record.
  * Written at dispatch time; quality_score is filled when the task is verified.
  */
@@ -11462,6 +11481,125 @@ export class StateStore {
     this.db.prepare(`
       UPDATE failure_interceptions SET final_outcome = ? WHERE task_id = ? AND final_outcome IS NULL
     `).run(outcome, taskId);
+  }
+
+  // ── Standup Quality History (issue #591) ──────────────────────────────────
+
+  private runStandupQualityMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS standup_quality_history (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_name        TEXT    NOT NULL,
+        standup_date      TEXT    NOT NULL,
+        quality_score     REAL    NOT NULL,
+        action_item_count INTEGER NOT NULL DEFAULT 0,
+        task_id           TEXT,
+        recorded_at       TEXT    NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sqh_agent_date
+        ON standup_quality_history(agent_name, standup_date DESC);
+      CREATE INDEX IF NOT EXISTS idx_sqh_date
+        ON standup_quality_history(standup_date DESC);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_sqh_task_id
+        ON standup_quality_history(task_id) WHERE task_id IS NOT NULL;
+    `);
+  }
+
+  /**
+   * Record a standup quality event for a single agent.
+   *
+   * Called from the verification loop when a standup task is approved or
+   * rejected, so operators can track per-agent scoring trends over time
+   * via `/standup-quality` (Telegram) or `GET /standup-quality` (metrics).
+   *
+   * INSERT OR IGNORE on task_id prevents double-counting if verification
+   * runs more than once for the same task.
+   */
+  recordStandupQualityEvent(params: {
+    agentName: string;
+    standupDate: string;
+    qualityScore: number;
+    actionItemCount: number;
+    taskId?: string;
+  }): void {
+    this.runStandupQualityMigration();
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO standup_quality_history
+         (agent_name, standup_date, quality_score, action_item_count, task_id, recorded_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        params.agentName,
+        params.standupDate,
+        params.qualityScore,
+        params.actionItemCount,
+        params.taskId ?? null,
+        new Date().toISOString(),
+      );
+  }
+
+  /**
+   * Compute per-agent standup quality trends over a rolling window.
+   *
+   * Returns one entry per agent with chronological score arrays suitable
+   * for sparkline rendering, an average, the latest score, a low-streak
+   * flag (last 3 standups all below 0.70), and trend direction.
+   *
+   * @param agentName  Filter to a single agent (null = all agents)
+   * @param days       Rolling window in days (0 = no cutoff)
+   */
+  getStandupQualityTrend(agentName: string | null, days: number): StandupQualityAgentTrend[] {
+    this.runStandupQualityMigration();
+    const cutoff =
+      days > 0
+        ? new Date(Date.now() - days * 86_400_000).toISOString().split("T")[0]
+        : "0000-00-00";
+
+    const agentFilter = agentName ? "AND agent_name = ?" : "";
+    const agentParam = agentName ? [agentName] : [];
+
+    const agents = this.db
+      .prepare(
+        `SELECT DISTINCT agent_name FROM standup_quality_history
+         WHERE standup_date >= ? ${agentFilter}
+         ORDER BY agent_name`,
+      )
+      .all(cutoff!, ...agentParam) as Array<{ agent_name: string }>;
+
+    return agents.map(({ agent_name }) => {
+      const rows = this.db
+        .prepare(
+          `SELECT standup_date, quality_score FROM standup_quality_history
+           WHERE agent_name = ? AND standup_date >= ?
+           ORDER BY standup_date ASC`,
+        )
+        .all(agent_name, cutoff!) as Array<{ standup_date: string; quality_score: number }>;
+
+      const scores = rows.map((r) => r.quality_score);
+      const dates = rows.map((r) => r.standup_date);
+      const n = scores.length;
+
+      const avg_score =
+        n > 0 ? Math.round((scores.reduce((s, v) => s + v, 0) / n) * 100) / 100 : null;
+      const latest_score = n > 0 ? (scores[n - 1] ?? null) : null;
+      const low_streak = n >= 3 && scores.slice(-3).every((s) => s < 0.7);
+
+      let trend: StandupQualityAgentTrend["trend"] = "insufficient_data";
+      if (n >= 4) {
+        const half = Math.floor(n / 2);
+        const recentAvg =
+          scores.slice(-half).reduce((s, v) => s + v, 0) / half;
+        const priorAvg =
+          scores.slice(0, half).reduce((s, v) => s + v, 0) / half;
+        const delta = recentAvg - priorAvg;
+        trend = delta > 0.05 ? "improving" : delta < -0.05 ? "declining" : "stable";
+      } else if (n >= 2) {
+        trend = "stable";
+      }
+
+      return { agent_name, scores, dates, avg_score, latest_score, low_streak, trend };
+    });
   }
 
   /**

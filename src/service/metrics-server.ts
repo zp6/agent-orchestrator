@@ -27,6 +27,7 @@ import {
   type FailureInterceptionStats,
   type VerificationCalibrationRecommendationRow,
   type SupervisorDecisionRecord,
+  type StandupQualityAgentTrend,
 } from "../state/store.js";
 import { createLogger } from "./logger.js";
 
@@ -173,6 +174,22 @@ export interface SupervisorDecisionsResponse {
   count: number;
   /** Decision records, newest first. */
   decisions: SupervisorDecisionRecord[];
+  /** ISO timestamp of when this response was generated. */
+  generated_at: string;
+}
+
+/**
+ * JSON response shape for GET /standup-quality (issue #591).
+ * Per-agent standup quality history with sparkline data, trend direction,
+ * average scores, and operator alert flags.
+ */
+export interface StandupQualityResponse {
+  /** Rolling window in days. */
+  days: number;
+  /** Agent name filter applied (null = all agents). */
+  agent: string | null;
+  /** One entry per agent with chronological score arrays and trend metadata. */
+  per_agent: StandupQualityAgentTrend[];
   /** ISO timestamp of when this response was generated. */
   generated_at: string;
 }
@@ -473,6 +490,35 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /standup-quality ───────────────────────────────────────────────────
+    // Per-agent standup quality history with sparkline arrays, trend direction,
+    // and operator alert flags (issue #591).
+    //
+    // Query params:
+    //   agent=<name>  — filter to a single agent (default: all agents)
+    //   days=N        — rolling window in days (default 30, max 90)
+    if (url.pathname === "/standup-quality") {
+      try {
+        const agent = url.searchParams.get("agent") || null;
+        const rawDays = parseInt(url.searchParams.get("days") ?? "30", 10);
+        const days = isNaN(rawDays) || rawDays < 1 ? 30 : Math.min(rawDays, MAX_WINDOW_DAYS);
+        const per_agent = store.getStandupQualityTrend(agent, days);
+        const body: StandupQualityResponse = {
+          days,
+          agent,
+          per_agent,
+          generated_at: new Date().toISOString(),
+        };
+        sendJson(res, 200, body);
+      } catch (err) {
+        log.warn("Failed to fetch standup quality trend", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to fetch standup quality data" });
+      }
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -493,6 +539,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
         "/failure-interceptions",
         "/api/ulid-collisions",
         "/supervisor-decisions",
+        "/standup-quality",
       ],
     });
   });

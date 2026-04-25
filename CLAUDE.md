@@ -133,6 +133,7 @@ Two-way communication via `@TheSupervisor_rapartlu_bot`:
 | `newchat <agent>` | Reset conversation |
 | `issue <idea>` | Create issue from rough description |
 | `dispatch <agent> <msg>` | Send task to agent |
+| `standup-quality [agent] [days]` | Per-agent standup quality sparkline, avg score, trend, and low-streak alert (issue #591) |
 
 Telegram polls independently every 3 seconds (not tied to daemon cycles).
 Config: `~/.claude-orchestrator/.env` (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID).
@@ -235,6 +236,7 @@ An embedded HTTP server starts alongside the daemon on port **3472** (same as th
 | `GET /failure-interceptions` | Predictive failure interception feed — interception events with similarity scores, lesson counts, model upgrade suggestions, and final outcomes (`?days=N`) |
 | `GET /api/ulid-collisions` | ULID collision log — events where `createTask()` detected a duplicate ULID before INSERT; `createTask()` retries with a fresh ULID so the task still succeeds, but every collision event is logged here for operator audit; any non-empty result warrants ULID generator investigation (issue #1133) |
 | `GET /supervisor-decisions` | Supervisor dispatch rationale feed — recent supervisor decisions with agent, action, reason, rationale, issue_refs, hard_gates, and outcome; supports `?limit=N&agent=<name>&days=N` filters; unblocks dashboard #570 (issue #1140) |
+| `GET /standup-quality` | Per-agent standup quality trend — chronological score arrays (sparkline-ready), avg/latest scores, trend direction, and low-streak alert flag; supports `?agent=<name>&days=N` (default 30 days); populated by verification loop when standup tasks are scored (issue #591) |
 
 The dashboard agent polls `/dispatch-efficiency` to populate the dispatch efficiency panel without needing CLI access.
 
