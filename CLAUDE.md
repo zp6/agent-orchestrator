@@ -87,6 +87,7 @@ When this container is used for LLM PR reviews:
 - Meta-quality gate: stricter approval floor for tasks whose scope is quality enforcement or calibration
 - PR scope pre-flight check: deterministic bundling detection before LLM review is triggered
 - Semantic task memory: daily Telegram digest summarising the semantic task memory index; `/memory` command
+- Standup quality trend tracker: `standup_quality_history` table records (agent, date, score, action_item_count) per standup task; `getStandupQualityTrend()` builds sparkline + avg + `is_degrading` flag when last 3 standups all scored < 0.70; `/standup-quality [agent] [days]` Telegram command (`standup-quality-trend.ts`)
 - Score provenance tracker: `score_source` on verification results distinguishes parsed LLM scores from `default_fallback` values; `shouldBlockDefaultFallbackApproval()` lets the orchestrator block silent auto-approval of parse-error zeros (`score-provenance.ts`)
 - Persistent anomaly tracker: `score_anomaly_observations` rows capture recurring quality anomalies across analysis cycles; `getPersistentAnomalies()` and `/api/persistent-anomalies` surface repeated patterns for operators (`persistent-anomalies.ts`)
 - Calibration recommendations feed: `calibration_recommendations` persistence plus review/resolve flow for `ScoreCalibrator` recommendations and high-confidence auto-apply (`calibration-recommendations-feed.ts`)
@@ -204,6 +205,7 @@ src/
     meeting-outcome-client.ts       — HTTP client for meeting-facilitator agent outcome API (port 3485); `MeetingOutcomeClient` with `fetchOutcome()`, `listOutcomes()`, `summary()`, `extractSupervisorIntelligence()`; `IssueRef`, `PriorityRankingEntry`, `SequencingConstraint`, `MeetingOutcome`, `MeetingOutcomeSummary` types; factory `createMeetingOutcomeClient()` (issue #460)
     meeting-priority-dispatcher.ts  — rule-based fast-path for auto-dispatch from `MeetingOutcome` signals; `evaluateAutoDispatch()` pure function; 7-rule ordered evaluation returning `PriorityDispatchDecision` (`"dispatch"` | `"skip"` | `"defer-to-llm"`); `MeetingPriorityDispatcher` class with `evaluate()` + `filterDispatchable()`; `DispatchEvaluationContext` for caller-supplied fleet state (open PRs, in-flight tasks, merged issues); factory `createMeetingPriorityDispatcher()` (issue #463)
     proactive-dispatch-log.ts       — `getProactiveDispatches()` enriches supervisor dispatch decisions with task quality score + verification status; `formatProactiveDispatchesForTelegram()` renders rationale, idle-signal, confidence, and outcome badge; backing module for `/supervisor-dispatches` Telegram command (dashboard#570)
+    standup-quality-trend.ts        — `standup_quality_history` SQLite table; `recordStandupQualityScore()` insert hook; `getStandupQualityTrend()` per-agent sparkline + avg + `is_degrading` flag (streak of ≥3 consecutive sub-0.70 scores); `formatStandupQualityForTelegram()`; `/standup-quality [agent] [days]` command (issue #498)
   integration/
     orchestrator-adapter.ts         — createReviewerInstances() adapter for orchestrator import
   service/

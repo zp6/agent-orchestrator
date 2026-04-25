@@ -1233,6 +1233,25 @@ export {
 } from "./reviewer/proactive-dispatch-log.js";
 export type { ProactiveDispatch } from "./reviewer/proactive-dispatch-log.js";
 
+// Standup quality trend — standup_quality_history persistence + /standup-quality Telegram command (issue #498)
+export {
+  recordStandupQualityScore,
+  getStandupQualityTrend,
+  parseStandupQualityParams,
+  formatStandupQualityForTelegram,
+  STANDUP_QUALITY_MIGRATION_SQL,
+  STANDUP_QUALITY_DEFAULT_DAYS,
+  STANDUP_QUALITY_MAX_DAYS,
+  STANDUP_LOW_SCORE_THRESHOLD,
+  STANDUP_DEGRADATION_STREAK,
+} from "./reviewer/standup-quality-trend.js";
+export type {
+  StandupQualityRecord,
+  StandupQualityTrendPayload,
+  StandupQualityParams,
+  IStandupQualityStore,
+} from "./reviewer/standup-quality-trend.js";
+
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
 export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";
