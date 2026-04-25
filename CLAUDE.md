@@ -279,6 +279,7 @@ The `orch` CLI is built from `src/cli/index.ts`. Key command groups:
 | `orch agent-gaps` | Coverage gap detection: unowned topics, scope overload, low-confidence routing |
 | `orch cost` | Token usage and billing |
 | `orch failure-interceptions` | Failure interception panel: pre-dispatch similarity filter hits, lesson injection counts, model upgrade suggestions, and pass/fail outcomes |
+| `orch marginal-score-tasks` | Marginal-score task panel: tasks in the borderline quality range (default 50–75%) with daily trend sparkline, per-agent breakdown, and pagination; supports `--days`, `--min-score`, `--max-score`, `--agent`, `--limit`, `--offset`, `--json` (issue #597) |
 
 Run `orch --help` for the full list. All commands accept `--json` for machine-readable output.
 

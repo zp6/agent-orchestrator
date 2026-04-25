@@ -50,6 +50,7 @@ import { registerControlsCommand } from "./commands/controls.js";
 import { registerDagCommand } from "./commands/dag.js";
 import { registerFailureInterceptionsCommand } from "./commands/failure-interceptions.js";
 import { registerStandupQualityCommand } from "./commands/standup-quality.js";
+import { registerMarginalScoreTasksCommand } from "./commands/marginal-score-tasks.js";
 
 const program = new Command();
 
@@ -109,5 +110,6 @@ registerControlsCommand(program);
 registerDagCommand(program);
 registerFailureInterceptionsCommand(program);
 registerStandupQualityCommand(program);
+registerMarginalScoreTasksCommand(program);
 
 program.parse();
