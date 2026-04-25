@@ -1601,6 +1601,19 @@ export class Daemon {
       healthy = false;
     }
 
+    // Also check Docker socket — proxy can respond OK while Docker is down,
+    // making all container-based agents unreachable.
+    if (healthy) {
+      try {
+        execSync("curl --unix-socket /var/run/docker.sock --max-time 5 http://localhost/ping", {
+          encoding: "utf-8", timeout: 8_000,
+        });
+      } catch {
+        this.log.warn("Docker socket unresponsive — proxy is up but containers are unreachable");
+        healthy = false;
+      }
+    }
+
     if (healthy) {
       this.proxyRecoveryStreak++;
       this.proxyFailureCount = 0;
