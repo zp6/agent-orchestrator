@@ -11,8 +11,9 @@ import { createHash } from "node:crypto";
 import { createLLMClient } from "../client/llm-client.js";
 import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
-import type { IStateStore, Task, IImprovementBatchDeduplicationStore, IPatternRiskStore } from "../state/types.js";
+import type { IStateStore, Task, IImprovementBatchDeduplicationStore, IPatternRiskStore, IPersistentAnomalyStore } from "../state/types.js";
 import { PatternRiskConsumer } from "./pattern-risk-consumer.js";
+import { recordAnomalyObservation, generateCycleId } from "./persistent-anomalies.js";
 
 export interface DetectedImprovement {
   title: string;
@@ -113,7 +114,7 @@ export class ImprovementDetector {
 
   constructor(
     private config: ReviewerConfig,
-    private store?: (IStateStore & IImprovementBatchDeduplicationStore & IPatternRiskStore) | (IStateStore & IImprovementBatchDeduplicationStore) | IStateStore,
+    private store?: (IStateStore & IImprovementBatchDeduplicationStore & IPatternRiskStore & IPersistentAnomalyStore) | (IStateStore & IImprovementBatchDeduplicationStore & IPatternRiskStore) | (IStateStore & IImprovementBatchDeduplicationStore) | IStateStore,
   ) {}
 
   async analyze(recentTasks: Task[]): Promise<DetectedImprovement[]> {
@@ -204,7 +205,14 @@ export class ImprovementDetector {
         .map((b) => ("text" in b ? b.text : ""))
         .join("");
 
-      return this.parseResponse(text, implTasks);
+      const improvements = this.parseResponse(text, implTasks);
+
+      // ── Anomaly observation wiring (issue #485) ────────────────────────────
+      // Record quality anomalies for this analysis cycle so the persistent-anomaly
+      // tracker can detect recurring patterns across multiple cycles.
+      this.recordAnomalyObservationsForTasks(implTasks, generateCycleId());
+
+      return improvements;
     } catch (err) {
       this.log.error("Improvement detection failed", {
         error: err instanceof Error ? err.message : String(err),
@@ -291,12 +299,95 @@ export class ImprovementDetector {
         .map((b) => ("text" in b ? b.text : ""))
         .join("");
 
-      return this.parseResponse(text, researchTasks, "research-finding");
+      const improvements = this.parseResponse(text, researchTasks, "research-finding");
+
+      // ── Anomaly observation wiring (issue #485) ────────────────────────────
+      this.recordAnomalyObservationsForTasks(researchTasks, generateCycleId());
+
+      return improvements;
     } catch (err) {
       this.log.error("Research findings analysis failed", {
         error: err instanceof Error ? err.message : String(err),
       });
       return [];
+    }
+  }
+
+  /**
+   * Type-narrow `this.store` to `IPersistentAnomalyStore` when available.
+   * Returns null when the store does not implement anomaly tracking methods.
+   */
+  private asPersistentAnomalyStore(): IPersistentAnomalyStore | null {
+    if (
+      this.store &&
+      typeof (this.store as unknown as IPersistentAnomalyStore).insertAnomalyObservation === "function"
+    ) {
+      return this.store as unknown as IPersistentAnomalyStore;
+    }
+    return null;
+  }
+
+  /**
+   * Record anomaly observations for tasks that exhibit quality anomalies
+   * (issue #485 — wires persistent-anomaly tracking into the analysis loop).
+   *
+   * Scans the task batch for three anomaly categories:
+   * - `default_fallback_approved` — score=0, approved, result contains parse-failure sentinel
+   * - `low_score_approved`        — score < 0.60 with verification_status='approved'
+   * - `high_score_rejected`       — score > 0.85 with verification_status='rejected'
+   *
+   * All observations share the same `cycleId` so distinct analysis runs
+   * produce distinct cycle entries in `score_anomaly_observations`.
+   */
+  private recordAnomalyObservationsForTasks(tasks: Task[], cycleId: string): void {
+    const anomalyStore = this.asPersistentAnomalyStore();
+    if (!anomalyStore) return;
+
+    for (const task of tasks) {
+      const score = task.quality_score ?? null;
+      const vs = task.verification_status;
+
+      if (score === null) continue;
+
+      // default_fallback: score=0 and result contains parse-failure sentinel
+      if (
+        score === 0 &&
+        vs === "approved" &&
+        typeof task.result === "string" &&
+        task.result.includes("Failed to parse verification response")
+      ) {
+        recordAnomalyObservation(anomalyStore, {
+          task_id: task.id,
+          cycle_id: cycleId,
+          agent_name: task.agent_name,
+          score: 0,
+          anomaly_type: "default_fallback_approved",
+        });
+        continue;
+      }
+
+      // low_score_approved: score below 0.60 but approved
+      if (score < 0.6 && vs === "approved") {
+        recordAnomalyObservation(anomalyStore, {
+          task_id: task.id,
+          cycle_id: cycleId,
+          agent_name: task.agent_name,
+          score,
+          anomaly_type: "low_score_approved",
+        });
+        continue;
+      }
+
+      // high_score_rejected: score above 0.85 but rejected
+      if (score > 0.85 && vs === "rejected") {
+        recordAnomalyObservation(anomalyStore, {
+          task_id: task.id,
+          cycle_id: cycleId,
+          agent_name: task.agent_name,
+          score,
+          anomaly_type: "high_score_rejected",
+        });
+      }
     }
   }
 

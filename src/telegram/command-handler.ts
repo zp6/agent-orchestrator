@@ -120,6 +120,7 @@ import {
   formatProactiveDispatchesForTelegram,
   type ProactiveDispatchOptions,
 } from "../reviewer/proactive-dispatch-log.js";
+import { shouldBlockDefaultFallbackApproval } from "../reviewer/score-provenance.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
 const log = createLogger("telegram-commands");
@@ -2373,6 +2374,28 @@ function handleOperatorOverride(
       `Only tasks in \`needs_operator_review\` status can be acted on.`,
       `Run \`/review-queue\` to see current held tasks.`,
     ].join("\n");
+  }
+
+  // ── Score provenance guard (issue #485) ──────────────────────────────────
+  // Block operator /approve when the task's score came from a parse-failure
+  // default (score_source=default_fallback).  Auto-approving a meaningless
+  // score-0 result silently hides a verifier infrastructure failure.
+  if (decision === "approve") {
+    const verRecord = store.getLatestVerificationRecord(match.id);
+    if (verRecord && shouldBlockDefaultFallbackApproval(verRecord)) {
+      return [
+        `🚨 *Approval Blocked — Parse-Failure Score (score_source=default_fallback)*`,
+        ``,
+        `Task \`${match.id.slice(0, 8)}\` scored 0 because the verifier LLM response`,
+        `was unparseable — this is an infrastructure failure, not a quality judgment.`,
+        ``,
+        `Auto-approving a parse-error zero silently hides a verifier failure.`,
+        `Dispatch for re-verification instead:`,
+        `\`/dispatch ${match.agent_name ?? "agent"} Re-verify task ${match.id.slice(0, 8)}: previous verification failed to parse LLM response\``,
+        ``,
+        `Or use \`/reject ${match.id.slice(0, 8)}\` to reject and trigger automatic re-dispatch.`,
+      ].join("\n");
+    }
   }
 
   const applied = store.operatorOverride(match.id, decision, note);

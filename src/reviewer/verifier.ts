@@ -17,10 +17,12 @@ import { createLogger } from "../service/logger.js";
 import type {
   IStateStore,
   IVerificationResultStore,
+  IPersistentAnomalyStore,
   SubtaskRollupPolicy,
   SubtaskRollupResult,
   SubtaskChildSummary,
   ShortCircuitDimension,
+  Task,
 } from "../state/types.js";
 import type { Notifier } from "../notify.js";
 import {
@@ -34,6 +36,8 @@ import {
   sendMetaQualityAlert,
   META_QUALITY_FLOOR,
 } from "./meta-quality-gate.js";
+import { shouldBlockDefaultFallbackApproval } from "./score-provenance.js";
+import { recordAnomalyObservation, generateCycleId } from "./persistent-anomalies.js";
 
 /**
  * Per-dimension quality scores for verification results.
@@ -1414,6 +1418,112 @@ export class Verifier {
     };
   }
 
+  // ── Score provenance guard (issue #485) ────────────────────────────────────
+
+  /**
+   * Type-narrow the main store to `IPersistentAnomalyStore` when available.
+   * Returns null when the store does not implement anomaly tracking methods.
+   */
+  private asPersistentAnomalyStore(): IPersistentAnomalyStore | null {
+    if (
+      this.store &&
+      typeof (this.store as unknown as IPersistentAnomalyStore).insertAnomalyObservation === "function"
+    ) {
+      return this.store as unknown as IPersistentAnomalyStore;
+    }
+    return null;
+  }
+
+  /**
+   * Handle a `default_fallback` verification result (issue #485).
+   *
+   * A `default_fallback` score means the verifier's LLM response was unparseable —
+   * this is an infrastructure failure, NOT a quality judgment.  The score of 0 in
+   * such a result is meaningless and MUST NOT be treated as the agent's actual quality.
+   *
+   * This method:
+   * 1. Marks the task as `rejected` (not held-for-review) to trigger re-dispatch
+   * 2. Sends a high-urgency Telegram alert identifying the parse failure
+   * 3. Records a `default_fallback_approved` anomaly observation for persistence tracking
+   * 4. Returns a result with `score_source: 'default_fallback'` so callers can detect it
+   *
+   * The orchestrator daemon should check `result.score_source === 'default_fallback'`
+   * before routing — dispatch for re-verification, not for revision or approval.
+   */
+  private async applyDefaultFallbackGuard(
+    taskId: string,
+    task: Task,
+  ): Promise<VerificationResult> {
+    const notes =
+      "[score-provenance-guard] Verification blocked: LLM response was unparseable " +
+      "(score_source=default_fallback). This is an infrastructure failure, not a quality " +
+      "judgment. The task will be dispatched for re-verification.";
+
+    this.log.warn("Default-fallback score detected — blocking auto-approval", {
+      taskId,
+      agent: task.agent_name,
+    });
+
+    // Mark as rejected so the orchestrator re-dispatches for a fresh verification attempt
+    this.store.updateTask(taskId, {
+      verification_status: "rejected",
+      quality_score: 0,
+      verification_notes: notes,
+    });
+
+    this.recordVerificationResult(
+      taskId,
+      task.agent_name ?? "unknown",
+      0,
+      false,
+      notes,
+      undefined, // no blocked_reason — this is a specific re-verification path
+      undefined,
+    );
+
+    // Alert the operator with high urgency
+    if (this.notifier) {
+      const body = [
+        `🚨 *Verifier parse failure — score_source=default_fallback*`,
+        ``,
+        `Task \`${taskId.slice(0, 12)}\` returned score=0 because the verifier LLM response`,
+        `could not be parsed. This is an infrastructure failure, not a quality judgment.`,
+        ``,
+        `*Task:* \`${taskId}\``,
+        `*Agent:* \`${task.agent_name ?? "unknown"}\``,
+        ``,
+        `Task marked as \`rejected\` and queued for re-verification. Do NOT use ` +
+          `\`/approve\` — the score is meaningless.`,
+      ].join("\n");
+
+      await this.notifier.notifyOperator(
+        "Verifier parse failure: score blocked from auto-approval (default_fallback)",
+        body,
+        "high",
+      );
+    }
+
+    // Record anomaly observation so the persistent-anomaly tracker can detect
+    // recurring parse failures across multiple cycles
+    const anomalyStore = this.asPersistentAnomalyStore();
+    if (anomalyStore) {
+      recordAnomalyObservation(anomalyStore, {
+        task_id: taskId,
+        cycle_id: generateCycleId(),
+        agent_name: task.agent_name,
+        score: 0,
+        anomaly_type: "default_fallback_approved",
+      });
+    }
+
+    return {
+      approved: false,
+      score: 0,
+      notes,
+      score_source: "default_fallback",
+    };
+  }
+
   /**
    * Hold a sub-0.60 task for operator review instead of auto-rejecting.
    *
@@ -1822,6 +1932,29 @@ export class Verifier {
       taskId,
       "first-pass",
     );
+
+    // ── Score provenance guard (issue #485) ──────────────────────────────────
+    // A default_fallback score means the LLM response was unparseable — this is
+    // an infrastructure failure, not a quality judgment.  Block auto-approval
+    // and dispatch for re-verification rather than holding for operator review.
+    if (
+      firstPassResult.score_source === "default_fallback" ||
+      shouldBlockDefaultFallbackApproval({
+        task_id: taskId,
+        score: firstPassResult.score,
+        first_pass: firstPassResult.approved ? 1 : 0,
+        rejection_reason: firstPassResult.notes ?? null,
+        blocked_reason: firstPassResult.blockedReason ?? null,
+        approval_rationale: firstPassResult.approvalRationale ?? null,
+        threshold: 0.8,
+        agent_id: task.agent_name ?? "unknown",
+        timestamp: new Date().toISOString(),
+        score_source: firstPassResult.score_source ?? null,
+      })
+    ) {
+      return this.applyDefaultFallbackGuard(taskId, task);
+    }
+
     const enforcedFirstPassResult = this.applySubThresholdRejectionGuard(
       this.applyHardBlockGuard(firstPassResult),
     );
