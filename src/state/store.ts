@@ -10188,6 +10188,36 @@ export class StateStore {
   }
 
   /**
+   * Return the ISO timestamp of the most recent dispatch surge event for
+   * `(repo, issueNumber)` within `windowMs`, or `null` if no event exists.
+   *
+   * Used by the cross-agent inflight guard to compute the precise flood-gate
+   * expiry time so the dashboard can show "dispatch-suppressed (PR in review)
+   * until HH:MM" (issue #1158 AC #3).
+   *
+   * @param repo          Repository slug, e.g. "rapartlu/agent-orchestrator"
+   * @param issueNumber   GitHub issue number
+   * @param windowMs      Rolling window duration in milliseconds (default 60 min)
+   */
+  getMostRecentSurgeEventAt(
+    repo: string,
+    issueNumber: number,
+    windowMs = 3_600_000,
+  ): string | null {
+    this.runDispatchSurgeSuppressionMigration();
+    const cutoff = new Date(Date.now() - windowMs).toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT event_at FROM dispatch_surge_events
+         WHERE repo = ? AND issue_number = ? AND event_at >= ?
+         ORDER BY event_at DESC
+         LIMIT 1`,
+      )
+      .get(repo, issueNumber, cutoff) as { event_at: string } | undefined;
+    return row?.event_at ?? null;
+  }
+
+  /**
    * Check if dispatch surge suppression is active for an issue.
    *
    * @param repo            Repository slug, e.g. "rapartlu/agent-orchestrator"

@@ -673,18 +673,37 @@ export async function dispatchGitHubIssues(
       // Note: this guards same-DB concurrency; cross-DB dedup (e.g. codex vs
       // claude orchestrator instances) relies on the GitHub open_pr_exists check
       // in runGitHubPreDispatchValidation below.
+      //
+      // Issue #1158 AC #3: compute the precise flood-gate expiry from the most
+      // recent surge event timestamp so the dashboard can display the suppression
+      // window as "dispatch-suppressed (PR in review) until HH:MM".
       {
         if (store.hasRecentSurgeEvent(issue.repo, issue.number, GUARD_FLOOD_GATE_WINDOW_MS)) {
+          // Compute expiry = most-recent-event-time + window so the dashboard
+          // renders "dispatch-suppressed (PR in review) until <time>" (issue #1158).
+          const mostRecentEventAt = store.getMostRecentSurgeEventAt(
+            issue.repo, issue.number, GUARD_FLOOD_GATE_WINDOW_MS,
+          );
+          const expiresAt = mostRecentEventAt
+            ? new Date(new Date(mostRecentEventAt).getTime() + GUARD_FLOOD_GATE_WINDOW_MS).toISOString()
+            : null;
+
           log.info(
             "Skipping dispatch: recent already-in-review event within flood-gate window (issue #1168)",
-            { sourceRef, agentName, windowMs: GUARD_FLOOD_GATE_WINDOW_MS },
+            { sourceRef, agentName, windowMs: GUARD_FLOOD_GATE_WINDOW_MS, expiresAt },
           );
           reportDashboardSkip({
             issue_id: sourceRef,
             agent_name: agentName,
             skip_reason: "cross_agent_inflight_guard",
-            condition_value: `recent_surge_event=true,window_ms=${GUARD_FLOOD_GATE_WINDOW_MS}`,
-            context: "Cross-agent inflight guard: recent already-in-review surge event within flood-gate window",
+            condition_value: [
+              `recent_surge_event=true`,
+              `window_ms=${GUARD_FLOOD_GATE_WINDOW_MS}`,
+              expiresAt ? `expires_at=${expiresAt}` : null,
+            ].filter(Boolean).join(","),
+            context: expiresAt
+              ? `Dispatch suppressed (PR in review): flood-gate active until ${expiresAt}`
+              : "Cross-agent inflight guard: recent already-in-review surge event within flood-gate window",
           });
           result.skipped++;
           continue;

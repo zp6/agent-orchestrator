@@ -139,6 +139,9 @@ describe("dispatchGitHubIssues", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      // Cross-agent inflight guard (issue #1168 / #1158)
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
@@ -395,6 +398,9 @@ describe("pre-dispatch issue state validation", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      // Cross-agent inflight guard (issue #1168 / #1158)
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -497,6 +503,9 @@ describe("duplicate PR detection before dispatch", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      // Cross-agent inflight guard (issue #1168 / #1158)
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -734,6 +743,9 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      // Cross-agent inflight guard (issue #1168 / #1158)
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -874,6 +886,9 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      // Cross-agent inflight guard (issue #1168 / #1158)
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -1236,6 +1251,9 @@ describe("dispatchIdleAgentBacklog", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      // Cross-agent inflight guard (issue #1168 / #1158)
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -1514,6 +1532,9 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      // Cross-agent inflight guard (issue #1168 / #1158)
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -1673,6 +1694,9 @@ describe("in-flight branch detection", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      // Cross-agent inflight guard (issue #1168 / #1158)
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
 
@@ -1743,6 +1767,9 @@ describe("in-flight branch detection", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      // Cross-agent inflight guard (issue #1168 / #1158)
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
 
@@ -1814,6 +1841,9 @@ describe("in-flight branch detection", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      // Cross-agent inflight guard (issue #1168 / #1158)
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
 
@@ -1880,6 +1910,9 @@ describe("in-flight branch detection", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      // Cross-agent inflight guard (issue #1168 / #1158)
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
 
@@ -1948,6 +1981,9 @@ describe("approved PR skip logic", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      // Cross-agent inflight guard (issue #1168 / #1158)
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -2121,6 +2157,9 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      // Cross-agent inflight guard (issue #1168 / #1158)
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
     } as unknown as StateStore;
     mockDispatcher = {
@@ -2379,6 +2418,9 @@ describe("dispatch flood gate (issue #1060)", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      // Cross-agent inflight guard (issue #1168 / #1158)
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
@@ -2564,6 +2606,9 @@ describe("PR guard surge alert (issue #1082)", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      // Cross-agent inflight guard (issue #1168 / #1158)
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
@@ -3029,5 +3074,51 @@ describe("PR guard surge alert (issue #1082)", () => {
     );
     expect(alertCall).toBeDefined();
     expect(alertCall![0]).toMatch(/\d{2}:\d{2}/); // HH:MM format
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Cross-agent inflight guard expiry (issue #1158 AC #3)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  it("skips dispatch when hasRecentSurgeEvent returns true (cross_agent_inflight_guard)", async () => {
+    // Setup: a recent surge event exists for the issue
+    (mockStore.hasRecentSurgeEvent as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (mockStore.getMostRecentSurgeEventAt as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    mockQueryPRGuardCooldown.mockResolvedValue({ status: "inactive" });
+    (mockStore.getDispatchSurgeStatus as ReturnType<typeof vi.fn>).mockReturnValue({ active: false });
+
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 449, title: "Inflight test", body: "", url: "", labels: [] },
+    ]);
+
+    const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+    expect(mockStore.hasRecentSurgeEvent).toHaveBeenCalledWith(
+      "owner/my-repo", 449, GUARD_FLOOD_GATE_WINDOW_MS,
+    );
+  });
+
+  it("includes expires_at in cross_agent_inflight_guard skip when most recent event is known (issue #1158 AC #3)", async () => {
+    // Setup: recent surge event exists, getMostRecentSurgeEventAt returns a timestamp
+    const eventAt = new Date(Date.now() - 5 * 60_000).toISOString(); // 5 min ago
+    (mockStore.hasRecentSurgeEvent as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (mockStore.getMostRecentSurgeEventAt as ReturnType<typeof vi.fn>).mockReturnValue(eventAt);
+    mockQueryPRGuardCooldown.mockResolvedValue({ status: "inactive" });
+    (mockStore.getDispatchSurgeStatus as ReturnType<typeof vi.fn>).mockReturnValue({ active: false });
+
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 450, title: "Expiry test", body: "", url: "", labels: [] },
+    ]);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    // getMostRecentSurgeEventAt should be called to compute expiry
+    expect(mockStore.getMostRecentSurgeEventAt).toHaveBeenCalledWith(
+      "owner/my-repo", 450, GUARD_FLOOD_GATE_WINDOW_MS,
+    );
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
   });
 });
