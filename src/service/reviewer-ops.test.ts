@@ -227,10 +227,13 @@ describe("reviewer-ops", () => {
     expect(mockDispatch).not.toHaveBeenCalled();
     // Task verification_status should be set to approved (not re-queued for revision)
     expect(store.getTask(task.id)?.verification_status).toBe("approved");
-    // A supervisor decision should be recorded for observability
+    // A supervisor decision should be recorded for observability.
+    // outcome must be "none" (not "skipped") so the skip-pattern aggregator
+    // does not count this expected pre-flight behaviour as a dispatch blocker
+    // (issue #1186: 74 false systemic-blocker entries in 7 days).
     const decisions = store.getRecentSupervisorDecisions(5);
     expect(decisions).toHaveLength(1);
-    expect(decisions[0].outcome).toBe("skipped");
+    expect(decisions[0].outcome).toBe("none");
     expect(decisions[0].hard_gates).toContain("no-op: already resolved");
   });
 

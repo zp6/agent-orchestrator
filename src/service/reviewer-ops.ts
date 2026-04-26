@@ -220,7 +220,11 @@ export async function verifyAndReviseTask(
             rationale: `Revision skipped for task ${taskId}: ${task.source_ref} is already resolved (${skipReason}). No revision dispatched.`,
             issue_refs: [task.source_ref],
             hard_gates: ["no-op: already resolved"],
-            outcome: "skipped",
+            // Use "none" (not "skipped") — this is an expected verification pre-flight
+            // result, not a dispatch being blocked.  Using "skipped" caused these
+            // decisions to accumulate in getSkipPatterns() (which aggregates
+            // outcome='skipped') and fire false systemic-blocker issues (issue #1186).
+            outcome: "none",
           });
           store.incrementStat("supervisor_preflight_noop");
           // Reset verification_status so the task isn't re-queued for revision
