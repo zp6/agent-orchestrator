@@ -11,6 +11,7 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 - `MeetingPriorityDispatcher`: rule-based fast-path that auto-dispatches the top-ranked issue from a completed `MeetingOutcome` without LLM judgment when all 7 guards pass. Reduces meeting-to-implementation latency. Exported as `evaluateAutoDispatch()` and `MeetingPriorityDispatcher` from `src/index.ts`. (#464)
+- `quality-gate` handler (`src/reviewer/quality-gate.ts`): framework-agnostic request handler for `POST /api/quality-gate/check`. Blocks unverified, rejected, escalated, and sub-floor approvals; closes the auto-approval bypass hole introduced by #445. (#513)
 
 ---
 
