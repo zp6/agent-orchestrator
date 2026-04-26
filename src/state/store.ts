@@ -8638,6 +8638,7 @@ export class StateStore {
         AND created_at >= ?
         AND reason IS NOT NULL
         AND reason != ''
+        AND (hard_gates IS NULL OR hard_gates NOT LIKE '%skipped-empty-backlog%')
       GROUP BY reason
       ORDER BY skip_count DESC
     `).all(since) as Array<{
