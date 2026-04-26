@@ -18,6 +18,7 @@ import {
 import { fetchOpenPRFiles } from "./conflict-risk.js";
 import { checkSchemaContractDrift, extractChangedFiles } from "./schema-impact.js";
 import { TRIAGE_HOUSEKEEPING_SCHEMA, TRIAGE_CROSS_REPO_SCHEMA } from "./verifier.js";
+import { checkQualityGate } from "../client/quality-gate-client.js";
 
 export interface PRInfo {
   number: number;
@@ -536,6 +537,33 @@ Please add this block to your PR description and try again.`,
           if (this.store.isPRInMergeQueue(repo, prNumber)) {
             this.log.info("PR already in merge queue, skipping re-enqueue", { repo, prNumber });
             break;
+          }
+
+          // Quality gate check — ask the reviewer agent whether this PR passes
+          // all quality checks before allowing it into the merge queue.  This
+          // closes the bypass hole from issue #445.  Fails open: if the reviewer
+          // is unavailable we proceed with approval as normal.
+          const gateOutcome = await checkQualityGate(repo, prNumber, branch);
+          if (gateOutcome.status === "blocked") {
+            this.log.warn("Quality gate blocked PR from merge queue", {
+              repo,
+              prNumber,
+              reason: gateOutcome.reason,
+              score: gateOutcome.score,
+            });
+            execSync(
+              `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**[orchestrator] PR Review — Quality Gate Blocked** 🚫\n\nThis PR was approved by the review LLM but blocked from the merge queue by the reviewer's quality gate.\n\n**Reason:** ${gateOutcome.reason}\n\nPlease address the feedback and push an update.`)}`,
+              { encoding: "utf-8", timeout: 30000 },
+            );
+            this.store.recordPRReview(repo, prNumber, "request-changes");
+            break;
+          }
+          if (gateOutcome.status === "unavailable") {
+            this.log.debug("Quality gate unavailable — proceeding with approval", {
+              repo,
+              prNumber,
+              error: gateOutcome.error,
+            });
           }
 
           // Enqueue instead of merging immediately — the merge queue processes one at a time
