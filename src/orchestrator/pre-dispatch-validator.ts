@@ -13,6 +13,7 @@ import {
   findExistingPRsForIssue,
   findExistingPRsForIssueAcrossRepos,
   type LinkedPR,
+  type PRDetectionStrategy,
 } from "../triggers/github.js";
 import { DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
 import { assessConflictRisk, buildConflictHeatMap } from "./conflict-risk.js";
@@ -34,6 +35,11 @@ export interface PreDispatchValidationResult {
   failureCode: string | null;
   failureReason: string | null;
   blockingPRNumber: number | null;
+  /**
+   * Which detection strategy found the blocking PR (issue #1179).
+   * Null when dispatch was not blocked by a PR, or when strategy is unavailable.
+   */
+  blockingPRDetectionStrategy: PRDetectionStrategy | null;
   draftPR: LinkedPR | null;
   existingBranch: string | null;
 }
@@ -102,6 +108,7 @@ export function runGitHubPreDispatchValidation(params: {
     issueNumber: issue.number,
     checks,
     blockingPRNumber: null as number | null,
+    blockingPRDetectionStrategy: null as PRDetectionStrategy | null,
     draftPR: null as LinkedPR | null,
     existingBranch: null as string | null,
   };
@@ -524,6 +531,7 @@ export function runGitHubPreDispatchValidation(params: {
         `issue ${sourceRef} already has open PR #${openPR.number}`,
       );
       failed.blockingPRNumber = openPR.number;
+      failed.blockingPRDetectionStrategy = openPR.detectionStrategy ?? null;
       store.addDispatchValidation({
         source,
         source_ref: sourceRef,

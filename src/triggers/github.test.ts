@@ -426,6 +426,76 @@ describe("findExistingPRsForIssue", () => {
     expect(prs).toHaveLength(1); // deduplicated — not counted twice
     expect(prs[0]).toMatchObject({ number: 5, state: "open" });
   });
+
+  // ── detectionStrategy tagging (issue #1179) ─────────────────────────────
+
+  it("tags PRs found via search with detectionStrategy: search_index", () => {
+    mockPRCalls(
+      [{ number: 50, title: "Search hit", url: "url", isDraft: false, headRefName: "issue-42-fix" }],
+      [],
+      [],
+    );
+    const prs = findExistingPRsForIssue("owner/repo", 42);
+    expect(prs).toHaveLength(1);
+    expect(prs[0].detectionStrategy).toBe("search_index");
+  });
+
+  it("tags PRs found via branch-name pattern with detectionStrategy: branch_name", () => {
+    mockPRCalls(
+      [], // search index empty
+      [{ number: 51, title: "Branch match", url: "url", isDraft: false, body: null, headRefName: "issue-42-feature" }],
+      [],
+    );
+    const prs = findExistingPRsForIssue("owner/repo", 42);
+    expect(prs).toHaveLength(1);
+    expect(prs[0].detectionStrategy).toBe("branch_name");
+  });
+
+  it("tags PRs found via body keyword (non-standard branch) with detectionStrategy: body_keyword", () => {
+    mockPRCalls(
+      [], // search index not yet updated
+      [{ number: 52, title: "Cross-variant", url: "url", isDraft: false, body: "Closes #42", headRefName: "triage-unrelated-branch" }],
+      [],
+    );
+    const prs = findExistingPRsForIssue("owner/repo", 42);
+    expect(prs).toHaveLength(1);
+    expect(prs[0].detectionStrategy).toBe("body_keyword");
+  });
+
+  it("prefers branch_name over body_keyword when both match for the same open PR", () => {
+    mockPRCalls(
+      [],
+      [{ number: 53, title: "Both match", url: "url", isDraft: false, body: "Closes #42", headRefName: "issue-42-dual" }],
+      [],
+    );
+    const prs = findExistingPRsForIssue("owner/repo", 42);
+    expect(prs).toHaveLength(1);
+    expect(prs[0].detectionStrategy).toBe("branch_name"); // branch_name takes precedence
+  });
+
+  it("tags merged PRs found via body keyword with detectionStrategy: body_keyword", () => {
+    mockPRCalls(
+      [],
+      [],
+      [{ number: 54, title: "Merged via body", url: "url", body: "Closes #42", headRefName: "unrelated-branch" }],
+    );
+    const prs = findExistingPRsForIssue("owner/repo", 42);
+    expect(prs).toHaveLength(1);
+    expect(prs[0].state).toBe("merged");
+    expect(prs[0].detectionStrategy).toBe("body_keyword");
+  });
+
+  it("tags merged PRs found only via branch name with detectionStrategy: branch_name", () => {
+    mockPRCalls(
+      [],
+      [],
+      [{ number: 55, title: "Merged via branch", url: "url", body: "No closing keyword", headRefName: "issue-42-merged" }],
+    );
+    const prs = findExistingPRsForIssue("owner/repo", 42);
+    expect(prs).toHaveLength(1);
+    expect(prs[0].state).toBe("merged");
+    expect(prs[0].detectionStrategy).toBe("branch_name");
+  });
 });
 
 describe("validateGhAuth", () => {

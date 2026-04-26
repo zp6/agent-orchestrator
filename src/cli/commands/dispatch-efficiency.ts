@@ -9,7 +9,7 @@
 
 import type { Command } from "commander";
 import chalk from "chalk";
-import { StateStore, type DispatchWasteDay, type DispatchWasteMetrics, type DispatchWasteHour, type DispatchWasteMetrics24h } from "../../state/store.js";
+import { StateStore, type DispatchWasteDay, type DispatchWasteMetrics, type DispatchWasteHour, type DispatchWasteMetrics24h, type PRDetectionStrategyBreakdown } from "../../state/store.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -176,6 +176,69 @@ function printWindow24h(data: DispatchWasteMetrics24h): void {
   );
 }
 
+/**
+ * Print the PR detection strategy breakdown (issue #1179).
+ * Shows how many blocks were caught by each detection path so operators can
+ * judge whether the body-keyword fallback fires in practice.
+ */
+function printStrategyBreakdown(data: PRDetectionStrategyBreakdown): void {
+  console.log(chalk.bold(`\n● PR Detection Strategy Breakdown (last ${data.days} days)`));
+  console.log(
+    chalk.dim(
+      "  Shows which detection path identified the blocking PR for each dispatch block.\n" +
+      "  If body_keyword > 0, the search-index lag is a real operational problem.\n"
+    )
+  );
+
+  if (data.total === 0) {
+    console.log(chalk.dim("  No PR-blocked dispatches recorded in this window yet."));
+    return;
+  }
+
+  const rows: Array<[string, number, string]> = [
+    ["search_index", data.search_index, "GitHub search API (primary, scalable)"],
+    ["branch_name ", data.branch_name,  "Branch-name pattern (REST paginated fallback)"],
+    ["body_keyword", data.body_keyword, "Closing keyword in PR body (cross-variant dedup)"],
+  ];
+  if (data.unknown > 0) {
+    rows.push(["unknown     ", data.unknown, "Recorded before strategy tracking was added"]);
+  }
+
+  const maxCount = Math.max(...rows.map((r) => r[1]), 1);
+
+  for (const [label, count, desc] of rows) {
+    const pct = data.total > 0 ? (count / data.total) * 100 : 0;
+    const barFilled = Math.round((count / maxCount) * 16);
+    const bar = "█".repeat(barFilled) + "░".repeat(16 - barFilled);
+    const countStr = String(count).padStart(4);
+    const pctStr = `${pct.toFixed(0)}%`.padStart(4);
+    const highlight = label.trim() === "body_keyword" && count > 0 ? chalk.yellow : chalk.dim;
+    console.log(
+      `  ${chalk.cyan(label)}  ${highlight(bar)}  ${countStr} ${chalk.dim(`(${pctStr})`)}  ${chalk.dim(desc)}`
+    );
+  }
+
+  console.log();
+  console.log(
+    `  ${"Total PR-blocked dispatches:".padEnd(32)} ${chalk.bold(String(data.total))}`
+  );
+
+  if (data.body_keyword > 0) {
+    console.log(
+      chalk.yellow(
+        `\n  ⚠  body_keyword fired ${data.body_keyword}× — search-index lag is real. ` +
+        "Consider a distributed lock (e.g. Redis) if this rate keeps climbing.\n"
+      )
+    );
+  } else {
+    console.log(
+      chalk.green(
+        "\n  ✓  body_keyword has not fired — search-index lag is theoretical in practice.\n"
+      )
+    );
+  }
+}
+
 // ── Command registration ───────────────────────────────────────────────────────
 
 export function registerDispatchEfficiencyCommand(program: Command): void {
@@ -199,15 +262,17 @@ export function registerDispatchEfficiencyCommand(program: Command): void {
 
       let data24h: DispatchWasteMetrics24h;
       let data7: DispatchWasteMetrics;
+      let strategyBreakdown: PRDetectionStrategyBreakdown;
       try {
         data24h = store.getDispatchWasteMetrics24h();
         data7 = store.getDispatchWasteMetrics(7);
+        strategyBreakdown = store.getPRDetectionStrategyBreakdown(7);
       } finally {
         store.close();
       }
 
       if (opts.json) {
-        console.log(JSON.stringify({ "24h": data24h, "7d": data7 }, null, 2));
+        console.log(JSON.stringify({ "24h": data24h, "7d": data7, strategy_breakdown: strategyBreakdown }, null, 2));
         return;
       }
 
@@ -221,6 +286,7 @@ export function registerDispatchEfficiencyCommand(program: Command): void {
 
       printWindow24h(data24h);
       printWindow("Last 7 days", data7);
+      printStrategyBreakdown(strategyBreakdown);
 
       // Overall health note
       const rate = data7.avg_waste_rate_pct;

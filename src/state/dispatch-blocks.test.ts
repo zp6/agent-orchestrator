@@ -1,9 +1,12 @@
 /**
- * Tests for dispatch block tracking (issue #976).
+ * Tests for dispatch block tracking (issue #976) and PR detection strategy
+ * breakdown (issue #1179).
  *
  * Verifies that:
  * - recordDispatchBlock() persists block events
+ * - detectionStrategy is stored and retrievable
  * - getDispatchBlockMetrics() correctly computes block rates and trends
+ * - getPRDetectionStrategyBreakdown() aggregates by strategy correctly
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -48,6 +51,18 @@ describe("Dispatch Block Tracking", () => {
           sourceRef: "rapartlu/agent-orchestrator#100",
           reason: "Some block reason",
           blockCode: "approved_pr_waiting",
+        }),
+      ).not.toThrow();
+    });
+
+    it("records detectionStrategy when provided", () => {
+      expect(() =>
+        store.recordDispatchBlock({
+          sourceRef: "rapartlu/agent-orchestrator#110",
+          reason: "Open PR #111 is already in review",
+          blockCode: "open_pr_exists",
+          blockingPRNumber: 111,
+          detectionStrategy: "body_keyword",
         }),
       ).not.toThrow();
     });
@@ -158,6 +173,64 @@ describe("Dispatch Block Tracking", () => {
         expect(day.block_rate_pct).toBeGreaterThanOrEqual(0);
         expect(day.block_rate_pct).toBeLessThanOrEqual(100);
       }
+    });
+  });
+
+  describe("getPRDetectionStrategyBreakdown", () => {
+    it("returns all-zero breakdown when no blocks recorded", () => {
+      const breakdown = store.getPRDetectionStrategyBreakdown(7);
+      expect(breakdown.days).toBe(7);
+      expect(breakdown.search_index).toBe(0);
+      expect(breakdown.branch_name).toBe(0);
+      expect(breakdown.body_keyword).toBe(0);
+      expect(breakdown.unknown).toBe(0);
+      expect(breakdown.total).toBe(0);
+    });
+
+    it("counts each strategy correctly", () => {
+      store.recordDispatchBlock({ sourceRef: "r/a#1", reason: "r", blockCode: "open_pr_exists", detectionStrategy: "search_index" });
+      store.recordDispatchBlock({ sourceRef: "r/a#2", reason: "r", blockCode: "open_pr_exists", detectionStrategy: "search_index" });
+      store.recordDispatchBlock({ sourceRef: "r/a#3", reason: "r", blockCode: "open_pr_exists", detectionStrategy: "branch_name" });
+      store.recordDispatchBlock({ sourceRef: "r/a#4", reason: "r", blockCode: "open_pr_exists", detectionStrategy: "body_keyword" });
+
+      const breakdown = store.getPRDetectionStrategyBreakdown(7);
+      expect(breakdown.search_index).toBe(2);
+      expect(breakdown.branch_name).toBe(1);
+      expect(breakdown.body_keyword).toBe(1);
+      expect(breakdown.unknown).toBe(0);
+      expect(breakdown.total).toBe(4);
+    });
+
+    it("counts blocks with no strategy as unknown", () => {
+      store.recordDispatchBlock({ sourceRef: "r/a#10", reason: "r", blockCode: "open_pr_exists" });
+
+      const breakdown = store.getPRDetectionStrategyBreakdown(7);
+      expect(breakdown.unknown).toBe(1);
+      expect(breakdown.total).toBe(1);
+    });
+
+    it("total equals sum of individual strategy counts", () => {
+      store.recordDispatchBlock({ sourceRef: "r/a#20", reason: "r", blockCode: "open_pr_exists", detectionStrategy: "search_index" });
+      store.recordDispatchBlock({ sourceRef: "r/a#21", reason: "r", blockCode: "open_pr_exists", detectionStrategy: "body_keyword" });
+      store.recordDispatchBlock({ sourceRef: "r/a#22", reason: "r", blockCode: "open_pr_exists" });
+
+      const breakdown = store.getPRDetectionStrategyBreakdown(7);
+      expect(breakdown.total).toBe(
+        breakdown.search_index + breakdown.branch_name + breakdown.body_keyword + breakdown.unknown
+      );
+    });
+
+    it("respects the days parameter", () => {
+      store.recordDispatchBlock({ sourceRef: "r/a#30", reason: "r", blockCode: "open_pr_exists", detectionStrategy: "search_index" });
+
+      const breakdown7 = store.getPRDetectionStrategyBreakdown(7);
+      const breakdown1 = store.getPRDetectionStrategyBreakdown(1);
+
+      // Today's record should appear in both windows
+      expect(breakdown7.total).toBeGreaterThanOrEqual(1);
+      expect(breakdown1.total).toBeGreaterThanOrEqual(1);
+      expect(breakdown7.days).toBe(7);
+      expect(breakdown1.days).toBe(1);
     });
   });
 });

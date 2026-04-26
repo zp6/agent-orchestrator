@@ -75,6 +75,17 @@ export function validateGhAuth(
   }
 }
 
+/**
+ * Which mechanism in `findExistingPRsForIssue()` detected this PR.
+ *
+ * - `search_index`  — found by GitHub's server-side search API (primary path)
+ * - `branch_name`   — found by branch-name pattern in the REST paginated fallback
+ * - `body_keyword`  — found by closing keyword in the PR body in the REST fallback
+ *                     (catches sibling-variant PRs whose branch doesn't match the
+ *                     issue-N-* convention but whose body contains "Closes #N")
+ */
+export type PRDetectionStrategy = "search_index" | "branch_name" | "body_keyword";
+
 export interface LinkedPR {
   number: number;
   title: string;
@@ -82,6 +93,15 @@ export interface LinkedPR {
   /** "open" includes draft PRs. "merged" means the PR was merged (not just closed). */
   state: "open" | "merged";
   isDraft: boolean;
+  /**
+   * Which detection strategy found this PR (issue #1179).
+   * Set by `findExistingPRsForIssue()`. Undefined for LinkedPR objects created
+   * from other sources (e.g. findApprovedPRForIssue, test mocks).
+   * Used by the dispatch-efficiency metrics to surface how often each strategy
+   * fires so operators can judge whether the body-keyword fallback is hit in
+   * practice.
+   */
+  detectionStrategy?: PRDetectionStrategy;
 }
 
 /**
@@ -168,10 +188,14 @@ export function findExistingPRsForIssue(repo: string, issueNumber: number): Link
       url: pr.url,
       state: "open" as const,
       isDraft: pr.isDraft,
+      detectionStrategy: "search_index" as const,
     }));
 
-    // Secondary: branch-name matching from the paginated list. Catches agents
-    // that follow the issue-N-description convention but omit closing keywords.
+    // Secondary: branch-name and body-keyword matching from the paginated list.
+    // Catches agents that follow the issue-N-description convention but omit
+    // closing keywords (branch_name), and sibling-variant PRs whose branch name
+    // doesn't match the convention but whose body contains "Closes #N"
+    // (body_keyword — added in issue #1174, tracked in issue #1179).
     // PRs already found via search are deduplicated by PR number.
     const openRaw = execSync(
       `gh api "repos/${repo}/pulls?state=open&per_page=100" --jq '[.[] | {number, title, url: .html_url, isDraft: .draft, body: .body, headRefName: .head.ref}]'`,
@@ -198,6 +222,10 @@ export function findExistingPRsForIssue(repo: string, issueNumber: number): Link
         url: pr.url,
         state: "open" as const,
         isDraft: pr.isDraft,
+        // branch_name takes precedence; body_keyword fires when branch doesn't match
+        detectionStrategy: (
+          branchPattern.test(pr.headRefName) ? "branch_name" : "body_keyword"
+        ) as PRDetectionStrategy,
       }));
 
     const openPRs = [...searchOpenPRs, ...branchMatchedPRs];
@@ -223,6 +251,10 @@ export function findExistingPRsForIssue(repo: string, issueNumber: number): Link
         url: pr.url,
         state: "merged" as const,
         isDraft: false,
+        // For merged PRs: body_keyword check comes first (primary signal for "Closes #N")
+        detectionStrategy: (
+          closingPattern.test(pr.body ?? "") ? "body_keyword" : "branch_name"
+        ) as PRDetectionStrategy,
       }));
 
     return [...openPRs, ...mergedPRs];

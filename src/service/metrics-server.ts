@@ -26,6 +26,7 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import {
   StateStore,
   type DispatchBlockMetrics,
+  type PRDetectionStrategyBreakdown,
   type SemanticMemoryEffectivenessResult,
   type FailureInterceptionStats,
   type VerificationCalibrationRecommendationRow,
@@ -68,6 +69,12 @@ export interface DispatchEfficiencyResponse {
     total: number;
     block_rate_pct: number | null;
   }>;
+  /**
+   * Breakdown of blocks by PR detection strategy (issue #1179).
+   * Shows how often each detection path (search_index, branch_name, body_keyword)
+   * was the deciding factor, over the same rolling window.
+   */
+  pr_detection_strategy_breakdown: PRDetectionStrategyBreakdown;
   /** ISO timestamp of when this response was generated */
   generated_at: string;
 }
@@ -324,6 +331,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       const days = parseWindowDays(req);
       try {
         const metrics = store.getDispatchBlockMetrics(days);
+        const strategyBreakdown = store.getPRDetectionStrategyBreakdown(days);
         const body: DispatchEfficiencyResponse = {
           days: metrics.days,
           total_blocked: metrics.total_blocked,
@@ -331,6 +339,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
           block_rate_pct: metrics.avg_block_rate_pct,
           trend: metrics.trend,
           daily: metrics.daily,
+          pr_detection_strategy_breakdown: strategyBreakdown,
           generated_at: new Date().toISOString(),
         };
         sendJson(res, 200, body);

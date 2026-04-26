@@ -827,6 +827,7 @@ export async function dispatchGitHubIssues(
               reason: `Pre-dispatch guard blocked: ${resolution}`,
               blockCode: validation.failureCode,
               blockingPRNumber: validation.blockingPRNumber,
+              detectionStrategy: validation.blockingPRDetectionStrategy ?? undefined,
             });
           } catch (blockErr) {
             log.warn("Failed to record dispatch block event", {

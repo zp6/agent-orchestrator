@@ -1605,6 +1605,25 @@ export interface DispatchBlockMetrics {
   trend: "improving" | "worsening" | "stable" | "insufficient_data";
 }
 
+/**
+ * Breakdown of dispatch blocks by PR detection strategy (issue #1179).
+ * Covers the rolling N-day window requested by the operator.
+ */
+export interface PRDetectionStrategyBreakdown {
+  /** Rolling window in days */
+  days: number;
+  /** Blocks detected by GitHub's server-side search index */
+  search_index: number;
+  /** Blocks detected by branch-name pattern in the REST paginated fallback */
+  branch_name: number;
+  /** Blocks detected by closing keyword in PR body (cross-variant dedup, issue #1174) */
+  body_keyword: number;
+  /** Blocks recorded before strategy tracking was added (no strategy stored) */
+  unknown: number;
+  /** Total blocks across all strategies */
+  total: number;
+}
+
 export interface VerificationCalibrationRecommendationRow {
   id: number;
   verifier_agent: string;
@@ -9879,6 +9898,15 @@ export class StateStore {
       CREATE INDEX IF NOT EXISTS idx_dispatch_blocks_source_ref ON dispatch_blocks(source_ref);
       CREATE INDEX IF NOT EXISTS idx_dispatch_blocks_block_code ON dispatch_blocks(block_code);
     `);
+    // Migration: add detection_strategy column if not present (issue #1179)
+    const cols = this.db
+      .prepare("PRAGMA table_info(dispatch_blocks)")
+      .all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "detection_strategy")) {
+      this.db.exec(
+        "ALTER TABLE dispatch_blocks ADD COLUMN detection_strategy TEXT",
+      );
+    }
   }
 
   /**
@@ -9887,11 +9915,13 @@ export class StateStore {
    * Called by the pre-dispatch guard whenever a dispatch is blocked because an
    * open or approved PR already exists for the target issue.
    *
-   * @param params.sourceRef       Issue ref, e.g. "rapartlu/agent-orchestrator#976"
-   * @param params.agentName       Agent the dispatch would have gone to
-   * @param params.reason          Human-readable block reason
-   * @param params.blockCode       Machine code: "open_pr_exists" | "approved_pr_waiting"
-   * @param params.blockingPRNumber PR number that caused the block
+   * @param params.sourceRef            Issue ref, e.g. "rapartlu/agent-orchestrator#976"
+   * @param params.agentName            Agent the dispatch would have gone to
+   * @param params.reason               Human-readable block reason
+   * @param params.blockCode            Machine code: "open_pr_exists" | "approved_pr_waiting"
+   * @param params.blockingPRNumber     PR number that caused the block
+   * @param params.detectionStrategy    Which strategy detected the blocking PR (issue #1179):
+   *                                    "search_index" | "branch_name" | "body_keyword"
    */
   recordDispatchBlock(params: {
     sourceRef: string;
@@ -9899,13 +9929,15 @@ export class StateStore {
     reason: string;
     blockCode: string;
     blockingPRNumber?: number;
+    detectionStrategy?: string;
   }): void {
+    this.runDispatchBlocksMigration();
     const now = new Date().toISOString();
     this.db
       .prepare(
         `INSERT INTO dispatch_blocks
-          (source_ref, agent_name, reason, block_code, blocking_pr_number, timestamp)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+          (source_ref, agent_name, reason, block_code, blocking_pr_number, detection_strategy, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         params.sourceRef,
@@ -9913,6 +9945,7 @@ export class StateStore {
         params.reason,
         params.blockCode,
         params.blockingPRNumber ?? null,
+        params.detectionStrategy ?? null,
         now,
       );
   }
@@ -10383,6 +10416,53 @@ export class StateStore {
       total_dispatches: totalDispatches,
       avg_block_rate_pct: avgRate,
       trend,
+    };
+  }
+
+  /**
+   * Count dispatch blocks grouped by PR detection strategy over a rolling window.
+   *
+   * Each blocked dispatch records which strategy detected the blocking PR
+   * (search_index, branch_name, or body_keyword — issue #1179). This breakdown
+   * lets operators verify whether the body-keyword fallback (added in issue #1174)
+   * fires in practice, and whether the search-index lag is a real operational
+   * problem or merely theoretical.
+   *
+   * @param days Rolling window in days (default: 7)
+   */
+  getPRDetectionStrategyBreakdown(days = 7): PRDetectionStrategyBreakdown {
+    this.runDispatchBlocksMigration();
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const rows = this.db
+      .prepare(
+        `SELECT
+           COALESCE(detection_strategy, 'unknown') AS strategy,
+           COUNT(*) AS cnt
+         FROM dispatch_blocks
+         WHERE timestamp >= ?
+         GROUP BY COALESCE(detection_strategy, 'unknown')`,
+      )
+      .all(cutoff) as Array<{ strategy: string; cnt: number }>;
+
+    let searchIndex = 0;
+    let branchName = 0;
+    let bodyKeyword = 0;
+    let unknown = 0;
+
+    for (const row of rows) {
+      if (row.strategy === "search_index") searchIndex = row.cnt;
+      else if (row.strategy === "branch_name") branchName = row.cnt;
+      else if (row.strategy === "body_keyword") bodyKeyword = row.cnt;
+      else unknown += row.cnt;
+    }
+
+    return {
+      days,
+      search_index: searchIndex,
+      branch_name: branchName,
+      body_keyword: bodyKeyword,
+      unknown,
+      total: searchIndex + branchName + bodyKeyword + unknown,
     };
   }
 
