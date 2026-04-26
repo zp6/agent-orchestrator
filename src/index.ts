@@ -1292,6 +1292,21 @@ export type {
   MarginalApprovalDayBucket,
 } from "./state/types.js";
 
+// Pre-existing staging failure tracker — consolidated Telegram alert when the
+// same pre-existing test failure is skipped across ≥3 distinct PRs (issue #453).
+export {
+  PreexistingFailureTracker,
+  PREEXISTING_SKIP_THRESHOLD,
+  PREEXISTING_SKIP_WINDOW_MS,
+  PREEXISTING_ALERT_COOLDOWN_MS,
+} from "./reviewer/preexisting-failure-tracker.js";
+export type {
+  PreexistingSkip,
+  PreexistingSkipRow,
+  IPreexistingFailureStore,
+  PreexistingFailureTrackerConfig,
+} from "./reviewer/preexisting-failure-tracker.js";
+
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
 export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";

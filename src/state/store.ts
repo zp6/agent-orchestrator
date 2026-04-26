@@ -764,6 +764,24 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       CREATE INDEX IF NOT EXISTS idx_standup_quality_agent_date
         ON standup_quality_history (agent_id, date DESC);
     `);
+
+    // Pre-existing staging failure skips (issue #453).
+    // Records each time the staging validator skips validation because the
+    // same failure already exists on main.  Used by PreexistingFailureTracker
+    // to fire a consolidated Telegram alert when the same (repo, pattern) pair
+    // accumulates ≥3 distinct PR numbers within a rolling 7-day window.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS staging_preexisting_skips (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo       TEXT    NOT NULL,
+        pattern    TEXT    NOT NULL,
+        pr_number  INTEGER NOT NULL,
+        skipped_at TEXT    NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_staging_preexisting_skips_repo_pattern_at
+        ON staging_preexisting_skips (repo, pattern, skipped_at DESC);
+    `);
   }
 
   // ── PR guard cooldown (issue #390) ───────────────────────────────────────
@@ -5061,6 +5079,57 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
 
     const rows_inserted = insertMany(candidates) as number;
     return { rows_inserted };
+  }
+
+  // ── Pre-existing staging failure skips (issue #453) ─────────────────────
+
+  /**
+   * Persist a pre-existing staging failure skip row.
+   *
+   * Implements `IPreexistingFailureStore.insertPreexistingSkip`.
+   */
+  insertPreexistingSkip(skip: {
+    repo: string;
+    pattern: string;
+    pr_number: number;
+    skipped_at: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO staging_preexisting_skips (repo, pattern, pr_number, skipped_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(skip.repo, skip.pattern, skip.pr_number, skip.skipped_at);
+  }
+
+  /**
+   * Return all skip rows for the given `(repo, pattern)` pair whose
+   * `skipped_at` timestamp falls within `[windowStart, windowEnd]`.
+   *
+   * Implements `IPreexistingFailureStore.getPreexistingSkipsInWindow`.
+   */
+  getPreexistingSkipsInWindow(
+    repo: string,
+    pattern: string,
+    windowStart: Date,
+    windowEnd: Date,
+  ): { repo: string; pattern: string; pr_number: number; skipped_at: string }[] {
+    return this.db
+      .prepare(
+        `SELECT repo, pattern, pr_number, skipped_at
+           FROM staging_preexisting_skips
+          WHERE repo = ?
+            AND pattern = ?
+            AND skipped_at >= ?
+            AND skipped_at <= ?
+          ORDER BY skipped_at DESC`,
+      )
+      .all(
+        repo,
+        pattern,
+        windowStart.toISOString(),
+        windowEnd.toISOString(),
+      ) as { repo: string; pattern: string; pr_number: number; skipped_at: string }[];
   }
 
   /**
