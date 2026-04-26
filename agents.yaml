@@ -16,7 +16,7 @@ providers:
       daily: 5000000        # ~5M tokens/day
       weekly: 25000000      # ~25M tokens/week
   openai:
-    model: "gpt-5.4-mini"
+    model: "gpt-5.5-mini"
     limits:
       hourly: 2000000
       daily: 10000000
@@ -150,7 +150,7 @@ agents:
     dir: "claude-agent-orchestrator"
     repo: "git@github.com:rapartlu/agent-orchestrator.git"
     provider: "openai"
-    model: "gpt-5.4-mini"
+    model: "gpt-5.5"
     pool: "orchestrator"
     description: "Core orchestration infrastructure (Codex). Parallel throughput for orchestrator pool."
     capabilities: ["typescript", "orchestration", "sqlite"]
@@ -186,7 +186,7 @@ agents:
     dir: "claude-orchestrator-reviewer"
     repo: "git@github.com:rapartlu/agent-reviewer.git"
     provider: "openai"
-    model: "gpt-5.4-mini"
+    model: "gpt-5.5-mini"
     pool: "reviewer"
     description: "PR reviewer, verifier, supervisor (Codex). Parallel throughput for reviewer pool."
     capabilities: ["typescript", "llm", "review", "verification"]
@@ -221,7 +221,7 @@ agents:
     dir: "claude-orchestrator-dashboard"
     repo: "git@github.com:rapartlu/agent-dashboard.git"
     provider: "openai"
-    model: "gpt-5.4-mini"
+    model: "gpt-5.5-mini"
     pool: "dashboard"
     description: "Dashboard, CLI commands, observability UI (Codex). Parallel throughput for dashboard pool."
     capabilities: ["typescript", "html", "css", "express", "dashboard"]
@@ -271,7 +271,7 @@ agents:
     dir: "claude-research-agent"
     repo: "git@github.com:rapartlu/research-agent.git"
     provider: "openai"
-    model: "gpt-5.4-mini"
+    model: "gpt-5.5"
     pool: "research"
     description: "Research agent (Codex). Parallel throughput for research pool."
     capabilities: ["research", "web-search", "documentation", "analysis"]
@@ -307,7 +307,7 @@ agents:
     dir: "claude-proxy"
     repo: "git@github.com:rapartlu/agent-proxy.git"
     provider: "openai"
-    model: "gpt-5.4-mini"
+    model: "gpt-5.5-mini"
     pool: "proxy"
     description: "Proxy server (Codex). Parallel throughput for proxy pool."
     capabilities: ["typescript", "docker", "proxy", "api", "infrastructure"]
