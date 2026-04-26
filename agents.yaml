@@ -328,7 +328,7 @@ agents:
     description: "Meeting facilitator. Evaluates requests, selects format and participants, runs structured discussions, synthesises outcomes."
     capabilities: ["facilitation", "synthesis", "coordination"]
     github: "rapartlu/meeting-facilitator-agent"
-    owns_topics: ["facilitation", "meetings", "coordination"]
+    owns_topics: ["facilitation", "meetings", "meeting", "standup", "coordination", "suppression", "surge"]
     # Housekeeping fires at cycle modulo 50 → sixth slot in each 5h window (~:250min offset)
     housekeeping_offset_cycles: 50
     docker:
