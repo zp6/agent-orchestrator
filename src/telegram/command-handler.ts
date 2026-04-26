@@ -40,7 +40,7 @@
  *   /triage-health [agent]     → per-agent triage schema pass/fail rate, missing fields, revision count, and 7-day trend
  *   /investigations            → list pending/active/completed research agent investigations with titles, times, and result issue URLs
  *   /meeting-goal              → meeting-facilitator-agent monthly goal tracker: core_logic_shipped + meetings_facilitated progress (issue #456)
- *   /supervisor-dispatches [n] → last N proactive supervisor dispatches with rationale, quality score, and PR outcome (default 10)
+ *   /supervisor-dispatches [n] [agent=<name>] [since=7d|24h] → last N proactive supervisor dispatches with rationale, quality score, and PR outcome (default 10); filterable by agent and date range
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -118,6 +118,7 @@ import type { ReviewerConfig } from "../config.js";
 import {
   getProactiveDispatches,
   formatProactiveDispatchesForTelegram,
+  type ProactiveDispatchOptions,
 } from "../reviewer/proactive-dispatch-log.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
@@ -638,10 +639,26 @@ async function executeCommand(
     }
 
     case "supervisor-dispatches": {
-      // /supervisor-dispatches [n] — last N proactive dispatches with rationale, score, outcome.
-      const n = parseInt(cmd.args[0] ?? "10", 10);
-      const limit = Number.isNaN(n) || n < 1 ? 10 : Math.min(n, 25);
-      return Promise.resolve(handleSupervisorDispatches(store, limit));
+      // /supervisor-dispatches [n] [agent=<name>] [since=7d]
+      // Parse positional limit (optional, first non-flag arg) and keyword flags.
+      let limit = 10;
+      const options: ProactiveDispatchOptions = {};
+
+      for (const arg of cmd.args) {
+        const agentMatch = arg.match(/^agent=(.+)$/);
+        const sinceMatch = arg.match(/^since=(.+)$/i);
+        if (agentMatch) {
+          options.agentName = agentMatch[1];
+        } else if (sinceMatch) {
+          options.since = sinceMatch[1];
+        } else {
+          // Positional numeric argument — treat as limit
+          const n = parseInt(arg, 10);
+          if (!Number.isNaN(n) && n >= 1) limit = Math.min(n, 25);
+        }
+      }
+
+      return Promise.resolve(handleSupervisorDispatches(store, limit, options));
     }
   }
 }
@@ -2542,7 +2559,7 @@ function handleMeetingGoal(store: ITelegramStateStore): string {
 // ── Supervisor proactive dispatch log handler (issue #570) ───────────────
 
 /**
- * Handle the `/supervisor-dispatches [n]` command.
+ * Handle the `/supervisor-dispatches [n] [agent=<name>] [since=7d]` command.
  *
  * Shows the last N proactive supervisor dispatches alongside:
  *   - The structured dispatch rationale (idle signal, confidence, borrow flag)
@@ -2550,12 +2567,19 @@ function handleMeetingGoal(store: ITelegramStateStore): string {
  *   - Whether the resulting PR was approved/merged
  *
  * Usage:
- *   /supervisor-dispatches         — last 10 dispatches
- *   /supervisor-dispatches 5       — last 5 dispatches
+ *   /supervisor-dispatches              — last 10 dispatches
+ *   /supervisor-dispatches 5            — last 5 dispatches
+ *   /supervisor-dispatches agent=claude-orchestrator-dashboard
+ *   /supervisor-dispatches since=7d
+ *   /supervisor-dispatches 5 agent=claude-proxy since=24h
  */
-function handleSupervisorDispatches(store: ITelegramStateStore, limit: number): string {
-  const dispatches = getProactiveDispatches(store, limit);
-  return formatProactiveDispatchesForTelegram(dispatches);
+function handleSupervisorDispatches(
+  store: ITelegramStateStore,
+  limit: number,
+  options: ProactiveDispatchOptions = {},
+): string {
+  const dispatches = getProactiveDispatches(store, limit, options);
+  return formatProactiveDispatchesForTelegram(dispatches, options);
 }
 
 // ── Quality system health handler (issue #304) ────────────────────────────

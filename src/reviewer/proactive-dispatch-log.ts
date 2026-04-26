@@ -51,21 +51,67 @@ function parseDispatchRationale(json: string | null | undefined): DispatchRation
 }
 
 /**
+ * Filter options for getProactiveDispatches().
+ */
+export interface ProactiveDispatchOptions {
+  /** Filter to dispatches targeting a specific agent (e.g. "claude-orchestrator-dashboard"). */
+  agentName?: string;
+  /**
+   * Only include dispatches from the last N days/hours.
+   * Accepts formats: "7d" (7 days), "24h" (24 hours), "2h30m" (compound).
+   * Converted to an ISO-8601 timestamp before querying the store.
+   */
+  since?: string;
+}
+
+/**
+ * Parse a "since" duration string (e.g. "7d", "24h", "2h30m") into an
+ * ISO-8601 cutoff timestamp relative to now.
+ *
+ * Returns null when the input is missing or cannot be parsed.
+ *
+ * Exported for unit testing.
+ */
+export function parseSinceDuration(since: string | undefined, now = Date.now()): string | null {
+  if (!since) return null;
+  // Match optional day, hour, and minute components (e.g. "1d", "24h", "1h30m", "7d12h")
+  const match = since.match(/^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?$/i);
+  if (!match) return null;
+
+  const days = parseInt(match[1] ?? "0", 10);
+  const hours = parseInt(match[2] ?? "0", 10);
+  const minutes = parseInt(match[3] ?? "0", 10);
+  const totalMs = (days * 24 * 60 + hours * 60 + minutes) * 60_000;
+  if (totalMs === 0) return null;
+
+  return new Date(now - totalMs).toISOString();
+}
+
+/**
  * Retrieve the last N proactive supervisor dispatches, enriched with quality
  * scores and verification outcomes from the task store.
  *
  * Only "dispatch" and "follow-up" supervisor actions are included — pure
  * "verify", "none", or "redeploy" cycles are filtered out.
  *
- * @param store  State store (orchestrator's or reviewer's StateStore).
- * @param limit  Maximum dispatches to return (default 10, max 25).
+ * @param store    State store (orchestrator's or reviewer's StateStore).
+ * @param limit    Maximum dispatches to return (default 10, max 25).
+ * @param options  Optional filters: agentName and/or since.
  */
-export function getProactiveDispatches(store: IStateStore, limit = 10): ProactiveDispatch[] {
+export function getProactiveDispatches(
+  store: IStateStore,
+  limit = 10,
+  options: ProactiveDispatchOptions = {},
+): ProactiveDispatch[] {
   const cap = Math.min(limit, 25);
+
+  const sinceTimestamp = parseSinceDuration(options.since);
 
   const decisions = querySupervisorLog(store, {
     action: "dispatch",
     limit: cap,
+    agentName: options.agentName,
+    since: sinceTimestamp ?? undefined,
   });
 
   return decisions.map((decision): ProactiveDispatch => {
@@ -150,14 +196,24 @@ function formatOutcomeBadge(verificationStatus: string | null, score: number | n
  *   _High-value observability panel; idle dashboard agent_
  *
  * @param dispatches  From getProactiveDispatches(), newest-first.
+ * @param options     Active filters (shown in the header for context).
  * @returns           Telegram Markdown-formatted string.
  */
-export function formatProactiveDispatchesForTelegram(dispatches: ProactiveDispatch[]): string {
+export function formatProactiveDispatchesForTelegram(
+  dispatches: ProactiveDispatch[],
+  options: ProactiveDispatchOptions = {},
+): string {
+  // Build filter description for the header
+  const filterParts: string[] = [];
+  if (options.agentName) filterParts.push(`agent=${options.agentName}`);
+  if (options.since) filterParts.push(`since=${options.since}`);
+  const filterSuffix = filterParts.length > 0 ? ` · ${filterParts.join(" ")}` : "";
+
   if (dispatches.length === 0) {
-    return "🤖 *Supervisor Dispatches*\n\nNo proactive dispatches recorded yet.";
+    return `🤖 *Supervisor Dispatches*${filterSuffix}\n\nNo proactive dispatches found${filterParts.length > 0 ? " matching filters" : ""}.`;
   }
 
-  const lines: string[] = [`🤖 *Supervisor Dispatches* (last ${dispatches.length})`, ``];
+  const lines: string[] = [`🤖 *Supervisor Dispatches* (${dispatches.length}${filterSuffix})`, ``];
 
   for (const pd of dispatches) {
     const { decision, rationale, rationale_summary, quality_score, verification_status } = pd;
