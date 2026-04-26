@@ -7,6 +7,13 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Added
+- `MeetingPriorityDispatcher`: rule-based fast-path that auto-dispatches the top-ranked issue from a completed `MeetingOutcome` without LLM judgment when all 7 guards pass. Reduces meeting-to-implementation latency. Exported as `evaluateAutoDispatch()` and `MeetingPriorityDispatcher` from `src/index.ts`. (#464)
+
+---
+
 ## [0.1.0] — 2026-04-05
 
 ### Added
