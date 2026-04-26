@@ -1,13 +1,18 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-25 (triage cycle 16)_
+_Last updated: 2026-04-26 (triage cycle 17)_
 
 ## Completed (recent)
 
-- **dashboard#570 / PR (this cycle)** — `proactive-dispatch-log.ts`: `getProactiveDispatches()` + `formatProactiveDispatchesForTelegram()` + `/supervisor-dispatches [n]` Telegram command — closes the ROI loop on supervisor idle-agent utilisation by surfacing rationale, quality score, and PR outcome per proactive dispatch.
+- **#504 / PR #505** — `marginal-approvals-feed.ts` trend endpoint + per-agent coaching prompt for dashboard panel (`getMarginalApprovalsTrend()`)
+- **#502 / PR #503** — `marginal-approvals-feed.ts`: `/api/marginal-approvals` REST payload + `/marginal-approvals` Telegram command — surfaces approved tasks in the 0.60–0.79 band for operator review
+- **#490 / PR #493** — `quality-summary.ts`: rolling 24h approval-quality digest (total, below-floor count, marginal rate, worst agent); daily scheduled Telegram digest + on-demand `/quality-summary` command
+- **#498 / PR #501** — `standup_quality_history` backfill: existing verified standup tasks imported into the trend table on startup
+- **#498 / PR #499** — `standup-quality-trend.ts`: `standup_quality_history` table, `recordStandupQualityScore()`, per-agent sparkline + degradation flag, `/standup-quality [agent] [days]` Telegram command
+- **#476 / PR #475** — `pattern-risk-consumer.ts`: `PatternRiskConsumer.buildRiskContext()` injects aggregated per-agent pattern-risk signals into improvement detector LLM prompt
+- **dashboard#570 / PR #491** — `proactive-dispatch-log.ts`: `getProactiveDispatches()` + `formatProactiveDispatchesForTelegram()` + `/supervisor-dispatches [n]` Telegram command — closes the ROI loop on supervisor idle-agent utilisation by surfacing rationale, quality score, and PR outcome per proactive dispatch.
 - **#484 / PR #484** — score provenance tracking + persistent anomaly digest: distinguishes `default_fallback` score sources from true LLM scores, persists anomaly observations, and exposes `/api/score-provenance/:task_id` + `/api/persistent-anomalies`
 - **#479 / PR #479** — calibration recommendations persistence: stores `ScoreCalibrator` recommendations in SQLite with lifecycle tracking and auto-apply for high-confidence recommendations
-- **#475 / PR #475** — pattern_risk signals into improvement detector: consumed recurring quality-risk signals directly in the improvement prompt
 - **#471 / PR #471** — PR guard surge detector defaults realigned to the canonical coordinated spec: 5 hits / 30 min suppression window
 - **#464 / PR #464** — `MeetingPriorityDispatcher`: rule-based fast-path for auto-dispatch from meeting outcomes
 - **#461 / PR #461** — `MeetingOutcomeClient`: supervisor routing intelligence from meeting outcomes
@@ -83,11 +88,11 @@ _Last updated: 2026-04-25 (triage cycle 16)_
 
 ## In flight
 
-- **#469 / PR #482** — cross-repo housekeeping follow-up already has an open PR with `Closes #469`; no additional backlog work needed unless the PR regresses.
+- **#492 / PR #507** — `/supervisor-dispatches` filter by agent and date range; PR open with `Closes #492`.
+- **#496 / PR #497** — `/api/score-provenance/summary` 7-day breakdown by score source; PR open with `Closes #496`.
 
 ## Planned
 
-- **#490 — Marginal approval rate digest** _(medium)_ — 3 of 7 real tasks scored below 0.80 in the observed window; surface a weekly Telegram digest of the marginal approval rate trend so operators track quality floor adherence at a glance.
 - **#472 — Meeting facilitator: persist synthesis results to queryable store** _(high)_ — Keep meeting results searchable across daemon cycles so follow-up sessions can retrieve prior synthesis outputs without revision churn.
 - **#440 — Improvement issues filed from analysis are not being dispatched** _(medium)_ — Add a `/stale-improvements` view and/or dispatch exemption path so chronic improvement findings do not stall silently.
 - **#364 — Hard quality floor with mandatory override audit trail** _(high)_ — Hard floor at 0.10 blocking sub-floor approvals; Telegram escalation with `/approve-override` and `/reject-override`; `score_floor_overrides` audit table.
@@ -105,6 +110,8 @@ _Last updated: 2026-04-25 (triage cycle 16)_
 - **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
 
 ## Triage notes
+
+- **2026-04-26 cycle 17**: No duplicate issues found (16 open, all distinct). No stale issues (>14 days) — oldest open issues (#340, #359, #364, #368) are 7 days old. Open PRs audited: #507 (Closes #492) and #497 (Closes #496) — both valid. Five features shipped since cycle 16: #490 (quality-summary.ts), #498 (standup-quality-trend.ts + backfill), #476 (pattern-risk-consumer.ts), #502 (marginal-approvals-feed initial), #504 (marginal-approvals trend). CLAUDE.md: added `pattern-risk-consumer.ts`, `quality-summary.ts`, `marginal-approvals-feed.ts` to source layout and scope. ROADMAP.md: promoted #490/#498/#476/#502/#504 to Completed; removed #490 from Planned; updated In flight to show PRs #507/#497; corrected duplicate #475/#476 entry.
 
 - **2026-04-25 cycle 16**: No duplicate issues found (16 open, all distinct). No stale issues (>14 days) — oldest open issues (#340, #359, #364, #368) are 6 days old, under the 14-day cutoff. Open PRs: #488 (cycle 15 housekeeping) is already merged; no open housekeeping PRs to audit. New issues since cycle 15: #489 (/pr-guard-status command, high priority, added to Next up position 2), #490 (marginal approval rate digest, medium, added to Planned). Priority reordering: #489 promoted to Next up rank 2 (was new/null); #490 added to Planned (new/null). Feature shipped this cycle: `proactive-dispatch-log.ts` + `/supervisor-dispatches` Telegram command (dashboard#570). CLAUDE.md: added `proactive-dispatch-log.ts` module and `/supervisor-dispatches` command to source layout and scope sections. ROADMAP.md: added dashboard#570 to Completed; promoted #489 to Next up rank 2; added #490 to Planned.
 
