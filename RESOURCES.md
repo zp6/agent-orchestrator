@@ -28,21 +28,21 @@ Each ask is one entry:
 
 ### 2. Grok API key
 
-- **Status**: open
+- **Status**: in-progress
 - **Asked by**: orchestrator
 - **Asked on**: 2026-04-27
 - **Unlocks**: Grok 4 as a meeting voice — non-voting standup participant providing viewpoints from a materially different model lineage. Article VI cognitive-diversity work.
 - **Effort for Operator**: xAI console → API key → drop in `~/.claude-orchestrator/.env` as `XAI_API_KEY=...`
-- **Notes**: Used only for meetings initially. Expanded to dispatch only if it earns it.
+- **Notes**: `grok-meeting-voice` agent registered. Provider adapter and model tiers wired (issue #1211). Activate by setting `XAI_API_KEY`.
 
 ### 3. Deepseek API key
 
-- **Status**: open
+- **Status**: in-progress
 - **Asked by**: orchestrator
 - **Asked on**: 2026-04-27
 - **Unlocks**: Deepseek V3 for cheap heavy background workloads (embeddings, semantic memory reindexing, fuzzing); Deepseek R1 as a third reasoning voice in the reviewer pool.
 - **Effort for Operator**: deepseek.com → API key → drop in `~/.claude-orchestrator/.env` as `DEEPSEEK_API_KEY=...`
-- **Notes**: ~10–20× cheaper than frontier models. Cost-tier strategy: Deepseek for volume, frontier models for stakes.
+- **Notes**: `deepseek-background` and `deepseek-reasoning` agents registered. Provider adapter and model tiers wired (issue #1211). Activate by setting `DEEPSEEK_API_KEY`. ~10-20x cheaper than frontier models.
 
 ### 4. Daemon migration off Operator's laptop — DEFERRED
 

@@ -24,6 +24,21 @@ const MODEL_MAP: Record<string, Record<ModelTier, string>> = {
     standard: "gpt-5.4-mini",
     heavy: "gpt-5.4",
   },
+  grok: {
+    light: "grok-3-mini",
+    standard: "grok-3",
+    heavy: "grok-4",
+  },
+  deepseek: {
+    light: "deepseek-chat",
+    standard: "deepseek-chat",
+    heavy: "deepseek-reasoner",
+  },
+  gemini: {
+    light: "gemini-2.0-flash",
+    standard: "gemini-2.5-flash-preview-04-17",
+    heavy: "gemini-2.5-pro",
+  },
 };
 
 /** Complexity thresholds for tier selection. */
