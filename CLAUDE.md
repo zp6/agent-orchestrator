@@ -6,9 +6,9 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 
 ## Architecture
 
-### Agent Fleet (7 Claude agents across 6 repos)
+### Agent Fleet (7 Claude agents + 5 Codex agents across 6 repos)
 
-> **Note:** Codex (OpenAI) pool variants are currently disabled — out of tokens. Infrastructure remains in place for re-enablement.
+> **Note:** Codex (OpenAI) pool variants are active alongside the Claude pool — all 5 codex agents are running and dispatching. See provider/model columns in the table below.
 
 | Agent | Port | Model | Pool | Purpose |
 |-------|------|-------|------|---------|
@@ -32,7 +32,7 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 
 ### Key Features
 
-- **Multi-provider pools** — infrastructure supports Claude + Codex in parallel (Codex currently disabled)
+- **Multi-provider pools** — Claude + Codex agents run in parallel; both pools are active and dispatching
 - **Agent pools** — multiple instances share workload via round-robin (orchestrator, reviewer, dashboard, research, proxy)
 - **Persistent sessions** — conversations resume across requests via `x-conversation-id` header
 - **Per-agent models** — Opus for coding, Sonnet for reviews, Haiku for Telegram

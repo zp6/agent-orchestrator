@@ -10333,178 +10333,6 @@ export class StateStore {
     }));
   }
 
-  // ── Guard Health Metrics (issue #1163) ────────────────────────────────────
-
-  /**
-   * Lazy-load migration: creates tables for guard surge hit tracking and leak detection.
-   * Called on first access via recordGuardHit(), checkForLeakedHits(), or getGuardHealthMetrics().
-   */
-  private runGuardHealthMetricsMigration(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS guard_surge_hits (
-        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-        repo               TEXT    NOT NULL,
-        issue_number       INTEGER NOT NULL,
-        hit_at             TEXT    NOT NULL,
-        suppression_active INTEGER NOT NULL DEFAULT 0
-      );
-      CREATE INDEX IF NOT EXISTS idx_guard_surge_hits_repo_issue
-        ON guard_surge_hits(repo, issue_number);
-      CREATE INDEX IF NOT EXISTS idx_guard_surge_hits_at
-        ON guard_surge_hits(hit_at);
-      CREATE INDEX IF NOT EXISTS idx_guard_surge_hits_suppressed
-        ON guard_surge_hits(suppression_active);
-
-      CREATE TABLE IF NOT EXISTS guard_surge_leaks (
-        id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-        repo                    TEXT    NOT NULL,
-        issue_number            INTEGER NOT NULL,
-        suppression_recorded_at TEXT    NOT NULL,
-        leak_hit_at             TEXT    NOT NULL,
-        UNIQUE(repo, issue_number, leak_hit_at)
-      );
-      CREATE INDEX IF NOT EXISTS idx_guard_surge_leaks_at
-        ON guard_surge_leaks(leak_hit_at);
-    `);
-  }
-
-  /**
-   * Record a guard surge hit (dispatch blocked by already-in-review).
-   * Tracks whether hit occurred during active suppression (potential leak).
-   *
-   * @param repo            Repository slug, e.g. "owner/repo"
-   * @param issueNumber     GitHub issue number
-   * @param suppressionActive  1 if hit occurred during active suppression, 0 otherwise
-   */
-  recordGuardHit(repo: string, issueNumber: number, suppressionActive: boolean): void {
-    this.runGuardHealthMetricsMigration();
-    const now = new Date();
-    this.db
-      .prepare(
-        `INSERT INTO guard_surge_hits (repo, issue_number, hit_at, suppression_active)
-         VALUES (?, ?, ?, ?)`,
-      )
-      .run(repo, issueNumber, now.toISOString(), suppressionActive ? 1 : 0);
-  }
-
-  /**
-   * Check for hits that occurred after a suppression was recorded (potential leaks).
-   * A leak is a hit that occurred within the suppression window but AFTER the
-   * suppression record was created, indicating the suppression didn't prevent dispatch.
-   *
-   * @param repo                Repository slug
-   * @param issueNumber         GitHub issue number
-   * @param suppressionRecordedAt ISO timestamp when suppression was recorded
-   * @returns Count of leaked hits
-   */
-  checkForLeakedHits(repo: string, issueNumber: number, suppressionRecordedAt: string): number {
-    this.runGuardHealthMetricsMigration();
-
-    // Find hits that occurred AFTER the suppression was recorded
-    // within a reasonable post-suppression window (2 hours from suppression creation)
-    const suppressionWindow = new Date(new Date(suppressionRecordedAt).getTime() + 2 * 60 * 60 * 1000);
-
-    const leakedHits = this.db
-      .prepare(
-        `SELECT COUNT(*) as count FROM guard_surge_hits
-         WHERE repo = ? AND issue_number = ?
-         AND hit_at > ? AND hit_at <= ?`,
-      )
-      .get(repo, issueNumber, suppressionRecordedAt, suppressionWindow.toISOString()) as { count: number };
-
-    return leakedHits.count;
-  }
-
-  /**
-   * Record leaked guard hits in the leak tracking table.
-   * Helps operators understand suppression effectiveness across daemon restarts.
-   *
-   * @param repo                Repository slug
-   * @param issueNumber         GitHub issue number
-   * @param suppressionRecordedAt ISO timestamp when suppression was recorded
-   */
-  recordLeakedHits(repo: string, issueNumber: number, suppressionRecordedAt: string): void {
-    this.runGuardHealthMetricsMigration();
-
-    // Find all leaked hits and record them
-    const suppressionWindow = new Date(new Date(suppressionRecordedAt).getTime() + 2 * 60 * 60 * 1000);
-    const leakedHitsRows = this.db
-      .prepare(
-        `SELECT hit_at FROM guard_surge_hits
-         WHERE repo = ? AND issue_number = ?
-         AND hit_at > ? AND hit_at <= ?
-         ORDER BY hit_at ASC`,
-      )
-      .all(repo, issueNumber, suppressionRecordedAt, suppressionWindow.toISOString()) as Array<{ hit_at: string }>;
-
-    for (const row of leakedHitsRows) {
-      // Use INSERT OR IGNORE to handle duplicates gracefully
-      this.db
-        .prepare(
-          `INSERT OR IGNORE INTO guard_surge_leaks (repo, issue_number, suppression_recorded_at, leak_hit_at)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .run(repo, issueNumber, suppressionRecordedAt, row.hit_at);
-    }
-  }
-
-  /**
-   * Get guard health metrics for a time window.
-   * Returns total hits, leaked hits, and active suppressions.
-   *
-   * @param windowMs Look-back window in milliseconds (default: 24 hours)
-   */
-  getGuardHealthMetrics(windowMs = 24 * 60 * 60 * 1000): {
-    total_hits: number;
-    leaked_hits: number;
-    active_suppressions: number;
-    suppressions: Array<{ repo: string; issue_number: number; expires_at: string; minutes_remaining: number }>;
-  } {
-    this.runGuardHealthMetricsMigration();
-    const cutoff = new Date(Date.now() - windowMs).toISOString();
-    const nowIso = new Date().toISOString();
-    const now = Date.now();
-
-    // Total hits in window
-    const hitCount = this.db
-      .prepare(
-        `SELECT COUNT(*) as count FROM guard_surge_hits
-         WHERE hit_at >= ?`,
-      )
-      .get(cutoff) as { count: number };
-
-    // Leaked hits in window
-    const leakCount = this.db
-      .prepare(
-        `SELECT COUNT(*) as count FROM guard_surge_leaks
-         WHERE leak_hit_at >= ?`,
-      )
-      .get(cutoff) as { count: number };
-
-    // Active suppressions (not expired)
-    const activeSuppressionsRows = this.db
-      .prepare(
-        `SELECT repo, issue_number, expires_at FROM dispatch_surge_suppressions
-         WHERE expires_at > ?
-         ORDER BY expires_at DESC`,
-      )
-      .all(nowIso) as Array<{ repo: string; issue_number: number; expires_at: string }>;
-
-    const suppressions = activeSuppressionsRows.map((s) => ({
-      repo: s.repo,
-      issue_number: s.issue_number,
-      expires_at: s.expires_at,
-      minutes_remaining: Math.ceil((new Date(s.expires_at).getTime() - now) / (60 * 1000)),
-    }));
-
-    return {
-      total_hits: hitCount.count,
-      leaked_hits: leakCount.count,
-      active_suppressions: activeSuppressionsRows.length,
-      suppressions,
-    };
-  }
-
   /**
    * Return per-day dispatch block rate metrics over a rolling window.
    *
@@ -11861,16 +11689,16 @@ export class StateStore {
     `).run(repo, issueNumber, new Date().toISOString(), suppressionActive ? 1 : 0);
   }
 
-  checkForLeakedHits(repo: string, issueNumber: number, suppressionRecordedAt: Date): number {
+  checkForLeakedHits(repo: string, issueNumber: number, suppressionRecordedAt: string): number {
     this.runGuardHealthMetricsMigration();
     const result = this.db.prepare(`
       SELECT COUNT(*) AS count FROM guard_surge_hits
       WHERE repo = ? AND issue_number = ? AND hit_at > ? AND suppression_active = 0
-    `).get(repo, issueNumber, suppressionRecordedAt.toISOString()) as { count: number };
+    `).get(repo, issueNumber, suppressionRecordedAt) as { count: number };
     return result.count ?? 0;
   }
 
-  recordLeakedHits(repo: string, issueNumber: number, suppressionRecordedAt: Date): void {
+  recordLeakedHits(repo: string, issueNumber: number, suppressionRecordedAt: string): void {
     this.runGuardHealthMetricsMigration();
     const leakedCount = this.checkForLeakedHits(repo, issueNumber, suppressionRecordedAt);
     if (leakedCount > 0) {
@@ -11879,8 +11707,8 @@ export class StateStore {
         SELECT ?, ?, ?, hit_at FROM guard_surge_hits
         WHERE repo = ? AND issue_number = ? AND hit_at > ? AND suppression_active = 0
       `).run(
-        repo, issueNumber, suppressionRecordedAt.toISOString(),
-        repo, issueNumber, suppressionRecordedAt.toISOString()
+        repo, issueNumber, suppressionRecordedAt,
+        repo, issueNumber, suppressionRecordedAt
       );
     }
   }
@@ -11890,11 +11718,12 @@ export class StateStore {
     leaked_hits: number;
     duplicate_suppressed_hits: number;
     active_suppressions: number;
-    suppressions: Array<{ repo: string; issue_number: number; expires_at: string }>;
+    suppressions: Array<{ repo: string; issue_number: number; expires_at: string; minutes_remaining: number }>;
   } {
     this.runGuardHealthMetricsMigration();
     this.runGuardDuplicateSuppressionsMigration();
     const cutoff = new Date(Date.now() - windowMs).toISOString();
+    const now = Date.now();
 
     // Count total hits
     const hitRow = this.db.prepare(`
@@ -11915,12 +11744,17 @@ export class StateStore {
     `).get(cutoffDate) as { total: number };
     const duplicate_suppressed_hits = dupRow.total ?? 0;
 
-    // Get active suppressions (from dispatch_surge_suppressions table)
-    const suppressions = this.db.prepare(`
+    // Get active suppressions with minutes remaining
+    const rawSuppressions = this.db.prepare(`
       SELECT repo, issue_number, expires_at FROM dispatch_surge_suppressions
       WHERE expires_at > datetime('now')
       ORDER BY expires_at ASC
     `).all() as Array<{ repo: string; issue_number: number; expires_at: string }>;
+
+    const suppressions = rawSuppressions.map((s) => ({
+      ...s,
+      minutes_remaining: Math.ceil((new Date(s.expires_at).getTime() - now) / (60 * 1000)),
+    }));
 
     return {
       total_hits,
