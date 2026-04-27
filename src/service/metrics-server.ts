@@ -271,6 +271,33 @@ export interface MisroutingFeedResponse {
   generated_at: string;
 }
 
+/**
+ * JSON response shape for GET /guard-health (issue #1163).
+ * PR guard surge suppression effectiveness metrics and leak tracking.
+ */
+export interface GuardHealthResponse {
+  /** Look-back window in hours. */
+  window_hours: number;
+  /** Guard surge metrics. */
+  metrics: {
+    /** Total guard hits in the window. */
+    total_hits: number;
+    /** Guard hits that occurred after suppression was recorded (potential leaks). */
+    leaked_hits: number;
+    /** Number of currently active suppressions. */
+    active_suppressions: number;
+    /** List of active suppressions with expiry times. */
+    suppressions: Array<{
+      repo: string;
+      issue_number: number;
+      expires_at: string;
+      minutes_remaining: number;
+    }>;
+  };
+  /** ISO timestamp of when this response was generated. */
+  generated_at: string;
+}
+
 // ── Handler helpers ────────────────────────────────────────────────────────────
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -684,6 +711,31 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /guard-health ─────────────────────────────────────────────────────
+    // PR guard surge suppression effectiveness: hit counts, leaks, and active suppressions.
+    // Issue #1163.
+    if (url.pathname === "/guard-health") {
+      const windowHours = parseFloat(url.searchParams.get("hours") ?? "24");
+      const validHours = isNaN(windowHours) || windowHours < 1 ? 24 : Math.min(windowHours, 720); // max 30 days
+      const windowMs = validHours * 60 * 60 * 1000;
+
+      try {
+        const metrics = store.getGuardHealthMetrics(windowMs);
+        const body: GuardHealthResponse = {
+          window_hours: validHours,
+          metrics,
+          generated_at: new Date().toISOString(),
+        };
+        sendJson(res, 200, body);
+      } catch (err) {
+        log.warn("Failed to fetch guard health metrics", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to fetch guard health metrics" });
+      }
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -707,6 +759,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
         "/standup-quality",
         "/marginal-score-tasks",
         "POST /marginal-score-tasks/:id/redispatch",
+        "/guard-health",
       ],
     });
   });

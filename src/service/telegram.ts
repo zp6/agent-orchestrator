@@ -14,6 +14,8 @@ import { loadGoals, measureGoalProgress, formatGoalsForTelegram } from "../orche
 import { runTeamMeeting } from "../orchestrator/team-meeting.js";
 import { buildCalibrationReport, formatCalibrationForTelegram } from "../orchestrator/verification-calibrator.js";
 import { deescalateAllEscalatedTasks, deescalateEscalatedTask, normaliseSourceRef } from "../cli/commands/deescalate.js";
+import type { DigestSchedulerState } from "../service/slack-digest.js";
+import { isScheduledTimeReached, todayLocalDateString } from "../service/slack-digest.js";
 
 const log = createLogger("telegram");
 
@@ -344,6 +346,35 @@ export async function handleCommand(text: string, ctx: TelegramContext): Promise
       }
     }));
     return `🏥 *Health*\n\n${checks.join("\n")}`;
+  }
+
+  // Guard Health (PR guard surge suppression metrics, issue #1163)
+  if (cmd === "guard-health" || cmd === "/guard-health") {
+    try {
+      const res = await fetch("http://localhost:3472/guard-health", { signal: AbortSignal.timeout(5000) });
+      if (!res.ok) {
+        return `❌ Failed to fetch guard metrics (${res.status})`;
+      }
+      const data = (await res.json()) as {
+        metrics: { total_hits: number; leaked_hits: number; active_suppressions: number; suppressions: Array<{ repo: string; issue_number: number; minutes_remaining: number }> };
+      };
+      const { metrics } = data;
+      const suppressionsList = metrics.suppressions
+        .map((s) => `  \`${s.repo}#${s.issue_number}\` (${s.minutes_remaining}m remaining)`)
+        .slice(0, 5)
+        .join("\n");
+      const suppText = metrics.active_suppressions > 5 ? `${suppressionsList}\n  ... and ${metrics.active_suppressions - 5} more` : suppressionsList;
+      const leakAlert = metrics.leaked_hits > 0 ? ` ⚠️ *LEAKED: ${metrics.leaked_hits} hits after suppression*` : "";
+      return (
+        `🛡️ *Guard Health* (24h)\n\n` +
+        `📊 Total hits: ${metrics.total_hits}\n` +
+        `🚫 Leaked hits: ${metrics.leaked_hits}${leakAlert ? " — potential suppression failure" : ""}\n` +
+        `🔒 Active suppressions: ${metrics.active_suppressions}\n` +
+        (suppText ? `\n*Active:*\n${suppText}` : "")
+      );
+    } catch (err) {
+      return `❌ Guard health check failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
   }
 
   // Issues (parallel across repos)
@@ -1354,6 +1385,75 @@ function buildAntibodiesPanel(ctx: TelegramContext): string {
 ${lines.join("\n")}
 
 _Run \`orch antibodies\` for full panel with diff shapes and filters._`;
+}
+
+/**
+ * Check whether the configured daily guard health digest should fire on this poll cycle,
+ * and if so, fetch metrics and send a Telegram message.
+ * Similar to Slack's maybePostDailyDigest but for guard health metrics.
+ * Safe to call every poll cycle — it is a no-op when:
+ *  - Telegram is not configured
+ *  - The digest has already been sent today
+ *  - The current time is before the scheduled window
+ *
+ * Issue #1163.
+ */
+export async function maybePostDailyGuardDigest(
+  state: DigestSchedulerState,
+  store: StateStore,
+  schedule = "09:00",
+  now = new Date(),
+): Promise<void> {
+  if (!chatId) return; // Telegram not configured
+
+  const today = todayLocalDateString(now);
+
+  // Already sent today
+  if (state.lastDigestDate === today) return;
+
+  // Not yet the scheduled time
+  if (!isScheduledTimeReached(schedule, now)) return;
+
+  // Mark as sent before awaiting so concurrent cycles don't double-post
+  state.lastDigestDate = today;
+
+  try {
+    const res = await fetch("http://localhost:3472/guard-health", { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) {
+      log.warn("Failed to fetch guard health metrics for digest", { status: res.status });
+      return;
+    }
+
+    const data = (await res.json()) as {
+      metrics: {
+        total_hits: number;
+        leaked_hits: number;
+        active_suppressions: number;
+        suppressions: Array<{ repo: string; issue_number: number; minutes_remaining: number }>;
+      };
+    };
+    const { metrics } = data;
+
+    const suppressionsList = metrics.suppressions
+      .map((s) => `\`${s.repo}#${s.issue_number}\` (${s.minutes_remaining}m)`)
+      .slice(0, 5)
+      .join(", ");
+
+    const suppText = metrics.active_suppressions > 0 ? `Active: ${suppressionsList}${metrics.active_suppressions > 5 ? ` ... +${metrics.active_suppressions - 5} more` : ""}` : "None";
+
+    let alert = `🛡️ *Daily Guard Health* (24h)\n\n` + `📊 Total hits: ${metrics.total_hits}\n` + `🚫 Leaked hits: ${metrics.leaked_hits}\n` + `🔒 Active suppressions: ${metrics.active_suppressions}\n` + `${suppText}`;
+
+    // Add warning if leaks detected
+    if (metrics.leaked_hits > 0) {
+      alert += `\n\n⚠️ *Warning:* Leaked hits detected — suppression may be failing. Run \`/guard-health\` for details.`;
+    }
+
+    sendTelegramAlert(alert);
+    log.info("Daily guard health digest sent", { date: today, totalHits: metrics.total_hits, leakedHits: metrics.leaked_hits });
+  } catch (err) {
+    // Don't reset lastDigestDate — one attempt per day is enough even on failure.
+    log.error("Failed to send daily guard health digest", { error: String(err) });
+  }
 }
 
 /**

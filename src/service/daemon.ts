@@ -32,7 +32,7 @@ import { notifyOperator, clearNotifyRateLimit, setTelegramRateLimitMs } from "./
 import { buildHealthPostmortem, renderPostmortemBlock } from "./health-postmortem.js";
 import { setRecencyWindowHours } from "../triggers/duplicate-guard.js";
 import { DuplicateIdDetector, checkDbForDuplicateIds } from "../state/duplicate-id-detector.js";
-import { startTelegramPolling, stopTelegramPolling, pollTelegram } from "./telegram.js";
+import { startTelegramPolling, stopTelegramPolling, pollTelegram, maybePostDailyGuardDigest } from "./telegram.js";
 import { OperatorControlProcessor } from "./operator-controls.js";
 import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.js";
 import { maybeRunDailySecurityScan, type SecurityScanState } from "../orchestrator/security-scanner.js";
@@ -314,6 +314,8 @@ export class Daemon {
 
   /** Tracks when the daily Slack digest was last sent (re-arms on new calendar day). */
   private digestState: DigestSchedulerState = { lastDigestDate: null };
+  /** Tracks when the daily guard health digest was last sent (re-arms on new calendar day, issue #1163). */
+  private guardDigestState: DigestSchedulerState = { lastDigestDate: null };
   private securityScanState: SecurityScanState = { lastScanDate: null };
 
   /** Resolved path to agents.yaml — stored for hot-reload. */
@@ -894,6 +896,7 @@ export class Daemon {
         }
       }
       batch4.push(maybePostDailyDigest(this.digestState, this.store, this.config));
+      batch4.push(maybePostDailyGuardDigest(this.guardDigestState, this.store, "09:00"));
       batch4.push(maybeRunDailySecurityScan(this.securityScanState, this.config));
       if (this.cycleCount % QUALITY_SLA_CHECK_EVERY_N_CYCLES === 0) {
         batch4.push(this.checkQualitySlaBreaches(time));

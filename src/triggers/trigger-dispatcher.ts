@@ -601,6 +601,9 @@ export async function dispatchGitHubIssues(
           // without querying the reviewer service every cycle indefinitely.
           {
             const surgeResult = store.recordDispatchSurgeEvent(issue.repo, issue.number);
+            // Record this hit for guard health metrics (issue #1163)
+            store.recordGuardHit(issue.repo, issue.number, false);
+            // If suppression just triggered, check for leaked hits
             if (surgeResult.suppressed) {
               log.info(
                 "Dispatch surge suppression triggered via PR guard cooldown cross-wire (issue #1158)",
@@ -611,6 +614,8 @@ export async function dispatchGitHubIssues(
                   expiresAt: surgeResult.expiresAt,
                 },
               );
+              // Record any hits that occurred between event recording and now (issue #1163)
+              store.recordLeakedHits(issue.repo, issue.number, new Date().toISOString());
               sendTelegramAlert(
                 `⚠️ *Dispatch surge suppressed* — \`${issue.repo}#${issue.number}\` has ` +
                 `≥5 PR guard cooldown hits in 30 min. Further dispatches blocked until ` +
@@ -653,6 +658,8 @@ export async function dispatchGitHubIssues(
             agentName,
             expiresAt: surgeStatus.expiresAt,
           });
+          // Record this hit as suppressed (issue #1163)
+          store.recordGuardHit(issue.repo, issue.number, true);
           reportDashboardSkip({
             issue_id: sourceRef,
             agent_name: agentName,
@@ -760,6 +767,8 @@ export async function dispatchGitHubIssues(
             });
             // Record the suppressed attempt for the 24h Telegram digest (issue #1095, AC #2).
             store.recordPRGuardDuplicateAttempt(sourceRef, validation.blockingPRNumber);
+            // Record this duplicate hit for guard health metrics (issue #1163)
+            store.recordGuardHit(issue.repo, issue.number, false);
             prGuardDuplicateSuppressedThisCycle = true;
             // Surge counting (issue #1082, AC #3): suppressed hits still count
             // toward the blocking PR's total so the surge alert message is accurate.

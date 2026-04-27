@@ -143,6 +143,12 @@ describe("dispatchGitHubIssues", () => {
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      // Guard health metrics (issue #1163)
+      recordGuardHit: vi.fn(),
+      checkForLeakedHits: vi.fn().mockReturnValue(0),
+      recordLeakedHits: vi.fn(),
+      getGuardHealthMetrics: vi.fn().mockReturnValue({ total_hits: 0, leaked_hits: 0, active_suppressions: 0, suppressions: [] }),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
     } as unknown as StateStore;
@@ -402,6 +408,14 @@ describe("pre-dispatch issue state validation", () => {
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      // Guard health metrics (issue #1163)
+      recordGuardHit: vi.fn(),
+      checkForLeakedHits: vi.fn().mockReturnValue(0),
+      recordLeakedHits: vi.fn(),
+      getGuardHealthMetrics: vi.fn().mockReturnValue({ total_hits: 0, leaked_hits: 0, active_suppressions: 0, suppressions: [] }),
+      createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
+      updateTask: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -507,6 +521,14 @@ describe("duplicate PR detection before dispatch", () => {
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      // Guard health metrics (issue #1163)
+      recordGuardHit: vi.fn(),
+      checkForLeakedHits: vi.fn().mockReturnValue(0),
+      recordLeakedHits: vi.fn(),
+      getGuardHealthMetrics: vi.fn().mockReturnValue({ total_hits: 0, leaked_hits: 0, active_suppressions: 0, suppressions: [] }),
+      createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
+      updateTask: vi.fn(),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -747,6 +769,12 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      // Guard health metrics (issue #1163)
+      recordGuardHit: vi.fn(),
+      checkForLeakedHits: vi.fn().mockReturnValue(0),
+      recordLeakedHits: vi.fn(),
+      getGuardHealthMetrics: vi.fn().mockReturnValue({ total_hits: 0, leaked_hits: 0, active_suppressions: 0, suppressions: [] }),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -890,6 +918,12 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      // Guard health metrics (issue #1163)
+      recordGuardHit: vi.fn(),
+      checkForLeakedHits: vi.fn().mockReturnValue(0),
+      recordLeakedHits: vi.fn(),
+      getGuardHealthMetrics: vi.fn().mockReturnValue({ total_hits: 0, leaked_hits: 0, active_suppressions: 0, suppressions: [] }),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1536,6 +1570,12 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      // Guard health metrics (issue #1163)
+      recordGuardHit: vi.fn(),
+      checkForLeakedHits: vi.fn().mockReturnValue(0),
+      recordLeakedHits: vi.fn(),
+      getGuardHealthMetrics: vi.fn().mockReturnValue({ total_hits: 0, leaked_hits: 0, active_suppressions: 0, suppressions: [] }),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -1698,6 +1738,12 @@ describe("in-flight branch detection", () => {
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      // Guard health metrics (issue #1163)
+      recordGuardHit: vi.fn(),
+      checkForLeakedHits: vi.fn().mockReturnValue(0),
+      recordLeakedHits: vi.fn(),
+      getGuardHealthMetrics: vi.fn().mockReturnValue({ total_hits: 0, leaked_hits: 0, active_suppressions: 0, suppressions: [] }),
     } as unknown as StateStore;
 
     vi.mocked(mockStore.hasActiveTask).mockReturnValue(false);
@@ -1771,6 +1817,12 @@ describe("in-flight branch detection", () => {
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      // Guard health metrics (issue #1163)
+      recordGuardHit: vi.fn(),
+      checkForLeakedHits: vi.fn().mockReturnValue(0),
+      recordLeakedHits: vi.fn(),
+      getGuardHealthMetrics: vi.fn().mockReturnValue({ total_hits: 0, leaked_hits: 0, active_suppressions: 0, suppressions: [] }),
     } as unknown as StateStore;
 
     await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1845,6 +1897,12 @@ describe("in-flight branch detection", () => {
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      // Guard health metrics (issue #1163)
+      recordGuardHit: vi.fn(),
+      checkForLeakedHits: vi.fn().mockReturnValue(0),
+      recordLeakedHits: vi.fn(),
+      getGuardHealthMetrics: vi.fn().mockReturnValue({ total_hits: 0, leaked_hits: 0, active_suppressions: 0, suppressions: [] }),
     } as unknown as StateStore;
 
     const result = await dispatchGitHubIssues(branchConfig, mockStore, mockDispatcher);
@@ -1985,6 +2043,12 @@ describe("approved PR skip logic", () => {
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      // Guard health metrics (issue #1163)
+      recordGuardHit: vi.fn(),
+      checkForLeakedHits: vi.fn().mockReturnValue(0),
+      recordLeakedHits: vi.fn(),
+      getGuardHealthMetrics: vi.fn().mockReturnValue({ total_hits: 0, leaked_hits: 0, active_suppressions: 0, suppressions: [] }),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -2161,6 +2225,12 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      // Guard health metrics (issue #1163)
+      recordGuardHit: vi.fn(),
+      checkForLeakedHits: vi.fn().mockReturnValue(0),
+      recordLeakedHits: vi.fn(),
+      getGuardHealthMetrics: vi.fn().mockReturnValue({ total_hits: 0, leaked_hits: 0, active_suppressions: 0, suppressions: [] }),
     } as unknown as StateStore;
     mockDispatcher = {
       dispatch: vi.fn().mockResolvedValue({ taskId: "task-1", agentName: "my-agent", response: { content: "done" } }),
@@ -2422,6 +2492,12 @@ describe("dispatch flood gate (issue #1060)", () => {
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      // Guard health metrics (issue #1163)
+      recordGuardHit: vi.fn(),
+      checkForLeakedHits: vi.fn().mockReturnValue(0),
+      recordLeakedHits: vi.fn(),
+      getGuardHealthMetrics: vi.fn().mockReturnValue({ total_hits: 0, leaked_hits: 0, active_suppressions: 0, suppressions: [] }),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
     } as unknown as StateStore;
@@ -2610,6 +2686,12 @@ describe("PR guard surge alert (issue #1082)", () => {
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
       getActiveDispatchSuppressions: vi.fn().mockReturnValue([]),
+      hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
+      // Guard health metrics (issue #1163)
+      recordGuardHit: vi.fn(),
+      checkForLeakedHits: vi.fn().mockReturnValue(0),
+      recordLeakedHits: vi.fn(),
+      getGuardHealthMetrics: vi.fn().mockReturnValue({ total_hits: 0, leaked_hits: 0, active_suppressions: 0, suppressions: [] }),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
       ...overrides,
