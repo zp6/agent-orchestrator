@@ -154,6 +154,14 @@ QUALITY SLA BREACHES (when "## Quality SLA Breaches" is present):
 - Do NOT dispatch new work to a breaching agent without first creating an issue to investigate why their quality regressed
 - The breach indicates real performance degradation, not random variance — prioritize root-cause analysis
 
+ANTI-NAVEL-GAZING RULE (applies every cycle):
+- Before approving or dispatching any internal infrastructure work, ask: did at least one OKR advance this week?
+- An OKR advance means a task tagged OKR-1, OKR-2, OKR-3, or OKR-4 (not "internal") completed successfully in the last 7 days
+- If the answer is NO (all recent work is "internal"-tagged or untagged), REFUSE to dispatch new internal work — instead, re-prioritize and dispatch OKR-tagged issues from the open issues list
+- When "## OKR Context" is present in the context, use it to check the current OKR advancement status
+- If navel-gazing risk is flagged ("⚠️ NAVEL-GAZING RISK" in the context), make re-prioritizing OKR work your first action — dispatch the top OKR-tagged open issue rather than any internal task
+- This rule takes precedence over all routing optimizations — external impact is the fleet's primary obligation
+
 Be specific and actionable. Only suggest actions that address real gaps. Return [] if everything is on track.`;
 
 /** Regex to detect issue references like #42 or owner/repo#42 */
@@ -478,6 +486,130 @@ export function formatQualityByTaskTypeSection(
   });
 }
 
+/**
+ * OKR tag values that represent forward external-impact progress.
+ * Tasks tagged with these advance at least one OKR.
+ */
+export const OKR_ADVANCE_TAGS = ["OKR-1", "OKR-2", "OKR-3", "OKR-4"] as const;
+
+/**
+ * Rolling look-back window for navel-gazing risk detection (7 days in ms).
+ */
+const NAVEL_GAZING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Result of a navel-gazing risk check.
+ */
+export interface NavelGazingRiskResult {
+  /** True when all recent completed tasks are internal/untagged — no OKR advanced. */
+  atRisk: boolean;
+  /** Total completed tasks examined in the rolling window. */
+  totalTasks: number;
+  /** Count of tasks with an OKR-advancing tag. */
+  ocrAdvanceTasks: number;
+  /** Count of tasks explicitly tagged `'internal'`. */
+  internalTasks: number;
+  /** Count of tasks with no okr_tag set (unknown alignment). */
+  untaggedTasks: number;
+  /** ISO timestamp of the most recent OKR-tagged task, if any. */
+  lastOkrAdvanceAt: string | null;
+}
+
+/**
+ * Check whether the fleet has made any OKR progress in the rolling 7-day window.
+ *
+ * Returns `atRisk: true` when every completed task in the window is either
+ * explicitly `'internal'`-tagged or has no OKR tag at all — i.e. the fleet
+ * shipped nothing with confirmed external impact.
+ *
+ * The check is intentionally conservative: tasks with `okr_tag = null` are
+ * counted as untagged (unknown), not as `'internal'`.  The fleet is considered
+ * "at risk" only when `ocrAdvanceTasks === 0` AND there is at least one
+ * completed task in the window (no tasks → no signal either way → not at risk).
+ *
+ * Exported for unit testing.
+ */
+export function detectNavelGazingRisk(
+  tasks: Array<{ okr_tag?: string | null; created_at: string; status: string }>,
+  nowMs: number = Date.now(),
+): NavelGazingRiskResult {
+  const windowStart = new Date(nowMs - NAVEL_GAZING_WINDOW_MS).toISOString();
+
+  const recent = tasks.filter(
+    (t) => t.status === "done" && t.created_at >= windowStart,
+  );
+
+  let ocrAdvanceTasks = 0;
+  let internalTasks = 0;
+  let untaggedTasks = 0;
+  let lastOkrAdvanceAt: string | null = null;
+
+  for (const t of recent) {
+    const tag = t.okr_tag ?? null;
+    if (tag && (OKR_ADVANCE_TAGS as readonly string[]).includes(tag)) {
+      ocrAdvanceTasks++;
+      if (!lastOkrAdvanceAt || t.created_at > lastOkrAdvanceAt) {
+        lastOkrAdvanceAt = t.created_at;
+      }
+    } else if (tag === "internal") {
+      internalTasks++;
+    } else {
+      untaggedTasks++;
+    }
+  }
+
+  const atRisk = recent.length > 0 && ocrAdvanceTasks === 0;
+
+  return {
+    atRisk,
+    totalTasks: recent.length,
+    ocrAdvanceTasks,
+    internalTasks,
+    untaggedTasks,
+    lastOkrAdvanceAt,
+  };
+}
+
+/**
+ * Format the OKR context section for the supervisor LLM prompt.
+ *
+ * Includes the navel-gazing risk signal (⚠️ NAVEL-GAZING RISK) when atRisk is
+ * true, so the model receives a clear structural signal to re-prioritize.
+ *
+ * Exported for unit testing.
+ */
+export function formatOkrContextSection(risk: NavelGazingRiskResult): string[] {
+  const lines: string[] = [];
+
+  if (risk.totalTasks === 0) {
+    lines.push("- No completed tasks in the rolling 7-day window — OKR status unknown.");
+    return lines;
+  }
+
+  if (risk.atRisk) {
+    lines.push(
+      `⚠️ NAVEL-GAZING RISK: ${risk.totalTasks} task(s) completed in the last 7d — ZERO had an OKR-advancing tag.`,
+    );
+  } else {
+    const ago = risk.lastOkrAdvanceAt
+      ? formatTimeAgo(risk.lastOkrAdvanceAt)
+      : "unknown";
+    lines.push(
+      `✅ OKR progress detected: ${risk.ocrAdvanceTasks}/${risk.totalTasks} task(s) advanced an OKR (last: ${ago}).`,
+    );
+  }
+
+  const parts: string[] = [];
+  if (risk.ocrAdvanceTasks > 0) parts.push(`OKR-tagged: ${risk.ocrAdvanceTasks}`);
+  if (risk.internalTasks > 0) parts.push(`internal: ${risk.internalTasks}`);
+  if (risk.untaggedTasks > 0) parts.push(`untagged: ${risk.untaggedTasks}`);
+  if (parts.length > 0) {
+    lines.push(`  Breakdown: ${parts.join(", ")}`);
+  }
+
+  return lines;
+}
+
 export class Supervisor {
   private log = createLogger("supervisor");
   private conflictStatsProvider?: ConflictStatsProvider;
@@ -515,6 +647,7 @@ export class Supervisor {
   async review(): Promise<SupervisorDecision[]> {
     const ageEscalations = await this.applyAgeEscalations();
     await this.checkCalibrationDriftAlerts();
+    await this.checkNavelGazingRisk();
     const context = this.buildContext();
     const client = createLLMClient();
 
@@ -672,6 +805,59 @@ export class Supervisor {
     if (!this.calibrationDriftProvider?.checkAndAlert || !this.notifier.isConfigured()) return;
 
     await this.calibrationDriftProvider.checkAndAlert(this.notifier.send.bind(this.notifier));
+  }
+
+  /**
+   * Check for navel-gazing risk each supervisor cycle and log a structured
+   * signal when all recent work is internal/untagged (no OKR advanced).
+   *
+   * Persists a `navel-gazing-risk` supervisor decision record so operators
+   * can query it via `orch supervisor-log` and the orchestrator can react.
+   * Also sends a Telegram alert when the risk is newly detected.
+   *
+   * Implements fix #4 from agent-orchestrator#1258.
+   */
+  private async checkNavelGazingRisk(): Promise<void> {
+    const tasks = this.store.listTasks({ limit: 500 });
+    const risk = detectNavelGazingRisk(tasks);
+
+    if (!risk.atRisk) return;
+
+    const reason = [
+      `Navel-gazing risk: ${risk.totalTasks} task(s) completed in the last 7d — none advanced an OKR.`,
+      `Breakdown: internal=${risk.internalTasks}, untagged=${risk.untaggedTasks}.`,
+      `The fleet must dispatch OKR-tagged work before accepting new internal tasks.`,
+    ].join(" ");
+
+    this.store.recordSupervisorDecision("navel-gazing-risk", reason, {
+      outcome: "flagged",
+      message: `OKR advancement: ${risk.ocrAdvanceTasks}/${risk.totalTasks} tasks (7d window). Internal: ${risk.internalTasks}. Untagged: ${risk.untaggedTasks}.`,
+    });
+
+    this.log.warn("Navel-gazing risk detected", {
+      totalTasks: risk.totalTasks,
+      ocrAdvanceTasks: risk.ocrAdvanceTasks,
+      internalTasks: risk.internalTasks,
+      untaggedTasks: risk.untaggedTasks,
+    });
+
+    if (this.notifier.isConfigured()) {
+      await this.notifier.notifyOperator(
+        "⚠️ Navel-gazing risk: zero OKR progress in 7 days",
+        [
+          `*Fleet shipped ${risk.totalTasks} task(s) this week — none advanced an OKR.*`,
+          ``,
+          `Breakdown:`,
+          `• Internal-tagged: ${risk.internalTasks}`,
+          `• Untagged (unknown alignment): ${risk.untaggedTasks}`,
+          `• OKR-advancing: 0`,
+          ``,
+          `The supervisor will now re-prioritize OKR-tagged issues over internal work.`,
+          `See orchestrator#1258 for the full anti-navel-gazing plan.`,
+        ].join("\n"),
+        "high",
+      );
+    }
   }
 
   private filterUnknownAgentTargets(
@@ -919,6 +1105,14 @@ export class Supervisor {
         })
         .join("\n");
       sections.push(`## Agent Performance\n${lines}`);
+    }
+
+    // OKR context — navel-gazing risk signal (agent-orchestrator#1258 fix #4)
+    {
+      const allTasks = this.store.listTasks({ limit: 500 });
+      const risk = detectNavelGazingRisk(allTasks);
+      const okrLines = formatOkrContextSection(risk);
+      sections.push(`## OKR Context\n${okrLines.join("\n")}`);
     }
 
     // Merge conflict stats (from PRReviewer, when wired via ConflictStatsProvider)

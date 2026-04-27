@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractIssueRefs, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo, formatConflictStatsSection } from "../reviewer/supervisor.js";
+import { extractIssueRefs, isConcreteDispatch, formatAgentHealthSection, formatTimeAgo, formatConflictStatsSection, detectNavelGazingRisk, formatOkrContextSection } from "../reviewer/supervisor.js";
 import type { AgentHealth } from "../state/types.js";
 import type { ConflictStats } from "../reviewer/pr-reviewer.js";
 
@@ -248,5 +248,142 @@ describe("formatConflictStatsSection", () => {
     const lines = formatConflictStatsSection(stats);
     // Repos only contributing auto-closes (not escalations or nudges) are omitted
     expect(lines.some((l) => l.includes("agent-proxy"))).toBe(false);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// detectNavelGazingRisk (agent-orchestrator#1258 fix #4)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("detectNavelGazingRisk", () => {
+  const now = new Date("2026-04-27T12:00:00Z").getTime();
+
+  const makeTask = (
+    okr_tag: string | null,
+    daysAgo: number,
+    status: string = "done",
+  ) => ({
+    okr_tag,
+    status,
+    created_at: new Date(now - daysAgo * 24 * 60 * 60 * 1000).toISOString(),
+  });
+
+  it("returns atRisk=false when there are no completed tasks", () => {
+    const result = detectNavelGazingRisk([], now);
+    expect(result.atRisk).toBe(false);
+    expect(result.totalTasks).toBe(0);
+  });
+
+  it("returns atRisk=false when at least one OKR-tagged task exists", () => {
+    const tasks = [
+      makeTask("OKR-1", 2),
+      makeTask("internal", 1),
+      makeTask(null, 3),
+    ];
+    const result = detectNavelGazingRisk(tasks, now);
+    expect(result.atRisk).toBe(false);
+    expect(result.ocrAdvanceTasks).toBe(1);
+  });
+
+  it("returns atRisk=true when all tasks are internal", () => {
+    const tasks = [makeTask("internal", 1), makeTask("internal", 3)];
+    const result = detectNavelGazingRisk(tasks, now);
+    expect(result.atRisk).toBe(true);
+    expect(result.internalTasks).toBe(2);
+    expect(result.ocrAdvanceTasks).toBe(0);
+  });
+
+  it("returns atRisk=true when all tasks are untagged", () => {
+    const tasks = [makeTask(null, 1), makeTask(null, 2)];
+    const result = detectNavelGazingRisk(tasks, now);
+    expect(result.atRisk).toBe(true);
+    expect(result.untaggedTasks).toBe(2);
+    expect(result.ocrAdvanceTasks).toBe(0);
+  });
+
+  it("ignores tasks outside the 7-day rolling window", () => {
+    const tasks = [
+      makeTask("OKR-1", 10), // 10 days ago — outside window
+      makeTask("internal", 1), // inside window
+    ];
+    const result = detectNavelGazingRisk(tasks, now);
+    expect(result.atRisk).toBe(true);
+    expect(result.ocrAdvanceTasks).toBe(0);
+    expect(result.totalTasks).toBe(1);
+  });
+
+  it("ignores non-done tasks", () => {
+    const tasks = [
+      makeTask("OKR-1", 1, "dispatched"),
+      makeTask("internal", 1, "done"),
+    ];
+    const result = detectNavelGazingRisk(tasks, now);
+    expect(result.atRisk).toBe(true);
+    expect(result.ocrAdvanceTasks).toBe(0);
+  });
+
+  it("records the most recent OKR advance timestamp", () => {
+    const newerAt = new Date(now - 1 * 24 * 60 * 60 * 1000).toISOString();
+    const olderAt = new Date(now - 3 * 24 * 60 * 60 * 1000).toISOString();
+    const tasks = [
+      { okr_tag: "OKR-2", status: "done", created_at: newerAt },
+      { okr_tag: "OKR-3", status: "done", created_at: olderAt },
+    ];
+    const result = detectNavelGazingRisk(tasks, now);
+    expect(result.lastOkrAdvanceAt).toBe(newerAt);
+  });
+
+  it("counts all OKR tag variants", () => {
+    const tasks = [
+      makeTask("OKR-1", 1),
+      makeTask("OKR-2", 2),
+      makeTask("OKR-3", 3),
+      makeTask("OKR-4", 4),
+    ];
+    const result = detectNavelGazingRisk(tasks, now);
+    expect(result.atRisk).toBe(false);
+    expect(result.ocrAdvanceTasks).toBe(4);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// formatOkrContextSection (agent-orchestrator#1258 fix #4)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("formatOkrContextSection", () => {
+  it("shows unknown status when no tasks in window", () => {
+    const result = { atRisk: false, totalTasks: 0, ocrAdvanceTasks: 0, internalTasks: 0, untaggedTasks: 0, lastOkrAdvanceAt: null };
+    const lines = formatOkrContextSection(result);
+    expect(lines[0]).toContain("unknown");
+  });
+
+  it("includes NAVEL-GAZING RISK warning when atRisk is true", () => {
+    const result = { atRisk: true, totalTasks: 5, ocrAdvanceTasks: 0, internalTasks: 3, untaggedTasks: 2, lastOkrAdvanceAt: null };
+    const lines = formatOkrContextSection(result);
+    expect(lines[0]).toContain("NAVEL-GAZING RISK");
+    expect(lines[0]).toContain("ZERO");
+  });
+
+  it("shows OKR progress detected when not at risk", () => {
+    const result = {
+      atRisk: false,
+      totalTasks: 3,
+      ocrAdvanceTasks: 2,
+      internalTasks: 1,
+      untaggedTasks: 0,
+      lastOkrAdvanceAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    };
+    const lines = formatOkrContextSection(result);
+    expect(lines[0]).toContain("✅");
+    expect(lines[0]).toContain("2/3");
+  });
+
+  it("includes breakdown line when non-zero counts exist", () => {
+    const result = { atRisk: true, totalTasks: 4, ocrAdvanceTasks: 0, internalTasks: 2, untaggedTasks: 2, lastOkrAdvanceAt: null };
+    const lines = formatOkrContextSection(result);
+    const breakdownLine = lines.find((l) => l.includes("Breakdown"));
+    expect(breakdownLine).toBeDefined();
+    expect(breakdownLine).toContain("internal: 2");
+    expect(breakdownLine).toContain("untagged: 2");
   });
 });

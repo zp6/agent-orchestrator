@@ -137,6 +137,17 @@ export interface Task {
    * `fork_label`).
    */
   fork_from?: string | null;
+  /**
+   * OKR alignment tag set by the orchestrator dispatcher (agent-orchestrator#1258).
+   *
+   * Well-known values: `'OKR-1'` (external impact), `'OKR-2'`, `'OKR-3'`,
+   * `'OKR-4'`, or `'internal'` (pure infrastructure / self-optimisation with no
+   * external user impact).
+   *
+   * Null when the task was created before the OKR-tagging feature was deployed
+   * (treat as unknown, not as `'internal'`).
+   */
+  okr_tag?: string | null;
   created_at: string;
   updated_at: string;
 }
