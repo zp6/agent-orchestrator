@@ -88,7 +88,7 @@ When this container is used for LLM PR reviews:
 - PR scope pre-flight check: deterministic bundling detection before LLM review is triggered
 - Semantic task memory: daily Telegram digest summarising the semantic task memory index; `/memory` command
 - Standup quality trend tracker: `standup_quality_history` table records (agent, date, score, action_item_count) per standup task; `getStandupQualityTrend()` builds sparkline + avg + `is_degrading` flag when last 3 standups all scored < 0.70; `/standup-quality [agent] [days]` Telegram command (`standup-quality-trend.ts`)
-- Score provenance tracker: `score_source` on verification results distinguishes parsed LLM scores from `default_fallback` values; `shouldBlockDefaultFallbackApproval()` lets the orchestrator block silent auto-approval of parse-error zeros (`score-provenance.ts`)
+- Score provenance tracker: `score_source` on verification results distinguishes parsed LLM scores from `default_fallback` values; `shouldBlockDefaultFallbackApproval()` lets the orchestrator block silent auto-approval of parse-error zeros (`score-provenance.ts`). **Wired into auto-approval path**: `applyDefaultFallbackGuard()` in `verifier.ts` rejects `default_fallback` scores before they reach the approval stage and fires a high-urgency Telegram alert; the Telegram `/approve` command in `command-handler.ts` also calls this guard so operators cannot manually approve parse-failure zeros.
 - Persistent anomaly tracker: `score_anomaly_observations` rows capture recurring quality anomalies across analysis cycles; `getPersistentAnomalies()` and `/api/persistent-anomalies` surface repeated patterns for operators (`persistent-anomalies.ts`)
 - Calibration recommendations feed: `calibration_recommendations` persistence plus review/resolve flow for `ScoreCalibrator` recommendations and high-confidence auto-apply (`calibration-recommendations-feed.ts`)
 - Research investigation client: HTTP client for the research agent's investigation feed API (`/api/investigations`); registers new investigations when research tasks are dispatched, activates them when work begins, completes them with findings + result issue URL after `analyzeResearchFindings()` converts a report into a GitHub issue; `summary()` method calls `GET /api/investigations/summary` for lightweight snapshots (active_count, last_completed, oldest_in_flight_age)
@@ -145,7 +145,7 @@ src/
     security-allowlist.ts           — shared example/template file patterns (synced with agent-proxy)
   reviewer/
     pr-reviewer.ts                  — PR review: LLM eval, approve/request-changes/escalate
-    verifier.ts                     — task verification: 0-1 score, dimension breakdown, second-pass
+    verifier.ts                     — task verification: 0-1 score, dimension breakdown, second-pass; `applyDefaultFallbackGuard()` blocks `score_source=default_fallback` approvals and fires Telegram alert
     supervisor.ts                   — strategic system-state reasoning, dispatch decisions
     improvement-detector.ts         — analyze task patterns, surface improvement candidates
     score-calibrator.ts             — score → outcome feedback loop; threshold recommendations

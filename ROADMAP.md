@@ -1,9 +1,10 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-26 (triage cycle 18)_
+_Last updated: 2026-04-27 (triage cycle 19)_
 
 ## Completed (recent)
 
+- **#485 / PR #528** — Score provenance guard wired into auto-approval path: `applyDefaultFallbackGuard()` in `verifier.ts` blocks `score_source=default_fallback` approvals and fires high-urgency Telegram alert; Telegram `/approve` in `command-handler.ts` calls the same guard to block operator manual approval of parse-failure zeros; `improvement-detector.ts` now records `score_anomaly_observations` rows after each LLM pass
 - **#453 / PR #508** — `preexisting-failure-tracker.ts`: consolidated Telegram alert when the same `(repo, pattern)` pair accumulates ≥3 distinct merged PRs within a rolling 7-day window; 24h per-pair dedup cooldown; `staging_preexisting_skips` SQLite table
 - **#492 / PR #507** — `/supervisor-dispatches` extended with `--agent` and `--since` filters: per-agent date-range drill-down on proactive dispatch history
 - **#504 / PR #505** — `marginal-approvals-feed.ts` trend endpoint + per-agent coaching prompt for dashboard panel (`getMarginalApprovalsTrend()`)
@@ -76,22 +77,26 @@ _Last updated: 2026-04-26 (triage cycle 18)_
 
 ## Next up
 
-1. **#485 — Wire score provenance guard into orchestrator auto-approval path** _(high)_ — Block `score_source='default_fallback'` approvals in the orchestrator and operator override paths; this is the direct follow-up to the just-merged score provenance work.
+1. **#489 — Add /pr-guard-status Telegram command showing active surge suppressions** _(high)_ — Surface which `(repo, issue)` pairs have active surge suppressions so operators can see the PR-guard flood gate in real time; follows directly from the surge suppression work.
 
-2. **#489 — Add /pr-guard-status Telegram command showing active surge suppressions** _(high)_ — Surface which `(repo, issue)` pairs have active surge suppressions so operators can see the PR-guard flood gate in real time; follows directly from the surge suppression work.
+2. **#524 — Canonicalize agent variants in cross-agent inflight guard** _(high)_ — `cross-agent-inflight-guard.ts` treats `codex-proxy` and `claude-proxy` as distinct agents; add `canonicalizeAgentName()` to strip the `codex-` prefix so the same `(repo, issue)` pair can't be dispatched to both variant in one daemon cycle.
 
-3. **#473 — Newly shipped surge suppression doesn't cover PR-guard floods** _(high)_ — Add a PR-level suppression axis so batches of different issues blocked by the same PR collapse into one consolidated suppression event.
+3. **#525 — PR guard surge detector: aggregate hits across agent variants** _(high, PR #529 open)_ — Surge counting currently keys by `(issueRef, agentName)` so cross-variant floods bypass the threshold; key by `issueRef` only so hits from all variants aggregate into a single counter.
 
-4. **#468 — Persist dispatch surge suppression events to SQLite** _(high)_ — Make `PRGuardSurgeDetector` suppression survive restarts and expose the suppression log via REST.
+4. **#473 — Newly shipped surge suppression doesn't cover PR-guard floods** _(high)_ — Add a PR-level suppression axis so batches of different issues blocked by the same PR collapse into one consolidated suppression event.
 
-5. **#445 — Sub-0.60 approval audit entry gap** _(high)_ — Score 0.52 was approved without a bypass-audit entry; investigate the path that bypasses bypass-audit recording and add the missing hook.
+5. **#468 — Persist dispatch surge suppression events to SQLite** _(high)_ — Make `PRGuardSurgeDetector` suppression survive restarts and expose the suppression log via REST.
 
-6. **#496 — Add /api/score-provenance/summary endpoint** _(medium)_ — Rolling 7-day breakdown of approved tasks grouped by `score_source` (`llm_parse`, `default_fallback`, `operator_override`); PR #497 was closed without merging — still needed.
+6. **#445 — Sub-0.60 approval audit entry gap** _(high)_ — Score 0.52 was approved without a bypass-audit entry; investigate the path that bypasses bypass-audit recording and add the missing hook.
+
+7. **#496 — Add /api/score-provenance/summary endpoint** _(medium)_ — Rolling 7-day breakdown of approved tasks grouped by `score_source` (`llm_parse`, `default_fallback`, `operator_override`); PR #497 was closed without merging — still needed.
 
 ## Planned
 
+- **#526 — Sub-threshold bypass audit gap (cross-repo follow-up)** _(high)_ — Related to #445; cross-repo follow-up from a meeting task about the same bypass-audit gap; address together with #445.
 - **#514 — Add start_period to generated Docker healthcheck for claude-orchestrator-telegram** _(medium)_ — Prevents avoidable recovery loops on slow-start containers; confirm scope (may belong to agent-orchestrator repo).
 - **#472 — Meeting facilitator: persist synthesis results to queryable store** _(high)_ — Keep meeting results searchable across daemon cycles so follow-up sessions can retrieve prior synthesis outputs without revision churn.
+- **#530 — Fleet self-direction kickoff per CHARTER #1209 (cross-repo follow-up)** _(medium)_ — Orchestrator-generated follow-up; scope to be determined once parent task context is available.
 - **#440 — Improvement issues filed from analysis are not being dispatched** _(medium)_ — Add a `/stale-improvements` view and/or dispatch exemption path so chronic improvement findings do not stall silently.
 - **#414 — Bookkeeping task type: score 'close-by-reference' outcomes appropriately** _(high)_ — Treat close-by-reference bookkeeping work as a distinct outcome instead of letting it fall back to a null/defaulted score.
 - **#340 — Persist proactive rebase stats to SQLite** _(medium)_ — `rebase_events` table, `IRebaseStore` interface, `/rebase-stats` Telegram command, and `/rebase-stats` HTTP endpoint for dashboard.
@@ -105,6 +110,36 @@ _Last updated: 2026-04-26 (triage cycle 18)_
 - **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
 
 ## Triage notes
+
+- **2026-04-27 cycle 19**: 15 open issues audited (excl. #531 triage trigger), 0 duplicates, 0 stale (oldest #340 at 8 days). No issues closed. Feature shipped since cycle 18: #485 (PR #528 — score provenance guard wired into `verifier.ts` auto-approval path and Telegram `/approve` command). New issues since cycle 18: #524 (canonicalize agent variants in inflight guard — high, added to Next up rank 2), #525 (surge detector cross-variant aggregation — high, open PR #529, added to Next up rank 3), #526 (sub-threshold bypass audit gap cross-repo follow-up — related to #445, added to Planned), #530 (fleet self-direction cross-repo follow-up — added to Planned). ROADMAP.md: promoted #485 to Completed; removed #485 from Next up rank 1; added #524/#525 to Next up; renumbered remaining items; added #526/#530 to Planned. CLAUDE.md: updated score-provenance scope entry to document `applyDefaultFallbackGuard()` wiring; updated `verifier.ts` source layout description.
+
+```json
+{
+  "duplicates_checked": true,
+  "stale_issues": [],
+  "priority_reordering": [
+    {
+      "issue": 489,
+      "old_rank": 2,
+      "new_rank": 1,
+      "reason": "#485 shipped (PR #528 merged); #489 is the highest-impact unblocked item."
+    },
+    {
+      "issue": 524,
+      "old_rank": null,
+      "new_rank": 2,
+      "reason": "New high-severity issue: cross-variant inflight guard bypass allows duplicate dispatches; directly blocking quality of dispatch deduplication."
+    },
+    {
+      "issue": 525,
+      "old_rank": null,
+      "new_rank": 3,
+      "reason": "New high-severity issue with open PR #529; surge detector cross-variant aggregation gap — in-flight work promoted to Next up."
+    }
+  ],
+  "outcome_summary": "Cycle 19 triage: 15 open issues audited, 0 duplicates, 0 stale (oldest 8 days). One feature shipped (#485 — score provenance guard). Four new issues triaged (#524 → Next up rank 2, #525 → Next up rank 3, #526 → Planned, #530 → Planned). CLAUDE.md updated with applyDefaultFallbackGuard() wiring for verifier.ts and score-provenance scope entry."
+}
+```
 
 - **2026-04-26 cycle 18**: 13 open issues audited (excl. #522 triage trigger), 0 duplicates, 0 stale (oldest #340 at 7 days). Closed #511 (standup action: PR #599 on agent-dashboard already merged — action complete). Features shipped since cycle 17: #453 (PR #508 — preexisting-failure-tracker.ts), #492 (PR #507 — /supervisor-dispatches agent+date filter). ROADMAP.md: promoted #453/#492 to Completed; removed #453 from Next up; removed In flight section (both PRs shipped); removed closed issues #364/#368/#359 from Planned; added #496 to Next up rank 6 (PR #497 closed without merging); added #514 to Planned. CLAUDE.md: added preexisting-failure-tracker.ts to Scope and Source Layout; updated /supervisor-dispatches description to mention agent+date filters.
 
