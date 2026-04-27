@@ -200,9 +200,19 @@ function evaluateMetricValue(name: string, store: StateStore): number | null {
     }
     case "meetings_facilitated": {
       try {
-        // Count non-standup/non-bluesky meetings from getMeetings
-        const meetings = store.getMeetings(100);
-        return meetings.filter((m) => m.type !== "standup" && m.type !== "bluesky").length;
+        // Count meeting_outcome signals with decision="proceed" written by
+        // the facilitator-agent. These land in the shared signals store via
+        // `orch signals write`. The meetings table only contains standup and
+        // bluesky runs (orchestrator-owned), so it would always return 0 for
+        // facilitated meetings. Signals have a 168h TTL; count all unexpired
+        // ones to approximate "this period's" facilitated runs.
+        const outcomes = store.readSignals({ signal_type: "meeting_outcome" });
+        return outcomes.filter((s) => {
+          try {
+            const v = JSON.parse(s.value as string) as { decision?: string };
+            return v.decision === "proceed";
+          } catch { return false; }
+        }).length;
       } catch { return 0; }
     }
 
