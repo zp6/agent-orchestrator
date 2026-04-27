@@ -1,9 +1,10 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-27 (triage cycle 19)_
+_Last updated: 2026-04-27 (triage cycle 20)_
 
 ## Completed (recent)
 
+- **#525 / PR #529** — PR guard surge detector: aggregate hits across agent variants — `PRGuardSurgeDetector` now keys by `issueRef` only so cross-variant floods (claude-proxy + codex-proxy) aggregate into a single counter; closed cross-variant bypass gap
 - **#485 / PR #528** — Score provenance guard wired into auto-approval path: `applyDefaultFallbackGuard()` in `verifier.ts` blocks `score_source=default_fallback` approvals and fires high-urgency Telegram alert; Telegram `/approve` in `command-handler.ts` calls the same guard to block operator manual approval of parse-failure zeros; `improvement-detector.ts` now records `score_anomaly_observations` rows after each LLM pass
 - **#453 / PR #508** — `preexisting-failure-tracker.ts`: consolidated Telegram alert when the same `(repo, pattern)` pair accumulates ≥3 distinct merged PRs within a rolling 7-day window; 24h per-pair dedup cooldown; `staging_preexisting_skips` SQLite table
 - **#492 / PR #507** — `/supervisor-dispatches` extended with `--agent` and `--since` filters: per-agent date-range drill-down on proactive dispatch history
@@ -81,15 +82,13 @@ _Last updated: 2026-04-27 (triage cycle 19)_
 
 2. **#524 — Canonicalize agent variants in cross-agent inflight guard** _(high)_ — `cross-agent-inflight-guard.ts` treats `codex-proxy` and `claude-proxy` as distinct agents; add `canonicalizeAgentName()` to strip the `codex-` prefix so the same `(repo, issue)` pair can't be dispatched to both variant in one daemon cycle.
 
-3. **#525 — PR guard surge detector: aggregate hits across agent variants** _(high, PR #529 open)_ — Surge counting currently keys by `(issueRef, agentName)` so cross-variant floods bypass the threshold; key by `issueRef` only so hits from all variants aggregate into a single counter.
+3. **#473 — Newly shipped surge suppression doesn't cover PR-guard floods** _(high)_ — Add a PR-level suppression axis so batches of different issues blocked by the same PR collapse into one consolidated suppression event.
 
-4. **#473 — Newly shipped surge suppression doesn't cover PR-guard floods** _(high)_ — Add a PR-level suppression axis so batches of different issues blocked by the same PR collapse into one consolidated suppression event.
+4. **#468 — Persist dispatch surge suppression events to SQLite** _(high)_ — Make `PRGuardSurgeDetector` suppression survive restarts and expose the suppression log via REST.
 
-5. **#468 — Persist dispatch surge suppression events to SQLite** _(high)_ — Make `PRGuardSurgeDetector` suppression survive restarts and expose the suppression log via REST.
+5. **#445 — Sub-0.60 approval audit entry gap** _(high)_ — Score 0.52 was approved without a bypass-audit entry; investigate the path that bypasses bypass-audit recording and add the missing hook.
 
-6. **#445 — Sub-0.60 approval audit entry gap** _(high)_ — Score 0.52 was approved without a bypass-audit entry; investigate the path that bypasses bypass-audit recording and add the missing hook.
-
-7. **#496 — Add /api/score-provenance/summary endpoint** _(medium)_ — Rolling 7-day breakdown of approved tasks grouped by `score_source` (`llm_parse`, `default_fallback`, `operator_override`); PR #497 was closed without merging — still needed.
+6. **#496 — Add /api/score-provenance/summary endpoint** _(medium)_ — Rolling 7-day breakdown of approved tasks grouped by `score_source` (`llm_parse`, `default_fallback`, `operator_override`); PR #497 was closed without merging — still needed.
 
 ## Planned
 
@@ -110,6 +109,42 @@ _Last updated: 2026-04-27 (triage cycle 19)_
 - **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
 
 ## Triage notes
+
+- **2026-04-27 cycle 20**: 14 open issues audited (excl. #537 and #535 triage triggers), 0 duplicates, 0 stale (oldest #340 at 8 days). No issues closed. Feature shipped since cycle 19: #525 (PR #529 — PR guard surge detector cross-variant aggregation). ROADMAP.md: promoted #525 to Completed; removed #525 from Next up rank 3; renumbered ranks 4–7 → 3–6. CLAUDE.md: verified current — no new modules since cycle 19.
+
+```json
+{
+  "duplicates_checked": true,
+  "stale_issues": [],
+  "priority_reordering": [
+    {
+      "issue": 473,
+      "old_rank": 4,
+      "new_rank": 3,
+      "reason": "#525 shipped (PR #529 merged); ranks 4-7 shifted up by one."
+    },
+    {
+      "issue": 468,
+      "old_rank": 5,
+      "new_rank": 4,
+      "reason": "#525 shipped; renumbered."
+    },
+    {
+      "issue": 445,
+      "old_rank": 6,
+      "new_rank": 5,
+      "reason": "#525 shipped; renumbered."
+    },
+    {
+      "issue": 496,
+      "old_rank": 7,
+      "new_rank": 6,
+      "reason": "#525 shipped; renumbered."
+    }
+  ],
+  "outcome_summary": "Cycle 20 triage: 14 open issues audited, 0 duplicates, 0 stale (oldest #340 at 8 days). Feature shipped since cycle 19: #525 (PR #529 — PR guard surge detector cross-variant aggregation). ROADMAP updated to reflect #525 completion and renumber Next up. CLAUDE.md is current with no drift."
+}
+```
 
 - **2026-04-27 cycle 19**: 15 open issues audited (excl. #531 triage trigger), 0 duplicates, 0 stale (oldest #340 at 8 days). No issues closed. Feature shipped since cycle 18: #485 (PR #528 — score provenance guard wired into `verifier.ts` auto-approval path and Telegram `/approve` command). New issues since cycle 18: #524 (canonicalize agent variants in inflight guard — high, added to Next up rank 2), #525 (surge detector cross-variant aggregation — high, open PR #529, added to Next up rank 3), #526 (sub-threshold bypass audit gap cross-repo follow-up — related to #445, added to Planned), #530 (fleet self-direction cross-repo follow-up — added to Planned). ROADMAP.md: promoted #485 to Completed; removed #485 from Next up rank 1; added #524/#525 to Next up; renumbered remaining items; added #526/#530 to Planned. CLAUDE.md: updated score-provenance scope entry to document `applyDefaultFallbackGuard()` wiring; updated `verifier.ts` source layout description.
 
