@@ -41,6 +41,7 @@
  *   /investigations            → list pending/active/completed research agent investigations with titles, times, and result issue URLs
  *   /meeting-goal              → meeting-facilitator-agent monthly goal tracker: core_logic_shipped + meetings_facilitated progress (issue #456)
  *   /supervisor-dispatches [n] [agent=<name>] [since=7d|24h] → last N proactive supervisor dispatches with rationale, quality score, and PR outcome (default 10); filterable by agent and date range
+ *   /stale-improvements [min_age_hours] → improvement-detector issues older than N hours with no associated PR, sorted by re-detection count (default 24h)
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -121,6 +122,11 @@ import {
   type ProactiveDispatchOptions,
 } from "../reviewer/proactive-dispatch-log.js";
 import { shouldBlockDefaultFallbackApproval } from "../reviewer/score-provenance.js";
+import {
+  buildStaleImprovementsFeed,
+  formatStaleImprovementsFeedForTelegram,
+  STALE_IMPROVEMENTS_DEFAULT_MIN_AGE_HOURS,
+} from "../reviewer/stale-improvements-feed.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
 const log = createLogger("telegram-commands");
@@ -187,7 +193,8 @@ type CommandName =
   | "meeting-goal"
   | "supervisor-dispatches"
   | "marginal-approvals"
-  | "marginal";
+  | "marginal"
+  | "stale-improvements";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -234,6 +241,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "supervisor-dispatches",
   "marginal-approvals",
   "marginal",
+  "stale-improvements",
 ]);
 
 interface ParsedCommand {
@@ -660,6 +668,16 @@ async function executeCommand(
       }
 
       return Promise.resolve(handleSupervisorDispatches(store, limit, options));
+    }
+
+    case "stale-improvements": {
+      // /stale-improvements [min_age_hours]
+      // min_age_hours: minimum age in hours to flag an issue (default 24)
+      const ageStr = cmd.args[0]?.trim();
+      const minAgeHours = ageStr
+        ? Math.min(Math.max(parseInt(ageStr, 10) || STALE_IMPROVEMENTS_DEFAULT_MIN_AGE_HOURS, 1), 720)
+        : STALE_IMPROVEMENTS_DEFAULT_MIN_AGE_HOURS;
+      return handleStaleImprovements(reviewerConfig, minAgeHours);
     }
   }
 }
@@ -2766,6 +2784,40 @@ function handleMemoryExpand(store: ITelegramStateStore, topic: string): string {
   }
 
   return lines.join("\n");
+}
+
+// ── Stale improvements handler (issue #440) ──────────────────────────────
+
+/**
+ * Handle the `/stale-improvements [min_age_hours]` command.
+ *
+ * Lists improvement-detector issues (label: "orchestrator") older than
+ * `minAgeHours` that have no associated open or merged PR.  Issues are sorted
+ * by detection count (number of evidence entries in the body) descending so
+ * operators can prioritise the most-re-detected problems first.
+ *
+ * Requires `reviewerConfig` to know which agent repos to query.
+ */
+async function handleStaleImprovements(
+  reviewerConfig: ReviewerConfig | undefined,
+  minAgeHours: number,
+): Promise<string> {
+  if (!reviewerConfig) {
+    return [
+      `⚠️ *Stale Improvements — Unavailable*`,
+      ``,
+      `Reviewer config is not available in this session.`,
+      `Please ensure the command handler is initialised with a \`reviewerConfig\`.`,
+    ].join("\n");
+  }
+
+  try {
+    const feed = buildStaleImprovementsFeed(reviewerConfig, minAgeHours);
+    return formatStaleImprovementsFeedForTelegram(feed, minAgeHours);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `⚠️ *Stale Improvements — Error*\n\n\`${msg.slice(0, 300)}\``;
+  }
 }
 
 // ── TelegramCommandHandler class ──────────────────────────────────────────
