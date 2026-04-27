@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/claude-orchestrator-reviewer)](https://www.npmjs.com/package/claude-orchestrator-reviewer)
 [![license](https://img.shields.io/npm/l/claude-orchestrator-reviewer)](./LICENSE)
 
-Quality and oversight layer for the [Claude Agent Orchestrator](https://github.com/rapartlu/claude-orchestrator-core). Provides PR review, task verification, supervision, improvement detection, and Telegram escalation — everything needed to evaluate and improve multi-agent output quality.
+Quality and oversight layer for the [Claude Agent Orchestrator](https://github.com/rapartlu/agent-orchestrator). Provides PR review, task verification, supervision, improvement detection, and Telegram escalation — everything needed to evaluate and improve multi-agent output quality.
 
 ---
 
@@ -180,4 +180,4 @@ The package also exports direct payload builders that the dashboard or orchestra
 
 - [CHANGELOG.md](./CHANGELOG.md) — version history
 - [ROADMAP.md](./ROADMAP.md) — what's planned next
-- [claude-orchestrator-core](https://github.com/rapartlu/claude-orchestrator-core) — the daemon that drives this package
+- [agent-orchestrator](https://github.com/rapartlu/agent-orchestrator) — the daemon that drives this package
