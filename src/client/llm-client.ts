@@ -7,6 +7,10 @@
  *
  * If ANTHROPIC_BASE_URL is set, it is used as the base URL (e.g. for a
  * local proxy or testing). This is the only routing the reviewer needs.
+ *
+ * For multi-provider (reviewer pool) usage, prefer createPoolAwareLLMClient()
+ * from ../client/multi-provider-client — it supports Deepseek and Grok via
+ * REVIEWER_PROVIDER / REVIEWER_MODEL environment variables.
  */
 
 import Anthropic from "@anthropic-ai/sdk";

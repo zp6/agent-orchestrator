@@ -1307,6 +1307,44 @@ export type {
   PreexistingFailureTrackerConfig,
 } from "./reviewer/preexisting-failure-tracker.js";
 
+// Multi-provider LLM client — supports Anthropic (default), Deepseek, and Grok.
+// Used by reviewer pool members. REVIEWER_PROVIDER / REVIEWER_MODEL env vars
+// select the active provider/model (issue: rapartlu/agent-orchestrator#1211).
+export {
+  createPoolAwareLLMClient,
+  resetPoolClient,
+  getReviewerProvider,
+  getReviewerModel,
+} from "./client/multi-provider-client.js";
+export type {
+  ReviewerProvider,
+  IReviewerLLMClient,
+  LLMCreateParams,
+  LLMMessageResponse,
+  LLMMessageContent,
+  LLMUsage,
+} from "./client/multi-provider-client.js";
+
+// Reviewer pool integration — pool membership, consensus, and display helpers
+// (issue: rapartlu/agent-orchestrator#1211).
+export {
+  REVIEWER_POOL_NAME,
+  KNOWN_POOL_MEMBERS,
+  getPoolMembership,
+  isSecondaryPoolMember,
+  formatPoolMemberBadge,
+  formatPoolConsensus,
+  evaluatePoolConsensus,
+} from "./reviewer/reviewer-pool.js";
+export type {
+  KnownPoolMemberId,
+  ReviewerPoolMember,
+  PoolConsensusResult,
+} from "./reviewer/reviewer-pool.js";
+
+// Pool member config type (re-exported from config for orchestrator consumers)
+export type { ReviewerPoolMemberConfig } from "./config.js";
+
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
 export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";

@@ -18,6 +18,21 @@ export interface AgentConfig {
   repo?: string;
 }
 
+/**
+ * Pool member configuration for secondary reviewer instances.
+ * Set when this reviewer runs as a non-primary pool member (e.g. deepseek-reasoning).
+ * Read from POOL_MEMBER_ID / REVIEWER_PROVIDER / REVIEWER_MODEL env vars at runtime;
+ * this config field allows the orchestrator to pass values programmatically too.
+ */
+export interface ReviewerPoolMemberConfig {
+  /** Agent name as in agents.yaml (e.g. "deepseek-reasoning") */
+  member_id: string;
+  /** LLM provider ("anthropic" | "deepseek" | "grok") */
+  provider: string;
+  /** Model name (e.g. "deepseek-reasoner") */
+  model: string;
+}
+
 export interface ReviewerConfig {
   /** Base directory where all agent repos live */
   base_dir: string;
@@ -39,6 +54,13 @@ export interface ReviewerConfig {
   };
   /** Optional SSH key path for git push operations */
   ssh_key?: string;
+  /**
+   * Optional pool member config for secondary reviewer instances.
+   * When set, this reviewer participates in the multi-model reviewer pool
+   * and adjusts its behaviour accordingly (e.g. skips auto-merge).
+   * If not set, the instance runs as the primary reviewer.
+   */
+  pool_member?: ReviewerPoolMemberConfig;
   /**
    * Optional base URL for the agent dashboard.
    * When set, the calibration drift Telegram alert includes a clickable link
