@@ -68,6 +68,13 @@ describe("categoriseReviewComment", () => {
     expect(categories).toContain("stale-branch");
   });
 
+  it("categorises missing execution evidence", () => {
+    const categories = categoriseReviewComment(
+      "This response is largely narrative without concrete evidence of execution or command output.",
+    );
+    expect(categories).toContain("no-execution-evidence");
+  });
+
   it("categorises logic errors", () => {
     const categories = categoriseReviewComment(
       "The logic error in the sort function returns wrong results for negative numbers.",

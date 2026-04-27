@@ -1312,6 +1312,8 @@ export interface ICalibrationRecommendationStore {
  * - `feedback-ceiling`  — PR hit the max revision round cap
  * - `diff-too-large`    — Diff exceeds safe automated review size
  * - `stale-branch`      — Branch is significantly behind `origin/main`
+ * - `no-execution-evidence` — Commentary describes work but does not show
+ *                              command output, diffs, or other proof of execution
  * - `code-quality`      — General code style, structure, or readability issues
  * - `other`             — Any feedback not matching a specific category above
  */
@@ -1325,6 +1327,7 @@ export type ReviewCategory =
   | "feedback-ceiling"
   | "diff-too-large"
   | "stale-branch"
+  | "no-execution-evidence"
   | "code-quality"
   | "other";
 

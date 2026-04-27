@@ -7,6 +7,7 @@
  */
 
 import Database from "better-sqlite3";
+import { getAgentVariantFamily } from "./agent-variant.js";
 import type {
   ITelegramStateStore,
   Task,
@@ -1127,9 +1128,16 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
   }
 
   hasActiveTask(agentName: string): boolean {
+    const variantFamily = getAgentVariantFamily(agentName);
+    const placeholders = variantFamily.map(() => "?").join(", ");
     const row = this.db
-      .prepare("SELECT 1 FROM tasks WHERE agent_name = ? AND status = 'dispatched' LIMIT 1")
-      .get(agentName);
+      .prepare(
+        `SELECT 1 FROM tasks
+         WHERE status = 'dispatched'
+           AND agent_name IN (${placeholders})
+         LIMIT 1`,
+      )
+      .get(...variantFamily);
     return row !== undefined;
   }
 

@@ -37,6 +37,7 @@ const CATEGORY_RULES: Array<{ pattern: RegExp; category: ReviewCategory }> = [
   { pattern: /feedback.*ceiling|revision.*round.*cap|too.*many.*round|escalat.*revision/i, category: "feedback-ceiling" },
   { pattern: /diff.*too.*large|diff.*exceed|oversized.*pr|large.*diff/i, category: "diff-too-large" },
   { pattern: /stale.*branch|behind.*main|rebase.*required|branch.*behind/i, category: "stale-branch" },
+  { pattern: /no.*execution.*evidence|no.*command.*output|no.*file.*diff|largely.*narrative.*without.*concrete.*evidence|evidence.*of.*execution/i, category: "no-execution-evidence" },
   { pattern: /logic.*error|incorrect.*behav|wrong.*algorithm|off.by.one|return.*wrong|null.*deref|undefined/i, category: "logic" },
   { pattern: /code.*quality|naming|readability|structure|clean.*up|refactor|style/i, category: "code-quality" },
 ];

@@ -475,6 +475,10 @@ export type { ReviewerConfig, AgentConfig } from "./config.js";
 // APPROVAL_SCORE_FLOOR is exported separately so callers can reference the
 // hard floor constant without importing the full StateStore class (issue #266).
 export { StateStore, APPROVAL_SCORE_FLOOR } from "./state/store.js";
+export {
+  canonicalizeAgentVariantName,
+  getAgentVariantFamily,
+} from "./state/agent-variant.js";
 export type { ILowScoreFeedStore, IBypassAuditStore, ICalibrationRecommendationStore } from "./state/types.js";
 export type {
   IStateStore,
