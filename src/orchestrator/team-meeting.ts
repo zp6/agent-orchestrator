@@ -286,6 +286,67 @@ function buildLiveIssueContext(config: OrchestratorConfig, store: StateStore): s
 
 // ── Core meeting logic ──────────────────────────────────────────────────────
 
+/**
+ * Participant selection rationale
+ * ─────────────────────────────────
+ * One agent per functional pool is the policy. Agents within the same pool
+ * (e.g. claude-agent-orchestrator + codex-agent-orchestrator both belong to
+ * pool "orchestrator") are ENVIRONMENT DUPLICATES — different model providers
+ * running the same role. Including both would give a single stakeholder two
+ * votes while adding no distinct perspective.
+ *
+ * Inclusion criteria (applied in order of precedence):
+ *   1. First registered agent for a given pool — canonical instance speaks.
+ *   2. "Owns the enforcement problem" — an agent that is the authoritative
+ *      owner of the system under discussion is included regardless of whether
+ *      its role label says "reviewer". Role label is NOT the criterion; domain
+ *      ownership is.
+ *   3. Telegram agents are always excluded (asynchronous notification channel,
+ *      not a deliberative stakeholder).
+ *
+ * When explicit participants are supplied via MeetingOptions.participants,
+ * the same pool-dedup logic is applied before running rounds. This prevents
+ * a meeting request that lists both claude-* and codex-* variants from
+ * double-staffing a single role.
+ */
+
+/**
+ * Deduplicate a list of agent names so that at most one agent per pool is
+ * represented. Agents that share a pool key are environment duplicates (e.g.
+ * claude-agent-orchestrator and codex-agent-orchestrator in pool "orchestrator").
+ * The first occurrence in the input list is kept; subsequent duplicates within
+ * the same pool are dropped.
+ *
+ * Agents with no configured pool use their own name as the pool key, so they
+ * are always unique and are never dropped by this function.
+ *
+ * Telegram agents are always excluded (notification channel, not a deliberative
+ * stakeholder).
+ */
+export function deduplicateParticipantsByPool(
+  participants: string[],
+  config: OrchestratorConfig,
+): string[] {
+  const seenPools = new Set<string>();
+  const result: string[] = [];
+  for (const name of participants) {
+    if (name.includes("telegram")) continue;
+    const agent = config.agents[name];
+    const poolKey = agent?.pool ?? name;
+    if (seenPools.has(poolKey)) {
+      log.info("Meeting: excluded environment-duplicate participant", {
+        agent: name,
+        pool: poolKey,
+        reason: "pool already represented by an earlier entry",
+      });
+      continue;
+    }
+    seenPools.add(poolKey);
+    result.push(name);
+  }
+  return result;
+}
+
 function selectAgents(config: OrchestratorConfig): string[] {
   const seenPools = new Set<string>();
   const agents: string[] = [];
@@ -629,8 +690,14 @@ export async function runTeamMeeting(
   }
 
   const client = new AgentClient(config);
-  // Use explicit participants if provided, otherwise auto-select
-  const agents = options?.participants ?? selectAgents(config);
+  // Resolve participant list. If explicit participants are provided, apply the
+  // same pool-dedup policy as selectAgents() to strip environment duplicates
+  // (e.g. both claude-agent-orchestrator and codex-agent-orchestrator listed
+  // in a meeting request). Otherwise fall back to automatic selection.
+  const rawParticipants = options?.participants ?? selectAgents(config);
+  const agents = options?.participants
+    ? deduplicateParticipantsByPool(rawParticipants, config)
+    : rawParticipants;
 
   log.info("Meeting participants", { agents, type: formatLabel });
 
