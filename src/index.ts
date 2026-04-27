@@ -16,7 +16,14 @@
  */
 
 // Core reviewer modules
-export { PRReviewer, enforceChecklist, validateClosesReferences, isExampleOrTemplateFile, isPlaceholderCredential } from "./reviewer/pr-reviewer.js";
+export {
+  PRReviewer,
+  enforceChecklist,
+  validateClosesReferences,
+  isExampleOrTemplateFile,
+  isPlaceholderCredential,
+  normalizeAllowedBaseBranches,
+} from "./reviewer/pr-reviewer.js";
 export type { PRInfo, PRReviewResult, RedispatchCategory, ConflictStats, CrossRepoCloseIssue } from "./reviewer/pr-reviewer.js";
 
 // PR scope pre-flight check (issue #358) — detects bundled / multi-issue PRs
@@ -56,6 +63,18 @@ export type {
   SchemaContractValidationWarning,
   SchemaContractValidationResult,
 } from "./reviewer/schema-contract.js";
+
+// Scope-contract preflight checks for hard dispatch limits
+export {
+  checkScopeContract,
+  extractScopeContractConstraints,
+  formatScopeContractViolationComment,
+} from "./reviewer/scope-contract.js";
+export type {
+  ScopeContractCheckResult,
+  ScopeContractConstraint,
+  ScopeContractViolationType,
+} from "./reviewer/scope-contract.js";
 
 // Agent quality trend sparklines — `/agent-trends` API payload (issue #156).
 //

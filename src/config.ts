@@ -44,6 +44,12 @@ export interface ReviewerConfig {
     feedback_ceiling?: number;
     /** Hours behind main before a branch is flagged as stale (default: 48) */
     stale_branch_threshold_hours?: number;
+    /**
+     * Allowed base branches for rebase/staleness checks.
+     * Defaults to ["main"] but can include release branches such as
+     * ["main", "release/1.0"] when a repo lands work on a long-lived base.
+     */
+    allowed_base_branches?: string[];
   };
   /** Map of agent names to their config */
   agents: Record<string, AgentConfig>;

@@ -34,6 +34,10 @@ import {
   type SchemaImpactHit,
 } from "./schema-impact.js";
 import {
+  checkScopeContract,
+  formatScopeContractViolationComment,
+} from "./scope-contract.js";
+import {
   isStandupIssue,
   extractActionItemCount,
   handleZeroActionStandup,
@@ -75,6 +79,14 @@ export type RedispatchCategory =
   | "conflict-escalation"
   | "stale-branch-nudge"
   | null;
+
+export function normalizeAllowedBaseBranches(branches?: readonly string[]): string[] {
+  const normalized = (branches ?? [])
+    .map((branch) => branch.trim())
+    .filter((branch) => branch.length > 0);
+
+  return normalized.length > 0 ? [...new Set(normalized)] : ["main"];
+}
 
 export interface PRReviewResult {
   decision: "approve" | "request-changes" | "escalate";
@@ -400,6 +412,7 @@ export class PRReviewer {
     if (pr.mergeable === "CONFLICTING") {
       const localPath = this.findLocalRepoPath(repo);
       if (localPath) {
+        const baseBranch = this.resolveBaseBranch(localPath);
         const rebaseOutcome = await this.tryAutoRebase(localPath, pr.branch);
         if (rebaseOutcome === "success") {
           this.log.info("Auto-rebase succeeded — continuing with review", {
@@ -414,7 +427,7 @@ export class PRReviewer {
           this.conflictEscalationCount.set(conflictKey, conflictCount);
           const result: PRReviewResult = {
             decision: "escalate",
-            comment: `This PR has merge conflicts and auto-rebase onto \`origin/main\` failed (real conflicts need manual resolution).\n\n\`\`\`\ngit fetch origin\ngit rebase origin/main\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``,
+            comment: `This PR has merge conflicts and auto-rebase onto \`origin/${baseBranch}\` failed (real conflicts need manual resolution).\n\n\`\`\`\ngit fetch origin\ngit rebase origin/${baseBranch}\n# resolve conflicts\ngit push --force-with-lease\n\`\`\``,
             reason: "Merge conflict — auto-rebase failed, escalating to human",
             conflictEscalation: true,
             redispatchCategory: "conflict-escalation",
@@ -463,6 +476,8 @@ export class PRReviewer {
 
     // ── Branch staleness check ─────────────────────────────────────────────
     const stalenessHours = this.measureBranchStaleness(repo, pr.branch);
+    const localPathForBase = this.findLocalRepoPath(repo);
+    const baseBranch = localPathForBase ? this.resolveBaseBranch(localPathForBase) : "main";
 
     if (stalenessHours !== null && stalenessHours > this.staleBranchThresholdHours) {
       const repoKey = repo.split("/").pop() ?? repo;
@@ -484,11 +499,11 @@ export class PRReviewer {
         execSync(
           `gh pr comment ${prNumber} --repo ${shellEscape(repo)} --body ${shellEscape(
             `**[orchestrator] Stale branch warning** ⚠️\n\n` +
-            `This branch is ~${Math.round(stalenessHours)} hours behind \`main\`. ` +
+            `This branch is ~${Math.round(stalenessHours)} hours behind \`${baseBranch}\`. ` +
             `Branches that drift for more than ${this.staleBranchThresholdHours}h are ` +
             `much more likely to hit merge conflicts.\n\n` +
             `Consider rebasing before pushing more commits:\n` +
-            `\`\`\`\ngit fetch origin && git rebase origin/main && git push --force-with-lease\n\`\`\``,
+            `\`\`\`\ngit fetch origin && git rebase origin/${baseBranch} && git push --force-with-lease\n\`\`\``,
           )}`,
           { encoding: "utf-8", timeout: 30000 },
         );
@@ -677,6 +692,28 @@ export class PRReviewer {
         redispatchCategory: "quality-revision",
         severity: "minor",
       };
+      await this.executeDecision(repo, prNumber, result);
+      return result;
+    }
+
+    const scopeContract = checkScopeContract(`${pr.title}\n\n${pr.body}`, pr.diff);
+    if (scopeContract.violation) {
+      const result: PRReviewResult = {
+        decision: "request-changes",
+        comment: formatScopeContractViolationComment(scopeContract, {
+          prNumber,
+          title: pr.title,
+        }),
+        reason: `Scope contract violation (${scopeContract.violation_type}): ${scopeContract.reason}`,
+        confidence: 0.98,
+        redispatchCategory: "quality-revision",
+      };
+      this.log.warn("PR scope contract violated — request changes", {
+        repo,
+        prNumber,
+        violationType: scopeContract.violation_type,
+        reason: scopeContract.reason,
+      });
       await this.executeDecision(repo, prNumber, result);
       return result;
     }
@@ -1497,11 +1534,12 @@ export class PRReviewer {
   private measureBranchStaleness(repo: string, branch: string): number | null {
     const localPath = this.findLocalRepoPath(repo);
     if (!localPath) return null;
+    const baseBranch = this.resolveBaseBranch(localPath);
 
     try {
       // Get the timestamp of the merge-base (where branch diverged from main)
       const mergeBase = execSync(
-        `git merge-base origin/main ${branch}`,
+        `git merge-base origin/${shellEscape(baseBranch)} ${shellEscape(branch)}`,
         { cwd: localPath, encoding: "utf-8", timeout: 10000 },
       ).trim();
 
@@ -1533,6 +1571,7 @@ export class PRReviewer {
     env.GIT_TERMINAL_PROMPT = "0";
 
     const opts = { cwd: localPath, encoding: "utf-8" as const, env };
+    const baseBranch = this.resolveBaseBranch(localPath);
     let currentBranch = "main";
 
     try {
@@ -1553,7 +1592,10 @@ export class PRReviewer {
       execSync(`git checkout ${branch}`, { ...opts, timeout: 15000 });
 
       try {
-        const rebaseOutput = execSync("git rebase origin/main", { ...opts, timeout: 60000 });
+        const rebaseOutput = execSync(`git rebase origin/${shellEscape(baseBranch)}`, {
+          ...opts,
+          timeout: 60000,
+        });
         if (rebaseOutput.includes("is up to date")) {
           return "up-to-date";
         }
@@ -1590,6 +1632,24 @@ export class PRReviewer {
         execSync(`git checkout ${currentBranch}`, { ...opts, timeout: 10000 });
       } catch { /* ignore */ }
     }
+  }
+
+  private resolveBaseBranch(localPath: string): string {
+    const candidates = normalizeAllowedBaseBranches(this.config.pr_review?.allowed_base_branches);
+
+    for (const candidate of candidates) {
+      try {
+        const ref = execSync(
+          `git rev-parse --verify --quiet ${shellEscape(`origin/${candidate}`)}`,
+          { cwd: localPath, encoding: "utf-8", timeout: 10000 },
+        ).trim();
+        if (ref) return candidate;
+      } catch {
+        // Try the next allowed base branch.
+      }
+    }
+
+    return candidates[0] ?? "main";
   }
 
   /**
