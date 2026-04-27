@@ -44,10 +44,32 @@ export const SECURITY_EXAMPLE_FILE_PATTERNS = {
     "agents.example.json",
     "docker-compose.example.yml",
     "docker-compose.example.yaml",
+    "config.example.ts",
+    "config.example.js",
+    "config.example.json",
+    "config.example.yaml",
+    "config.example.yml",
+    "settings.example.json",
+    "settings.example.ts",
+    "secrets.example.yaml",
+    "secrets.example.yml",
+    "credentials.example.json",
+    "credentials.example.yaml",
   ],
 
   // Directory patterns (any file under these dirs is considered an example)
-  directoryPatterns: ["examples", "templates", "samples"],
+  directoryPatterns: [
+    "examples",
+    "templates",
+    "samples",
+    "fixtures",
+    "mocks",
+    "stubs",
+    "__mocks__",
+    "__fixtures__",
+    "test-fixtures",
+    "testdata",
+  ],
 
   // Filename prefix patterns (file basename starts with these)
   prefixPatterns: ["example.", "template.", "sample."],
@@ -63,6 +85,15 @@ export const SECURITY_EXAMPLE_FILE_PATTERNS = {
     "# template",
     "# do not commit",
     "# placeholder",
+    "# example only",
+    "# do not use in production",
+    "# test fixture",
+    "# for testing purposes",
+    "// example",
+    "// sample",
+    "// template",
+    "// do not commit",
+    "// placeholder",
   ],
 };
 
@@ -162,6 +193,6 @@ function simpleGlobMatch(name: string, pattern: string): boolean {
  * - OR create separate PRs but reference each other with issue links
  *
  * Current pattern definitions match both systems as of:
- * - agent-proxy: PR #412
- * - agent-reviewer: Issue #103 (this PR)
+ * - agent-proxy: PR #481 (expanded fixture/mock dirs + additional exact filenames)
+ * - agent-reviewer: Issue #548 (this PR)
  */

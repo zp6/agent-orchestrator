@@ -63,6 +63,7 @@ export const SCHEMA_CONSUMER_MAP: SchemaConsumerEntry[] = [
       "rapartlu/agent-orchestrator",
       "rapartlu/agent-dashboard",
       "rapartlu/agent-reviewer",
+      "rapartlu/agent-proxy",
     ],
     indicators: [
       "CREATE TABLE",
@@ -82,19 +83,47 @@ export const SCHEMA_CONSUMER_MAP: SchemaConsumerEntry[] = [
       "rapartlu/agent-orchestrator",
       "rapartlu/agent-dashboard",
       "rapartlu/agent-reviewer",
+      "rapartlu/agent-proxy",
     ],
   },
-  // ── Proxy HTTP API (consumed by orchestrator and dashboard) ──────────────
+  // ── Proxy HTTP API (consumed by orchestrator, dashboard, and reviewer) ──
   {
     filePattern: "routes/",
     schemaLabel: "proxy HTTP API route shapes",
-    consumers: ["rapartlu/agent-orchestrator", "rapartlu/agent-dashboard"],
+    consumers: [
+      "rapartlu/agent-orchestrator",
+      "rapartlu/agent-dashboard",
+      "rapartlu/agent-reviewer",
+    ],
     indicators: ["res.json(", "interface ", "type ", ": Response", ": Request"],
   },
   {
     filePattern: "openapi.yaml",
     schemaLabel: "proxy OpenAPI spec",
-    consumers: ["rapartlu/agent-orchestrator", "rapartlu/agent-dashboard"],
+    consumers: [
+      "rapartlu/agent-orchestrator",
+      "rapartlu/agent-dashboard",
+      "rapartlu/agent-reviewer",
+    ],
+  },
+  // ── Security allowlist (synced between proxy and reviewer) ───────────────
+  {
+    filePattern: "config/security-allowlist",
+    schemaLabel: "shared security allowlist (example/template file patterns)",
+    consumers: ["rapartlu/agent-proxy", "rapartlu/agent-reviewer"],
+    indicators: [
+      "SECURITY_EXAMPLE_FILE_PATTERNS",
+      "globPatterns",
+      "exactFilenames",
+      "directoryPatterns",
+    ],
+  },
+  // ── Schema-consumer config (synced between proxy and reviewer) ───────────
+  {
+    filePattern: "config/schema-consumers",
+    schemaLabel: "schema-consumer registry (downstream repo list)",
+    consumers: ["rapartlu/agent-proxy", "rapartlu/agent-reviewer"],
+    indicators: ["SCHEMA_CONSUMER", "consumers:", "filePattern"],
   },
   // ── Reviewer package public API (consumed by orchestrator) ───────────────
   {
