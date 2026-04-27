@@ -91,6 +91,8 @@ import type {
   IMarginalApprovalsFeedStore,
   IMarginalApprovalsTrendStore,
   MarginalApprovalDayBucket,
+  ISynthesisWatchdogStore,
+  SynthesisWatchEntry,
 } from "./types.js";
 import { ulid } from "../util/ulid.js";
 
@@ -106,7 +108,7 @@ import { ulid } from "../util/ulid.js";
  */
 export const APPROVAL_SCORE_FLOOR = 0.60;
 
-export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore, IMeetingFacilitatorGoalStore, IImprovementBatchDeduplicationStore, IPatternRiskStore, ICalibrationRecommendationStore, IMarginalApprovalsFeedStore, IMarginalApprovalsTrendStore {
+export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore, IMeetingFacilitatorGoalStore, IImprovementBatchDeduplicationStore, IPatternRiskStore, ICalibrationRecommendationStore, IMarginalApprovalsFeedStore, IMarginalApprovalsTrendStore, ISynthesisWatchdogStore {
   private db: Database.Database;
 
   constructor(dbPath: string = process.env.STATE_DB_PATH ?? "state.db") {
@@ -782,6 +784,26 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
 
       CREATE INDEX IF NOT EXISTS idx_staging_preexisting_skips_repo_pattern_at
         ON staging_preexisting_skips (repo, pattern, skipped_at DESC);
+    `);
+
+    // Synthesis watchlist table (idempotent — issue #553).
+    // Tracks meeting/standup synthesis intake entries. The watchdog fires a
+    // Telegram alert and re-attempts intake when synthesized_at is NULL and
+    // intake_at is older than SYNTHESIS_MISSING_THRESHOLD_HOURS (24h).
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS synthesis_watchlist (
+        id             TEXT PRIMARY KEY,
+        repo           TEXT    NOT NULL,
+        issue_number   INTEGER NOT NULL,
+        intake_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+        synthesized_at TEXT,
+        alerted_at     TEXT,
+        reintake_at    TEXT,
+        UNIQUE(repo, issue_number)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_synthesis_watchlist_intake
+        ON synthesis_watchlist (intake_at DESC);
     `);
   }
 
@@ -5138,6 +5160,94 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
         windowStart.toISOString(),
         windowEnd.toISOString(),
       ) as { repo: string; pattern: string; pr_number: number; skipped_at: string }[];
+  }
+
+  // ── Synthesis watchdog (issue #553) ─────────────────────────────────────
+
+  /**
+   * Insert or refresh a synthesis intake row for (repo, issueNumber).
+   *
+   * Uses INSERT OR REPLACE so repeated calls for the same issue are idempotent —
+   * a fresh meeting on the same issue gets a reset intake_at and clears any
+   * previous synthesized_at / alerted_at / reintake_at.
+   *
+   * Implements `ISynthesisWatchdogStore.registerSynthesisIntake`.
+   */
+  registerSynthesisIntake(repo: string, issueNumber: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO synthesis_watchlist (id, repo, issue_number, intake_at)
+         VALUES (?, ?, ?, datetime('now'))
+         ON CONFLICT(repo, issue_number) DO UPDATE SET
+           intake_at      = datetime('now'),
+           synthesized_at = NULL,
+           alerted_at     = NULL,
+           reintake_at    = NULL`,
+      )
+      .run(ulid(), repo, issueNumber);
+  }
+
+  /**
+   * Mark synthesis as complete by setting `synthesized_at` to now.
+   *
+   * Implements `ISynthesisWatchdogStore.recordSynthesisComplete`.
+   */
+  recordSynthesisComplete(repo: string, issueNumber: number): void {
+    this.db
+      .prepare(
+        `UPDATE synthesis_watchlist
+            SET synthesized_at = datetime('now')
+          WHERE repo = ? AND issue_number = ?`,
+      )
+      .run(repo, issueNumber);
+  }
+
+  /**
+   * Return all entries where synthesis is missing (synthesized_at IS NULL) and
+   * intake_at is older than `thresholdHours` hours.
+   *
+   * Implements `ISynthesisWatchdogStore.getMissingSynthesisEntries`.
+   */
+  getMissingSynthesisEntries(thresholdHours = 24): SynthesisWatchEntry[] {
+    return this.db
+      .prepare(
+        `SELECT id, repo, issue_number, intake_at, synthesized_at, alerted_at, reintake_at
+           FROM synthesis_watchlist
+          WHERE synthesized_at IS NULL
+            AND intake_at <= datetime('now', ? || ' hours')
+          ORDER BY intake_at ASC`,
+      )
+      .all(`-${thresholdHours}`) as SynthesisWatchEntry[];
+  }
+
+  /**
+   * Set `alerted_at` to now for the given (repo, issueNumber) entry.
+   *
+   * Implements `ISynthesisWatchdogStore.markWatchdogAlerted`.
+   */
+  markWatchdogAlerted(repo: string, issueNumber: number): void {
+    this.db
+      .prepare(
+        `UPDATE synthesis_watchlist
+            SET alerted_at = datetime('now')
+          WHERE repo = ? AND issue_number = ?`,
+      )
+      .run(repo, issueNumber);
+  }
+
+  /**
+   * Set `reintake_at` to now for the given (repo, issueNumber) entry.
+   *
+   * Implements `ISynthesisWatchdogStore.markWatchdogReintake`.
+   */
+  markWatchdogReintake(repo: string, issueNumber: number): void {
+    this.db
+      .prepare(
+        `UPDATE synthesis_watchlist
+            SET reintake_at = datetime('now')
+          WHERE repo = ? AND issue_number = ?`,
+      )
+      .run(repo, issueNumber);
   }
 
   /**

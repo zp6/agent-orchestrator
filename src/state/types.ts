@@ -1551,6 +1551,42 @@ export interface IStandupHealthStore {
   getStandupHealth(days?: number): StandupHealthSummary;
 }
 
+// ── Synthesis watchdog types (issue #553) ────────────────────────────────────
+
+/**
+ * A single entry in the `synthesis_watchlist` table.
+ *
+ * Tracks the lifecycle from synthesis intake registration through completion.
+ * When `synthesized_at` is null and `intake_at` is older than 24 hours, the
+ * SynthesisWatchdog fires a Telegram alert and re-attempts intake.
+ */
+export interface SynthesisWatchEntry {
+  id: string;
+  repo: string;
+  issue_number: number;
+  /** ISO-8601 UTC timestamp when the synthesis intake was registered. */
+  intake_at: string;
+  /** ISO-8601 UTC timestamp when synthesis completed, or null if still pending. */
+  synthesized_at: string | null;
+  /** ISO-8601 UTC timestamp of the last Telegram alert for this entry, or null. */
+  alerted_at: string | null;
+  /** ISO-8601 UTC timestamp of the last re-intake attempt, or null. */
+  reintake_at: string | null;
+}
+
+/**
+ * Store interface for synthesis watchlist persistence.
+ *
+ * Implemented by the reviewer's StateStore (issue #553).
+ */
+export interface ISynthesisWatchdogStore {
+  registerSynthesisIntake(repo: string, issueNumber: number): void;
+  recordSynthesisComplete(repo: string, issueNumber: number): void;
+  getMissingSynthesisEntries(thresholdHours?: number): SynthesisWatchEntry[];
+  markWatchdogAlerted(repo: string, issueNumber: number): void;
+  markWatchdogReintake(repo: string, issueNumber: number): void;
+}
+
 // ── Verification result types ─────────────────────────────────────────────
 
 /**

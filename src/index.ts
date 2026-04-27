@@ -1257,6 +1257,31 @@ export type {
   IStandupQualityStore,
 } from "./reviewer/standup-quality-trend.js";
 
+// Synthesis watchdog — alert + re-attempt intake when synthesis missing after 24h (issue #553).
+//
+// Provides a reliability layer for meeting/standup synthesis: if the meeting-facilitator
+// is unavailable when synthesis should be written, the result can be silently lost.
+// The watchdog persists the intake moment and alerts operators + re-posts after 24h.
+//
+// Usage:
+//   registerSynthesisIntake(store, repo, issueNumber)  // call on intake received
+//   recordSynthesisComplete(store, repo, issueNumber)  // call when synthesis written
+//   new SynthesisWatchdog(store, notifier).checkAndAlert()  // call from daemon loop
+export {
+  SynthesisWatchdog,
+  registerSynthesisIntake,
+  recordSynthesisComplete,
+  formatMissingSynthesisAlert,
+  SYNTHESIS_MISSING_THRESHOLD_HOURS,
+  SYNTHESIS_ALERT_COOLDOWN_HOURS,
+  SYNTHESIS_WATCHDOG_MIGRATION_SQL,
+} from "./reviewer/synthesis-watchdog.js";
+export type {
+  SynthesisWatchEntry,
+  SynthesisWatchdogCheckResult,
+  ISynthesisWatchdogStore,
+} from "./reviewer/synthesis-watchdog.js";
+
 // Marginal approvals feed — `/api/marginal-approvals` API payload + `/marginal-approvals` Telegram command (issue #502).
 //
 // Surfaces all tasks approved in the 0.60–0.79 "marginal" band so operators can
