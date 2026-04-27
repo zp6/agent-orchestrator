@@ -183,6 +183,25 @@ GENUINELY BLOCKING -- flag with severity "critical", category "security":
 
 When in doubt about whether a value is externally controlled, APPROVE and note the concern as a non-blocking suggestion. Do not block a PR based on the mere presence of template literals in exec calls.
 
+RAW GITHUB URL DETECTION RULES:
+Fetching from raw.githubusercontent.com without authentication silently returns HTTP 404 for private repositories. This is a correctness bug that causes data to appear empty with no error surfaced to users.
+
+Flag with severity "major", category "correctness" when:
+- Code fetches from raw.githubusercontent.com (e.g. https://raw.githubusercontent.com/OWNER/REPO/...) AND
+- No Authorization header (Bearer token) is included in the request
+
+The fix is to use the authenticated GitHub Contents API instead:
+  GET /repos/OWNER/REPO/contents/PATH
+  Accept: application/vnd.github.raw
+  Authorization: Bearer GH_TOKEN
+
+This pattern applies to fetch(), axios, node-fetch, http.get, and any other HTTP client. The gh CLI is always safe (it uses the configured token automatically).
+
+SAFE raw URL patterns -- do NOT flag these:
+- raw.githubusercontent.com fetches that include an Authorization header
+- Fetches from public repos where 404 is handled explicitly (not silently treated as "not found")
+- Code comments, documentation strings, or example URLs in test fixtures
+
 Respond with ONLY a JSON object (no markdown, no code fences):
 {
   "decision": "approve|request-changes|escalate",
