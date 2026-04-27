@@ -27,9 +27,37 @@ How work is tracked across Linear and GitHub. Routing decisions made at issue-cr
 3. **External engagement (OSS upstream contribution)** → tracked in Linear as a project entry per upstream repo; individual contributions get sub-issues.
 4. **Operator escalations** → land in `RESOURCES.md` (in-repo) AND a Linear "Operator queue" project (canonical). Operator monitors both.
 
+## Linear ↔ GitHub native integration
+
+Linear's GitHub integration is enabled at the org level. Use it. Don't duplicate its work in our code.
+
+**What Linear handles automatically:**
+- PR-to-issue linking via magic comments (see below)
+- Status transitions: PR opened → "In Review", merged → "Done", closed → "Cancelled"
+- Surfacing commit/PR/branch state inside Linear
+
+**What our orchestrator handles:**
+- Polling Linear for issues newly assigned to the fleet → dispatching
+- Verifier writing outcome **comments** to Linear (via API) — never status writes
+- Creating Linear issues for OKR/project/charter work
+
+### Magic-comment convention (enforced by orchestrator)
+
+Every fleet-authored PR that resolves a Linear issue **must** include in the PR body:
+
+```
+Closes NEX-<number>
+```
+
+Use `Refs NEX-<number>` if the PR contributes but doesn't fully resolve the issue. Pre-submit validator checks this for any task whose source is Linear.
+
+For GitHub-originating tasks, the existing `Closes #<number>` convention continues to apply.
+
 ## Verification and comment-back
 
-The verifier writes outcomes to whichever tracker the work originated from. `verification.sources` in `agents.yaml` controls polling and comment-back targets.
+The verifier writes outcome **comments** to whichever tracker the work originated from. `verification.sources` in `agents.yaml` controls polling and comment-back targets.
+
+**Important:** the verifier never sets Linear status — Linear's native GitHub integration handles status transitions on PR open/merge/close. Two non-overlapping layers.
 
 ## Cadence
 
