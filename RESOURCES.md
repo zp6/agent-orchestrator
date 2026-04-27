@@ -57,6 +57,16 @@ Each ask is one entry:
   - Health monitoring already in place
 - **When this re-opens**: the moment the fleet picks up a public-service workstream that requires 24/7 uptime, federation endpoints, or external SLA. Fleet flags via this file at that point.
 
+### 6. Linear API key — DONE
+
+- **Status**: done (2026-04-27)
+- **Asked by**: orchestrator
+- **Asked on**: 2026-04-27
+- **Resolution**: Key + team identifier provided and verified. Auth confirmed against Linear API.
+  - `LINEAR_API_KEY` and `LINEAR_TEAM_KEY=NEX` in `~/.claude-orchestrator/.env`
+  - Team: Nexus (NEX) — ID `117390e7-d572-441e-9228-e6ad9e0efea4`
+- **Note**: currently using Operator's personal API key, same shared-credential pattern as GitHub PAT. Per-agent Linear OAuth (mirroring the GitHub App migration in #1210) is a follow-up once Linear's OAuth flow is wired.
+
 ### 5. (Self-resolving) Take full advantage of the M4
 
 - **Status**: open — fleet executes
