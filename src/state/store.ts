@@ -5336,6 +5336,88 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
     return summaries;
   }
 
+  // ── External-impact ratio (anti-navel-gazing, issue #1258) ─────────────────
+
+  /**
+   * Compute the external-impact ratio: what fraction of recently-completed
+   * tasks advanced an OKR (vs. purely internal/housekeeping work).
+   *
+   * "External-advancing" tasks are those with task_type = 'implementation'
+   * or 'research' whose titles do NOT match internal-work patterns.
+   * "Internal" tasks are task_type = 'housekeeping' or implementation tasks
+   * whose titles match common internal patterns (triage, backlog, refactor,
+   * CI, monitoring, cleanup, etc.).
+   *
+   * This is a heuristic — it does not require OKR labels on GitHub issues.
+   * The threshold for alerting is 30% (OKR-1 gate: issue #1258).
+   *
+   * @param days - Rolling window in days (default 7).
+   */
+  getExternalImpactRatio(days = 7): {
+    days: number;
+    total: number;
+    external_advancing: number;
+    internal: number;
+    ratio: number;
+    below_threshold: boolean;
+    threshold: number;
+    since: string;
+  } {
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const THRESHOLD = 0.30;
+
+    // Internal title patterns — tasks matching any of these are not OKR-advancing
+    const internalPatterns = [
+      "housekeeping", "backlog triage", "backlog-triage", "triage",
+      "cleanup", "clean up", "refactor", "orphan", "stale",
+      "ci fix", "ci-fix", "health check", "health-check",
+      "dependency update", "monitoring", "audit", "dedup",
+      "infrastructure", "tooling", "self-update", "self update",
+      "dispatch health", "routing health", "dispatch efficiency",
+      "score drift", "billing", "container", "fleet scaling",
+    ];
+    const internalRegex = new RegExp(
+      `(${internalPatterns.map((p) => p.replace(/[-]/g, "[-\\s]?")).join("|")})`,
+      "i",
+    );
+
+    const rows = this.db
+      .prepare(
+        `SELECT task_type, title
+         FROM tasks
+         WHERE (status = 'done' OR verification_status = 'approved')
+           AND created_at >= ?
+         ORDER BY created_at DESC
+         LIMIT 500`,
+      )
+      .all(since) as Array<{ task_type: string; title: string }>;
+
+    let external_advancing = 0;
+    let internal = 0;
+
+    for (const row of rows) {
+      if (row.task_type === "housekeeping" || internalRegex.test(row.title ?? "")) {
+        internal++;
+      } else {
+        external_advancing++;
+      }
+    }
+
+    const total = rows.length;
+    const ratio = total > 0 ? external_advancing / total : 0;
+
+    return {
+      days,
+      total,
+      external_advancing,
+      internal,
+      ratio,
+      below_threshold: total > 0 && ratio < THRESHOLD,
+      threshold: THRESHOLD,
+      since,
+    };
+  }
+
   /**
    * Close the underlying SQLite connection.
    *

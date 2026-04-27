@@ -81,13 +81,19 @@ export interface MeetingOptions {
 
 // ── Prompts per meeting type ────────────────────────────────────────────────
 
-const STANDUP_ROUND1 = `You are in a daily standup. Share your perspective concisely (under 200 words):
+const STANDUP_ROUND1 = `You are in a daily standup. Share your perspective concisely (under 250 words):
 
 1. **Blockers**: What's preventing you from doing your best work?
 2. **Opportunities**: What improvements could make the biggest impact in your domain?
 3. **Suggestions for the team**: What should other agents know?
 4. **Coverage gaps**: Are there tasks in your domain that a more specialised agent should handle?
-5. **Meeting request** (optional): If there's a cross-cutting topic that needs structured discussion beyond this standup, you can request an ad-hoc meeting. Add a section like:
+5. **OKR Progress** (mandatory — do not skip): For each active OKR, answer: did it advance since the last standup?
+   - OKR-1 (external-oss-impact — Ship a fleet-authored OSS tool): shipped anything? If not, what's blocking it?
+   - OKR-2 (scale-reliability — 1,500 tasks/week at <8% failure): trending up or down?
+   - OKR-3 (cost-efficiency — ≤$0.10/task): any change?
+   - OKR-4 (autonomous-delivery — multi-week projects without operator): any progress?
+   If any OKR has made ZERO progress since last standup, you must explain why and propose what to dispatch next.
+6. **Meeting request** (optional): If there's a cross-cutting topic that needs structured discussion beyond this standup, you can request an ad-hoc meeting. Add a section like:
    **REQUEST MEETING:** <topic> [format: rfc|retrospective|design-review|triage|incident-postmortem|investigation-spike]
    The meeting facilitator will evaluate and schedule it. Only request one if the topic genuinely needs multi-agent structured discussion.
 
@@ -160,8 +166,18 @@ Produce a JSON object (no markdown, no code fences):
   "action_items": [{"description": "specific action", "owner": "agent or pool", "priority": "high|medium|low"}],
   "goal_adjustments": ["adjustment if any"],
   "resource_notes": "rebalancing observations",
-  "summary": "2-3 sentence executive summary"
-}`,
+  "summary": "2-3 sentence executive summary",
+  "okr_progress": {
+    "okr_1_external_impact": "advanced|stalled|no_data",
+    "okr_2_scale_reliability": "advanced|stalled|no_data",
+    "okr_3_cost_efficiency": "advanced|stalled|no_data",
+    "okr_4_autonomous_delivery": "advanced|stalled|no_data",
+    "stalled_okrs": ["list any OKR IDs with zero progress — these MUST generate high-priority action items"],
+    "navel_gazing_risk": true
+  }
+}
+
+CRITICAL: If any OKR shows stalled or no_data status, you MUST include at least one high-priority action_item that dispatches work toward that OKR. A standup that reports stalled OKRs without dispatching OKR work is a quality failure. Set navel_gazing_risk=true if OKR-1 (external-impact) stalled.`,
 
   bluesky: `You are synthesising a blue-sky thinking session for an autonomous AI agent fleet.
 

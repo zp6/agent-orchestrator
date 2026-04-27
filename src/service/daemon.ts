@@ -45,7 +45,7 @@ import { runProactiveScan } from "../orchestrator/proactive-scanner.js";
 import { validateMergedPR } from "../orchestrator/staging-validator.js";
 import { proposeAndFileRoadmapItems } from "../orchestrator/roadmap-proposer.js";
 import { detectCoverageGaps, suggestNewAgent } from "../orchestrator/coverage-gap-detector.js";
-import { autoMarkCompletedKeyResults, maybeRefreshGoals } from "../orchestrator/goals.js";
+import { autoMarkCompletedKeyResults, maybeRefreshGoals, detectStalledOKRs, loadGoals } from "../orchestrator/goals.js";
 import { detectHighIterationAgents } from "../orchestrator/iteration-cost-detector.js";
 import { detectHealthIncidentIssues } from "../orchestrator/health-incident-detector.js";
 import { runIterationBudgetAlerts } from "../orchestrator/iteration-budget-alert.js";
@@ -866,6 +866,72 @@ export class Daemon {
             .then((refreshed) => { if (refreshed) console.log(`[${time}] Goals: refreshed goals.yaml with new targets`); })
             .catch((err) => { this.log.warn("Goal refresh failed", { error: err instanceof Error ? err.message : String(err) }); }),
         );
+
+        // ── Stalled OKR detection (anti-navel-gazing, issue #1258) ─────────
+        // Detects when OKR-1 (external-oss-impact) hasn't advanced in 3+ days.
+        // Auto-files a P0 issue and, after 48h below threshold, pauses internal dispatches.
+        try {
+          const goals = loadGoals(this.config.orchestrator_dir);
+          if (goals.goals.length > 0) {
+            const stalledOKRs = detectStalledOKRs(goals, this.store, 3);
+            for (const stalled of stalledOKRs) {
+              const ratio = this.store.getExternalImpactRatio(3);
+              const ratioStr = `${(ratio.ratio * 100).toFixed(0)}% (${ratio.external_advancing}/${ratio.total} tasks)`;
+
+              // File a P0 issue if external-impact is stalled
+              const issueCreator = new IssueCreator(this.config);
+              const body = `## ⚠️ OKR-1 Stalled — External Impact at Zero\n\n` +
+                `**Goal:** ${stalled.goal.title}\n` +
+                `**Target:** ${stalled.goal.target}\n` +
+                `**Status:** External-advancing task ratio over last 3 days: ${ratioStr} — below 30% threshold.\n\n` +
+                `### Required action\n` +
+                `The fleet has been shipping internal/housekeeping work without advancing OKR-1. ` +
+                `This is the failure mode described in [issue #1258](https://github.com/rapartlu/agent-orchestrator/issues/1258).\n\n` +
+                `**Director (claude-agent-orchestrator):** Identify and dispatch at least one OKR-1 issue immediately. ` +
+                `Check the \`external-oss-impact\` key results and dispatch work toward them.\n\n` +
+                `Key results:\n${stalled.goal.key_results.map((kr) => `- [ ] ${kr.description}`).join("\n")}\n\n` +
+                `---\n*Auto-filed by stalled-OKR detector (issue #1258).*`;
+              try {
+                issueCreator.createIssue(
+                  "rapartlu/agent-orchestrator",
+                  `[P0] OKR-1 stalled: external-impact ratio ${ratioStr} — dispatch OKR work now`,
+                  body,
+                  ["P0", "okr-1", "anti-navel-gazing"],
+                );
+                console.log(`[${time}] Stalled OKR: filed P0 issue for OKR-1 (ratio=${ratioStr})`);
+              } catch (err) {
+                this.log.warn("Failed to file stalled-OKR P0 issue", { error: err instanceof Error ? err.message : String(err) });
+              }
+
+              // Notify operator via Telegram
+              notifyOperator(
+                `⚠️ OKR-1 Stalled\n\nExternal-advancing ratio: ${ratioStr} (threshold: 30%)\n\nThe fleet has been shipping internal work without advancing OKR-1 (${stalled.goal.title}). A P0 issue was filed. Director should dispatch OKR-1 work immediately.`,
+                "",
+                "warning",
+              ).catch(() => {});
+
+              // Set internal_dispatch_paused signal if stalled for 48h
+              if (stalled.should_pause_internal) {
+                this.store.writeSignal({
+                  agent: "daemon",
+                  signal_type: "internal_dispatch_paused",
+                  key: "okr-1-stalled",
+                  value: JSON.stringify({ paused: true, reason: "OKR-1 external-impact stalled for 48h+", ratio: ratio.ratio }),
+                  confidence: 0.95,
+                  ttl_hours: 48,
+                });
+                console.log(`[${time}] Stalled OKR: set internal_dispatch_paused=true (ratio=${ratioStr})`);
+                notifyOperator(
+                  `🛑 Internal Dispatch Paused\n\nOKR-1 has been below 30% external-impact for 48h+. Internal work dispatches are paused until OKR-1 advances.\n\nRatio: ${ratioStr}`,
+                  "",
+                  "warning",
+                ).catch(() => {});
+              }
+            }
+          }
+        } catch (err) {
+          this.log.warn("Stalled OKR detection failed", { error: err instanceof Error ? err.message : String(err) });
+        }
 
         // Coverage gap analysis: propose new agents when topics are unowned
         try {

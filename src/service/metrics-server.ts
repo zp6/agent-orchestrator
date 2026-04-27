@@ -22,6 +22,8 @@
  *   GET /marginal-score-tasks                         — tasks with marginal quality scores + trend + per-agent (issue #597)
  *   GET /marginal-score-tasks?days=30&min_score=0.5&max_score=0.75&agent=<name>&limit=50&offset=0
  *   POST /marginal-score-tasks/:id/redispatch         — create a re-dispatch task for a marginal-score task
+ *   GET /external-impact-ratio                        — OKR-1 external-impact ratio with 30% threshold alert (issue #1258)
+ *   GET /external-impact-ratio?days=7                 — configurable window
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
@@ -811,6 +813,32 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /external-impact-ratio ─────────────────────────────────────────────
+    // Returns what fraction of recently-completed tasks advanced an OKR vs.
+    // were purely internal/housekeeping work (issue #1258 — anti-navel-gazing).
+    //
+    // Query params:
+    //   days=N  — rolling window in days (default 7, max 90)
+    //
+    // Response includes ratio, threshold (0.30), below_threshold flag, and
+    // breakdown of external-advancing vs internal task counts.
+    if (url.pathname === "/external-impact-ratio") {
+      const days = parseWindowDays(req);
+      try {
+        const ratio = store.getExternalImpactRatio(days);
+        sendJson(res, 200, {
+          ...ratio,
+          generated_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        log.warn("Failed to compute external impact ratio", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to compute external impact ratio" });
+      }
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -836,6 +864,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
         "POST /marginal-score-tasks/:id/redispatch",
         "/guard-health",
         "/api/persistent-anomalies",
+        "/external-impact-ratio",
       ],
     });
   });
