@@ -2460,7 +2460,11 @@ export class Daemon {
       const recentMeetings = this.store.getMeetings(10);
       const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
       const adHocThisWeek = recentMeetings.filter(
-        (m) => m.type !== "standup" && m.type !== "bluesky" && m.created_at >= oneWeekAgo,
+        (m) =>
+          m.type !== "standup" &&
+          m.type !== "bluesky" &&
+          m.type !== "retro" &&
+          m.created_at >= oneWeekAgo,
       );
       if (adHocThisWeek.length >= 1) {
         this.log.info("Meeting request deferred: weekly ad-hoc cap reached", {
@@ -2477,14 +2481,6 @@ export class Daemon {
         payload = request.value ? JSON.parse(request.value) : {};
       } catch {
         payload = { topic: request.key };
-      }
-
-      // Delete the signal so it's not re-dispatched on the next cycle.
-      // If dispatch fails, the operator can re-request via Telegram.
-      try {
-        this.store.deleteSignal(request.id);
-      } catch {
-        // Non-critical — duplicate dispatch is better than no dispatch
       }
 
       console.log(`[${time}] Dispatching meeting request to facilitator: "${payload.topic ?? request.key}"`);
@@ -2530,13 +2526,21 @@ export class Daemon {
           taskType: "facilitation",
         },
       ).then(() => {
+        // Delete the signal only after successful dispatch so that a failed
+        // dispatch is automatically retried on the next daemon cycle (issue #1198).
+        try {
+          this.store.deleteSignal(request.id);
+        } catch {
+          // Non-critical — signal will be cleaned up on next successful dispatch
+        }
         this.log.info("Meeting request dispatched to facilitator", {
           facilitator: facilitatorName,
           topic: payload.topic ?? request.key,
         });
       }).catch((err) => {
-        this.log.warn("Failed to dispatch meeting request", {
+        this.log.warn("Failed to dispatch meeting request — signal retained for retry", {
           error: err instanceof Error ? err.message : String(err),
+          signalId: request.id,
         });
       });
     } catch (err) {
