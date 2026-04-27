@@ -1457,6 +1457,79 @@ export async function maybePostDailyGuardDigest(
 }
 
 /**
+ * Check whether the configured daily persistent-anomalies digest should fire
+ * on this poll cycle, and if so, fetch the anomaly feed and send a Telegram
+ * message. Fires only when total > 0 (silent when clean).
+ *
+ * Safe to call every poll cycle — it is a no-op when:
+ *  - Telegram is not configured
+ *  - The digest has already been sent today
+ *  - The current time is before the scheduled window
+ *  - No anomalies were detected in the 24h window
+ *
+ * Issue #1207.
+ */
+export async function maybePostDailyAnomaliesDigest(
+  state: DigestSchedulerState,
+  _store: unknown,
+  schedule = "09:00",
+  now = new Date(),
+): Promise<void> {
+  if (!chatId) return; // Telegram not configured
+
+  const today = todayLocalDateString(now);
+
+  // Already sent today
+  if (state.lastDigestDate === today) return;
+
+  // Not yet the scheduled time
+  if (!isScheduledTimeReached(schedule, now)) return;
+
+  // Mark as sent before awaiting so concurrent cycles don't double-post
+  state.lastDigestDate = today;
+
+  try {
+    const res = await fetch("http://localhost:3472/api/persistent-anomalies?days=1&min_cycles=1", {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      log.warn("Failed to fetch persistent anomalies for digest", { status: res.status });
+      return;
+    }
+
+    const data = (await res.json()) as {
+      total: number;
+      anomalies: Array<{
+        task_id: string;
+        agent: string;
+        anomaly_type: string;
+        cycle_count: number;
+        last_seen: string;
+      }>;
+    };
+
+    // Don't post if no anomalies — keeps digest channel clean
+    if (data.total === 0) return;
+
+    const lines = data.anomalies.slice(0, 10).map(
+      (a) => `• \`${a.task_id.slice(-10)}\` ${a.agent} — ${a.anomaly_type} (${a.cycle_count}x)`,
+    );
+    if (data.total > 10) lines.push(`… +${data.total - 10} more`);
+
+    const alert =
+      `🔍 *Persistent Anomalies (24h)* — ${data.total} detected\n\n` +
+      lines.join("\n") +
+      `\n\n_Run \`orch anomalies --days 1\` for full panel._`;
+
+    sendTelegramAlert(alert);
+    log.info("Daily persistent anomalies digest sent", { date: today, total: data.total });
+  } catch (err) {
+    // Don't reset lastDigestDate — one attempt per day is enough even on failure.
+    log.error("Failed to send daily anomalies digest", { error: String(err) });
+  }
+}
+
+/**
  * Start independent Telegram polling loop (every 3 seconds).
  * Runs in the background, independent of the daemon poll cycle.
  */

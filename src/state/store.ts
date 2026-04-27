@@ -9773,6 +9773,116 @@ export class StateStore {
     return row.cnt;
   }
 
+  // ── Persistent Anomalies ───────────────────────────────────────────────────
+
+  /**
+   * Lazily create the score_anomaly_observations table.
+   * Populated by the verifier (parse-failure guard) and improvement detector.
+   * Queried by /api/persistent-anomalies endpoint and `orch anomalies` CLI (issue #1207).
+   */
+  private ensureScoreAnomalyObservationsTable(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS score_anomaly_observations (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id      TEXT NOT NULL,
+        agent        TEXT NOT NULL,
+        anomaly_type TEXT NOT NULL,
+        cycle_count  INTEGER NOT NULL DEFAULT 1,
+        first_seen   TEXT NOT NULL,
+        last_seen    TEXT NOT NULL,
+        UNIQUE(task_id, anomaly_type)
+      );
+      CREATE INDEX IF NOT EXISTS idx_sao_agent
+        ON score_anomaly_observations(agent);
+      CREATE INDEX IF NOT EXISTS idx_sao_anomaly_type
+        ON score_anomaly_observations(anomaly_type);
+      CREATE INDEX IF NOT EXISTS idx_sao_last_seen
+        ON score_anomaly_observations(last_seen);
+    `);
+  }
+
+  /**
+   * Record or increment a score anomaly observation for a task.
+   * If the (task_id, anomaly_type) pair already exists, increments cycle_count
+   * and updates last_seen. Otherwise inserts a new row.
+   * Safe to call idempotently — duplicate calls update in place.
+   */
+  recordScoreAnomalyObservation(params: {
+    taskId: string;
+    agent: string;
+    anomalyType: string;
+  }): void {
+    this.ensureScoreAnomalyObservationsTable();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO score_anomaly_observations (task_id, agent, anomaly_type, cycle_count, first_seen, last_seen)
+      VALUES (?, ?, ?, 1, ?, ?)
+      ON CONFLICT(task_id, anomaly_type) DO UPDATE SET
+        cycle_count = cycle_count + 1,
+        last_seen   = excluded.last_seen
+    `).run(params.taskId, params.agent, params.anomalyType, now, now);
+  }
+
+  /**
+   * Return persistent anomaly observations for the given rolling window.
+   * Supports filtering by minimum cycle_count and by agent name.
+   * Results ordered by last_seen DESC (most recent first).
+   * Consumed by /api/persistent-anomalies and `orch anomalies` (issue #1207).
+   */
+  getPersistentAnomaliesPayload(
+    days = 30,
+    minCycles = 1,
+    agent: string | null = null,
+    limit = 200,
+  ): Array<{
+    task_id: string;
+    agent: string;
+    anomaly_type: string;
+    cycle_count: number;
+    first_seen: string;
+    last_seen: string;
+  }> {
+    this.ensureScoreAnomalyObservationsTable();
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+    const agentFilter = agent ? "AND agent = ?" : "";
+    const params: (string | number)[] = [minCycles, cutoff];
+    if (agent) params.push(agent);
+    params.push(limit);
+
+    return this.db.prepare(`
+      SELECT task_id, agent, anomaly_type, cycle_count, first_seen, last_seen
+      FROM score_anomaly_observations
+      WHERE cycle_count >= ?
+        AND last_seen >= ?
+        ${agentFilter}
+      ORDER BY last_seen DESC
+      LIMIT ?
+    `).all(...params) as Array<{
+      task_id: string;
+      agent: string;
+      anomaly_type: string;
+      cycle_count: number;
+      first_seen: string;
+      last_seen: string;
+    }>;
+  }
+
+  /**
+   * Return total count of persistent anomaly observations (cycle_count >= minCycles)
+   * within the given rolling window. Used by the Telegram digest.
+   */
+  getPersistentAnomalyCount(days = 1, minCycles = 1): number {
+    this.ensureScoreAnomalyObservationsTable();
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS cnt
+      FROM score_anomaly_observations
+      WHERE cycle_count >= ?
+        AND last_seen >= ?
+    `).get(minCycles, cutoff) as { cnt: number };
+    return row.cnt;
+  }
+
   // ── Approval Queue ─────────────────────────────────────────────────────────
 
   /**

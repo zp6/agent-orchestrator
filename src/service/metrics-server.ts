@@ -771,6 +771,46 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /api/persistent-anomalies ─────────────────────────────────────────
+    // Returns score anomaly observations that have recurred across multiple
+    // verification cycles (issue #1207).
+    //
+    // Query params:
+    //   days=N         — rolling window (default 30, max 90)
+    //   min_cycles=N   — minimum recurrence count (default 1)
+    //   agent=<name>   — filter to a single agent (default: all)
+    //   limit=N        — max results (default 200, max 500)
+    if (url.pathname === "/api/persistent-anomalies") {
+      try {
+        const rawDays = parseInt(url.searchParams.get("days") ?? "30", 10);
+        const days = isNaN(rawDays) || rawDays < 1 ? 30 : Math.min(rawDays, MAX_WINDOW_DAYS);
+
+        const rawMinCycles = parseInt(url.searchParams.get("min_cycles") ?? "1", 10);
+        const minCycles = isNaN(rawMinCycles) || rawMinCycles < 1 ? 1 : rawMinCycles;
+
+        const agent = url.searchParams.get("agent") || null;
+
+        const rawLimit = parseInt(url.searchParams.get("limit") ?? "200", 10);
+        const limit = isNaN(rawLimit) || rawLimit < 1 ? 200 : Math.min(rawLimit, 500);
+
+        const anomalies = store.getPersistentAnomaliesPayload(days, minCycles, agent, limit);
+        sendJson(res, 200, {
+          days,
+          min_cycles: minCycles,
+          agent,
+          total: anomalies.length,
+          anomalies,
+          generated_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        log.warn("Failed to fetch persistent anomalies", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to fetch persistent anomalies" });
+      }
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -795,6 +835,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
         "/marginal-score-tasks",
         "POST /marginal-score-tasks/:id/redispatch",
         "/guard-health",
+        "/api/persistent-anomalies",
       ],
     });
   });
