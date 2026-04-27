@@ -1290,6 +1290,30 @@ export type {
   IPersistentAnomalyStore,
 } from "./reviewer/persistent-anomalies.js";
 
+// Variant-pair deduplication report — `/variant-duplicates [hours]` Telegram command +
+// `/api/variant-duplicate-dispatch` REST endpoint (issue #1270).
+// Lists (repo, issue, variant-A, variant-B, count) pairs where both Claude and Codex
+// siblings of the same agent pool hit the "already-in-review" guard within the same
+// dispatch window, producing redundant guard tasks.
+//
+// REST surface (caller-mounted):
+//   app.get('/api/variant-duplicate-dispatch', (req, res) => {
+//     const hours = Math.min(720, parseInt(req.query.hours ?? '24', 10) || 24);
+//     res.json(getVariantDuplicatesPayload(store, hours));
+//   });
+export {
+  getVariantDuplicatesPayload,
+  formatVariantDuplicatesForTelegram,
+  canonicalVariantSibling,
+  DEFAULT_WINDOW_HOURS as VARIANT_DEDUP_DEFAULT_WINDOW_HOURS,
+  MAX_WINDOW_HOURS as VARIANT_DEDUP_MAX_WINDOW_HOURS,
+  DISPATCH_WINDOW_MS as VARIANT_DEDUP_DISPATCH_WINDOW_MS,
+} from "./reviewer/variant-deduplication.js";
+export type {
+  VariantDuplicatePair,
+  VariantDuplicatesPayload,
+} from "./reviewer/variant-deduplication.js";
+
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
 export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";

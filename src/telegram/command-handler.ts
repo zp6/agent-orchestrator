@@ -40,6 +40,7 @@
  *   /triage-health [agent]     → per-agent triage schema pass/fail rate, missing fields, revision count, and 7-day trend
  *   /investigations            → list pending/active/completed research agent investigations with titles, times, and result issue URLs
  *   /meeting-goal              → meeting-facilitator-agent monthly goal tracker: core_logic_shipped + meetings_facilitated progress (issue #456)
+ *   /variant-duplicates [hours] → variant-pair dispatch dedup report: (repo, issue, variant-A, variant-B, count) pairs where both pool siblings hit the already-in-review guard (issue #1270)
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -110,6 +111,12 @@ import {
 import {
   getMeetingFacilitatorGoalPayload,
 } from "../reviewer/meeting-facilitator-goal.js";
+import {
+  getVariantDuplicatesPayload,
+  formatVariantDuplicatesForTelegram,
+  DEFAULT_WINDOW_HOURS as VARIANT_DEDUP_DEFAULT_HOURS,
+  MAX_WINDOW_HOURS as VARIANT_DEDUP_MAX_HOURS,
+} from "../reviewer/variant-deduplication.js";
 import type { MeetingFacilitatorGoalWidget } from "../state/types.js";
 import type { ReviewerConfig } from "../config.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
@@ -176,7 +183,8 @@ type CommandName =
   | "misrouting"
   | "triage-health"
   | "investigations"
-  | "meeting-goal";
+  | "meeting-goal"
+  | "variant-duplicates";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -221,6 +229,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "triage-health",
   "investigations",
   "meeting-goal",
+  "variant-duplicates",
 ]);
 
 interface ParsedCommand {
@@ -605,6 +614,15 @@ async function executeCommand(
     case "meeting-goal": {
       // /meeting-goal — monthly goal tracker for meeting-facilitator-agent.
       return Promise.resolve(handleMeetingGoal(store));
+    }
+
+    case "variant-duplicates": {
+      // /variant-duplicates [hours] — variant-pair dispatch dedup report (issue #1270)
+      const hoursStr = cmd.args[0]?.trim();
+      const lookbackHours = hoursStr
+        ? Math.min(Math.max(parseInt(hoursStr, 10) || VARIANT_DEDUP_DEFAULT_HOURS, 1), VARIANT_DEDUP_MAX_HOURS)
+        : VARIANT_DEDUP_DEFAULT_HOURS;
+      return handleVariantDuplicates(store, lookbackHours);
     }
   }
 }
@@ -2546,6 +2564,26 @@ export function formatMeetingGoalForTelegram(widget: MeetingFacilitatorGoalWidge
 function handleMeetingGoal(store: ITelegramStateStore): string {
   const widget = getMeetingFacilitatorGoalPayload(store as Parameters<typeof getMeetingFacilitatorGoalPayload>[0]);
   return formatMeetingGoalForTelegram(widget);
+}
+
+// ── Variant-pair dedup handler (issue #1270) ──────────────────────────────────
+
+/**
+ * Handle the `/variant-duplicates [hours]` command.
+ *
+ * Reports (repo, issue, variant-A, variant-B, count) pairs where both Claude
+ * and Codex siblings of the same agent pool hit the "already-in-review" guard
+ * within a single dispatch window.
+ */
+function handleVariantDuplicates(
+  store: ITelegramStateStore,
+  windowHours: number,
+): Promise<string> {
+  const payload = getVariantDuplicatesPayload(
+    store as Parameters<typeof getVariantDuplicatesPayload>[0],
+    windowHours,
+  );
+  return Promise.resolve(formatVariantDuplicatesForTelegram(payload));
 }
 
 // ── Quality system health handler (issue #304) ────────────────────────────
