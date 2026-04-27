@@ -121,6 +121,9 @@ When this container is used for LLM PR reviews:
 - Quality summary digest: rolling 24h approval-quality report (total approvals, below-floor count, marginal rate, worst-scoring agent); powers daily scheduled Telegram digest and on-demand `/quality-summary` command (`quality-summary.ts`)
 - Marginal approvals feed: `/api/marginal-approvals` payload builder surfacing approved tasks in the 0.60–0.79 band; `/marginal-approvals` Telegram command; trend endpoint with per-agent coaching prompt for dashboard panel (`marginal-approvals-feed.ts`)
 - Pre-existing failure tracker: records each staging-validator pre-existing skip to `staging_preexisting_skips` SQLite table; fires a consolidated Telegram alert (⚠️) when the same `(repo, pattern)` pair accumulates ≥3 distinct merged PRs within a rolling 7-day window; 24h per-pair alert dedup prevents per-merge noise while ensuring eventual escalation for persistent technical debt (`preexisting-failure-tracker.ts`)
+- Multi-provider reviewer pool: `REVIEWER_POOL_NAME` constant and `KNOWN_POOL_MEMBERS` list declare pool membership; `reviewer-pool.ts` exports pool utilities and `getPoolMemberId()`; `multi-provider-client.ts` wraps Anthropic + OpenAI-compatible providers (Deepseek, Grok) behind `IReviewerLLMClient` so provider-specific reviewer variants share the same call sites; sibling-variant dispatch deduplication via `agent-variant.ts` `canonicalizeAgentName()` (`reviewer-pool.ts`, `multi-provider-client.ts`)
+- Stale improvements feed: lists improvement-detector issues older than N hours with no associated PR; powers `/stale-improvements` Telegram command; evidence count used as detection-frequency signal for priority sorting (`stale-improvements-feed.ts`)
+- Synthesis watchdog: monitors meeting/standup synthesis intake entries; fires Telegram alert + re-attempts intake when synthesis is missing after 24h threshold; persists intake moments to `synthesis_watchlist` SQLite table; `registerSynthesisIntake()` / `recordSynthesisComplete()` / `checkWatchlist()` lifecycle (`synthesis-watchdog.ts`)
 
 **Out of scope (belongs to orchestrator-core):**
 - Daemon loop, state store, dispatching infrastructure
@@ -141,6 +144,7 @@ src/
   supervisor-log.ts                 — queryable supervisor decision log
   client/
     llm-client.ts                   — Anthropic SDK wrapper; prompt-caching support
+    multi-provider-client.ts        — `IReviewerLLMClient` interface; Anthropic + OpenAI-compatible provider adapters (Deepseek, Grok); `getReviewerProvider()` / `getReviewerModel()` env-driven factory (issue orchestrator#1211)
   config/
     security-allowlist.ts           — shared example/template file patterns (synced with agent-proxy)
   reviewer/
@@ -214,6 +218,9 @@ src/
     quality-summary.ts              — `IQualitySummaryStore`; `getQualitySummaryReport()`; `QualitySummaryDigestScheduler` for daily Telegram digest; `/quality-summary` command formatter (issue #490)
     marginal-approvals-feed.ts      — `getMarginalApprovalsFeed()` REST payload builder; `getMarginalApprovalsTrend()` trend endpoint; per-agent coaching prompt; `/marginal-approvals` Telegram command (issues #502, #504)
     preexisting-failure-tracker.ts  — `PreexistingFailureTracker`; `staging_preexisting_skips` table; `insertPreexistingSkip()` / `getPreexistingSkipsInWindow()`; consolidated Telegram alert at ≥3 distinct PRs for same `(repo, pattern)` pair in 7-day window; 24h dedup cooldown (issue #453)
+    reviewer-pool.ts                — `REVIEWER_POOL_NAME`, `KNOWN_POOL_MEMBERS`; pool membership declaration and `getPoolMemberId()` helper for multi-provider reviewer fleet (issue orchestrator#1211)
+    stale-improvements-feed.ts      — lists improvement-detector issues ≥N hours old with no open/merged PR; evidence count for priority sorting; powers `/stale-improvements` Telegram command (issue #440)
+    synthesis-watchdog.ts           — `synthesis_watchlist` SQLite table; `registerSynthesisIntake()` / `recordSynthesisComplete()` / `checkWatchlist()`; 24h threshold alert + re-attempt when synthesis missing after facilitator outage (issue #553)
   integration/
     orchestrator-adapter.ts         — createReviewerInstances() adapter for orchestrator import
   service/
@@ -221,6 +228,7 @@ src/
   state/
     store.ts                        — SQLite state.db read/write helpers
     types.ts                        — shared TypeScript interfaces and type aliases
+    agent-variant.ts                — `canonicalizeAgentName()` strips provider prefix (claude/codex/grok/deepseek/gemini) so cross-variant inflight guard treats siblings as the same agent family (issue #524)
   telegram/
     command-handler.ts              — /status, /tasks, /approve and other bot commands
   util/

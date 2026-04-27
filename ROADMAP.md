@@ -1,9 +1,14 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-27 (triage cycle 20)_
+_Last updated: 2026-04-27 (triage cycle 21)_
 
 ## Completed (recent)
 
+- **#553 / PR #554** — `synthesis-watchdog.ts`: monitors meeting/standup synthesis intake entries; fires Telegram alert + re-attempts intake when synthesis missing after 24h; `synthesis_watchlist` SQLite table; `registerSynthesisIntake()` / `recordSynthesisComplete()` / `checkWatchlist()` lifecycle
+- **#551 / PR #552** — Flag unauthenticated `raw.githubusercontent.com` fetches in PR review: `pr-reviewer.ts` detects and surfaces raw GitHub URL usage as a security signal
+- **orchestrator#1211 / PR #544** — Multi-provider reviewer pool: `multi-provider-client.ts` wraps Anthropic + Deepseek R1 behind `IReviewerLLMClient`; `reviewer-pool.ts` declares pool membership; `POOL_MEMBER_ID` / `REVIEWER_PROVIDER` env-driven factory for cognitive diversity per CHARTER Article VI
+- **#524 / PR #547** — Canonicalize agent variants in cross-agent inflight guard: `agent-variant.ts` `canonicalizeAgentName()` strips provider prefix (claude/codex/grok/deepseek/gemini) so sibling variants are treated as the same agent family
+- **#440 / PR #540** — `/stale-improvements` Telegram command: `stale-improvements-feed.ts` lists improvement-detector issues ≥N hours old with no associated PR, sorted by evidence count
 - **#525 / PR #529** — PR guard surge detector: aggregate hits across agent variants — `PRGuardSurgeDetector` now keys by `issueRef` only so cross-variant floods (claude-proxy + codex-proxy) aggregate into a single counter; closed cross-variant bypass gap
 - **#485 / PR #528** — Score provenance guard wired into auto-approval path: `applyDefaultFallbackGuard()` in `verifier.ts` blocks `score_source=default_fallback` approvals and fires high-urgency Telegram alert; Telegram `/approve` in `command-handler.ts` calls the same guard to block operator manual approval of parse-failure zeros; `improvement-detector.ts` now records `score_anomaly_observations` rows after each LLM pass
 - **#453 / PR #508** — `preexisting-failure-tracker.ts`: consolidated Telegram alert when the same `(repo, pattern)` pair accumulates ≥3 distinct merged PRs within a rolling 7-day window; 24h per-pair dedup cooldown; `staging_preexisting_skips` SQLite table
@@ -80,7 +85,7 @@ _Last updated: 2026-04-27 (triage cycle 20)_
 
 1. **#489 — Add /pr-guard-status Telegram command showing active surge suppressions** _(high)_ — Surface which `(repo, issue)` pairs have active surge suppressions so operators can see the PR-guard flood gate in real time; follows directly from the surge suppression work.
 
-2. **#524 — Canonicalize agent variants in cross-agent inflight guard** _(high)_ — `cross-agent-inflight-guard.ts` treats `codex-proxy` and `claude-proxy` as distinct agents; add `canonicalizeAgentName()` to strip the `codex-` prefix so the same `(repo, issue)` pair can't be dispatched to both variant in one daemon cycle.
+2. **#546 — Wire orchestrator's persistent-anomaly store into reviewer's recordAnomalyObservation call sites** _(high)_ — Audit that all `score_anomaly_observations` writes go through `recordAnomalyObservation()`; add `PersistentAnomaliesDigestScheduler` class so the orchestrator can schedule the daily Telegram digest via a single import; eliminates parallel-implementation risk.
 
 3. **#473 — Newly shipped surge suppression doesn't cover PR-guard floods** _(high)_ — Add a PR-level suppression axis so batches of different issues blocked by the same PR collapse into one consolidated suppression event.
 
@@ -96,7 +101,8 @@ _Last updated: 2026-04-27 (triage cycle 20)_
 - **#514 — Add start_period to generated Docker healthcheck for claude-orchestrator-telegram** _(medium)_ — Prevents avoidable recovery loops on slow-start containers; confirm scope (may belong to agent-orchestrator repo).
 - **#472 — Meeting facilitator: persist synthesis results to queryable store** _(high)_ — Keep meeting results searchable across daemon cycles so follow-up sessions can retrieve prior synthesis outputs without revision churn.
 - **#530 — Fleet self-direction kickoff per CHARTER #1209 (cross-repo follow-up)** _(medium)_ — Orchestrator-generated follow-up; scope to be determined once parent task context is available.
-- **#440 — Improvement issues filed from analysis are not being dispatched** _(medium)_ — Add a `/stale-improvements` view and/or dispatch exemption path so chronic improvement findings do not stall silently.
+- **#545 — CLAUDE.md / documentation sync requested from claude-proxy triage (cross-repo follow-up)** _(low)_ — Review CLAUDE.md for any gaps identified by the claude-proxy triage cycle; close once documentation is confirmed current.
+- **#555 — Linear adapter cross-repo follow-up** _(medium)_ — Implement the `rapartlu/agent-reviewer` portion of the Linear adapter MVP (quality-assessment dimension scored 0%); scope TBD from parent task context.
 - **#414 — Bookkeeping task type: score 'close-by-reference' outcomes appropriately** _(high)_ — Treat close-by-reference bookkeeping work as a distinct outcome instead of letting it fall back to a null/defaulted score.
 - **#340 — Persist proactive rebase stats to SQLite** _(medium)_ — `rebase_events` table, `IRebaseStore` interface, `/rebase-stats` Telegram command, and `/rebase-stats` HTTP endpoint for dashboard.
 
@@ -109,6 +115,8 @@ _Last updated: 2026-04-27 (triage cycle 20)_
 - **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
 
 ## Triage notes
+
+- **2026-04-27 cycle 21**: 14 open issues audited (excl. #557 triage trigger), 0 duplicates, 0 stale (oldest #340 at 8 days). No issues closed. Features shipped since cycle 20: #553 (PR #554 — synthesis-watchdog.ts), #551 (PR #552 — raw GitHub URL detection), orchestrator#1211 (PR #544 — multi-provider reviewer pool + Deepseek R1 integration), #524 (PR #547 — agent variant canonicalization in inflight guard), #440 (PR #540 — /stale-improvements Telegram command). ROADMAP.md: promoted 5 completed items; replaced #524 in Next up with #546 (persistent-anomaly store wiring); added #545 and #555 to Planned; removed #440 from Planned (shipped). CLAUDE.md: added `multi-provider-client.ts`, `reviewer-pool.ts`, `stale-improvements-feed.ts`, `synthesis-watchdog.ts` to Source Layout and Scope; added `agent-variant.ts` to state/ section.
 
 - **2026-04-27 cycle 20**: 14 open issues audited (excl. #537 and #535 triage triggers), 0 duplicates, 0 stale (oldest #340 at 8 days). No issues closed. Feature shipped since cycle 19: #525 (PR #529 — PR guard surge detector cross-variant aggregation). ROADMAP.md: promoted #525 to Completed; removed #525 from Next up rank 3; renumbered ranks 4–7 → 3–6. CLAUDE.md: verified current — no new modules since cycle 19.
 
