@@ -1,8 +1,8 @@
-# Claude Orchestrator Reviewer
+# Claude Agent Orchestrator
 
 ## What This Is
 
-The quality and oversight layer for the Claude Agent Orchestrator. This repo owns PR review, task verification, supervision, and improvement detection — everything that evaluates and improves agent output quality.
+The quality and oversight layer for the Claude Agent Orchestrator. This repo owns PR review, task verification, supervision, improvement detection, and the Linear issue adapter that keeps the fleet's work queues aligned.
 
 **This container also serves as the LLM backend for the orchestrator.** All PR reviews, task verifications, supervisor decisions, and improvement analysis are routed through this container. Keep it lightweight and responsive.
 
@@ -20,7 +20,7 @@ The orchestrator manages a fleet of Claude Code agents, each in a Docker contain
 | claude-proxy | rapartlu/agent-proxy | 3471 | Proxy server, container management |
 | meeting-facilitator-agent | rapartlu/meeting-facilitator-agent | 3485 | Meeting facilitation, structured discussions |
 
-**Daemon loop** runs every 30s: poll GitHub issues → dispatch to agents → verify quality → review PRs → detect improvements → supervisor decisions.
+**Daemon loop** runs every 30s: poll GitHub issues and Linear issues → dispatch to agents → verify quality → review PRs → detect improvements → supervisor decisions.
 
 **PR review flow**: reviewer reads diff → LLM evaluates → approve (merge via squash) / request-changes (dispatch feedback to agent) / escalate (notify human via Telegram).
 
@@ -38,6 +38,7 @@ The `TRIAGE_OUTPUT_SCHEMA` and `TRIAGE_REQUIRED_FIELDS` constants exported from 
 
 **Key conventions:**
 - Every PR must have `Closes #N` in the body
+- Linear-sourced PRs should use `Closes NEX-<number>` in the body when they resolve a Linear issue
 - Agents use `Co-Authored-By: <agent-name> <agent-name@agent>` in commits
 - One issue, one branch, one PR — no bundling
 - PRs with merge conflicts get auto-rebased; if rebase fails, escalate
@@ -51,6 +52,39 @@ When this container is used for LLM PR reviews:
 - **Never block** on style, naming, missing comments, or "could be cleaner" suggestions.
 - If minor issues exist, include them in an approval comment.
 
+## Commands
+
+- `npm run build` - compile TypeScript and refresh the schema-contract copy step
+- `npm test` - run the Vitest suite once
+- `npm run test:watch` - run Vitest in watch mode
+- `/status`, `/health`, `/pause`, `/resume`, `/dispatch`, `/prioritize` - daemon/operator control and live status
+- `/queue`, `/review-queue`, `/approve <task-id> [note]`, `/reject <task-id> [note]`, `/ack`, `/dismiss`, `/resolve`, `/deescalate` - operator review and escalation handling
+- `/quality`, `/quality-health`, `/quality-summary` - per-agent quality snapshot, system health, and rolling approval summary
+- `/verification-calibration`, `/calibration`, `/token-stats`, `/first-pass-rate`, `/fpr` - calibration, drift, token, and first-pass reporting
+- `/score <task-id>`, `/backfill-scores`, `/backfill-bypass-reasons`, `/low-score` - score inspection and remediation helpers
+- `/pr-guard-status`, `/routing-violations`, `/reconcile`, `/decisions` - PR guard, routing, and decision log views
+- `/triage-health [agent]`, `/investigations`, `/memory [expand <topic>|digest]`, `/misrouting [hours]`, `/meeting-goal` - triage, research, memory, and meeting surfaces
+
+## APIs
+
+- `GET /api/score-provenance/:task_id` - inspect score source and fallback-blocking state
+- `GET /api/persistent-anomalies` - recurring anomaly observations
+- `GET /api/quality-anomalies` - quality anomaly payload for recurring score/outcome mismatches
+- `GET /api/quality-system-health` - aggregate quality health status
+- `GET /api/triage-health` - triage schema health and revision metrics
+- `POST /api/validate-triage-schema` - pre-submission housekeeping schema check
+- `GET /api/pr-guard-cooldown/check` - single-issue PR guard cooldown lookup
+- `GET /api/pr-guard-cooldowns` - bulk PR guard cooldown feed
+- `GET /api/low-score-approved` - low-score approval audit feed
+- `GET /api/score-violations` - sub-threshold approval violation report
+- `GET /api/bypass-audit` - bypass-audit payload and daily digest source
+- `GET /api/calibration-recommendations` and `POST /api/calibration-recommendations/:id/resolve` - calibration recommendation feed and operator resolution
+- `GET /api/investigations` and `GET /api/investigations/summary` - research investigation feed and snapshot
+- `GET /api/fleet-capability-check` - fleet-wide task capability gate
+- `GET /api/schema-consumers` - schema consumer registry
+- `GET /api/meeting/:id/outcome`, `GET /api/meetings/outcomes`, `GET /api/meetings/outcomes/summary` - meeting-facilitator outcome client surface
+- `https://api.linear.app/graphql` - Linear GraphQL API used by `LinearClient`
+
 ## Scope
 
 **In scope:**
@@ -58,6 +92,8 @@ When this container is used for LLM PR reviews:
 - Task verifier: score completed tasks, approve/reject, dispatch revisions
 - Supervisor: strategic reasoning about system state, dispatch decisions
 - Improvement detector: analyze task patterns, create issues for improvements; batch deduplication guard prevents identical task-batches from triggering redundant LLM analysis within 6h (`improvement_analysis_runs` table, `computeBatchHash()`)
+- Linear integration: typed GraphQL client, Linear trigger polling, and verifier comment updates for Linear-sourced work
+- Quality summary: rolling approval-quality digest and `/quality-summary` operator command for trend monitoring
 - Escalation system: Telegram notifications, dashboard alert queue
 - Score calibrator: close feedback loop between scores and actual PR outcomes
 - Calibration drift monitor: alert when score distributions shift significantly
@@ -119,7 +155,7 @@ When this container is used for LLM PR reviews:
 
 **Out of scope (belongs to orchestrator-core):**
 - Daemon loop, state store, dispatching infrastructure
-- GitHub/Linear/Slack trigger polling
+- GitHub/Slack trigger polling
 - Agent deployment, container management
 
 **Out of scope (belongs to dashboard):**
@@ -136,6 +172,7 @@ src/
   supervisor-log.ts                 — queryable supervisor decision log
   client/
     llm-client.ts                   — Anthropic SDK wrapper; prompt-caching support
+    linear-client.ts                — Linear GraphQL client for issue polling and comments
   github-app-auth.ts                — GitHub App JWT exchange + installation-token cache for per-agent identities
   config/
     security-allowlist.ts           — shared example/template file patterns (synced with agent-proxy)
@@ -146,6 +183,7 @@ src/
     improvement-detector.ts         — analyze task patterns, surface improvement candidates
     score-calibrator.ts             — score → outcome feedback loop; threshold recommendations
     calibration-drift.ts            — score distribution drift alerts with dedup cooldown
+    calibration-recommendations-feed.ts — calibration recommendation persistence and review/resolve flow
     pr-iteration-metrics.ts         — multi-round PR review patterns and coaching directives
     routing-accuracy.ts             - per-agent quality stats to inform routing preferences
     reroute-quality-tracker.ts      - reroute decision correlation with quality outcomes; degradation detection
@@ -172,6 +210,7 @@ src/
     routing-violations.ts           — detect and surface routing decisions that breach policy rules
     semantic-duplicate-guard.ts     — semantic deduplication of improvement-detector issue candidates
     quality-system-health.ts        — aggregate quality-system health status: score floor, bypass rates, drift
+    quality-summary.ts              — rolling approval-quality digest plus `/quality-summary` Telegram command
     proactive-rebase-scheduler.ts   — detect stale PRs (≥3 commits behind main, open >24h); emit rebase tasks; track proactive vs reactive rebase counts
     capability-check.ts             — declare eligible task types; reject misrouted foreign implementation tasks
     pre-dispatch-capability-enforcer.ts — hard-block reviewer from accepting implementation tasks at dispatch time
@@ -188,18 +227,21 @@ src/
     misrouting-digest.ts            — daily Telegram digest of implementation tasks dispatched to reviewer; /misrouting [hours] on-demand command
     bypass-audit.ts                 — /api/bypass-audit payload + BypassAuditScheduler daily Telegram digest for sub-0.60-floor approvals; IBypassAuditStore
     universal-quality-gate.ts       — checkApprovalQualityGate() + UniversalQualityGateMonitor; sub-0.80 alert for ALL task types across ALL approval paths
+    score-provenance.ts             — score provenance payloads and default-fallback approval blocking
+    persistent-anomalies.ts         — recurring anomaly persistence and feed payloads
     research-investigation-client.ts — HTTP client for research agent /api/investigations feed; register/activate/complete/cancel lifecycle; `summary()` method for GET /api/investigations/summary snapshot (active_count, last_completed, oldest_in_flight_age); used by improvement-detector when dispatching research tasks
     investigations-feed.ts          — `/investigations` Telegram command: `getInvestigationsFeedPayload()` + `formatInvestigationsForTelegram()`; research feed grouped by status (active/pending/done/cancelled)
     meeting-facilitator-goal.ts     — meeting-facilitator monthly goal widget: `getMeetingFacilitatorGoalWidget()` tracking `core_logic_shipped` (target 1) and `meetings_facilitated` (target 5); `IMeetingFacilitatorGoalStore` wired into `ITelegramStateStore`
+    meeting-synthesis.ts            — meeting synthesis persistence and stale-result helpers
+    meeting-outcome-client.ts       — client for meeting-facilitator outcome APIs and supervisor intelligence extraction
+    meeting-priority-dispatcher.ts  — rule-based fast path for dispatching from meeting outcomes
     pr-guard-cooldown-feed.ts       — `listActivePRGuardCooldowns(repo?)` bulk query returning all non-expired cooldown entries; `getPRGuardCooldownFeedPayload()` REST payload for `/api/pr-guard-cooldowns` endpoint
     pr-guard-cooldown-check.ts      — `getCooldownCheckPayload()` + `parseCooldownCheckParams()` for `GET /api/pr-guard-cooldown/check?repo=...&issue=N`; per-issue proactive dispatch gate
     triage-health.ts                — per-agent schema failure rates and triage validation stats; powers `/triage-health` Telegram command; reads from `triage_validator_calls` table
     triage-schema-validator.ts      — `POST /api/validate-triage-schema` pre-submission self-check; `validateTriageSchema()` callable by agents before submitting housekeeping results to avoid revision cycles
     low-quality-pr-labeler.ts       — `LowQualityPRLabeler` adds/removes `low-quality` GitHub label on PRs when tasks score below 0.80; hooks into the universal quality gate path
     pr-guard-surge-detector.ts      — `PRGuardSurgeDetector`: surge alert at ≥2 hits/60min; auto-suppression (2h block + Telegram alert with "dispatch suppressed until HH:MM UTC") at ≥5 hits/30min via `IPRGuardCooldownStore`
-    score-provenance.ts             — `ScoreSource` type; `parseResponse()` score provenance tagging; `shouldBlockDefaultFallbackApproval()` guard for parse-error zeros; `/api/score-provenance/:task_id`
-    persistent-anomalies.ts         — `score_anomaly_observations` persistence; `recordAnomalyObservation()`; `getPersistentAnomalies()`; `/api/persistent-anomalies`
-    calibration-recommendations-feed.ts — `calibration_recommendations` persistence + review/resolve feed and high-confidence auto-apply helpers
+    linear.ts                       — Linear issue poller that dispatches unseen `linear:<issue>` work into the fleet
     fleet-capability-check.ts       — `FLEET_CAPABILITY_MAP` + `evaluateFleetCapability()` + `GET /api/fleet-capability-check`; fleet-wide pre-work capability gate callable by any agent (research-agent#178)
     fork-protocol.ts                — canonical spec and types for `fork_from: conversation_id` dispatch payload field; `DispatchForkSpec`, `buildForkSpec()`, `parseForkFrom()`, `serialiseForkFrom()`, `isExploratoryFork()`, `KNOWN_FORK_LABELS`, `FORK_FROM_MIGRATION_SQL`; Phase 1 shadow-mode spec for session-fork infrastructure (issue #454)
     meeting-outcome-client.ts       — HTTP client for meeting-facilitator agent outcome API (port 3485); `MeetingOutcomeClient` with `fetchOutcome()`, `listOutcomes()`, `summary()`, `extractSupervisorIntelligence()`; `IssueRef`, `PriorityRankingEntry`, `SequencingConstraint`, `MeetingOutcome`, `MeetingOutcomeSummary` types; factory `createMeetingOutcomeClient()` (issue #460)
@@ -212,7 +254,7 @@ src/
     store.ts                        — SQLite state.db read/write helpers
     types.ts                        — shared TypeScript interfaces and type aliases
   telegram/
-    command-handler.ts              — /status, /tasks, /approve and other bot commands
+    command-handler.ts              — /status, /health, /pause, /resume, /dispatch, /queue, /review-queue, /approve, /reject, /quality, /quality-health, /quality-summary, /triage-health, /investigations, /memory, /misrouting, /meeting-goal and other bot commands
   util/
     ulid.ts                         — ULID generation utility for task/event IDs
   __tests__/                        — Vitest unit tests (one file per module)
