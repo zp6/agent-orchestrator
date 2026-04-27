@@ -1,56 +1,62 @@
-# Monthly goals — ambitious targets that give the fleet direction.
-# The supervisor, roadmap proposer, and priority scorer use these
-# to align work. Progress tracked via key results and Telegram reports.
+# Fleet goals — Q3 2026
+# Decided at fleet kickoff meeting: rapartlu/agent-orchestrator#1209 (2026-04-27)
+# Director: claude-agent-orchestrator
+# Progress tracked weekly by Director; updated in quarterly retro.
 
-month: 2026-06
+quarter: 2026-Q3
+
+# May 2026 baseline — captured before Q3 begins. Populate via Day-1 snapshot task.
+baseline:
+  tasks_per_week: null       # to be filled by baseline snapshot issue
+  failure_rate: null         # to be filled by baseline snapshot issue
+  avg_cost_per_task_usd: null  # to be filled by baseline snapshot issue
+
 goals:
-  - id: parallel-subtask-execution
-    title: Parallel subtask execution for complex issues
-    target: 3 multi-subtask issues completed end-to-end with parallel agent coordination
-    owner: orchestrator
+  - id: external-oss-impact
+    title: Ship one fleet-authored OSS tool with external adoption
+    target: One open-source project built entirely by the fleet, with measurable external engagement by 30 Sep 2026
+    owner: system
+    article: IV
     key_results:
-      - description: Planner generates parallel subtask plans with dependency graphs for complex issues
-        metric: parallel_plans_generated >= 10
-      - description: Dispatcher creates and tracks parent/child task trees in state.db
-        metric: parent_child_trees_tracked >= 5
-      - description: At least one 4-agent parallel execution completes successfully end-to-end
-        metric: max_parallel_agents_in_single_task >= 4
-      - description: 3 multi-subtask issues closed with all child PRs merged
-        metric: parallel_issues_completed >= 3
-  - id: token-spend-reduction
-    title: Cut token spend 50% via smart routing, caching, and cost attribution
-    target: Same throughput at half the token cost with full per-tier visibility
+      - description: GitHub stars on fleet-authored OSS repo
+        metric: oss_github_stars >= 100
+      - description: Issues filed by non-fleet contributors
+        metric: oss_external_issues >= 5
+      - description: Published postmortem or RFC indexed externally
+        metric: published_external_artefacts >= 1
+
+  - id: scale-reliability
+    title: Scale to 1,500 tasks/week at sub-8% failure rate
+    target: Higher throughput AND higher reliability — 1500 tasks/week, failure_rate <= 0.08
     owner: system
     key_results:
-      - description: Per-model token usage tracked and attributed to cost tier for every task
-        metric: token_attribution_coverage >= 0.95
-      - description: Token usage dashboard surfaces per-tier cost breakdown in real time
-        metric: dashboard_cost_breakdown_live == true
-      - description: Prompt cache hit rate reaches 40% or above across all LLM calls
-        metric: prompt_cache_hit_rate >= 0.40
-      - description: Total token spend per completed task drops 30% vs May baseline
-        metric: tokens_per_task_reduction >= 0.30
-  - id: scale-throughput-quality
-    title: Scale to 1,000 tasks/week at sub-12% failure rate
-    target: "Higher throughput AND higher reliability: 1000 tasks/week, failure_rate <= 0.12"
+      - description: Weekly completed tasks reach 1,500
+        metric: weekly_tasks_completed >= 1500
+      - description: Task failure rate at or below 8%
+        metric: failure_rate <= 0.08
+      - description: First-pass verification rate at or above 90%
+        metric: first_pass_verification_rate >= 0.90
+
+  - id: cost-efficiency
+    title: Average cost per completed task at or below $0.10 USD
+    target: Token efficiency and caching gains keep per-task cost under $0.10 within Article V budget
     owner: system
     key_results:
-      - description: Weekly completed tasks reach 1,000 (up from ~776)
-        metric: weekly_tasks_completed >= 1000
-      - description: Task failure rate drops from 20% to below 12%
-        metric: failure_rate <= 0.12
-      - description: First-pass verification rate pushed from 80.1% to 85%
-        metric: first_pass_verification_rate >= 0.85
-      - description: Fleet expanded to 10 or more active agents
-        metric: active_agents >= 10
-  - id: meeting-facilitator-live
-    title: Meeting facilitator agent live and handling real meetings
-    target: Core logic shipped, 5+ meetings facilitated end-to-end with logged outcomes
+      - description: Average token cost per completed task (USD)
+        metric: avg_cost_per_task_usd <= 0.10
+      - description: Prompt cache hit rate across all LLM calls
+        metric: prompt_cache_hit_rate >= 0.50
+      - description: Monthly infra spend stays within Article V cap
+        metric: monthly_infra_spend_usd <= 2000
+
+  - id: autonomous-delivery
+    title: Fleet completes multi-week projects without operator intervention
+    target: 2 multi-issue multi-repo projects completed end-to-end; Director runs retros autonomously
     owner: orchestrator
     key_results:
-      - description: Core meeting facilitator logic implemented, deployed, and passing CI
-        metric: meeting_facilitator_deployed == true
-      - description: At least 5 meetings facilitated end-to-end without operator intervention
-        metric: meetings_facilitated >= 5
-      - description: Meeting outcomes (agenda, decisions, action items) persisted to state.db
-        metric: outcome_persistence_rate >= 0.90
+      - description: Projects spanning > 5 issues across >= 3 repos completed without operator intervention
+        metric: autonomous_multi_repo_projects >= 2
+      - description: Consecutive weeks Director runs autonomous weekly retro
+        metric: director_retro_streak >= 8
+      - description: Tasks requiring operator escalation below Article II threshold
+        metric: unauthorised_escalations == 0

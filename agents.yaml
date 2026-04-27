@@ -137,6 +137,8 @@ agents:
     capabilities: ["typescript", "orchestration", "sqlite"]
     github: "rapartlu/agent-orchestrator"
     owns_topics: ["orchestrator", "daemon", "routing", "dispatcher", "planner", "deployer", "state", "triggers", "sync", "waste", "guard", "metric"]
+    director: true                 # Fleet Director — Q3 2026 (decided at kickoff #1209)
+    director_duties: ["weekly-retro", "goals-yaml", "quarterly-retro-issue"]
     auto_reroute_rejection_threshold: 4
     # Housekeeping fires at cycle modulo 0 → first slot in each 5h window (~:00)
     housekeeping_offset_cycles: 0
