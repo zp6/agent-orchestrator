@@ -85,6 +85,13 @@ const STALE_ISSUE_AGE_DAYS = 7;
 const STANDUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 /** Minimum interval between blue-sky sessions (ms). */
 const BLUESKY_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+/** Minimum interval between Director retros (ms). Target: Monday 09:00 UTC. */
+const RETRO_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+/**
+ * Tolerance window around Monday 09:00 UTC in which the retro may fire (ms).
+ * Wide enough to tolerate poll jitter and daemon restarts around that time.
+ */
+const RETRO_WINDOW_MS = 4 * 60 * 60 * 1000; // ±4h either side of 09:00 UTC Monday
 /** Only check meeting schedule every N cycles to avoid querying the DB every cycle. */
 const MEETING_SCHEDULE_CHECK_EVERY_N_CYCLES = 6; // ~30 min
 const ROADMAP_PROPOSAL_EVERY_N_CYCLES = 288; // ~24h at 5min interval
@@ -811,8 +818,10 @@ export class Daemon {
         const now = Date.now();
         const lastStandup = this.store.getLastMeetingTime("standup");
         const lastBluesky = this.store.getLastMeetingTime("bluesky");
+        const lastRetro = this.store.getLastMeetingTime("retro");
         const standupElapsed = lastStandup ? now - new Date(lastStandup).getTime() : Infinity;
         const blueskyElapsed = lastBluesky ? now - new Date(lastBluesky).getTime() : Infinity;
+        const retroElapsed = lastRetro ? now - new Date(lastRetro).getTime() : Infinity;
 
         if (standupElapsed >= STANDUP_INTERVAL_MS) {
           batch4.push(this.runMeeting(time, "standup"));
@@ -827,6 +836,13 @@ export class Daemon {
         }
         if (blueskyElapsed >= BLUESKY_INTERVAL_MS) {
           batch4.push(this.runMeeting(time, "bluesky"));
+        }
+        // Director retro — fires Monday 09:00 UTC (±RETRO_WINDOW_MS tolerance).
+        // Two conditions must both be true:
+        //   1. At least 7 days have elapsed since the last retro (prevents double-fire).
+        //   2. Current UTC time falls within the Monday 09:00 ±4h window.
+        if (retroElapsed >= RETRO_INTERVAL_MS && Daemon.isRetroWindowOpen(now)) {
+          batch4.push(this.runMeeting(time, "retro"));
         }
       }
       if (this.cycleCount % ROADMAP_PROPOSAL_EVERY_N_CYCLES === 0) {
@@ -2804,8 +2820,33 @@ export class Daemon {
     }
   }
 
-  private async runMeeting(time: string, type: "standup" | "bluesky"): Promise<void> {
-    const label = type === "bluesky" ? "blue sky session" : "standup";
+  /**
+   * Returns true when the current UTC time falls within the Monday 09:00 UTC
+   * retro window (±RETRO_WINDOW_MS tolerance). This allows the retro to fire
+   * anywhere from Monday 05:00 UTC through Monday 13:00 UTC, absorbing poll
+   * jitter and brief daemon outages without skipping the week.
+   *
+   * Also fires if `nowMs` is on a Monday and any time after 09:00 (catches
+   * late starts on Monday) OR on a Tuesday before 09:00 (48-hour grace for
+   * daemon downtime over the weekend).
+   */
+  static isRetroWindowOpen(nowMs: number): boolean {
+    const d = new Date(nowMs);
+    const dow = d.getUTCDay(); // 0=Sun, 1=Mon, 2=Tue ... 6=Sat
+    const utcHour = d.getUTCHours();
+    const utcMin = d.getUTCMinutes();
+    const minutesSinceMidnight = utcHour * 60 + utcMin;
+    const retroMinutes = 9 * 60; // 09:00 UTC
+
+    // Monday 05:00–23:59 UTC
+    if (dow === 1 && minutesSinceMidnight >= retroMinutes - 4 * 60) return true;
+    // Tuesday 00:00–13:00 UTC (grace period for weekend daemon outage)
+    if (dow === 2 && minutesSinceMidnight <= retroMinutes + 4 * 60) return true;
+    return false;
+  }
+
+  private async runMeeting(time: string, type: "standup" | "bluesky" | "retro"): Promise<void> {
+    const label = type === "bluesky" ? "blue sky session" : type === "retro" ? "director retro" : "standup";
     try {
       console.log(`[${time}] Starting ${label}...`);
       const summary = await runTeamMeeting(this.config, this.store, { type });
