@@ -1,9 +1,11 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-26 (triage cycle 17)_
+_Last updated: 2026-04-26 (triage cycle 18)_
 
 ## Completed (recent)
 
+- **#453 / PR #508** — `preexisting-failure-tracker.ts`: consolidated Telegram alert when the same `(repo, pattern)` pair accumulates ≥3 distinct merged PRs within a rolling 7-day window; 24h per-pair dedup cooldown; `staging_preexisting_skips` SQLite table
+- **#492 / PR #507** — `/supervisor-dispatches` extended with `--agent` and `--since` filters: per-agent date-range drill-down on proactive dispatch history
 - **#504 / PR #505** — `marginal-approvals-feed.ts` trend endpoint + per-agent coaching prompt for dashboard panel (`getMarginalApprovalsTrend()`)
 - **#502 / PR #503** — `marginal-approvals-feed.ts`: `/api/marginal-approvals` REST payload + `/marginal-approvals` Telegram command — surfaces approved tasks in the 0.60–0.79 band for operator review
 - **#490 / PR #493** — `quality-summary.ts`: rolling 24h approval-quality digest (total, below-floor count, marginal rate, worst agent); daily scheduled Telegram digest + on-demand `/quality-summary` command
@@ -84,21 +86,14 @@ _Last updated: 2026-04-26 (triage cycle 17)_
 
 5. **#445 — Sub-0.60 approval audit entry gap** _(high)_ — Score 0.52 was approved without a bypass-audit entry; investigate the path that bypasses bypass-audit recording and add the missing hook.
 
-6. **#453 — Reviewer-side guard: alert when staging validator fires for pre-existing failures repeatedly (>3 distinct PRs)** _(high)_ — When the staging validator fires for the same failure pattern across >3 distinct PRs, alert operators; prevents silent accumulation of pre-existing failures.
-
-## In flight
-
-- **#492 / PR #507** — `/supervisor-dispatches` filter by agent and date range; PR open with `Closes #492`.
-- **#496 / PR #497** — `/api/score-provenance/summary` 7-day breakdown by score source; PR open with `Closes #496`.
+6. **#496 — Add /api/score-provenance/summary endpoint** _(medium)_ — Rolling 7-day breakdown of approved tasks grouped by `score_source` (`llm_parse`, `default_fallback`, `operator_override`); PR #497 was closed without merging — still needed.
 
 ## Planned
 
+- **#514 — Add start_period to generated Docker healthcheck for claude-orchestrator-telegram** _(medium)_ — Prevents avoidable recovery loops on slow-start containers; confirm scope (may belong to agent-orchestrator repo).
 - **#472 — Meeting facilitator: persist synthesis results to queryable store** _(high)_ — Keep meeting results searchable across daemon cycles so follow-up sessions can retrieve prior synthesis outputs without revision churn.
 - **#440 — Improvement issues filed from analysis are not being dispatched** _(medium)_ — Add a `/stale-improvements` view and/or dispatch exemption path so chronic improvement findings do not stall silently.
-- **#364 — Hard quality floor with mandatory override audit trail** _(high)_ — Hard floor at 0.10 blocking sub-floor approvals; Telegram escalation with `/approve-override` and `/reject-override`; `score_floor_overrides` audit table.
-- **#368 — Auto-file GitHub issues for improvements identified across 3+ consecutive batches** _(medium)_ — `ImprovementRecurrenceTracker` records patterns by normalized title hash across distinct batches; auto-files `chronic` + `improvement` tagged issue when threshold is reached.
 - **#414 — Bookkeeping task type: score 'close-by-reference' outcomes appropriately** _(high)_ — Treat close-by-reference bookkeeping work as a distinct outcome instead of letting it fall back to a null/defaulted score.
-- **#359 — Daily agent quality digest with degradation callouts** _(high)_ — Scheduled Telegram message summarising each agent's 24-hour score average, trend direction, and day-over-day degradation.
 - **#340 — Persist proactive rebase stats to SQLite** _(medium)_ — `rebase_events` table, `IRebaseStore` interface, `/rebase-stats` Telegram command, and `/rebase-stats` HTTP endpoint for dashboard.
 
 ## Ideas
@@ -110,6 +105,31 @@ _Last updated: 2026-04-26 (triage cycle 17)_
 - **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
 
 ## Triage notes
+
+- **2026-04-26 cycle 18**: 13 open issues audited (excl. #522 triage trigger), 0 duplicates, 0 stale (oldest #340 at 7 days). Closed #511 (standup action: PR #599 on agent-dashboard already merged — action complete). Features shipped since cycle 17: #453 (PR #508 — preexisting-failure-tracker.ts), #492 (PR #507 — /supervisor-dispatches agent+date filter). ROADMAP.md: promoted #453/#492 to Completed; removed #453 from Next up; removed In flight section (both PRs shipped); removed closed issues #364/#368/#359 from Planned; added #496 to Next up rank 6 (PR #497 closed without merging); added #514 to Planned. CLAUDE.md: added preexisting-failure-tracker.ts to Scope and Source Layout; updated /supervisor-dispatches description to mention agent+date filters.
+
+```json
+{
+  "duplicates_checked": true,
+  "stale_issues": [
+    {
+      "number": 511,
+      "title": "[standup] Merge PR #599 (dashboard marginal approvals panel, MERGEABLE) to close issue #597",
+      "action": "closed",
+      "reason": "PR #599 on rapartlu/agent-dashboard merged 2026-04-26 — standup action is complete."
+    }
+  ],
+  "priority_reordering": [
+    {
+      "issue": 496,
+      "old_rank": null,
+      "new_rank": 6,
+      "reason": "PR #497 closed without merging; score-provenance/summary endpoint still needed — promoted to Next up."
+    }
+  ],
+  "outcome_summary": "Cycle 18 triage: 13 open issues audited, 0 duplicates, 0 stale (oldest 7 days). Closed #511 (standup action already complete). Two features shipped since cycle 17 (#453, #492) moved to Completed. Removed 3 closed issues (#364, #368, #359) from Planned. Added #496 to Next up and #514 to Planned. CLAUDE.md updated with preexisting-failure-tracker.ts module."
+}
+```
 
 - **2026-04-26 cycle 17**: No duplicate issues found (16 open, all distinct). No stale issues (>14 days) — oldest open issues (#340, #359, #364, #368) are 7 days old. Open PRs audited: #507 (Closes #492) and #497 (Closes #496) — both valid. Five features shipped since cycle 16: #490 (quality-summary.ts), #498 (standup-quality-trend.ts + backfill), #476 (pattern-risk-consumer.ts), #502 (marginal-approvals-feed initial), #504 (marginal-approvals trend). CLAUDE.md: added `pattern-risk-consumer.ts`, `quality-summary.ts`, `marginal-approvals-feed.ts` to source layout and scope. ROADMAP.md: promoted #490/#498/#476/#502/#504 to Completed; removed #490 from Planned; updated In flight to show PRs #507/#497; corrected duplicate #475/#476 entry.
 
