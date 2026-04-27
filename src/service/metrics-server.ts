@@ -11,6 +11,8 @@
  *   GET /dispatch-efficiency          — 7-day rolling window
  *   GET /dispatch-efficiency?days=30  — configurable window
  *   GET /health                       — basic liveness check
+ *   GET /guard-health                 — PR guard surge metrics (issue #1163)
+ *   GET /guard-health?hours=24        — configurable window in hours
  *   GET /investigations               — research investigation feed (issue #140)
  *   GET /investigations?limit=20&offset=0&status=done
  *   GET /misrouting                   — research agent impl-task misroute feed (issue #1077)
@@ -284,6 +286,8 @@ export interface GuardHealthResponse {
     total_hits: number;
     /** Guard hits that occurred after suppression was recorded (potential leaks). */
     leaked_hits: number;
+    /** Hits that were deduplicated (task already in recent queue). */
+    duplicate_suppressed_hits: number;
     /** Number of currently active suppressions. */
     active_suppressions: number;
     /** List of active suppressions with expiry times. */
@@ -319,6 +323,16 @@ function parseWindowDays(req: IncomingMessage): number {
   return Math.min(n, MAX_WINDOW_DAYS);
 }
 
+function parseWindowHours(req: IncomingMessage): number {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const raw = url.searchParams.get("hours");
+  if (!raw) return 24;
+  const n = parseInt(raw, 10);
+  if (isNaN(n) || n < 1) return 24;
+  // Max 30 days = 720 hours
+  return Math.min(n, 720);
+}
+
 // ── Server factory ─────────────────────────────────────────────────────────────
 
 /**
@@ -350,6 +364,27 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
     // ── GET /health ──────────────────────────────────────────────────────────
     if (url.pathname === "/health") {
       sendJson(res, 200, { status: "ok", service: "orchestrator-metrics", at: new Date().toISOString() });
+      return;
+    }
+
+    // ── GET /guard-health (issue #1163) ──────────────────────────────────────
+    if (url.pathname === "/guard-health") {
+      const hours = parseWindowHours(req);
+      try {
+        const windowMs = hours * 60 * 60 * 1000;
+        const metrics = store.getGuardHealthMetrics(windowMs);
+        const body: GuardHealthResponse = {
+          generated_at: new Date().toISOString(),
+          window_hours: hours,
+          metrics,
+        };
+        sendJson(res, 200, body);
+      } catch (err) {
+        log.warn("Failed to compute guard health metrics", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to compute metrics" });
+      }
       return;
     }
 

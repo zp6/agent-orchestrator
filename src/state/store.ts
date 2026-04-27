@@ -1815,6 +1815,8 @@ export class StateStore {
     this.runOperatorControlsMigration();
     this.runDagMigration();
     this.runFailureInterceptionMigration();
+    this.runGuardHealthMetricsMigration();
+    this.runGuardDuplicateSuppressionsMigration();
   }
 
   private runPhase2Migration(): void {
@@ -11822,6 +11824,166 @@ export class StateStore {
     this.db.prepare(`
       UPDATE failure_interceptions SET final_outcome = ? WHERE task_id = ? AND final_outcome IS NULL
     `).run(outcome, taskId);
+  }
+
+  // ── Guard Health Metrics (issue #1163) ────────────────────────────────────
+
+  private runGuardHealthMetricsMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS guard_surge_hits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        issue_number INTEGER NOT NULL,
+        hit_at TEXT NOT NULL,
+        suppression_active INTEGER DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_guard_surge_hits_repo_issue ON guard_surge_hits(repo, issue_number);
+      CREATE INDEX IF NOT EXISTS idx_guard_surge_hits_at ON guard_surge_hits(hit_at);
+      CREATE INDEX IF NOT EXISTS idx_guard_surge_hits_suppressed ON guard_surge_hits(suppression_active);
+
+      CREATE TABLE IF NOT EXISTS guard_surge_leaks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        issue_number INTEGER NOT NULL,
+        suppression_recorded_at TEXT NOT NULL,
+        leak_hit_at TEXT NOT NULL,
+        UNIQUE(repo, issue_number, leak_hit_at)
+      );
+      CREATE INDEX IF NOT EXISTS idx_guard_surge_leaks_at ON guard_surge_leaks(leak_hit_at);
+    `);
+  }
+
+  recordGuardHit(repo: string, issueNumber: number, suppressionActive: boolean): void {
+    this.runGuardHealthMetricsMigration();
+    this.db.prepare(`
+      INSERT INTO guard_surge_hits (repo, issue_number, hit_at, suppression_active)
+      VALUES (?, ?, ?, ?)
+    `).run(repo, issueNumber, new Date().toISOString(), suppressionActive ? 1 : 0);
+  }
+
+  checkForLeakedHits(repo: string, issueNumber: number, suppressionRecordedAt: Date): number {
+    this.runGuardHealthMetricsMigration();
+    const result = this.db.prepare(`
+      SELECT COUNT(*) AS count FROM guard_surge_hits
+      WHERE repo = ? AND issue_number = ? AND hit_at > ? AND suppression_active = 0
+    `).get(repo, issueNumber, suppressionRecordedAt.toISOString()) as { count: number };
+    return result.count ?? 0;
+  }
+
+  recordLeakedHits(repo: string, issueNumber: number, suppressionRecordedAt: Date): void {
+    this.runGuardHealthMetricsMigration();
+    const leakedCount = this.checkForLeakedHits(repo, issueNumber, suppressionRecordedAt);
+    if (leakedCount > 0) {
+      this.db.prepare(`
+        INSERT OR IGNORE INTO guard_surge_leaks (repo, issue_number, suppression_recorded_at, leak_hit_at)
+        SELECT ?, ?, ?, hit_at FROM guard_surge_hits
+        WHERE repo = ? AND issue_number = ? AND hit_at > ? AND suppression_active = 0
+      `).run(
+        repo, issueNumber, suppressionRecordedAt.toISOString(),
+        repo, issueNumber, suppressionRecordedAt.toISOString()
+      );
+    }
+  }
+
+  getGuardHealthMetrics(windowMs: number): {
+    total_hits: number;
+    leaked_hits: number;
+    duplicate_suppressed_hits: number;
+    active_suppressions: number;
+    suppressions: Array<{ repo: string; issue_number: number; expires_at: string }>;
+  } {
+    this.runGuardHealthMetricsMigration();
+    this.runGuardDuplicateSuppressionsMigration();
+    const cutoff = new Date(Date.now() - windowMs).toISOString();
+
+    // Count total hits
+    const hitRow = this.db.prepare(`
+      SELECT COUNT(*) AS count FROM guard_surge_hits WHERE hit_at >= ?
+    `).get(cutoff) as { count: number };
+    const total_hits = hitRow.count ?? 0;
+
+    // Count leaked hits
+    const leakRow = this.db.prepare(`
+      SELECT COUNT(*) AS count FROM guard_surge_leaks WHERE leak_hit_at >= ?
+    `).get(cutoff) as { count: number };
+    const leaked_hits = leakRow.count ?? 0;
+
+    // Count duplicate-suppressed hits
+    const cutoffDate = cutoff.split('T')[0];
+    const dupRow = this.db.prepare(`
+      SELECT COALESCE(SUM(suppression_count), 0) AS total FROM guard_duplicate_suppressions WHERE suppressed_date >= ?
+    `).get(cutoffDate) as { total: number };
+    const duplicate_suppressed_hits = dupRow.total ?? 0;
+
+    // Get active suppressions (from dispatch_surge_suppressions table)
+    const suppressions = this.db.prepare(`
+      SELECT repo, issue_number, expires_at FROM dispatch_surge_suppressions
+      WHERE expires_at > datetime('now')
+      ORDER BY expires_at ASC
+    `).all() as Array<{ repo: string; issue_number: number; expires_at: string }>;
+
+    return {
+      total_hits,
+      leaked_hits,
+      duplicate_suppressed_hits,
+      active_suppressions: suppressions.length,
+      suppressions,
+    };
+  }
+
+  // ── Guard Duplicate Suppressions (issue #1164) ────────────────────────────
+
+  private runGuardDuplicateSuppressionsMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS guard_duplicate_suppressions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        issue_number INTEGER NOT NULL,
+        suppressed_date TEXT NOT NULL,
+        suppression_count INTEGER DEFAULT 1,
+        UNIQUE(repo, issue_number, suppressed_date)
+      );
+      CREATE INDEX IF NOT EXISTS idx_guard_dup_supp_repo_issue ON guard_duplicate_suppressions(repo, issue_number);
+      CREATE INDEX IF NOT EXISTS idx_guard_dup_supp_date ON guard_duplicate_suppressions(suppressed_date);
+    `);
+  }
+
+  hasRecentAlreadyInReviewTask(repo: string, issueNumber: number, windowMs: number = 6 * 60 * 60 * 1000): boolean {
+    const sourceRef = `${repo}#${issueNumber}`;
+    const cutoff = new Date(Date.now() - windowMs).toISOString();
+    const row = this.db.prepare(`
+      SELECT 1 FROM tasks
+      WHERE source = 'github'
+        AND source_ref = ?
+        AND status = 'done'
+        AND verification_status = 'approved'
+        AND created_at > ?
+      LIMIT 1
+    `).get(sourceRef, cutoff);
+    return !!row;
+  }
+
+  recordGuardDuplicateSuppression(repo: string, issueNumber: number): void {
+    this.runGuardDuplicateSuppressionsMigration();
+    const today = new Date().toISOString().split('T')[0];
+    this.db.prepare(`
+      INSERT INTO guard_duplicate_suppressions (repo, issue_number, suppressed_date, suppression_count)
+      VALUES (?, ?, ?, 1)
+      ON CONFLICT(repo, issue_number, suppressed_date) DO UPDATE SET
+        suppression_count = suppression_count + 1
+    `).run(repo, issueNumber, today);
+  }
+
+  getGuardDuplicateSuppressions(windowMs: number): Array<{ repo: string; issueNumber: number; count: number }> {
+    this.runGuardDuplicateSuppressionsMigration();
+    const cutoff = new Date(Date.now() - windowMs).toISOString().split('T')[0];
+    return this.db.prepare(`
+      SELECT repo, issue_number AS issueNumber, SUM(suppression_count) AS count
+      FROM guard_duplicate_suppressions
+      WHERE suppressed_date >= ?
+      GROUP BY repo, issue_number
+      ORDER BY count DESC
+    `).all(cutoff) as Array<{ repo: string; issueNumber: number; count: number }>;
   }
 
   // ── Standup Quality History (issue #591) ──────────────────────────────────

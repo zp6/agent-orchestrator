@@ -7,7 +7,7 @@ const log = createLogger("guard-command");
  * Guard health command — PR guard surge suppression metrics and leak tracking (issue #1163).
  * Usage:
  *   orch guard-health             — fetch and display 24h metrics (default)
- *   orch guard-health --days 7    — fetch and display 7-day metrics
+ *   orch guard-health --hours 7   — fetch and display 7-hour metrics
  *   orch guard-health --json      — output raw JSON
  */
 export function registerGuardHealthCommand(program: Command): void {
@@ -38,6 +38,7 @@ export function registerGuardHealthCommand(program: Command): void {
           metrics: {
             total_hits: number;
             leaked_hits: number;
+            duplicate_suppressed_hits: number;
             active_suppressions: number;
             suppressions: Array<{
               repo: string;
@@ -57,6 +58,7 @@ export function registerGuardHealthCommand(program: Command): void {
           console.log(`\n🛡️  *Guard Health* (${window_hours}h window)\n`);
           console.log(`📊 Total hits: ${metrics.total_hits}`);
           console.log(`🚫 Leaked hits: ${metrics.leaked_hits}`);
+          console.log(`🔄 Duplicate-suppressed: ${metrics.duplicate_suppressed_hits}`);
           console.log(`🔒 Active suppressions: ${metrics.active_suppressions}`);
 
           if (metrics.suppressions.length > 0) {
@@ -72,6 +74,17 @@ export function registerGuardHealthCommand(program: Command): void {
           // Alert if leaks detected
           if (metrics.leaked_hits > 0) {
             console.log(`\n⚠️  *Alert:* Leaked hits detected — suppression may be failing!`);
+          }
+
+          // Alert if high duplicate suppression rate
+          const totalHits = metrics.total_hits;
+          if (totalHits > 0) {
+            const dupRate = metrics.duplicate_suppressed_hits / totalHits;
+            if (dupRate > 0.2) {
+              console.log(
+                `\n⚠️  *Alert:* High duplicate suppression rate (${(dupRate * 100).toFixed(1)}%) — many repeated dispatch attempts`
+              );
+            }
           }
 
           console.log(`\n_Generated: ${new Date(data.generated_at).toLocaleString()}_\n`);

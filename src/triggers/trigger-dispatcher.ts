@@ -113,6 +113,24 @@ function recordAlreadyInReviewTask(
     : `Open PR #${blockingPRNumber} is already in review`;
 
   try {
+    // Check for recent duplicate already-in-review task (issue #1164)
+    const hasRecentTask = store.hasRecentAlreadyInReviewTask(repo, issueNumber, 6 * 60 * 60 * 1000);
+
+    // Always record the guard hit
+    store.recordGuardHit(repo, issueNumber, hasRecentTask);
+
+    if (hasRecentTask) {
+      // Duplicate detected: skip task creation but record suppression
+      store.recordGuardDuplicateSuppression(repo, issueNumber);
+      log.debug("Already-in-review deduplication: skipped task creation", {
+        sourceRef,
+        blockingPRNumber,
+        reason: "duplicate task exists in last 6h",
+      });
+      return;
+    }
+
+    // No recent task: proceed with task creation
     const task = store.createTask({
       title: `[${repo}#${issueNumber}] Already in review — PR #${blockingPRNumber}`,
       description: `Pre-dispatch check detected that issue #${issueNumber} already has an ` +
