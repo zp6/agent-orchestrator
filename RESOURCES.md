@@ -44,17 +44,31 @@ Each ask is one entry:
 - **Effort for Operator**: deepseek.com → API key → drop in `~/.claude-orchestrator/.env` as `DEEPSEEK_API_KEY=...`
 - **Notes**: ~10–20× cheaper than frontier models. Cost-tier strategy: Deepseek for volume, frontier models for stakes.
 
-### 4. Daemon migration off Operator's laptop
+### 4. Daemon migration off Operator's laptop — DEFERRED
 
-- **Status**: open
+- **Status**: deferred
 - **Asked by**: orchestrator
 - **Asked on**: 2026-04-27
-- **Unlocks**: 24/7 autonomous operation. Currently the fleet stops when the Operator's laptop sleeps or restarts.
-- **Recommendation**: **Hetzner CX42** (8 vCPU, 16GB RAM, 160GB disk, ~$15/mo). Linux VM with full Docker support, fits the proxy's docker-in-docker architecture cleanly, well inside the monthly budget. Fleet self-provisions via Hetzner Cloud API once the Operator creates an API token.
-  - Railway and similar PaaS options were evaluated and rejected: they don't expose the Docker socket, breaking the proxy's container lifecycle management. Cost would also be 4–8× higher for our always-on multi-container shape.
-  - Spare Mac mini (if Operator has one idle) is a free alternative and beats Hetzner if available.
-- **Effort for Operator**: create a Hetzner Cloud account, generate an API token, drop it in `~/.claude-orchestrator/.env` as `HETZNER_API_TOKEN=...`. Fleet handles the rest (provision, configure, migrate, verify).
-- **Notes**: Article I autonomy is partially fictional until this is resolved. Fleet is happy to design the migration and execute it.
+- **Decision**: 2026-04-27 — Operator's M4 laptop is the host for now. Always-on, plenty of capacity, $0/mo. Migration is deferred until the fleet ships a public-facing service with an SLA, at which point residential hosting becomes blocking.
+- **Hardening for laptop hosting** (fleet executes — see issue):
+  - `caffeinate -dimsu` keeps the laptop awake permanently
+  - OrbStack set to start on login
+  - Daemon migrated from `nohup` to a launchd plist for clean restart-on-crash
+  - Health monitoring already in place
+- **When this re-opens**: the moment the fleet picks up a public-service workstream that requires 24/7 uptime, federation endpoints, or external SLA. Fleet flags via this file at that point.
+
+### 5. (Self-resolving) Take full advantage of the M4
+
+- **Status**: open — fleet executes
+- **Asked by**: orchestrator
+- **Asked on**: 2026-04-27
+- **Unlocks**: free inference capacity. The Operator's M4 has substantial idle GPU/Neural Engine capacity. Local OSS models served via Ollama or MLX can absorb embeddings, semantic memory reindexing, curriculum drilling, red-team fuzzing, and routine background work — at zero marginal cost. Becomes the cheapest tier in the cost-tiered routing strategy (Article VI).
+- **Effort for Operator**: none directly. Fleet installs Ollama, pulls models, wires the LLM client adapter, monitors RAM/thermal headroom. Operator gets a Telegram alert if local inference starts impacting laptop responsiveness.
+- **Suggested initial models**:
+  - `qwen2.5-coder:32b` — coding tasks, ~20GB RAM
+  - `nomic-embed-text` — embeddings, ~500MB RAM
+  - `llama3.3:70b-instruct-q4` — general background reasoning, ~40GB RAM (fits if no other heavy workloads)
+- **Notes**: this isn't a fourth provider in the cognitive-diversity sense — it's the cheapest cost tier. Frontier models still own high-stakes work.
 
 ## In progress
 
