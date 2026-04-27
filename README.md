@@ -97,11 +97,25 @@ agents:
 | `capabilities` | yes | Keyword tags for capability matching |
 | `owns_topics` | yes | Keywords for task routing |
 | `github` | no | `owner/repo` for GitHub issue routing |
+| `github_app` | no | Per-agent GitHub App identity used to mint installation tokens |
 | `docker.port` | no | Dedicated port for the agent's container |
 | `docker.permissions` | no | Claude Code permission mode (`auto`, `plan`, etc.) |
 | `docker.session` | no | Session mode (`fresh`, `continue`, `resume`) |
 
 `llm` is optional. It controls orchestrator-side LLM work such as routing, planning, PR review, verification, and supervisor decisions. To switch those calls from Claude to Codex, point `llm.preferred_agent` at a Codex-backed reviewer agent and set Codex-compatible model IDs under `llm.default_model` or `llm.models.*`.
+
+### GitHub App identity migration
+
+The fleet is migrating from a shared Operator PAT to per-agent GitHub App installation tokens. The canonical spec lives in [docs/github-app-identity-migration.md](./docs/github-app-identity-migration.md).
+
+At runtime, the orchestrator should:
+
+- mint one installation token per agent identity,
+- inject that token into `GH_TOKEN` and `GITHUB_TOKEN`,
+- refresh the token before expiry,
+- and keep the token in memory only.
+
+The app spec also defines the minimum repo permissions for each agent role.
 
 ## CLI
 
@@ -110,6 +124,27 @@ agents:
 ```bash
 orch agents                    # list all agents with live container status
 orch agents claude-proxy       # detailed view for one agent
+```
+
+### Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | Only for notifications | Telegram bot token from BotFather |
+| `TELEGRAM_CHAT_ID` | Only for notifications | Telegram chat ID to receive escalation and recovery alerts |
+| `STATE_DB_PATH` | — | Override path to shared SQLite DB (default: `~/.claude-orchestrator/state.db`) |
+
+Copy `.env.example` to `~/.claude-orchestrator/.env` and fill in the values.
+
+## Telegram escalation bot
+
+The `TelegramCommandHandler` exposes a two-way bot that operators can use to approve/reject tasks, trigger reruns, and view system status — all wired to the live `state.db`.
+
+```ts
+import { TelegramCommandHandler } from "claude-orchestrator-reviewer";
+
+const handler = new TelegramCommandHandler(store, notify);
+handler.start(); // begins polling Telegram for commands
 ```
 
 ### Dispatch a task

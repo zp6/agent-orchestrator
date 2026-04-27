@@ -78,6 +78,8 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 3. Push and create a PR: `gh pr create`
 4. Wait for review/merge
 
+- GitHub access is per-agent: use GitHub App installation tokens, not a shared Operator PAT. The canonical migration spec is `docs/github-app-identity-migration.md`.
+
 ## CRITICAL: Scope Boundaries
 
 This repo owns **core infrastructure only**:
@@ -115,7 +117,6 @@ curl -X POST http://localhost:3400/v1/rebuild
 # Delete
 curl -X DELETE http://localhost:3400/v1/agents/<name>
 ```
-
 **Important:** The management API is in-memory — registrations are lost on proxy restart. The daemon syncs agents on startup from `agents.yaml`.
 
 ## Telegram Bot
@@ -221,6 +222,94 @@ agents:
       api_key: "secret"
       permissions: "bypassPermissions"
       session: "fresh"
+src/
+  index.ts                          — package entry point; exports all public modules
+  config.ts                         — ReviewerConfig type and defaults
+  notify.ts                         — Notifier interface; Telegram + dashboard alert queue
+  health-recovery.ts                — health degraded/recovering detection and reporting
+  supervisor-log.ts                 — queryable supervisor decision log
+  client/
+    llm-client.ts                   — Anthropic SDK wrapper; prompt-caching support
+  github-app-auth.ts                — GitHub App JWT exchange + installation-token cache for per-agent identities
+  config/
+    security-allowlist.ts           — shared example/template file patterns (synced with agent-proxy)
+  reviewer/
+    pr-reviewer.ts                  — PR review: LLM eval, approve/request-changes/escalate
+    verifier.ts                     — task verification: 0-1 score, dimension breakdown, second-pass
+    supervisor.ts                   — strategic system-state reasoning, dispatch decisions
+    improvement-detector.ts         — analyze task patterns, surface improvement candidates
+    score-calibrator.ts             — score → outcome feedback loop; threshold recommendations
+    calibration-drift.ts            — score distribution drift alerts with dedup cooldown
+    pr-iteration-metrics.ts         — multi-round PR review patterns and coaching directives
+    routing-accuracy.ts             - per-agent quality stats to inform routing preferences
+    reroute-quality-tracker.ts      - reroute decision correlation with quality outcomes; degradation detection
+    reroute-conflict-recovery.ts    - conflict-recovery routing metrics and Telegram alerts
+    schema-impact.ts                - schema-consumer map; inject consumer notice into reviews
+    schema-contract.ts              — schema contract drift detection (CREATE/ALTER/INSERT column checks)
+    schema-contract.json            — checked-in registry of canonical column names per shared table
+    schema-consumer-registry.ts     — dynamic schema-consumer map auto-discovered from state.db access logs
+    quality-anomalies.ts            — quality anomaly feed: approvals where score contradicts PR outcome
+    agent-trends.ts                 — agent performance trend analysis (rolling quality averages)
+    health-incident-router.ts       — health incident routing and severity classification
+    standup-dispatch-guard.ts       — blocks standup dispatch when zero action items remain
+    issue-age.ts                    — issue age bucketing and severity (0-7d / 7-14d / 30d+)
+    issue-creator.ts                — create GitHub issues for detected improvements
+    standup-handler.ts              — zero-action standup handling; synthesis retry (up to 2x)
+    standup-batch-splitter.ts       — split large standup batches into prioritized sequential child tasks
+    triage-coaching.ts              — per-agent quality coaching directives injected into housekeeping prompts
+    duplicate-dispatch-surge-detector.ts — detect surge in duplicate dispatches and send Telegram alert
+    pr-existence-guard.ts           — pre-dispatch guard: check if a PR already exists before re-implementing
+    score-integrity.ts              — score integrity audit: bucket breakdown and per-task violation list
+    threshold-adjuster.ts           — per-verifier threshold auto-adjustment (Phase 2 calibration)
+    cli-smoke-test.ts               — lightweight end-to-end smoke tests callable from CLI
+    fleet-health-sparklines.ts      — per-agent health sparklines: rolling window of health events
+    routing-violations.ts           — detect and surface routing decisions that breach policy rules
+    semantic-duplicate-guard.ts     — semantic deduplication of improvement-detector issue candidates
+    quality-system-health.ts        — aggregate quality-system health status: score floor, bypass rates, drift
+    proactive-rebase-scheduler.ts   — detect stale PRs (≥3 commits behind main, open >24h); emit rebase tasks; track proactive vs reactive rebase counts
+    capability-check.ts             — declare eligible task types; reject misrouted foreign implementation tasks
+    pre-dispatch-capability-enforcer.ts — hard-block reviewer from accepting implementation tasks at dispatch time
+    cross-agent-inflight-guard.ts   — prevent same GitHub issue being dispatched to multiple agents simultaneously
+    dispatch-cascade-analyzer.ts    — detect, depth-limit, and cost-track multi-hop task cascades
+    quality-floor-bypass-detector.ts — Telegram alert when task approved below 0.80 with no bypass_reason
+    meta-quality-gate.ts            — stricter approval floor for quality-enforcement and calibration tasks
+    pr-scope-checker.ts             — deterministic bundling/multi-issue detection before LLM review round
+    memory-digest.ts                — daily Telegram digest of semantic task memory index; /memory command
+    low-score-approval-alerter.ts   — real-time Telegram alert when task approved with score < 0.70
+    score-zero-alert.ts             — dedicated alert for catastrophic score ≤ 0.05 approvals; higher-urgency than general low-score alerter
+    low-score-feed.ts               — /api/low-score-approved payload builder for operator audit
+    score-violations.ts             — /api/score-violations payload: sub-threshold approvals grouped by agent
+    misrouting-digest.ts            — daily Telegram digest of implementation tasks dispatched to reviewer; /misrouting [hours] on-demand command
+    bypass-audit.ts                 — /api/bypass-audit payload + BypassAuditScheduler daily Telegram digest for sub-0.60-floor approvals; IBypassAuditStore
+    universal-quality-gate.ts       — checkApprovalQualityGate() + UniversalQualityGateMonitor; sub-0.80 alert for ALL task types across ALL approval paths
+    research-investigation-client.ts — HTTP client for research agent /api/investigations feed; register/activate/complete/cancel lifecycle; `summary()` method for GET /api/investigations/summary snapshot (active_count, last_completed, oldest_in_flight_age); used by improvement-detector when dispatching research tasks
+    investigations-feed.ts          — `/investigations` Telegram command: `getInvestigationsFeedPayload()` + `formatInvestigationsForTelegram()`; research feed grouped by status (active/pending/done/cancelled)
+    meeting-facilitator-goal.ts     — meeting-facilitator monthly goal widget: `getMeetingFacilitatorGoalWidget()` tracking `core_logic_shipped` (target 1) and `meetings_facilitated` (target 5); `IMeetingFacilitatorGoalStore` wired into `ITelegramStateStore`
+    pr-guard-cooldown-feed.ts       — `listActivePRGuardCooldowns(repo?)` bulk query returning all non-expired cooldown entries; `getPRGuardCooldownFeedPayload()` REST payload for `/api/pr-guard-cooldowns` endpoint
+    pr-guard-cooldown-check.ts      — `getCooldownCheckPayload()` + `parseCooldownCheckParams()` for `GET /api/pr-guard-cooldown/check?repo=...&issue=N`; per-issue proactive dispatch gate
+    triage-health.ts                — per-agent schema failure rates and triage validation stats; powers `/triage-health` Telegram command; reads from `triage_validator_calls` table
+    triage-schema-validator.ts      — `POST /api/validate-triage-schema` pre-submission self-check; `validateTriageSchema()` callable by agents before submitting housekeeping results to avoid revision cycles
+    low-quality-pr-labeler.ts       — `LowQualityPRLabeler` adds/removes `low-quality` GitHub label on PRs when tasks score below 0.80; hooks into the universal quality gate path
+    pr-guard-surge-detector.ts      — `PRGuardSurgeDetector`: surge alert at ≥2 hits/60min; auto-suppression (2h block + Telegram alert with "dispatch suppressed until HH:MM UTC") at ≥5 hits/30min via `IPRGuardCooldownStore`
+    score-provenance.ts             — `ScoreSource` type; `parseResponse()` score provenance tagging; `shouldBlockDefaultFallbackApproval()` guard for parse-error zeros; `/api/score-provenance/:task_id`
+    persistent-anomalies.ts         — `score_anomaly_observations` persistence; `recordAnomalyObservation()`; `getPersistentAnomalies()`; `/api/persistent-anomalies`
+    calibration-recommendations-feed.ts — `calibration_recommendations` persistence + review/resolve feed and high-confidence auto-apply helpers
+    fleet-capability-check.ts       — `FLEET_CAPABILITY_MAP` + `evaluateFleetCapability()` + `GET /api/fleet-capability-check`; fleet-wide pre-work capability gate callable by any agent (research-agent#178)
+    fork-protocol.ts                — canonical spec and types for `fork_from: conversation_id` dispatch payload field; `DispatchForkSpec`, `buildForkSpec()`, `parseForkFrom()`, `serialiseForkFrom()`, `isExploratoryFork()`, `KNOWN_FORK_LABELS`, `FORK_FROM_MIGRATION_SQL`; Phase 1 shadow-mode spec for session-fork infrastructure (issue #454)
+    meeting-outcome-client.ts       — HTTP client for meeting-facilitator agent outcome API (port 3485); `MeetingOutcomeClient` with `fetchOutcome()`, `listOutcomes()`, `summary()`, `extractSupervisorIntelligence()`; `IssueRef`, `PriorityRankingEntry`, `SequencingConstraint`, `MeetingOutcome`, `MeetingOutcomeSummary` types; factory `createMeetingOutcomeClient()` (issue #460)
+    meeting-priority-dispatcher.ts  — rule-based fast-path for auto-dispatch from `MeetingOutcome` signals; `evaluateAutoDispatch()` pure function; 7-rule ordered evaluation returning `PriorityDispatchDecision` (`"dispatch"` | `"skip"` | `"defer-to-llm"`); `MeetingPriorityDispatcher` class with `evaluate()` + `filterDispatchable()`; `DispatchEvaluationContext` for caller-supplied fleet state (open PRs, in-flight tasks, merged issues); factory `createMeetingPriorityDispatcher()` (issue #463)
+  integration/
+    orchestrator-adapter.ts         — createReviewerInstances() adapter for orchestrator import
+  service/
+    logger.ts                       — structured logger
+  state/
+    store.ts                        — SQLite state.db read/write helpers
+    types.ts                        — shared TypeScript interfaces and type aliases
+  telegram/
+    command-handler.ts              — /status, /tasks, /approve and other bot commands
+  util/
+    ulid.ts                         — ULID generation utility for task/event IDs
+  __tests__/                        — Vitest unit tests (one file per module)
 ```
 
 ## Metrics Server
