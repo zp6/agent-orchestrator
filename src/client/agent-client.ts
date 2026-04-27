@@ -173,7 +173,10 @@ export class AgentClient {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       // Any HTTP response (even 404/405) means the proxy is up and accepting connections
-      await fetch(`${baseUrl}/`, { signal: controller.signal });
+      await fetch(`${baseUrl}/`, {
+        method: "GET",
+        signal: controller.signal,
+      });
       return true;
     } catch {
       // ECONNREFUSED, AbortError (timeout), etc.
@@ -198,7 +201,10 @@ export class AgentClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      await fetch(`${baseUrl}/`, { signal: controller.signal });
+      await fetch(`${baseUrl}/`, {
+        method: "GET",
+        signal: controller.signal,
+      });
       return { alive: true };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -227,7 +233,10 @@ export class AgentClient {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const start = Date.now();
     try {
-      await fetch(`${baseUrl}/`, { signal: controller.signal });
+      await fetch(`${baseUrl}/`, {
+        method: "GET",
+        signal: controller.signal,
+      });
       return { alive: true, latencyMs: Date.now() - start };
     } catch {
       return { alive: false, latencyMs: null };

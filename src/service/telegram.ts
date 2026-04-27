@@ -334,7 +334,10 @@ export async function handleCommand(text: string, ctx: TelegramContext): Promise
       const port = ctx.config.agents[name].docker?.port;
       if (!port) return `❓ ${name}: no port`;
       try {
-        const res = await fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(5000) });
+        const res = await fetch(`http://localhost:${port}/health`, {
+          method: "GET",
+          signal: AbortSignal.timeout(5000),
+        });
         return res.ok ? `✅ ${name}` : `❌ ${name} (${res.status})`;
       } catch {
         return `❌ ${name} (unreachable)`;
@@ -1204,7 +1207,10 @@ async function buildSummary(ctx: TelegramContext): Promise<string> {
     const port = ctx.config.agents[name].docker?.port;
     if (!port) return { name, ok: false };
     try {
-      const res = await fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(3000) });
+      const res = await fetch(`http://localhost:${port}/health`, {
+        method: "GET",
+        signal: AbortSignal.timeout(3000),
+      });
       return { name, ok: res.ok };
     } catch {
       return { name, ok: false };

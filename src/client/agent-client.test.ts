@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { AgentClient, buildAgentIdentityPrompt, buildAgentSystemPrompt, buildResearchPrompt } from "./agent-client.js";
 import { createServer, type Server } from "node:http";
 import type { OrchestratorConfig } from "../config/schema.js";
@@ -74,6 +74,23 @@ describe("AgentClient.ping", () => {
     const client = new AgentClient(config);
     const alive = await client.ping("no-port-agent", 3000);
     expect(alive).toBe(false);
+  });
+
+  it("uses GET for the proxy liveness check", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      const client = new AgentClient(makeConfig(port));
+      await client.ping("test-agent", 3000);
+
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(init.method).toBe("GET");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 

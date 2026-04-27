@@ -267,7 +267,10 @@ export class Deployer {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10_000);
     try {
-      const res = await fetch(`${baseUrl}/secrets/health`, { signal: controller.signal });
+      const res = await fetch(`${baseUrl}/secrets/health`, {
+        method: "GET",
+        signal: controller.signal,
+      });
       clearTimeout(timer);
 
       // 200 = all healthy, 207 = some unhealthy — both are valid JSON responses

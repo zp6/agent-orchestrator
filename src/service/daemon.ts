@@ -1594,7 +1594,10 @@ export class Daemon {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10_000);
-      const res = await fetch(`${proxyUrl}/health`, { signal: controller.signal });
+      const res = await fetch(`${proxyUrl}/health`, {
+        method: "GET",
+        signal: controller.signal,
+      });
       clearTimeout(timeout);
       healthy = res.ok;
     } catch {
@@ -1724,7 +1727,10 @@ export class Daemon {
 
       // Verify proxy
       try {
-        const res = await fetch(`${this.config.proxy.url}/health`, { signal: AbortSignal.timeout(10_000) });
+        const res = await fetch(`${this.config.proxy.url}/health`, {
+          method: "GET",
+          signal: AbortSignal.timeout(10_000),
+        });
         if (res.ok) {
           this.proxyOutageDeclared = false;
           this.proxyFailureTimestamps = [];
