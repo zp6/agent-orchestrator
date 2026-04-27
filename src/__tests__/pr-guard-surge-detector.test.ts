@@ -8,6 +8,7 @@ import {
   PR_GUARD_SUPPRESSION_WINDOW_MS,
   PR_GUARD_SUPPRESSION_TTL_MINUTES,
   PR_GUARD_PREFLIGHT_REQUIRED,
+  canonicalizeAgentName,
 } from "../reviewer/pr-guard-surge-detector.js";
 import type { PRGuardHit, PRGuardSurgeConfig } from "../reviewer/pr-guard-surge-detector.js";
 import type { IPRGuardCooldownStore } from "../reviewer/pr-existence-guard.js";
@@ -541,6 +542,131 @@ describe("PRGuardSurgeDetector", () => {
       // Suppression should NOT fire: the 30-min window from T=now covers T-30min to now,
       // which contains hits at -30min, -20min, -10min, now = 4 hits (< threshold 5)
       expect(store.calls).toHaveLength(0);
+    });
+  });
+
+  // ── canonicalizeAgentName (issue #525) ───────────────────────────────────────
+
+  describe("canonicalizeAgentName", () => {
+    it("strips claude- prefix", () => {
+      expect(canonicalizeAgentName("claude-proxy")).toBe("proxy");
+    });
+
+    it("strips codex- prefix", () => {
+      expect(canonicalizeAgentName("codex-proxy")).toBe("proxy");
+    });
+
+    it("strips claude- prefix from multi-word agent name", () => {
+      expect(canonicalizeAgentName("claude-orchestrator-reviewer")).toBe("orchestrator-reviewer");
+    });
+
+    it("strips codex- prefix from multi-word agent name", () => {
+      expect(canonicalizeAgentName("codex-orchestrator-reviewer")).toBe("orchestrator-reviewer");
+    });
+
+    it("leaves non-prefixed names unchanged", () => {
+      expect(canonicalizeAgentName("my-custom-agent")).toBe("my-custom-agent");
+      expect(canonicalizeAgentName("proxy")).toBe("proxy");
+      expect(canonicalizeAgentName("agent-reviewer")).toBe("agent-reviewer");
+    });
+
+    it("only strips the leading prefix (not mid-name occurrences)", () => {
+      expect(canonicalizeAgentName("agent-claude-helper")).toBe("agent-claude-helper");
+    });
+  });
+
+  // ── Cross-variant aggregation (issue #525) ───────────────────────────────────
+
+  describe("cross-variant hit aggregation", () => {
+    it("aggregates hits from claude-proxy and codex-proxy for the same (repo, issue)", async () => {
+      const fetchMock = mockFetch();
+      const store = makeSuppressionStore();
+      const detector = new PRGuardSurgeDetector(
+        makeConfig({ suppressionStore: store, suppressionThreshold: 5, suppressionWindowMs: 30 * 60 * 1000 }),
+      );
+      const base = new Date("2026-04-27T10:00:00Z");
+
+      // 3 hits from claude-proxy
+      for (let i = 0; i < 3; i++) {
+        await detector.recordHit(
+          makeHit({
+            timestamp: new Date(base.getTime() + i * 5 * 60 * 1000),
+            agentName: "claude-proxy",
+          }),
+        );
+      }
+      // 3 hits from codex-proxy for the same (repo, issue) — combined = 6
+      for (let i = 0; i < 3; i++) {
+        await detector.recordHit(
+          makeHit({
+            timestamp: new Date(base.getTime() + (3 + i) * 5 * 60 * 1000),
+            agentName: "codex-proxy",
+          }),
+        );
+      }
+
+      // Combined 6 hits ≥ suppressionThreshold 5 → suppression should fire
+      expect(store.calls).toHaveLength(1);
+      expect(store.calls[0]).toMatchObject({ repo: "rapartlu/research-agent", issueNumber: 133 });
+    });
+
+    it("triggers suppression at exactly 5 hits across two agent variants (3+2)", async () => {
+      const fetchMock = mockFetch();
+      const store = makeSuppressionStore();
+      const detector = new PRGuardSurgeDetector(
+        makeConfig({ suppressionStore: store, suppressionThreshold: 5, suppressionWindowMs: 30 * 60 * 1000 }),
+      );
+      const base = new Date("2026-04-27T10:00:00Z");
+
+      // 3 hits from claude-proxy (canonicalized: proxy)
+      for (let i = 0; i < 3; i++) {
+        await detector.recordHit(makeHit({ timestamp: new Date(base.getTime() + i * 4 * 60 * 1000), agentName: "claude-proxy" }));
+      }
+      // 1 more hit from codex-proxy (total = 4, still below threshold)
+      await detector.recordHit(makeHit({ timestamp: new Date(base.getTime() + 12 * 60 * 1000), agentName: "codex-proxy" }));
+      expect(store.calls).toHaveLength(0);
+
+      // 5th hit from codex-proxy (total = 5, exactly at threshold)
+      await detector.recordHit(makeHit({ timestamp: new Date(base.getTime() + 16 * 60 * 1000), agentName: "codex-proxy" }));
+      expect(store.calls).toHaveLength(1);
+    });
+
+    it("canonicalizes agentName stored in hit (claude-proxy → proxy)", async () => {
+      const detector = new PRGuardSurgeDetector(makeConfig({ suppressionThreshold: 999 }));
+      const base = new Date("2026-04-27T10:00:00Z");
+
+      await detector.recordHit(makeHit({ timestamp: base, agentName: "claude-proxy" }));
+      await detector.recordHit(makeHit({ timestamp: new Date(base.getTime() + 1000), agentName: "codex-proxy" }));
+
+      // Both hits should be in the window for the same (repo, issue)
+      const hits = detector.getWindowHits("rapartlu/research-agent", 133, new Date(base.getTime() + 2000));
+      expect(hits).toHaveLength(2);
+      // Both agent names should be canonicalized
+      expect(hits.every((h) => h.agentName === "proxy")).toBe(true);
+    });
+
+    it("does not block suppression when agent variants have different canonical names", async () => {
+      // Hits from 'proxy' and 'orchestrator-reviewer' should NOT aggregate together
+      const fetchMock = mockFetch();
+      const store = makeSuppressionStore();
+      const detector = new PRGuardSurgeDetector(
+        makeConfig({ suppressionStore: store, suppressionThreshold: 5, suppressionWindowMs: 30 * 60 * 1000 }),
+      );
+      const base = new Date("2026-04-27T10:00:00Z");
+
+      // 3 hits for issue 133 from claude-proxy (canonical: proxy)
+      for (let i = 0; i < 3; i++) {
+        await detector.recordHit(makeHit({ issueNumber: 133, timestamp: new Date(base.getTime() + i * 3 * 60 * 1000), agentName: "claude-proxy" }));
+      }
+      // 3 hits for issue 133 from claude-orchestrator-reviewer (canonical: orchestrator-reviewer)
+      // These are for a DIFFERENT logical agent type — same (repo, issue) pair still counts together
+      // because surge aggregation is by (repo, issue) not by agent type
+      for (let i = 0; i < 3; i++) {
+        await detector.recordHit(makeHit({ issueNumber: 133, timestamp: new Date(base.getTime() + (3 + i) * 3 * 60 * 1000), agentName: "claude-orchestrator-reviewer" }));
+      }
+
+      // All 6 hits are for the same (repo, issueNumber=133) → suppression fires at hit 5
+      expect(store.calls).toHaveLength(1);
     });
   });
 });

@@ -113,6 +113,18 @@ export interface PRGuardHit {
   prUrl: string;
   /** When the guard hit occurred. */
   timestamp: Date;
+  /**
+   * Optional: the agent that generated this hit (e.g. `"claude-proxy"`, `"codex-proxy"`).
+   *
+   * Stored for audit/diagnostic purposes only.  Surge counting is **always**
+   * aggregated across all agent variants for the same `(repo, issueNumber)` pair —
+   * hits from `claude-proxy` and `codex-proxy` both contribute to the shared counter.
+   *
+   * Callers that pass `agentName` should use {@link canonicalizeAgentName} before
+   * recording so the stored value is the canonical form (e.g. `"proxy"` rather
+   * than `"claude-proxy"`).  See issue #525.
+   */
+  agentName?: string;
 }
 
 export interface PRGuardSurgeConfig {
@@ -210,15 +222,30 @@ export class PRGuardSurgeDetector {
    *    `cooldownMs`).
    *
    * 2. **Suppression** — when rolling-window hits reach `suppressionThreshold`
-   *    (default 3) within `suppressionWindowMs` (default 15 min):
+   *    (default 5) within `suppressionWindowMs` (default 30 min):
    *      - A 2-hour cooldown entry is written via `suppressionStore` (if provided).
    *      - A Telegram alert is sent with "dispatch suppressed until HH:MM".
+   *
+   * **Agent variant aggregation (issue #525):**
+   * If `hit.agentName` is provided, it is canonicalized via {@link canonicalizeAgentName}
+   * before being stored (e.g. `"claude-proxy"` and `"codex-proxy"` both become `"proxy"`).
+   * The surge and suppression counts are always aggregated across ALL agent variants
+   * for the same `(repo, issueNumber)` pair — 3 hits from `claude-proxy` + 3 hits from
+   * `codex-proxy` = 6 combined hits toward the suppression threshold, same as 6 hits
+   * from a single agent.  This detector MUST be used as a shared singleton, not
+   * instantiated separately per agent variant.
    *
    * This method never throws — alert/store failures are logged and swallowed so
    * that guard logic is never interrupted.
    */
   async recordHit(hit: PRGuardHit): Promise<void> {
-    this.hits.push(hit);
+    // Canonicalize the agent name before storing so hits from `claude-proxy` and
+    // `codex-proxy` are stored identically — both contribute to the same per-(repo,issue)
+    // surge counter without being separated by provider variant (issue #525).
+    const canonicalHit: PRGuardHit = hit.agentName
+      ? { ...hit, agentName: canonicalizeAgentName(hit.agentName) }
+      : hit;
+    this.hits.push(canonicalHit);
 
     const key = makeKey(hit.repo, hit.issueNumber);
 
@@ -327,6 +354,12 @@ export class PRGuardSurgeDetector {
   /**
    * Returns all hits for the given (repo, issueNumber) pair within the
    * specified window duration in milliseconds.
+   *
+   * **Aggregates across all agent variants** — hits from `claude-proxy` and
+   * `codex-proxy` (or any other canonical variants) for the same `(repo, issue)`
+   * pair are counted together.  Agent names are NOT used as a filter dimension,
+   * so the suppression threshold is reached based on total hits regardless of
+   * which agent variant generated each hit (issue #525).
    */
   getWindowHitsInMs(
     repo: string,
@@ -500,4 +533,25 @@ export class PRGuardSurgeDetector {
 
 function makeKey(repo: string, issueNumber: number): string {
   return `${repo}#${issueNumber}`;
+}
+
+/**
+ * Canonicalize an agent name by stripping the provider-variant prefix.
+ *
+ * Both `claude-*` and `codex-*` variants of the same conceptual agent should
+ * contribute to the **same** surge counter for a given `(repo, issue)` pair.
+ * Canonicalization ensures `"claude-proxy"` and `"codex-proxy"` are stored
+ * identically (as `"proxy"`) so hit counts aggregate across providers.
+ *
+ * Examples:
+ *   `"claude-proxy"`              → `"proxy"`
+ *   `"codex-proxy"`               → `"proxy"`
+ *   `"claude-orchestrator-reviewer"` → `"orchestrator-reviewer"`
+ *   `"codex-orchestrator-reviewer"`  → `"orchestrator-reviewer"`
+ *   `"my-custom-agent"`           → `"my-custom-agent"` (unchanged)
+ *
+ * Issue #525 — fixes variant-blind aggregation for surge detection.
+ */
+export function canonicalizeAgentName(name: string): string {
+  return name.replace(/^(?:claude|codex)-/, "");
 }
