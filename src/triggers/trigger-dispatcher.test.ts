@@ -1600,6 +1600,95 @@ describe("dispatchIdleAgentBacklog", () => {
     expect(mockFetchIssues).not.toHaveBeenCalled();
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
   });
+
+  // ── Cross-agent inflight guard — idle path (issue #1196) ─────────────────
+
+  it("skips dispatch when a recent surge event exists within the flood-gate window (idle path, issue #1196)", async () => {
+    // Simulate a surge event within the 60-minute flood-gate window
+    (mockStore.hasRecentSurgeEvent as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (mockStore.getMostRecentSurgeEventAt as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Date(Date.now() - 10 * 60 * 1000).toISOString(), // 10 min ago
+    );
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 5, title: "Already guarded", body: "", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+    // Flood-gate check must be called for each issue
+    expect(mockStore.hasRecentSurgeEvent).toHaveBeenCalledWith(
+      "owner/my-repo",
+      5,
+      GUARD_FLOOD_GATE_WINDOW_MS,
+    );
+  });
+
+  it("dispatches when no recent surge event exists within the flood-gate window (idle path, issue #1196)", async () => {
+    // No recent surge events — should proceed normally
+    (mockStore.hasRecentSurgeEvent as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 5, title: "No guard active", body: "", url: "https://...", labels: [] },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalled();
+  });
+
+  // ── Atomic PR guard lock — idle path (issue #1196) ───────────────────────
+
+  it("suppresses duplicate guard fire when PR guard lock is already held (idle path, issue #1196)", async () => {
+    // Lock already acquired by main dispatch path
+    (mockStore.tryAcquirePRGuardLock as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 7, title: "Lock held", body: "", url: "https://...", labels: [] },
+    ]);
+    // Use mockReturnValueOnce so mock state doesn't bleed into subsequent describe blocks
+    mockCachedGetIssueState.mockReturnValueOnce({ state: "open", hasOpenPR: true, hasMergedPR: false });
+    mockFindExistingPRs.mockReturnValueOnce([
+      { number: 11, title: "WIP", url: "https://github.com/owner/my-repo/pull/11", state: "open", isDraft: false },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+    // Should record the suppressed attempt
+    expect(mockStore.recordPRGuardDuplicateAttempt).toHaveBeenCalledWith(
+      "owner/my-repo#7",
+      11,
+    );
+    // Should record the guard hit (as suppressed)
+    expect(mockStore.recordGuardHit).toHaveBeenCalledWith("owner/my-repo", 7, false);
+  });
+
+  it("creates already-in-review task when PR guard lock is acquired (idle path, issue #1196)", async () => {
+    // Lock not yet held — first fire
+    (mockStore.tryAcquirePRGuardLock as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    const createTaskMock = vi.fn().mockReturnValue({ id: "idle-guard-task" });
+    (mockStore as unknown as Record<string, unknown>).createTask = createTaskMock;
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 8, title: "New open PR", body: "", url: "https://...", labels: [] },
+    ]);
+    // Use mockReturnValueOnce so mock state doesn't bleed into subsequent describe blocks
+    mockCachedGetIssueState.mockReturnValueOnce({ state: "open", hasOpenPR: true, hasMergedPR: false });
+    mockFindExistingPRs.mockReturnValueOnce([
+      { number: 12, title: "WIP", url: "https://github.com/owner/my-repo/pull/12", state: "open", isDraft: false },
+    ]);
+
+    const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
+
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+    // Task must be created (first fire gets a task record)
+    expect(createTaskMock).toHaveBeenCalled();
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
