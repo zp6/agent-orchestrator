@@ -1,7 +1,7 @@
 node_modules/
 dist/
-*.js.map
+*.db
+*.db-shm
+*.db-wal
 .env
-.DS_Store
-.claude/worktrees/
-.claude/scheduled_tasks.lock
+.orchestrator-deploy-sha

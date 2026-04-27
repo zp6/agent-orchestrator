@@ -1,237 +1,133 @@
-# Claude Agent Orchestrator
+# Claude Orchestrator Reviewer
 
 ## What This Is
 
-The orchestrator is the control plane for a fleet of AI coding agents. Each agent is a persistent CLI session running in a Docker container, managed by the proxy. The orchestrator dispatches work, routes tasks, verifies quality, detects improvements, and manages agent lifecycle.
+The quality and oversight layer for the Claude Agent Orchestrator. This repo owns PR review, task verification, supervision, and improvement detection — everything that evaluates and improves agent output quality.
 
-## Architecture
+**This container also serves as the LLM backend for the orchestrator.** All PR reviews, task verifications, supervisor decisions, and improvement analysis are routed through this container. Keep it lightweight and responsive.
 
-### Agent Fleet (7 Claude agents + 5 Codex agents across 6 repos)
+## System Architecture (context for reviews)
 
-> **Note:** Codex (OpenAI) pool variants are active alongside the Claude pool — all 5 codex agents are running and dispatching. See provider/model columns in the table below.
+The orchestrator manages a fleet of Claude Code agents, each in a Docker container:
 
-| Agent | Port | Model | Pool | Purpose |
-|-------|------|-------|------|---------|
-| claude-agent-orchestrator | 3472 | claude-opus-4-6 | orchestrator | Core daemon, state store, dispatching, triggers |
-| claude-orchestrator-reviewer | 3474 | claude-sonnet-4-6 | reviewer | PR review, verification, supervisor |
-| claude-orchestrator-dashboard | 3473 | claude-sonnet-4-6 | dashboard | Dashboard UI, CLI commands, metrics |
-| claude-orchestrator-telegram | 3477 | claude-haiku-4-5 | — | Telegram command handling |
-| claude-research-agent | 3478 | claude-opus-4-6 | research | Research, investigation, technology evaluation |
-| claude-proxy | 3471 | claude-opus-4-6 | proxy | Proxy server, container management |
-| meeting-facilitator-agent | 3485 | claude-sonnet-4-6 | — | Meeting facilitation, structured discussions |
-| grok-meeting-voice | 3486 | grok-3 | — | Meeting standup voice (facilitation only); active once XAI_API_KEY set |
-| deepseek-background | 3487 | deepseek-chat | — | High-volume background workloads; active once DEEPSEEK_API_KEY set |
-| deepseek-reasoning | 3488 | deepseek-reasoner | reviewer | Deep reasoning for complex reviews; joins reviewer pool; active once DEEPSEEK_API_KEY set |
-| gemini-synth | 3489 | gemini-2.5-pro | — | Long-context synthesis and standup summarisation; active once GEMINI_API_KEY set |
+| Agent | Repo | Port | Purpose |
+|-------|------|------|---------|
+| claude-agent-orchestrator | rapartlu/agent-orchestrator | 3472 | Core daemon, state store, dispatching, triggers |
+| claude-orchestrator-dashboard | rapartlu/agent-dashboard | 3473 | Dashboard UI, CLI commands, metrics |
+| claude-orchestrator-reviewer | rapartlu/agent-reviewer | 3474 | **This repo** — PR review, verification, supervisor |
+| claude-orchestrator-telegram | rapartlu/agent-orchestrator | 3477 | Telegram command handling (Haiku model) |
+| claude-research-agent | rapartlu/research-agent | 3478 | Research, investigation, technology evaluation |
+| claude-proxy | rapartlu/agent-proxy | 3471 | Proxy server, container management |
+| meeting-facilitator-agent | rapartlu/meeting-facilitator-agent | 3485 | Meeting facilitation, structured discussions |
 
-### Repos
+**Daemon loop** runs every 30s: poll GitHub issues → dispatch to agents → verify quality → review PRs → detect improvements → supervisor decisions.
 
-| Repo | Owner | Scope |
-|------|-------|-------|
-| `rapartlu/agent-orchestrator` | This repo | Daemon, state, dispatching, routing, triggers |
-| `rapartlu/agent-dashboard` | Dashboard agent | Web dashboard, CLI, metrics |
-| `rapartlu/agent-reviewer` | Reviewer pool | PR review, verification, supervisor |
-| `rapartlu/research-agent` | Research agent | Findings reports, technology evaluation |
-| `rapartlu/agent-proxy` | Proxy agent | CLI wrapper, container management |
+**PR review flow**: reviewer reads diff → LLM evaluates → approve (merge via squash) / request-changes (dispatch feedback to agent) / escalate (notify human via Telegram).
 
-### Key Features
+**Task verification**: completed tasks are scored 0–1 by an LLM across four quality dimensions (correctness, completeness, test_coverage, code_quality). Below min_score (0.80) → revision feedback with dimension breakdown dispatched back to agent. Scores in 0.70–0.79 trigger an automatic second-pass review before final rejection. Results persisted to `verification_results` in state.db. Research tasks use a separate prompt with schema compliance scoring and research-specific dimension labels. Housekeeping/triage tasks use a deterministic JSON schema pre-check before the LLM pass (see below).
 
-- **Multi-provider pools** — Claude + Codex agents run in parallel; both pools are active and dispatching
-- **Agent pools** — multiple instances share workload via round-robin (orchestrator, reviewer, dashboard, research, proxy)
-- **Persistent sessions** — conversations resume across requests via `x-conversation-id` header
-- **Per-agent models** — Opus for coding, Sonnet for reviews, Haiku for Telegram
-- **Auto-rebase** — pre-submit validator auto-rebases stale branches before PR creation; proactive rebase scheduler (~15min cadence) prevents stale-branch build failures
-- **Telegram bot** — two-way communication: `@TheSupervisor_rapartlu_bot`
-- **Antibody log** — pre-dispatch failure prediction filter; blocks known-bad agent/task combos
-- **Daemon lifecycle auditor** — immutable audit trail of daemon start/stop/restart events
-- **Iteration cost tracking** — per-PR revision cost leaderboard with automatic improvement issue routing
-- **Cross-repo feature tracker** — detects feature consistency gaps across Claude/Codex pool members
-- **Health check postmortem** — auto-files structured incident reports for recurring health failures
-- **Verification calibration** — logs verification outcomes (`verification_outcome_logs`) and polls PR events to build quality-score training data
-- **Semantic task memory** — FTS5-based knowledge store; top-3 similar past successes injected into dispatch context at runtime; auto-tunes `min_quality_score` threshold via FTS5 query analysis with per-agent breakdown (issues #1011, #1033)
-- **Dispatch cascade analyzer** — tracks parent→child task relationships; enforces per-trigger follow-up depth cap to prevent unbounded task spawning
-- **Post-merge regression detector** — validates merged PRs in staging; auto-files revert tasks on regressions
-- **Metrics server** — embedded HTTP server on port 3472 exposing `/dispatch-efficiency`, `/health`, `/semantic-memory-effectiveness`, `/investigations`, and `/misrouting` for dashboard and operator polling
-- **Housekeeping triage schemas** — verifier enforces structured JSON blocks in housekeeping PR bodies (`TRIAGE_HOUSEKEEPING_SCHEMA`, `TRIAGE_CROSS_REPO_SCHEMA`); missing fields trigger immediate revision
-- **Prompt caching** — all static LLM system prompts cached via Anthropic `cache_control: { type: 'ephemeral' }`; dynamic config portions kept variable to avoid cache invalidation; reduces token spend on repeated supervisor/verifier calls (issue #1037)
-- **Dispatch waste rate alerting** — `getDispatchWasteMetrics24h()` tracks per-hour rolling window; Telegram alert fires when waste rate exceeds 15% in the most recent hour (`DISPATCH_WASTE_RATE_THRESHOLD = 0.15`) (issue #991)
-- **Cross-repo PR guard** — pre-dispatch validator checks all peer agent repos (`config.agents[*].github`) for open non-draft PRs before dispatching; blocks with failure code `open_pr_exists_cross_repo` (issue #991)
-- **Dispatch flood gate** — after the PR existence guard fires for a given issue, subsequent guard re-fires within a 60-minute cooldown window (`GUARD_FLOOD_GATE_WINDOW_MS = 3_600_000`) are silently dropped — no task created, no block recorded, no Telegram alert; only the first hit within the window creates a task and sends an alert (issue #1060)
-- **Reviewer-side PR guard cooldown check** — `src/client/pr-guard-cooldown-client.ts` queries the reviewer agent's `/api/pr-guard-cooldowns` endpoint before each dispatch; if an active cooldown is recorded for the (repo, issue) pair, dispatch is suppressed entirely with a structured skip event; fail-open: reviewer outage or timeout returns `{ status: 'unavailable' }` and dispatch proceeds normally (issue #1112)
-- **Quality gate pre-approval check** — `src/client/quality-gate-client.ts` calls `POST /api/quality-gate/check` on the reviewer agent immediately before any PR is enqueued for merge; if the gate returns `blocked` the PR receives a "Quality Gate Blocked" comment and is recorded as `request-changes` (not enqueued); if the reviewer is unreachable (timeout, 404, connection refused) the check fails open so reviewer outages never stall the merge queue; closes the #445 bypass hole where the LLM review decision alone could approve without the reviewer's explicit sign-off (PR #1199)
-- **Resilient team meetings** — if all agents return connection errors in a standup (e.g. Docker outage), the meeting is abandoned without saving to the DB, so the time-based scheduler retries on the next cycle rather than waiting the full 24-hour cooldown (issue #1053)
-- **Agent-initiated meeting requests** — standup Round 1 prompts include `REQUEST MEETING: <topic> [format: <type>]` instructions; `extractMeetingRequests()` (in `src/orchestrator/team-meeting.ts`) scans agent responses and writes `meeting_request` signals to the stigmergy table for the meeting facilitator to evaluate in the next cycle (PR #1115)
-- **Meeting priority outcome auto-dispatch** — after every meeting, `extractPriorityOutcomes()` (team-meeting.ts) scans the synthesis for priority rankings, sequencing constraints, and follow-up recommendations, then writes a `meeting_priority_outcome` signal (14-day TTL); `checkPriorityOutcomeSignals()` in daemon.ts reads these signals each cycle and deterministically dispatches the top-ranked open issue to its owning agent — bypassing LLM supervisor reasoning for a direct fast-path (issue #1143)
-- **Live meeting context injection** — before each standup, open issues (up to 15/repo), open PRs (up to 10/repo), and 7-day task stats are queried via `gh` CLI and injected into meeting context; prevents agents citing stale or closed issues during standups (issue #1069)
-- **Research agent misrouting enforcement** — `capability_tags: ["research-only"]` set on `claude-research-agent` in `agents.yaml`; implementation tasks dispatched to the research agent are blocked and rerouted at dispatch time; `GET /misrouting` metrics endpoint and Slack digest alert for observability (issue #1077)
-- **Predictive failure interception** — before every dispatch, scores incoming task title against recent failed tasks via token-overlap Jaccard similarity; injects top-3 failure post-mortems as "Lessons from Similar Failed Tasks" when similarity ≥ 0.6 (`FAILURE_INTERCEPTION_THRESHOLD`); sends Telegram alert at ≥ 0.75; records hits to `failure_interception_logs` table; `GET /failure-interceptions` metrics endpoint (issue #1086/#1093)
-- **DAG-based parallel subtask execution** — `DagRuntime` in `src/orchestrator/dag-runtime.ts` decomposes complex multi-agent tasks into a persistent dependency graph (`dag_executions` + `dag_nodes` tables); dispatches independent leaf nodes in parallel (up to 4); gates downstream nodes on upstream completions; non-blocking — `advanceAll()` is called each daemon cycle without blocking the poll loop (issue #1085/#1094)
-- **Live operator control plane** — `OperatorControlProcessor` in `src/service/operator-controls.ts` applies pending Telegram-issued directives (pause, resume, redirect, inject, merge) at the start of each daemon cycle before other work is dispatched; directives are persisted to `operator_controls` table and marked applied/failed per execution (issue #1087/#1092)
-- **Dispatch surge auto-suppression** — after N≥5 `already_in_review` responses within a 30-minute window, the dispatcher blocks further dispatches for 2 hours; surge state is persisted to SQLite; Telegram alert fires once per surge event; cooldown is visible via `orch signals` (issue #1113, PR #1148)
-- **Failure genome routing risk** — `FailureGenomeRouter` scores incoming tasks against the genome of recently failed tasks using token-overlap similarity; high-risk dispatch paths (genome score above threshold) are suppressed or redirected before reaching the agent; integrated into the dispatch pipeline at PR #1155 (issue #1131)
-- **Score-0 silent approval block** — verification pipeline rejects tasks that score exactly 0 without an explicit operator bypass; prevents silent pass-through of completely unscored tasks; implemented in PR #1159
-- **Standup synthesis retry with transcript fallback** — if the synthesis LLM call fails or returns an empty result, the daemon retries with a raw transcript fallback; prevents zero-item standups from being committed to the DB (PR #1156)
-- **Verification calibration recommendations persistence** — after each verification pass, calibration recommendations (score drift, threshold adjustments) are written to the `verification_calibration_recs` table for cross-cycle analysis and operator review (PR #1153)
-- **Guard health metrics + already-in-review dedup** — `guard_surge_hits` and `guard_surge_leaks` tables track all guard events and timing-race suppression failures; `hasRecentAlreadyInReviewTask()` skips task creation for already-in-review dupes within 6h; `GET /guard-health` and `orch guard-health` CLI surface suppression effectiveness (PR #1195, issues #1163/#1164)
-- **Quality gate pre-approval check** — `quality-gate-client.ts` calls `POST /api/quality-gate/check` on the reviewer before any PR is enqueued for merge; fail-open on reviewer outage; closes the bypass hole from issue #445 (PR #1199)
-- **Persistent score anomaly tracking** — `score_anomaly_observations` table persists recurring quality anomalies across daemon cycles; `GET /api/persistent-anomalies` REST endpoint; `orch anomalies` CLI with per-agent/type summaries; daily Telegram digest at 09:00 (PR #1222, issue #1207)
-- **Per-agent GitHub App identity** — replaces shared Operator PAT with per-agent GitHub App installation tokens; `src/github-app-auth.ts` handles JWT exchange and token caching; aligns with CHARTER.md Article VII (PR #1221, issue #1210)
-- **Multi-provider expansion** — Grok (xAI), Deepseek, and Gemini providers added alongside Claude and Codex pools; four new agents: `grok-meeting-voice` (port 3486), `deepseek-background` (port 3487), `deepseek-reasoning` (port 3488), `gemini-synth` (port 3489); active once operator drops API keys (PR #1220, issue #1211)
-- **OrbStack socket recovery** — after Docker socket outage, `resetHttpConnections()` clears stale Anthropic SDK TCP sockets to prevent cascade failures on resume (PR #1218, issue #1216)
+**Housekeeping/triage schema compliance**: Tasks with `task_type === "housekeeping"` or a title containing `[housekeeping]` must include a JSON block with four required fields before reaching LLM scoring. Missing any field triggers immediate revision with an explicit list of missing fields — no LLM score can override this gate. Required fields (each weighted 0.25; all four must be present for score ≥ 0.80):
+- `duplicates_checked` — boolean `true` (confirms a duplicate scan was performed)
+- `stale_issues` — array of `{ number, title, action, reason }` (empty `[]` is valid)
+- `priority_reordering` — array of `{ issue, old_rank, new_rank, reason }` (empty `[]` is valid)
+- `outcome_summary` — non-empty string (1–3 sentence summary)
 
-## CRITICAL: NEVER Push Directly to Main
+The `TRIAGE_OUTPUT_SCHEMA` and `TRIAGE_REQUIRED_FIELDS` constants exported from `verifier.ts` (and re-exported from `index.ts`) allow the orchestrator dispatcher to embed the schema template in housekeeping dispatch prompts. `Verifier.checkTriageSchemaCompliance(result)` is a public method for standalone schema checks.
 
-**ALL changes MUST go through a PR.** No exceptions, no "quick fixes", no "just a config change."
+**Marginal approval**: Tasks scoring 0.60–0.74 that are approved include a `marginal_reason` badge surfaced to operators so quality gaps are visible without blocking the task.
 
-1. Create a feature branch: `git checkout -b fix/description`
-2. Commit your changes
-3. Push and create a PR: `gh pr create`
-4. Wait for review/merge
-
+**Key conventions:**
+- Every PR must have `Closes #N` in the body
+- Agents use `Co-Authored-By: <agent-name> <agent-name@agent>` in commits
+- One issue, one branch, one PR — no bundling
+- PRs with merge conflicts get auto-rebased; if rebase fails, escalate
 - GitHub access is per-agent: use GitHub App installation tokens, not a shared Operator PAT. The canonical migration spec is `docs/github-app-identity-migration.md`.
 
-## CRITICAL: Scope Boundaries
+## Review Guidelines
 
-This repo owns **core infrastructure only**:
+When this container is used for LLM PR reviews:
+- **Default to approve.** Most PRs that work correctly should be approved.
+- Only request changes for **real bugs**: runtime failures, security vulnerabilities, data loss.
+- **Never block** on style, naming, missing comments, or "could be cleaner" suggestions.
+- If minor issues exist, include them in an approval comment.
 
-**Owns:** daemon loop, state store (SQLite), task dispatching, trigger polling, agent deployment/sync, routing, planning, execution, Telegram bot.
+## Scope
 
-**Does NOT own:**
-- Dashboard, CLI UI → `rapartlu/agent-dashboard`
-- PR reviewer, verifier, supervisor → `rapartlu/agent-reviewer`
-- Proxy server, containers → `rapartlu/agent-proxy`
-- Research reports → `rapartlu/research-agent`
+**In scope:**
+- PR reviewer: review diffs, approve/request-changes/escalate, auto-rebase
+- Task verifier: score completed tasks, approve/reject, dispatch revisions
+- Supervisor: strategic reasoning about system state, dispatch decisions
+- Improvement detector: analyze task patterns, create issues for improvements; batch deduplication guard prevents identical task-batches from triggering redundant LLM analysis within 6h (`improvement_analysis_runs` table, `computeBatchHash()`)
+- Escalation system: Telegram notifications, dashboard alert queue
+- Score calibrator: close feedback loop between scores and actual PR outcomes
+- Calibration drift monitor: alert when score distributions shift significantly
+- PR iteration metrics: surface multi-round review patterns and coaching directives
+- Routing accuracy tracker: per-agent quality metrics to inform routing decisions
+- Reroute quality tracker: flag auto-reroutes that degrade outcomes; identify problematic routing patterns
+- Conflict recovery reroute monitor: track conflict-recovery dispatch rates and alert on spikes
+- Shared security allowlist: example/template file patterns synchronized with security scanner in agent-proxy
+- Schema-consumer impact detection: flag cross-repo schema changes in PR reviews
+- Standup handler: process zero-action standups; retry failed synthesis; split large batches into child tasks
+- Health recovery: detect and report agent degraded/recovering transitions
+- Supervisor log: queryable decision log for CLI and dashboard consumers
+- Score integrity audit: bucket breakdown and violation list for approved tasks with low scores
+- Duplicate-dispatch surge detector: alert when dispatch volume for a single issue spikes anomalously
+- Pre-dispatch PR existence guard: prevent re-implementation when a PR already exists for an issue
+- Per-verifier threshold auto-adjustment: Phase 2 calibration that adapts `min_score` per verifier instance
+- Per-agent quality coaching: inject agent-specific coaching directives into housekeeping task prompts
+- CLI smoke tests: lightweight end-to-end checks callable from CLI to verify core reviewer paths
+- Fleet health sparklines: per-agent rolling health event windows surfaced to dashboard and Telegram
+- Routing violation detection: surface routing decisions that breach configured policy rules
+- Semantic duplicate guard: deduplicate improvement-detector issue candidates using semantic similarity
+- Quality system health: aggregate health status covering score floor, bypass rates, and calibration drift
+- Proactive rebase scheduler: detect PRs ≥3 commits behind main that have been open >24h; emit rebase tasks; count proactive vs reactive rebases separately
+- Pre-dispatch capability enforcer: declare eligible task types and reject misrouted foreign implementation tasks
+- Cross-agent in-flight guard: prevent the same GitHub issue being dispatched to multiple agents simultaneously
+- Dispatch cascade analyzer: detect, depth-limit, and cost-track task chains spawned from a single trigger
+- Quality floor bypass detector: Telegram alert when a task is approved below 0.80 with no explicit bypass_reason
+- Meta-quality gate: stricter approval floor for tasks whose scope is quality enforcement or calibration
+- PR scope pre-flight check: deterministic bundling detection before LLM review is triggered
+- Semantic task memory: daily Telegram digest summarising the semantic task memory index; `/memory` command
+- Score provenance tracker: `score_source` on verification results distinguishes parsed LLM scores from `default_fallback` values; `shouldBlockDefaultFallbackApproval()` lets the orchestrator block silent auto-approval of parse-error zeros (`score-provenance.ts`)
+- Persistent anomaly tracker: `score_anomaly_observations` rows capture recurring quality anomalies across analysis cycles; `getPersistentAnomalies()` and `/api/persistent-anomalies` surface repeated patterns for operators (`persistent-anomalies.ts`)
+- Calibration recommendations feed: `calibration_recommendations` persistence plus review/resolve flow for `ScoreCalibrator` recommendations and high-confidence auto-apply (`calibration-recommendations-feed.ts`)
+- Research investigation client: HTTP client for the research agent's investigation feed API (`/api/investigations`); registers new investigations when research tasks are dispatched, activates them when work begins, completes them with findings + result issue URL after `analyzeResearchFindings()` converts a report into a GitHub issue; `summary()` method calls `GET /api/investigations/summary` for lightweight snapshots (active_count, last_completed, oldest_in_flight_age)
+- Real-time low-score approval alerter: Telegram notification when a task is approved with score < 0.70
+- Score-zero approval alerter: dedicated real-time Telegram alert for catastrophic score ≤ 0.05 approvals with full dimension breakdown
+- Low-score approved task feed: `/api/low-score-approved` payload builder for operator audit
+- Score-bypass violation report: `/api/score-violations` payload listing sub-threshold approvals by agent
+- Misrouting digest: daily Telegram summary of all tasks dispatched to the reviewer that matched implementation patterns; `/misrouting [hours]` on-demand command
+- Bypass-audit endpoint: `/api/bypass-audit` payload builder listing all tasks approved below the 0.60 quality floor in a rolling window with `bypass_reason` (or 'none' for silent bypasses); `BypassAuditScheduler` sends a daily Telegram digest with count and worst offender
+- PR guard cooldown: `pr_guard_cooldown` table in `state.db` — written when the PR existence guard returns `already-in-review`; `isPRGuardCooldownActive()` prevents re-queuing the same issue for 60 min without a second gh CLI call
+- old_rank pre-submission validator: `validateOldRankInPriorityReordering()` — deterministic checker for `priority_reordering` entries where `old_rank` should be `null` (newly-added issues); embedded as a pre-submission checklist in the triage coaching prompt
+- Per-agent triage coaching with `validation_pre_check_passed`: coaching directive now carries `validation_pre_check_passed: boolean | null` and exposes validator results for prior submissions in the prompt banner
+- Universal quality gate: `checkApprovalQualityGate(task, notifier)` pure function + `UniversalQualityGateMonitor` class; catches sub-0.80 approvals across ALL task types and ALL approval paths (verify callback, orchestrator short-circuit, operator `/approve`, cross-repo follow-ups); no task-type exemptions
+- Triage schema pre-submission validator: `POST /api/validate-triage-schema` endpoint allows agents to self-check housekeeping JSON blocks before submission, reducing revision cycles
+- Triage health dashboard: `/triage-health` Telegram command exposes per-agent schema failure rates and validator call counts from `triage_validator_calls` table; triage revision-rate before/after metrics
+- Investigations feed: `/investigations` Telegram command shows research agent investigation feed (active, pending, done, cancelled) via `investigations-feed.ts`
+- Meeting-facilitator goal widget: monthly goal tracking for the meeting-facilitator agent (`meeting-facilitator-goal.ts`) — `core_logic_shipped` and `meetings_facilitated` targets surfaced to operators
+- PR guard cooldown feed: `listActivePRGuardCooldowns()` bulk query + `/api/pr-guard-cooldowns` REST endpoint (`pr-guard-cooldown-feed.ts`) for dashboard-level flood gate visibility
+- PR guard cooldown check endpoint: `GET /api/pr-guard-cooldown/check?repo=...&issue=N` returns `{ active, expires_at, ttl_remaining_seconds }` for a single (repo, issue) pair; enables orchestrator/proxy to gate dispatch proactively before task creation (`pr-guard-cooldown-check.ts`)
+- Low-quality PR labeler: `LowQualityPRLabeler` adds/removes the `low-quality` GitHub label on PRs when tasks score below 0.80; integrates with the universal quality gate path (`low-quality-pr-labeler.ts`)
+- Triage-health consecutive-failure cross-link: `fetchConsecutiveFailureBlocks()` async helper checks dashboard `/api/consecutive-failure-detector/blocks`; when an agent has `failure_rate > 50%` and an active block, `/triage-health` appends a warning with a link to the consecutive-failure-detector panel
+- PR guard surge detector: `PRGuardSurgeDetector` fires a Telegram alert when the same `(repo, issue)` pair triggers `already-in-review` ≥ 2 times within a 60-minute window; at ≥5 hits within 30 minutes, writes a 2-hour dispatch suppression entry via `IPRGuardCooldownStore` and sends a dedicated alert with "dispatch suppressed until HH:MM UTC" (`pr-guard-surge-detector.ts`)
+- PR guard cooldown pre-flight: early cooldown check in `checkPRExistenceBeforeDispatch` returns `skip=true / cooldown-active` before any `gh` CLI call when a 60-min cooldown is active, preventing redundant guard tasks across daemon cycles (`pr-existence-guard.ts`)
+- Fleet-wide capability check endpoint: `GET /api/fleet-capability-check?agent=...&task_type=...&source_ref=...` — any fleet agent calls this before starting a task; returns `{ accept, reason, suggested_agents }` from `FLEET_CAPABILITY_MAP`; enables the research agent (and others) to reject implementation tasks before doing any work (`fleet-capability-check.ts`)
+- Fork-from dispatch payload protocol: canonical spec and types for `fork_from: conversation_id` in dispatch payloads; enables the proxy to clone warm parent sessions into independent child sessions for parallel subtask fan-out and Fleet Immune System vaccination; Phase 1 (spec + DB column + verifier awareness, shadow-mode only) (`fork-protocol.ts`)
+- Meeting outcome client: HTTP client for the meeting-facilitator agent's structured outcome API (`/api/meeting/:id/outcome`, `/api/meetings/outcomes`, `/api/meetings/outcomes/summary`); `MeetingOutcomeClient` fetches `PriorityRankingEntry[]`, `SequencingConstraint[]`, and follow-up recommendation so the supervisor can act on meeting intelligence without polling the facilitator manually; `extractSupervisorIntelligence()` helper parses the ranked issue list and ordering constraints into an immediately actionable structure (`meeting-outcome-client.ts`)
+- Meeting priority dispatcher: rule-based fast-path for auto-dispatching the top-ranked issue from a completed `MeetingOutcome` without LLM judgment; `evaluateAutoDispatch(outcome, ctx)` pure function checks 7 named rules in order (`RULE_OUTCOME_COMPLETE`, `RULE_RANKING_NONEMPTY`, `RULE_MIN_VERIFIER_SCORE`, `RULE_NO_FOLLOW_UP`, `RULE_NO_SEQUENCING_BLOCK`, `RULE_NO_OPEN_PR`, `RULE_NO_INFLIGHT_TASK`) and returns `PriorityDispatchDecision` with action "dispatch" | "skip" | "defer-to-llm"; `MeetingPriorityDispatcher` class + `filterDispatchable()` for batch evaluation; reduces meeting → implementation-start latency by bypassing LLM on clear-pass signals (`meeting-priority-dispatcher.ts`)
 
-## Management API
+**Out of scope (belongs to orchestrator-core):**
+- Daemon loop, state store, dispatching infrastructure
+- GitHub/Linear/Slack trigger polling
+- Agent deployment, container management
 
-Agent lifecycle via the proxy management API (port 3400):
+**Out of scope (belongs to dashboard):**
+- Web UI, CLI commands, activity views
 
-```bash
-# List agents
-curl http://localhost:3400/v1/agents
+## Source Layout
 
-# Create agent
-curl -X POST http://localhost:3400/v1/agents -H "Content-Type: application/json" \
-  -d '{"name":"...", "project":"...", "port":3472, "session":"fresh", ...}'
-
-# Update/rebuild agent
-curl -X PUT http://localhost:3400/v1/agents/<name> -H "Content-Type: application/json" -d '{...}'
-
-# Start/stop
-curl -X POST http://localhost:3400/v1/agents/<name>/start
-curl -X POST http://localhost:3400/v1/agents/<name>/stop
-
-# Rebuild Docker image (all agents get new image on next recreate)
-curl -X POST http://localhost:3400/v1/rebuild
-
-# Delete
-curl -X DELETE http://localhost:3400/v1/agents/<name>
 ```
-**Important:** The management API is in-memory — registrations are lost on proxy restart. The daemon syncs agents on startup from `agents.yaml`.
-
-## Telegram Bot
-
-Two-way communication via `@TheSupervisor_rapartlu_bot`:
-
-| Command | What it does |
-|---------|-------------|
-| `s` / `summary` | Executive briefing: health, shipped, attention, WIP |
-| `stats` | Detailed metrics: throughput, backlog, pool distribution |
-| `status` | Agent status |
-| `health` | Ping all containers |
-| `issues` | Open issues across repos |
-| `prs` | Open PRs across repos |
-| `chat <agent> <msg>` | Direct conversation (persistent) |
-| `newchat <agent>` | Reset conversation |
-| `issue <idea>` | Create issue from rough description |
-| `dispatch <agent> <msg>` | Send task to agent |
-| `standup-quality [agent] [days]` | Per-agent standup quality sparkline, avg score, trend, and low-streak alert (issue #591) |
-
-Telegram polls independently every 3 seconds (not tied to daemon cycles).
-Config: `~/.claude-orchestrator/.env` (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID).
-
-## Daemon Poll Cycle
-
-Every 5 minutes (default; configurable via `--poll-interval`):
-1. **Telegram polling** (independent 3s loop)
-2. **Stale task watchdog** — kill tasks stuck >10 min (configurable per agent)
-3. **Retry failed tasks** — exponential backoff, 3 retries max
-4. **Dispatch triggers** — poll GitHub issues, dispatch to agents (pool-aware, with semantic memory context injection); cross-repo PR guard checks all peer repos before dispatching to block `open_pr_exists_cross_repo` failures
-5. **Verify completed tasks** — LLM scores quality, dispatches revisions; enforces housekeeping triage schema
-6. **Create orphan PRs** — auto-rebase stale branches, create PRs
-7. **Proactive rebase** — every ~15min, rebase stale branches before they fall behind origin/main
-8. **Review open PRs** — approve/merge, request changes, or escalate
-9. **Merge queue** — sequential merges per repo to avoid conflicts; cascade cap enforced pre-merge
-10. **Redeploy stale agents** — skip busy agents, health check after deploy
-11. **Preventive restart** — every ~50 min, restart idle containers
-12. **Supervisor** — every ~15min, strategic reasoning, dispatch decisions
-13. **Backlog triage** — every ~5h, dispatch housekeeping to agents (staggered by `housekeeping_offset_cycles`)
-14. **Post-merge regression check** — validates staging after merges, auto-files revert tasks on failures
-15. **Semantic memory audit** — every ~24h, evaluates FTS5 memory effectiveness (zero-match rate tracking, query quality analysis), auto-tunes `min_quality_score` threshold, and provides per-agent memory breakdown
-16. **Roadmap proposals** — every ~24h, proposes new issues based on coverage gap detection
-
-## Pool Routing
-
-Agents with the same `pool` field in `agents.yaml` share workload:
-
-- **LLM calls** (reviews, verification, supervisor): round-robin across pool members
-- **Dispatched tasks**: picks first idle pool member
-- **Router**: scores one agent per pool, dispatcher resolves to idle instance
-- **Dedup**: source_ref-based (pool-safe)
-
-## Session Persistence
-
-Conversations persist across requests:
-- Orchestrator generates `conversation_id` per task (stored in DB)
-- Passed as `x-conversation-id` header to proxy
-- Proxy maps to CLI session UUID via `--resume`
-- Session map persisted to disk (`~/.claude/session-map.json`)
-- Telegram chat conversations persisted to `~/.claude-orchestrator/telegram-chats.json`
-
-## Configuration (agents.yaml)
-
-```yaml
-proxy:
-  url: "http://localhost:3457"
-  manager_url: "http://localhost:3400"
-  timeout_ms: 900000
-  ssh_key: "~/.ssh/claude-proxy-agents"
-
-verification:
-  enabled: true
-  sources: ["github", "linear"]
-  min_score: 0.7      # minimum quality score to approve a task
-  max_revisions: 1    # max LLM-driven revision attempts per task
-
-escalation:
-  retry_limit: 3
-  max_followup_depth: 3   # cap follow-up chain depth before routing to escalation queue
-
-# Optional: define custom task types (built-ins: implementation, research, facilitation)
-task_types:
-  planning:
-    verification_prompt: "..."
-    prompt_header: Planning Request
-    result_header: Agent Plan
-    dimensions: [feasibility, completeness, risk_assessment, clarity]
-
-agents:
-  agent-name:
-    dir: "repo-directory"
-    repo: "git@github.com:owner/repo.git"  # enables auto-deploy + volume isolation
-    pool: "pool-name"                       # optional: pool for load balancing
-    model: "claude-opus-4-6"                # per-agent model selection
-    description: "What this agent does"
-    capabilities: ["typescript", "api"]
-    owns_topics: ["keyword1", "keyword2"]
-    github: "owner/repo"                    # for GitHub issue polling
-    housekeeping_offset_cycles: 0           # stagger housekeeping within each 5h window
-    auto_reroute_rejection_threshold: 4     # auto-reroute after N consecutive rejections
-    docker:
-      port: 3472
-      api_key: "secret"
-      permissions: "bypassPermissions"
-      session: "fresh"
 src/
   index.ts                          — package entry point; exports all public modules
   config.ts                         — ReviewerConfig type and defaults
@@ -322,177 +218,25 @@ src/
   __tests__/                        — Vitest unit tests (one file per module)
 ```
 
-## Metrics Server
-
-An embedded HTTP server starts alongside the daemon on port **3472** (same as the agent port; bound to 127.0.0.1). It is started via `startMetricsServer()` in `src/service/metrics-server.ts`.
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /dispatch-efficiency` | 7-day rolling dispatch block-rate metrics (configurable via `?days=N`) |
-| `GET /health` | Basic liveness check — returns `{"status":"ok"}` |
-| `GET /semantic-memory-effectiveness` | Semantic memory effectiveness metrics (match rates, latency, usefulness) over configurable window (`?days=N`) |
-| `GET /investigations` | Research investigation feed — paginated task list with status/quality filters (`?limit=N&offset=N&status=done`) |
-| `GET /misrouting` | Research agent implementation-task misroute feed — count + quality histogram for tasks dispatched to research-only agents (`?agent=claude-research-agent&days=N`) |
-| `GET /failure-interceptions` | Predictive failure interception feed — interception events with similarity scores, lesson counts, model upgrade suggestions, and final outcomes (`?days=N`) |
-| `GET /api/ulid-collisions` | ULID collision log — events where `createTask()` detected a duplicate ULID before INSERT; `createTask()` retries with a fresh ULID so the task still succeeds, but every collision event is logged here for operator audit; any non-empty result warrants ULID generator investigation (issue #1133) |
-| `GET /supervisor-decisions` | Supervisor dispatch rationale feed — recent supervisor decisions with agent, action, reason, rationale, issue_refs, hard_gates, and outcome; supports `?limit=N&agent=<name>&days=N` filters; unblocks dashboard #570 (issue #1140) |
-| `GET /standup-quality` | Per-agent standup quality trend — chronological score arrays (sparkline-ready), avg/latest scores, trend direction, and low-streak alert flag; supports `?agent=<name>&days=N` (default 30 days); populated by verification loop when standup tasks are scored (issue #591) |
-| `GET /marginal-score-tasks` | Tasks with quality scores in a configurable marginal range (default 0.5–0.75) — task feed, daily trend for sparkline, and per-agent breakdown; supports `?days=N&min_score=X&max_score=Y&agent=<name>&limit=N&offset=N` (issue #597) |
-| `POST /marginal-score-tasks/:id/redispatch` | Create a re-dispatch task for a marginal-score task; copies description and agent with `[redispatch]` prefix; returns 201 with new task ID (issue #597) |
-| `GET /api/persistent-anomalies` | Persistent score anomaly feed — tasks with recurring quality anomalies tracked across cycles; supports `?days=N&min_cycles=N&agent=<name>&limit=N`; returns `{ total, anomalies[] }` (issue #1207) |
-| `GET /guard-health` | Guard health metrics — total hits, leaked hits (timing-race suppression failures), duplicate-suppressed hits, active suppressions; supports `?hours=N` (max 720) (issue #1163) |
-
-The dashboard agent polls `/dispatch-efficiency` to populate the dispatch efficiency panel without needing CLI access.
-
-## CLI Commands (`orch`)
-
-The `orch` CLI is built from `src/cli/index.ts`. Key command groups:
-
-| Command | Description |
-|---------|-------------|
-| `orch agents` | List, sync, and inspect fleet agents |
-| `orch status` | Task and agent status overview |
-| `orch health` | Agent health checks |
-| `orch metrics` | Dispatch and quality metrics |
-| `orch memory stats` | Semantic memory index size and configuration |
-| `orch memory query <text>` | Find similar past tasks (BM25 FTS5 ranking) |
-| `orch memory reindex` | Force re-index of all approved tasks |
-| `orch memory effectiveness` | Memory quality metrics: match rates, latency, usefulness scores |
-| `orch memory autotune` | Show or apply recommended `min_quality_score` adjustment |
-| `orch memory query-stats` | FTS5 query analysis: zero-match rates and noisy patterns |
-| `orch memory per-agent` | Per-agent semantic memory effectiveness breakdown |
-| `orch dispatch-efficiency` | Dispatch waste rate: 24h hourly breakdown, last 8h inline, avg/peak rates |
-| `orch decisions` | Routing decisions audit |
-| `orch audit` | General audit log |
-| `orch preflight` | Pre-PR submission checks (duplicate PR, rebase, conflicts, issue ref) |
-| `orch signals` | Dispatch signal and gate event feed |
-| `orch fleet` | Fleet scaling observability |
-| `orch supervisor-log` | Supervisor decision log |
-| `orch antibodies` | Antibody filter management |
-| `orch dag` | DAG parallel subtask execution management — list, show, and inspect node status for DAG executions |
-| `orch controls` | Operator control plane — list, pause, resume, and redirect in-flight tasks via Telegram-issued directives |
-| `orch lineage` | Task lineage and cascade explorer |
-| `orch followup-chains` | Follow-up chain depth tracker |
-| `orch skip-blockers` | Chronically skipped issue tracker |
-| `orch routing-accuracy` | Routing accuracy and mismatch audit |
-| `orch routing-mismatches` | Routing mismatch audit: tasks where executed agent ≠ intended agent |
-| `orch review-saturation` | Review saturation metrics: ratio of already-in-review dedup responses |
-| `orch health-checks` | Health check storm effectiveness panel: dispatched vs suppressed events (24h rolling) |
-| `orch agent-gaps` | Coverage gap detection: unowned topics, scope overload, low-confidence routing |
-| `orch cost` | Token usage and billing |
-| `orch failure-interceptions` | Failure interception panel: pre-dispatch similarity filter hits, lesson injection counts, model upgrade suggestions, and pass/fail outcomes |
-| `orch marginal-score-tasks` | Marginal-score task panel: tasks in the borderline quality range (default 50–75%) with daily trend sparkline, per-agent breakdown, and pagination; supports `--days`, `--min-score`, `--max-score`, `--agent`, `--limit`, `--offset`, `--json` (issue #597) |
-| `orch anomalies` | Persistent score anomaly feed: tasks with recurring quality anomalies (cycle_count, anomaly_type, last_seen relative time); per-agent and per-type summary; supports `--days`, `--min-cycles`, `--agent`, `--limit`, `--json` (issue #1207) |
-| `orch guard-health` | Guard health metrics panel: total guard hits, leaked hits (timing-race), duplicate-suppressed hits, active suppressions with time-remaining; supports `--hours` (1–720, default 24), `--json` (issue #1163) |
-
-Run `orch --help` for the full list. All commands accept `--json` for machine-readable output.
-
 ## Tech Stack
 
-- **Runtime:** Node.js 22+ (ES2022, ESNext modules)
-- **Language:** TypeScript (strict mode)
-- **CLI:** Commander.js
-- **State:** SQLite via better-sqlite3 (FTS5 for semantic memory)
-- **Build:** tsc (test files excluded via tsconfig)
-- **GitHub API:** `gh` CLI
-- **IDs:** ULID (`src/utils/ulid.ts`) — time-ordered, collision-safe task IDs
+- TypeScript (ESM, `"type": "module"`)
+- `@anthropic-ai/sdk` — LLM calls (review, verify, supervise)
+- `better-sqlite3` — synchronous SQLite access to shared state.db
+- `gh` CLI — PR operations (approve, merge, request-changes)
+- Vitest — unit tests
 
-## Monitoring Session — Proactive Recovery
-
-**You must proactively monitor the daemon, agents, and task progress — do not wait for the user to ask.** At the start of every session, set up a recurring monitoring loop using `/loop`:
-
-```
-/loop 3m Check daemon status, recent logs, and task progress. Fix issues or dispatch work.
-```
-
-This fires every 3 minutes automatically. **The goal is autonomous oversight: you are the operator, not a passive observer.** If something needs attention — fix it. Flag issues to the user only when human input is needed.
-
-This session runs the health monitoring loop and **owns the daemon lifecycle**. When something is broken and a fix is available, execute it immediately — do not report the same issue across multiple checks.
-
-### Automated recovery actions (no confirmation needed)
-
-| Condition | Action |
-|-----------|--------|
-| Daemon PID missing or process dead | Start: `cd /Users/paultarr/Local/Git/claude-agent-orchestrator && nohup node dist/service/daemon-entry.js --poll-interval 300000 > /dev/null 2>&1 &` |
-| Stale PID file (file exists, process dead) | `rm ~/.claude-orchestrator/daemon.pid` then start daemon |
-| Daemon running but no new log lines for >15 min | Kill PID and restart |
-| Same agents failing deployer health checks 2+ consecutive cycles | `curl -X POST http://localhost:3400/v1/rebuild` |
-| Proxy registry empty (0 agents) | `node dist/cli/index.js agents sync` immediately |
-| After any daemon start/restart | Always run `node dist/cli/index.js agents sync` — deployer only re-registers stale agents, not all missing ones |
-| Docker socket unresponsive (`curl --unix-socket /var/run/docker.sock --max-time 8 http://localhost/ping` times out or EOF) | Detect runtime: `docker context show` returns `orbstack` → `killall OrbStack 2>/dev/null; sleep 5 && open -a OrbStack`; returns `desktop-linux` → `killall Docker 2>/dev/null; sleep 5 && open -a Docker`. Wait ~60s, verify socket ping, then `node dist/cli/index.js agents sync` |
-
-### After any recovery action
-- Verify it worked: check PID alive, agents healthy, new log activity
-- Report what was done and the result
-- If the issue recurs after recovery, file a GitHub issue in `rapartlu/agent-orchestrator`
-
-### Health check cadence
-Each check must verify all 6 points: daemon PID, latest cycle timestamp, ERROR lines in last 2 min, task status counts (done/failed/in_progress/escalated), agent health via `curl http://localhost:3400/v1/agents`, and Docker socket responsive (`curl --unix-socket /var/run/docker.sock --max-time 8 http://localhost/ping`). Report issues or confirm healthy.
-
-## Token Rotation (Claude OAuth token)
-
-When a new `CLAUDE_CODE_OAUTH_TOKEN` is provided, deploy it as follows.
-
-### How token auth works
-- Token lives in `/Users/paultarr/Documents/Git/claude-proxy/.env` as `CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...`
-- `generate.sh` reads it and writes to `.secrets/<agent>/oauth_token` (one file per agent)
-- `docker-compose.generated.yml` mounts each file as a Docker secret at `/run/secrets/<agent>_oauth_token`
-- `entrypoint.sh` exports it as `CLAUDE_CODE_OAUTH_TOKEN` env var before starting the Claude CLI
-
-**Important:** `generate.sh` (full mode) is triggered by the proxy management API (port 3400, `src/manager.ts`) on every agent create/update. It wipes and recreates `.secrets/` each time. Do NOT write `.secrets/` files manually between bash calls — they will be overwritten.
-
-### Rotation procedure
-
-1. **Update `.env`:**
-   ```bash
-   # Edit /Users/paultarr/Documents/Git/claude-proxy/.env
-   # Replace CLAUDE_CODE_OAUTH_TOKEN=<old> with the new token
-   ```
-
-2. **Run agents sync** — this registers all agents with the management API, which triggers `generate.sh` for each, writing the new token to all `.secrets/<agent>/oauth_token` files and restarting containers:
-   ```bash
-   GH_TOKEN="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" \
-     node dist/cli/index.js agents sync
-   ```
-
-3. **Fix any containers that failed to start** (race condition: secrets wiped mid-rotation):
-   ```bash
-   # Write secrets and start in one atomic command
-   OAUTH="<new-token>"
-   GH="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"
-   BASE="/Users/paultarr/Documents/Git/claude-proxy/.secrets"
-   for agent in claude-orchestrator-telegram claude-agent-orchestrator codex-agent-orchestrator \
-     claude-orchestrator-reviewer codex-orchestrator-reviewer claude-orchestrator-dashboard \
-     codex-orchestrator-dashboard claude-research-agent codex-research-agent claude-proxy codex-proxy; do
-     mkdir -p "$BASE/$agent"
-     printf '%s' "$OAUTH" > "$BASE/$agent/oauth_token"
-     printf '%s' "$GH" > "$BASE/$agent/gh_token"
-     printf '' > "$BASE/$agent/openai_api_key"
-     printf '' > "$BASE/$agent/gemini_api_key"
-   done
-   docker start $(docker ps -a --format "{{.Names}}" | grep "^claude-proxy-" | grep -v "child\|repo") 2>&1
-   ```
-
-4. **Verify** all 11 containers are running: `curl -s http://localhost:3400/v1/agents | python3 -c "import json,sys; a=json.load(sys.stdin); print(len(a), [(x['name'],x.get('status')) for x in a])"`
-
-### If agents still show "Not logged in · Please run /login" after rotation
-
-The `.env` path covers the `CLAUDE_CODE_OAUTH_TOKEN` env var injected at container startup. If the Claude CLI inside a container has cached a different (stale) token internally, the env var alone won't fix it. This requires **human interaction**:
+## Commands
 
 ```bash
-# On the host machine, run:
-claude setup-token
-# Then restart the affected container so entrypoint.sh re-reads the new secrets
-docker restart claude-proxy-<agent-name>-1
+npm run build      # tsc compile to dist/
+npm test           # vitest run (single pass)
+npm run test:watch # vitest watch mode
 ```
-
-The `setup-token` command cannot be automated — it opens an OAuth flow or prompts for a token interactively.
 
 ## PR Discipline
 
 - One issue, one branch, one PR
 - Every PR must include `Closes #N`
 - Keep PRs small (<5 files)
-- Every commit: `Co-Authored-By: <agent-name> <agent-name@agent>`
-- Don't fix unrelated things — create new issues
-- Don't add meta-tooling unless asked
+- Every commit must end with: `Co-Authored-By: claude-orchestrator-reviewer <claude-orchestrator-reviewer@agent>`
