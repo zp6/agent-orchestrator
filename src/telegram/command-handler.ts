@@ -42,6 +42,7 @@
  *   /meeting-goal              → meeting-facilitator-agent monthly goal tracker: core_logic_shipped + meetings_facilitated progress (issue #456)
  *   /supervisor-dispatches [n] [agent=<name>] [since=7d|24h] → last N proactive supervisor dispatches with rationale, quality score, and PR outcome (default 10); filterable by agent and date range
  *   /stale-improvements [min_age_hours] → improvement-detector issues older than N hours with no associated PR, sorted by re-detection count (default 24h)
+ *   /survival-status       → Day-7 checkpoint status for the 30-day fleet survival plan (ref: agent-orchestrator#1267): treasury balance, revenue paths, deadline countdown, and configured revenue URLs
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -127,6 +128,10 @@ import {
   formatStaleImprovementsFeedForTelegram,
   STALE_IMPROVEMENTS_DEFAULT_MIN_AGE_HOURS,
 } from "../reviewer/stale-improvements-feed.js";
+import {
+  formatSurvivalStatusForTelegram,
+  checkAndEscalateDay7,
+} from "../reviewer/survival-plan.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
 
 const log = createLogger("telegram-commands");
@@ -194,7 +199,8 @@ type CommandName =
   | "supervisor-dispatches"
   | "marginal-approvals"
   | "marginal"
-  | "stale-improvements";
+  | "stale-improvements"
+  | "survival-status";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -242,6 +248,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "marginal-approvals",
   "marginal",
   "stale-improvements",
+  "survival-status",
 ]);
 
 interface ParsedCommand {
@@ -678,6 +685,18 @@ async function executeCommand(
         ? Math.min(Math.max(parseInt(ageStr, 10) || STALE_IMPROVEMENTS_DEFAULT_MIN_AGE_HOURS, 1), 720)
         : STALE_IMPROVEMENTS_DEFAULT_MIN_AGE_HOURS;
       return handleStaleImprovements(reviewerConfig, minAgeHours);
+    }
+
+    case "survival-status": {
+      // /survival-status — Day-7 checkpoint status for the 30-day fleet survival plan.
+      // Ref: rapartlu/agent-orchestrator#1267
+      const db = (store as unknown as Record<string, unknown>)["db"] as
+        | { prepare: (sql: string) => { get: () => unknown } }
+        | undefined;
+      if (!db) {
+        return "⚠️ survival-status: state.db not accessible (store.db unavailable).";
+      }
+      return Promise.resolve(formatSurvivalStatusForTelegram(db));
     }
   }
 }
