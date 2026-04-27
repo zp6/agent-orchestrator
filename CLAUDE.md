@@ -19,6 +19,10 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 | claude-research-agent | 3478 | claude-opus-4-6 | research | Research, investigation, technology evaluation |
 | claude-proxy | 3471 | claude-opus-4-6 | proxy | Proxy server, container management |
 | meeting-facilitator-agent | 3485 | claude-sonnet-4-6 | — | Meeting facilitation, structured discussions |
+| grok-meeting-voice | 3486 | grok-3 | — | Meeting standup voice (facilitation only); active once XAI_API_KEY set |
+| deepseek-background | 3487 | deepseek-chat | — | High-volume background workloads; active once DEEPSEEK_API_KEY set |
+| deepseek-reasoning | 3488 | deepseek-reasoner | reviewer | Deep reasoning for complex reviews; joins reviewer pool; active once DEEPSEEK_API_KEY set |
+| gemini-synth | 3489 | gemini-2.5-pro | — | Long-context synthesis and standup summarisation; active once GEMINI_API_KEY set |
 
 ### Repos
 
@@ -68,6 +72,12 @@ The orchestrator is the control plane for a fleet of AI coding agents. Each agen
 - **Score-0 silent approval block** — verification pipeline rejects tasks that score exactly 0 without an explicit operator bypass; prevents silent pass-through of completely unscored tasks; implemented in PR #1159
 - **Standup synthesis retry with transcript fallback** — if the synthesis LLM call fails or returns an empty result, the daemon retries with a raw transcript fallback; prevents zero-item standups from being committed to the DB (PR #1156)
 - **Verification calibration recommendations persistence** — after each verification pass, calibration recommendations (score drift, threshold adjustments) are written to the `verification_calibration_recs` table for cross-cycle analysis and operator review (PR #1153)
+- **Guard health metrics + already-in-review dedup** — `guard_surge_hits` and `guard_surge_leaks` tables track all guard events and timing-race suppression failures; `hasRecentAlreadyInReviewTask()` skips task creation for already-in-review dupes within 6h; `GET /guard-health` and `orch guard-health` CLI surface suppression effectiveness (PR #1195, issues #1163/#1164)
+- **Quality gate pre-approval check** — `quality-gate-client.ts` calls `POST /api/quality-gate/check` on the reviewer before any PR is enqueued for merge; fail-open on reviewer outage; closes the bypass hole from issue #445 (PR #1199)
+- **Persistent score anomaly tracking** — `score_anomaly_observations` table persists recurring quality anomalies across daemon cycles; `GET /api/persistent-anomalies` REST endpoint; `orch anomalies` CLI with per-agent/type summaries; daily Telegram digest at 09:00 (PR #1222, issue #1207)
+- **Per-agent GitHub App identity** — replaces shared Operator PAT with per-agent GitHub App installation tokens; `src/github-app-auth.ts` handles JWT exchange and token caching; aligns with CHARTER.md Article VII (PR #1221, issue #1210)
+- **Multi-provider expansion** — Grok (xAI), Deepseek, and Gemini providers added alongside Claude and Codex pools; four new agents: `grok-meeting-voice` (port 3486), `deepseek-background` (port 3487), `deepseek-reasoning` (port 3488), `gemini-synth` (port 3489); active once operator drops API keys (PR #1220, issue #1211)
+- **OrbStack socket recovery** — after Docker socket outage, `resetHttpConnections()` clears stale Anthropic SDK TCP sockets to prevent cascade failures on resume (PR #1218, issue #1216)
 
 ## CRITICAL: NEVER Push Directly to Main
 
@@ -329,6 +339,8 @@ An embedded HTTP server starts alongside the daemon on port **3472** (same as th
 | `GET /standup-quality` | Per-agent standup quality trend — chronological score arrays (sparkline-ready), avg/latest scores, trend direction, and low-streak alert flag; supports `?agent=<name>&days=N` (default 30 days); populated by verification loop when standup tasks are scored (issue #591) |
 | `GET /marginal-score-tasks` | Tasks with quality scores in a configurable marginal range (default 0.5–0.75) — task feed, daily trend for sparkline, and per-agent breakdown; supports `?days=N&min_score=X&max_score=Y&agent=<name>&limit=N&offset=N` (issue #597) |
 | `POST /marginal-score-tasks/:id/redispatch` | Create a re-dispatch task for a marginal-score task; copies description and agent with `[redispatch]` prefix; returns 201 with new task ID (issue #597) |
+| `GET /api/persistent-anomalies` | Persistent score anomaly feed — tasks with recurring quality anomalies tracked across cycles; supports `?days=N&min_cycles=N&agent=<name>&limit=N`; returns `{ total, anomalies[] }` (issue #1207) |
+| `GET /guard-health` | Guard health metrics — total hits, leaked hits (timing-race suppression failures), duplicate-suppressed hits, active suppressions; supports `?hours=N` (max 720) (issue #1163) |
 
 The dashboard agent polls `/dispatch-efficiency` to populate the dispatch efficiency panel without needing CLI access.
 
@@ -370,6 +382,8 @@ The `orch` CLI is built from `src/cli/index.ts`. Key command groups:
 | `orch cost` | Token usage and billing |
 | `orch failure-interceptions` | Failure interception panel: pre-dispatch similarity filter hits, lesson injection counts, model upgrade suggestions, and pass/fail outcomes |
 | `orch marginal-score-tasks` | Marginal-score task panel: tasks in the borderline quality range (default 50–75%) with daily trend sparkline, per-agent breakdown, and pagination; supports `--days`, `--min-score`, `--max-score`, `--agent`, `--limit`, `--offset`, `--json` (issue #597) |
+| `orch anomalies` | Persistent score anomaly feed: tasks with recurring quality anomalies (cycle_count, anomaly_type, last_seen relative time); per-agent and per-type summary; supports `--days`, `--min-cycles`, `--agent`, `--limit`, `--json` (issue #1207) |
+| `orch guard-health` | Guard health metrics panel: total guard hits, leaked hits (timing-race), duplicate-suppressed hits, active suppressions with time-remaining; supports `--hours` (1–720, default 24), `--json` (issue #1163) |
 
 Run `orch --help` for the full list. All commands accept `--json` for machine-readable output.
 
