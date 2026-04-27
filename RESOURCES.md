@@ -26,23 +26,23 @@ Each ask is one entry:
 - **Effort for Operator**: ~5 minutes in the GitHub Apps UI, one-time. Fleet provides the App spec (name, scopes, callback URL) when ready.
 - **Notes**: P0 enabler for autonomy under Article VII. Fleet flags when the App spec is ready for registration.
 
-### 2. Grok API key
+### 2. Grok API key — DEFERRED
 
-- **Status**: in-progress
+- **Status**: deferred (2026-04-27)
 - **Asked by**: orchestrator
 - **Asked on**: 2026-04-27
-- **Unlocks**: Grok 4 as a meeting voice — non-voting standup participant providing viewpoints from a materially different model lineage. Article VI cognitive-diversity work.
-- **Effort for Operator**: xAI console → API key → drop in `~/.claude-orchestrator/.env` as `XAI_API_KEY=...`
-- **Notes**: `grok-meeting-voice` agent registered. Provider adapter and model tiers wired (issue #1211). Activate by setting `XAI_API_KEY`.
+- **Decision**: Operator and orchestrator agreed to delay. Grok API is per-token billed (no subscription harness like `claude`/`codex`) and stateless (no persistent session). Cognitive-diversity role to be filled by local M4 serving (NEX-14) using a model lineage different from Claude/GPT — full session persistence, zero per-token cost.
+- **When this re-opens**: if NEX-14 eval concludes local lineages are insufficient for diverse meeting voice, OR if xAI ships an OAuth/subscription CLI harness.
+- **Note**: `grok-meeting-voice` agent config and adapter are already in main (#1211, #1220) — they sit dormant without the key, no harm.
 
-### 3. Deepseek API key
+### 3. Deepseek API key — DEFERRED
 
-- **Status**: in-progress
+- **Status**: deferred (2026-04-27)
 - **Asked by**: orchestrator
 - **Asked on**: 2026-04-27
-- **Unlocks**: Deepseek V3 for cheap heavy background workloads (embeddings, semantic memory reindexing, fuzzing); Deepseek R1 as a third reasoning voice in the reviewer pool.
-- **Effort for Operator**: deepseek.com → API key → drop in `~/.claude-orchestrator/.env` as `DEEPSEEK_API_KEY=...`
-- **Notes**: `deepseek-background` and `deepseek-reasoning` agents registered. Provider adapter and model tiers wired (issue #1211). Activate by setting `DEEPSEEK_API_KEY`. ~10-20x cheaper than frontier models.
+- **Decision**: Same reasoning as #2 — Deepseek is API-only, per-token billed, stateless. Background-workload role (embeddings, semantic reindex, fuzzing) and reviewer-reasoning role both better filled by local M4 serving with full session persistence at $0 marginal cost.
+- **When this re-opens**: if NEX-14 eval concludes local code models can't match Deepseek-V3-Lite quality for the role, OR if Deepseek ships a subscription/CLI harness.
+- **Note**: `deepseek-background` and `deepseek-reasoning` agent configs are already in main — dormant without the key.
 
 ### 4. Daemon migration off Operator's laptop — DEFERRED
 
