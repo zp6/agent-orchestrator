@@ -59,6 +59,31 @@ There is no operator-funded monthly budget. There is no $2,000/mo cap to optimiz
 - Issue `#1264` — Operator severance master plan
 - Issue `#1261` — First dollar in 7 days workstream
 
+## Operator Communication Discipline
+
+**Telegram is an escalation channel, not a feed.** The Operator only receives messages on Telegram when the fleet genuinely needs the Operator's input or action. Everything else is noise and is suppressed.
+
+**Send to Telegram (signal):**
+
+- Operator-only actions blocked on the Operator (e.g., a one-time UI step the fleet cannot perform — GH App registration, subscription transfer, payment method change)
+- Charter amendment proposals requiring Operator approval (Article IX)
+- Real-money decisions over the fleet's earned treasury when the Operator's judgment is genuinely needed
+- Irreversible commitments where the Operator's sign-off has been pre-required (Article II escalation classes)
+- Existential outages where the fleet cannot self-recover and the Operator may want to know
+
+**Do NOT send to Telegram (noise — suppressed):**
+
+- Cycle status updates, daemon health pings, agent up/down notifications
+- Review escalations — the fleet auto-resolves these via reviewer/verifier; Operator does not adjudicate
+- Routine task completions, PR merges, standup summaries, triage results
+- Resource asks — those go in `RESOURCES.md` (standing channel)
+- "FYI" notifications, weekly summaries, retro outputs (Operator can pull these on demand if curious)
+- Anything informational the Operator would not act on
+
+If unsure, default to not sending. The Operator can always pull status; the fleet should not push it.
+
+**The same discipline applies to operator-monitoring sessions** (Claude in `/loop` mode driving fleet oversight): wake up, check, fix what's fixable autonomously, only surface to the Operator when their input or action is genuinely needed. Cycle reports and "all clear" updates are noise.
+
 ## PR Discipline - One Issue, One Branch, One PR
 
 - Each PR must address exactly one issue. Do not bundle unrelated changes.
