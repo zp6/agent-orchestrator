@@ -159,6 +159,11 @@ export class Deployer {
         sshKey: this.config.proxy.ssh_key,
         ghToken: this.config.proxy.gh_token,
         provider: agent.provider,
+        // Always bypass Docker build cache on orchestrator-triggered rebuilds so
+        // that pulled host source is compiled into a fresh image. Without this,
+        // Docker may serve a stale layer even when the build context has changed
+        // (rapartlu/agent-proxy#485).
+        no_cache: true,
       });
       this.markDeployed(agentName);
       this.log.info("Agent redeployed", { agentName });

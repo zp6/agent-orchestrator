@@ -93,6 +93,14 @@ describe("Deployer", () => {
     expect(mockUpdateAgent).toHaveBeenCalled();
   }, 15_000);
 
+  it("passes no_cache: true to the proxy so Docker does not reuse stale layers", async () => {
+    const deployer = new Deployer(config);
+    await deployer.redeploy("agent-a");
+    const callArgs = mockUpdateAgent.mock.calls[0];
+    // Second argument is the Partial<ProxyAgentConfig> update payload
+    expect(callArgs[1]).toMatchObject({ no_cache: true });
+  }, 15_000);
+
   it("returns error for unknown agent", async () => {
     const deployer = new Deployer(config);
     const result = await deployer.redeploy("nonexistent");
