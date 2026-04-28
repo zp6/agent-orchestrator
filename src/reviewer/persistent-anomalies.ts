@@ -339,3 +339,112 @@ export function formatPersistentAnomaliesForTelegram(
 export function generateCycleId(): string {
   return new Date().toISOString().slice(0, 16); // "2026-04-25T09:00"
 }
+
+// ── Digest scheduler ──────────────────────────────────────────────────────────
+
+/**
+ * Options for `PersistentAnomaliesDigestScheduler`.
+ */
+export interface PersistentAnomaliesDigestSchedulerOptions {
+  /** Minimum distinct cycles to qualify as persistent. Default: 2. */
+  minCycles?: number;
+  /** Lookback window in days. Default: 7. */
+  days?: number;
+  /** Maximum anomalies to include in the payload. Default: 50. */
+  limit?: number;
+  /** Dashboard base URL for a full-report link appended to Telegram messages. */
+  dashboardUrl?: string;
+}
+
+/**
+ * Daemon-style scheduler that posts a daily Telegram persistent-anomalies
+ * digest.
+ *
+ * Mirrors `BypassAuditScheduler` so the orchestrator can schedule the digest
+ * via a single import — no copy-paste of the query + format logic in the
+ * orchestrator codebase.  Eliminates the parallel implementation risk: if
+ * the schema or query logic drifts, only one side needs updating.
+ *
+ * Uses a per-day deduplication key so exactly one digest fires per calendar
+ * day regardless of how often the daemon's maintenance cycle calls
+ * `checkAndSend()`.
+ *
+ * Usage in the orchestrator daemon's daily maintenance cycle:
+ *
+ *   const scheduler = new PersistentAnomaliesDigestScheduler(store, notifier, { days: 7 });
+ *   await scheduler.checkAndSend();  // no-ops on second call in same day
+ */
+export class PersistentAnomaliesDigestScheduler {
+  private readonly log = createLogger("persistent-anomalies-scheduler");
+  private lastSentDateKey = "";
+
+  constructor(
+    private readonly store: IPersistentAnomalyStore,
+    private readonly notifier: { send(text: string): Promise<void> } | undefined,
+    private readonly opts: PersistentAnomaliesDigestSchedulerOptions = {},
+  ) {}
+
+  /**
+   * Send a daily persistent-anomalies digest to Telegram if:
+   *   1. Today's digest has not already been sent (date-keyed dedup), AND
+   *   2. A notifier is configured and there are anomalies to report.
+   *
+   * Returns true when a message was dispatched (or attempted), false otherwise.
+   */
+  async checkAndSend(nowMs: number = Date.now()): Promise<boolean> {
+    const dateKey = toDateKey(new Date(nowMs));
+
+    if (this.lastSentDateKey === dateKey) {
+      this.log.info("Persistent-anomalies digest already sent today", { dateKey });
+      return false;
+    }
+
+    const payload = getPersistentAnomaliesPayload(this.store, {
+      minCycles: this.opts.minCycles,
+      days: this.opts.days,
+      limit: this.opts.limit,
+    });
+
+    if (!this.notifier) {
+      this.log.warn("Persistent-anomalies digest due but no notifier configured", {
+        total: payload.total,
+      });
+      this.lastSentDateKey = dateKey;
+      return false;
+    }
+
+    if (payload.total === 0) {
+      this.log.info("Persistent-anomalies digest: no anomalies to report", { dateKey });
+      this.lastSentDateKey = dateKey;
+      return false;
+    }
+
+    let text = formatPersistentAnomaliesForTelegram(payload);
+
+    if (this.opts.dashboardUrl) {
+      text += `\n\n<a href="${this.opts.dashboardUrl}/persistent-anomalies">Full report</a>`;
+    }
+
+    try {
+      await this.notifier.send(text);
+      this.lastSentDateKey = dateKey;
+      this.log.info("Persistent-anomalies digest sent", {
+        dateKey,
+        total: payload.total,
+        byAgent: payload.by_agent.slice(0, 3),
+      });
+      return true;
+    } catch (err) {
+      this.log.error("Failed to send persistent-anomalies digest", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+function toDateKey(date: Date): string {
+  return date.toISOString().slice(0, 10); // "YYYY-MM-DD"
+}

@@ -11,6 +11,7 @@ import {
   PERSISTENT_ANOMALIES_MIGRATION_SQL,
   DEFAULT_MIN_CYCLES,
   DEFAULT_ANOMALY_LOOKBACK_DAYS,
+  PersistentAnomaliesDigestScheduler,
 } from "../reviewer/persistent-anomalies.js";
 import type { IPersistentAnomalyStore, PersistentAnomaly } from "../reviewer/persistent-anomalies.js";
 
@@ -217,6 +218,147 @@ describe("generateCycleId", () => {
     const b = generateCycleId();
     // May differ only at second boundaries — at least the date portion matches
     expect(a.slice(0, 13)).toBe(b.slice(0, 13)); // same hour
+  });
+});
+
+// ── PersistentAnomaliesDigestScheduler ────────────────────────────────────────
+
+describe("PersistentAnomaliesDigestScheduler", () => {
+  const DAY1 = new Date("2026-04-25T08:00:00.000Z").getTime();
+  const DAY2 = new Date("2026-04-26T08:00:00.000Z").getTime();
+
+  function makeNotifier() {
+    return { send: vi.fn().mockResolvedValue(undefined) };
+  }
+
+  it("sends the digest on first call", async () => {
+    const anomalies = [makeAnomaly()];
+    const store = makeStore(anomalies);
+    const notifier = makeNotifier();
+    const scheduler = new PersistentAnomaliesDigestScheduler(store, notifier);
+
+    const sent = await scheduler.checkAndSend(DAY1);
+    expect(sent).toBe(true);
+    expect(notifier.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("deduplicates within the same calendar day", async () => {
+    const anomalies = [makeAnomaly()];
+    const store = makeStore(anomalies);
+    const notifier = makeNotifier();
+    const scheduler = new PersistentAnomaliesDigestScheduler(store, notifier);
+
+    await scheduler.checkAndSend(DAY1);
+    const second = await scheduler.checkAndSend(DAY1 + 60_000); // 1 minute later, same day
+    expect(second).toBe(false);
+    expect(notifier.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends again on the next calendar day", async () => {
+    const anomalies = [makeAnomaly()];
+    const store = makeStore(anomalies);
+    const notifier = makeNotifier();
+    const scheduler = new PersistentAnomaliesDigestScheduler(store, notifier);
+
+    await scheduler.checkAndSend(DAY1);
+    const second = await scheduler.checkAndSend(DAY2);
+    expect(second).toBe(true);
+    expect(notifier.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns false and skips send when there are no anomalies", async () => {
+    const store = makeStore([]);
+    const notifier = makeNotifier();
+    const scheduler = new PersistentAnomaliesDigestScheduler(store, notifier);
+
+    const sent = await scheduler.checkAndSend(DAY1);
+    expect(sent).toBe(false);
+    expect(notifier.send).not.toHaveBeenCalled();
+  });
+
+  it("returns false when no notifier is configured", async () => {
+    const anomalies = [makeAnomaly()];
+    const store = makeStore(anomalies);
+    const scheduler = new PersistentAnomaliesDigestScheduler(store, undefined);
+
+    const sent = await scheduler.checkAndSend(DAY1);
+    expect(sent).toBe(false);
+  });
+
+  it("advances dedup key even without notifier so next-day check is correct", async () => {
+    const store = makeStore([makeAnomaly()]);
+    const scheduler = new PersistentAnomaliesDigestScheduler(store, undefined);
+
+    // Day 1 — no notifier
+    await scheduler.checkAndSend(DAY1);
+    // Day 2 same-instance — if we now add a notifier externally this verifies
+    // the date key advanced to day 1; this test just confirms no infinite retry
+    const notifier = makeNotifier();
+    (scheduler as unknown as { notifier: unknown }).notifier = notifier;
+    // Still should send on day 2
+    const sent = await scheduler.checkAndSend(DAY2);
+    expect(sent).toBe(true);
+  });
+
+  it("appends dashboard URL link when configured and anomalies exist", async () => {
+    const anomalies = [makeAnomaly()];
+    const store = makeStore(anomalies);
+    const notifier = makeNotifier();
+    const scheduler = new PersistentAnomaliesDigestScheduler(store, notifier, {
+      dashboardUrl: "https://dash.example.com",
+    });
+
+    await scheduler.checkAndSend(DAY1);
+    const sentText: string = notifier.send.mock.calls[0][0] as string;
+    expect(sentText).toContain("https://dash.example.com/persistent-anomalies");
+  });
+
+  it("does not append dashboard link when there are no anomalies", async () => {
+    // No-anomaly path bails before send, but verify no side-effect
+    const store = makeStore([]);
+    const notifier = makeNotifier();
+    const scheduler = new PersistentAnomaliesDigestScheduler(store, notifier, {
+      dashboardUrl: "https://dash.example.com",
+    });
+
+    await scheduler.checkAndSend(DAY1);
+    expect(notifier.send).not.toHaveBeenCalled();
+  });
+
+  it("handles notifier errors non-fatally and returns false", async () => {
+    const anomalies = [makeAnomaly()];
+    const store = makeStore(anomalies);
+    const notifier = { send: vi.fn().mockRejectedValue(new Error("network error")) };
+    const scheduler = new PersistentAnomaliesDigestScheduler(store, notifier);
+
+    await expect(scheduler.checkAndSend(DAY1)).resolves.toBe(false);
+  });
+
+  it("does not advance dedup key on notifier error (retry next invocation)", async () => {
+    const anomalies = [makeAnomaly()];
+    const store = makeStore(anomalies);
+    const notifier = { send: vi.fn().mockRejectedValueOnce(new Error("fail")) };
+    const scheduler = new PersistentAnomaliesDigestScheduler(store, notifier);
+
+    await scheduler.checkAndSend(DAY1); // fails
+    // lastSentDateKey should NOT have been set — next call same day retries
+    notifier.send.mockResolvedValueOnce(undefined);
+    const retried = await scheduler.checkAndSend(DAY1 + 30_000);
+    expect(retried).toBe(true);
+    expect(notifier.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("passes custom opts to getPersistentAnomaliesPayload", async () => {
+    const store = makeStore([makeAnomaly()]);
+    const notifier = makeNotifier();
+    const scheduler = new PersistentAnomaliesDigestScheduler(store, notifier, {
+      minCycles: 5,
+      days: 14,
+      limit: 10,
+    });
+
+    await scheduler.checkAndSend(DAY1);
+    expect(store.getPersistentAnomalies).toHaveBeenCalledWith(5, 14, 10);
   });
 });
 

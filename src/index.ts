@@ -1248,6 +1248,7 @@ export type {
 } from "./reviewer/score-provenance.js";
 
 // Persistent anomaly tracker — surface quality anomalies recurring across ≥2 cycles (issue #483)
+// Scheduler added in issue #546 so orchestrator can wire via a single import.
 export {
   recordAnomalyObservation,
   getPersistentAnomaliesPayload,
@@ -1256,6 +1257,7 @@ export {
   PERSISTENT_ANOMALIES_MIGRATION_SQL,
   DEFAULT_MIN_CYCLES,
   DEFAULT_ANOMALY_LOOKBACK_DAYS,
+  PersistentAnomaliesDigestScheduler,
 } from "./reviewer/persistent-anomalies.js";
 export type {
   AnomalyObservation,
@@ -1263,6 +1265,7 @@ export type {
   PersistentAnomaliesPayload,
   PersistentAnomaliesOptions,
   IPersistentAnomalyStore,
+  PersistentAnomaliesDigestSchedulerOptions,
 } from "./reviewer/persistent-anomalies.js";
 
 // Proactive dispatch rationale log — /supervisor-dispatches Telegram command (dashboard#570)
