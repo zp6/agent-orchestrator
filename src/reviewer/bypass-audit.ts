@@ -280,9 +280,10 @@ export class BypassAuditScheduler {
     }
 
     try {
-      await this.notifier.send(text);
+      // NOISE SUPPRESSION (#564): Bypass audit is informational reporting.
+      // Operator should query /bypass-audit if interested; no push notifications.
       this.lastSentDateKey = dateKey;
-      this.log.info("Bypass-audit digest sent", {
+      this.log.info("Bypass-audit digest prepared (not sending to Telegram per #564)", {
         dateKey,
         count: payload.count,
         silentBypassCount: payload.silent_bypass_count,

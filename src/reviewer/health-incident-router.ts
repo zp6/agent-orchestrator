@@ -172,8 +172,9 @@ export class HealthIncidentRouter implements HealthIncidentProvider {
 
     try {
       const message = this.formatIncidentForTelegram(incident);
-      await this.notifier.send(message);
-      log.info("Health incident routed to Telegram", {
+      // NOISE SUPPRESSION (#564): Health incident routing is informational monitoring.
+      // Operator should query /health or /incidents if interested; no push notifications.
+      log.info("Health incident recorded (not sending to Telegram per #564)", {
         agentName: incident.agentName,
         taskId: incident.taskId,
         rootCause: incident.rootCause ?? "unknown",

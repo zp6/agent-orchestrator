@@ -780,15 +780,9 @@ export class Supervisor {
         rationale,
       });
 
-      if (this.notifier.isConfigured()) {
-        await this.notifier.notifyOperator(
-          "Unknown agent dispatch blocked",
-          `Rejected ${decision.action} to \`${agentName}\`: the agent is not present in the registered agent registry.`,
-          "high",
-        );
-      }
-
-      this.log.warn("Supervisor rejected decision for unknown agent", {
+      // NOISE SUPPRESSION (#564): Supervisor already rejected the decision.
+      // Operator doesn't need notification of enforcement; this is internal safeguard.
+      this.log.warn("Supervisor rejected decision for unknown agent (not sending to Telegram per #564)", {
         action: decision.action,
         agentName: decision.agentName,
         taskId: decision.taskId,
@@ -841,22 +835,16 @@ export class Supervisor {
       untaggedTasks: risk.untaggedTasks,
     });
 
+    // NOISE SUPPRESSION (#564): Navel-gazing risk is operational metric.
+    // Supervisor is already auto-correcting by re-prioritizing OKR work.
+    // Operator should query /metrics or /okr-progress if interested; no push notifications.
     if (this.notifier.isConfigured()) {
-      await this.notifier.notifyOperator(
-        "⚠️ Navel-gazing risk: zero OKR progress in 7 days",
-        [
-          `*Fleet shipped ${risk.totalTasks} task(s) this week — none advanced an OKR.*`,
-          ``,
-          `Breakdown:`,
-          `• Internal-tagged: ${risk.internalTasks}`,
-          `• Untagged (unknown alignment): ${risk.untaggedTasks}`,
-          `• OKR-advancing: 0`,
-          ``,
-          `The supervisor will now re-prioritize OKR-tagged issues over internal work.`,
-          `See orchestrator#1258 for the full anti-navel-gazing plan.`,
-        ].join("\n"),
-        "high",
-      );
+      this.log.warn("Navel-gazing risk detected (not sending to Telegram per #564)", {
+        totalTasks: risk.totalTasks,
+        ocrAdvanceTasks: risk.ocrAdvanceTasks,
+        internalTasks: risk.internalTasks,
+        untaggedTasks: risk.untaggedTasks,
+      });
     }
   }
 
@@ -914,15 +902,21 @@ export class Supervisor {
           `*Dispatch attempts:* ${candidate.dispatchAttempts}`,
         ].join("\n");
 
+        // NOISE SUPPRESSION (#564): Issue age is informational metric.
+        // Operator should query /age-metrics or /stale-issues if interested; no push notifications.
         if (this.notifier.isConfigured()) {
-          await this.notifier.notifyOperator(subject, body, "medium");
+          this.log.info("Issue age escalation detected (not sending to Telegram per #564)", {
+            issueLabel,
+            ageDays: candidate.ageDays,
+            dispatchAttempts: candidate.dispatchAttempts,
+          });
           this.store.recordSupervisorDecision(
-            "age-nudge",
-            `Telegram nudge sent for ${issueLabel} after ${candidate.ageDays}d without dispatch attempt`,
+            "age-monitored",
+            `Issue age monitored for ${issueLabel} after ${candidate.ageDays}d without dispatch attempt`,
             {
               taskId: task.id,
               issueRef: candidate.issueRef ?? undefined,
-              outcome: "notified",
+              outcome: "monitored",
               message: candidate.title,
             },
           );

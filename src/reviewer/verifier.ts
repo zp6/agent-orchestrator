@@ -1483,24 +1483,13 @@ export class Verifier {
 
     // Alert the operator with high urgency
     if (this.notifier) {
-      const body = [
-        `🚨 *Verifier parse failure — score_source=default_fallback*`,
-        ``,
-        `Task \`${taskId.slice(0, 12)}\` returned score=0 because the verifier LLM response`,
-        `could not be parsed. This is an infrastructure failure, not a quality judgment.`,
-        ``,
-        `*Task:* \`${taskId}\``,
-        `*Agent:* \`${task.agent_name ?? "unknown"}\``,
-        ``,
-        `Task marked as \`rejected\` and queued for re-verification. Do NOT use ` +
-          `\`/approve\` — the score is meaningless.`,
-      ].join("\n");
-
-      await this.notifier.notifyOperator(
-        "Verifier parse failure: score blocked from auto-approval (default_fallback)",
-        body,
-        "high",
-      );
+      // NOISE SUPPRESSION (#564): Parse failure is infrastructure issue.
+      // Task is auto-queued for re-verification; no operator action needed.
+      // Operator should query /infrastructure or /parse-failures if interested; no push notifications.
+      this.log.error("Verifier parse failure detected (not sending to Telegram per #564)", {
+        taskId: taskId.slice(0, 12),
+        agent: task.agent_name,
+      });
     }
 
     // Record anomaly observation so the persistent-anomaly tracker can detect
@@ -2045,22 +2034,18 @@ export class Verifier {
           : `[Disagreement: passes diverged — conservative decision: ${finalApproved ? "approved" : "rejected"}]`,
       ].join("\n");
 
-      // Escalate to Telegram when passes disagree.
+      // NOISE SUPPRESSION (#564): Borderline disagreement is handled conservatively.
+      // No operator action needed; conservative decision already made.
+      // Operator should query /borderline-reviews if interested; no push notifications.
       if (!agreed && this.notifier) {
-        const body = [
-          `Task \`${taskId.slice(0, 12)}\` scored *${(enforcedFirstPassResult.score * 100).toFixed(0)}%* on first pass — borderline range triggered second review.`,
-          ``,
-          `*First pass:* ${enforcedFirstPassResult.approved ? "✅ approved" : "❌ rejected"} (${(enforcedFirstPassResult.score * 100).toFixed(0)}%)`,
-          `*Second pass:* ${enforcedSecondPassResult.approved ? "✅ approved" : "❌ rejected"} (${(enforcedSecondPassResult.score * 100).toFixed(0)}%)`,
-          `*Agent:* \`${task.agent_name ?? "unknown"}\``,
-          `*Conservative outcome:* ${finalApproved ? "approved" : "rejected"}`,
-        ].join("\n");
-
-        await this.notifier.notifyOperator(
-          "Borderline review disagreement",
-          body,
-          "medium",
-        );
+        this.log.info("Borderline review disagreement handled conservatively (not sending to Telegram per #564)", {
+          taskId: taskId.slice(0, 12),
+          firstPassScore: (enforcedFirstPassResult.score * 100).toFixed(0),
+          secondPassScore: (enforcedSecondPassResult.score * 100).toFixed(0),
+          firstPassApproved: enforcedFirstPassResult.approved,
+          secondPassApproved: enforcedSecondPassResult.approved,
+          conservativeOutcome: finalApproved ? "approved" : "rejected",
+        });
       }
 
       // Prefer the second-pass explanation when available; fall back to first pass.

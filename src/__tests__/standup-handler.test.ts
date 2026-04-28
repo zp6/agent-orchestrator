@@ -792,7 +792,7 @@ describe("applyGitHubSynthesisLabel", () => {
 // ── checkAndEscalateFallbackThreshold ────────────────────────────────────
 
 describe("checkAndEscalateFallbackThreshold", () => {
-  it("calls notifyOperator when should_escalate is true", async () => {
+  it("logs when should_escalate is true (NOISE SUPPRESSION #564)", async () => {
     const mockStore = {
       getStandupHealth: vi.fn().mockReturnValue({
         window_days: 1,
@@ -810,14 +810,12 @@ describe("checkAndEscalateFallbackThreshold", () => {
       mockNotifier as never,
     );
 
-    expect(mockNotifier.notifyOperator).toHaveBeenCalledWith(
-      expect.stringContaining("fallback threshold"),
-      expect.stringContaining("3"),
-      "high",
-    );
+    // Per noise suppression (#564), operational metrics like standup fallback
+    // counts should be logged, not sent to Telegram
+    expect(mockNotifier.notifyOperator).not.toHaveBeenCalled();
   });
 
-  it("does NOT call notifyOperator when below threshold", async () => {
+  it("does not escalate when below threshold", async () => {
     const mockStore = {
       getStandupHealth: vi.fn().mockReturnValue({
         window_days: 1,

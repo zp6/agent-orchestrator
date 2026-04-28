@@ -4826,7 +4826,8 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
         `[state.db] integrity_check FAILED:\n` +
         integrityRows.map((r) => r.integrity_check).join("\n");
       console.error(msg);
-      notifier?.send(msg);
+      // NOISE SUPPRESSION (#564): Integrity failures are logged to console for diagnosis.
+      // Operator should check logs directly; no push notifications.
     }
 
     // PRAGMA foreign_key_check returns one row per orphaned child row.
@@ -4837,7 +4838,8 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
         `[state.db] foreign_key_check found ${fkRows.length} violation(s):\n` +
         JSON.stringify(fkRows, null, 2);
       console.error(msg);
-      notifier?.send(msg);
+      // NOISE SUPPRESSION (#564): FK violations are logged to console for diagnosis.
+      // Operator should check logs directly; no push notifications.
     }
 
     if (!integrityFailed && fkRows.length === 0) {

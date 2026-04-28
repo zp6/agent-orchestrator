@@ -1,20 +1,23 @@
 /**
  * Telegram notification module for escalations and alerts.
  *
- * Sends messages to a configured Telegram bot/chat when the reviewer
- * escalates PRs, rejects tasks, or detects critical issues.
+ * DISCIPLINE: Telegram is an escalation channel, not a feed.
+ * Only send messages when the fleet genuinely needs Operator input/action.
  *
  * Configuration (via environment variables or ReviewerConfig.telegram):
  *   TELEGRAM_BOT_TOKEN  — Telegram bot token from @BotFather
  *   TELEGRAM_CHAT_ID    — Chat ID to send notifications to
  *
- * Usage:
+ * Usage (SIGNAL — Operator input needed):
  *   const notify = createNotifier();
- *   await notify.send("PR #42 escalated: merge conflicts");
- *   await notify.escalation("owner/repo", 42, "Diff too large");
- *   await notify.taskRejected("task-id", "claude-proxy", 0.3, "Missing auth check");
- *   await notify.notifyOperator("Deploy failed", "claude-proxy is down", "high");
- *   await notify.healthRecovery("claude-proxy", 12 * 60 * 1000);
+ *   await notify.emitOperatorEscalation("quality-floor-bypass", "Quality Floor Bypass", body, "high");
+ *   await notify.emitOperatorEscalation("task-needs-review", "Task Needs Review", body, "medium");
+ *   await notify.emitOperatorEscalation("charter-amendment", "Charter Amendment Proposal", body, "high");
+ *
+ * Usage (NOISE — Log only, no Telegram):
+ *   log.info("Low-score approval", { score, task_id });  // Not notifyOperator
+ *   log.info("Quality summary", { report });              // Query via /quality-summary command
+ *   log.info("Standup synthesis fallback", { count });    // Operational metric
  */
 
 import { createLogger } from "./service/logger.js";
@@ -28,18 +31,35 @@ const log = createLogger("notify");
 export type NotifyUrgency = "low" | "medium" | "high";
 
 export interface Notifier {
+  /**
+   * SIGNAL PATH (Operator action required):
+   * Gated escalation channel — only for issues requiring Operator input/decision.
+   * Automatically rate-limited to prevent flooding.
+   * Categories: quality-floor-bypass, task-needs-review, charter-amendment,
+   * operator-only-action, existential-outage, irreversible-commitment
+   */
+  emitOperatorEscalation(
+    category: string,
+    title: string,
+    body: string,
+    urgency: NotifyUrgency,
+  ): Promise<boolean>;
+
+  /**
+   * DEPRECATED: Use emitOperatorEscalation instead.
+   * This method is being phased out as part of noise suppression (#564).
+   * Send an operator notification with urgency level.
+   * Rate-limited to max 1 message per (title, urgency) type per 15 minutes.
+   * Returns true if the message was sent, false if suppressed by the rate limit.
+   */
+  notifyOperator(title: string, body: string, urgency: NotifyUrgency): Promise<boolean>;
+
   /** Send a raw message to the configured chat. */
   send(text: string): Promise<void>;
   /** Send a structured PR escalation alert. */
   escalation(repo: string, prNumber: number, reason: string): Promise<void>;
   /** Send a structured task rejection alert. */
   taskRejected(taskId: string, agentName: string, score: number, notes: string): Promise<void>;
-  /**
-   * Send an operator notification with urgency level.
-   * Rate-limited to max 1 message per (title, urgency) type per 15 minutes.
-   * Returns true if the message was sent, false if suppressed by the rate limit.
-   */
-  notifyOperator(title: string, body: string, urgency: NotifyUrgency): Promise<boolean>;
   /**
    * Post a supervisor decision to Telegram.
    * Only posts for concrete actions (not "none") to avoid noise.
@@ -135,6 +155,47 @@ export function createNotifier(
   return {
     isConfigured(): boolean {
       return resolved !== null;
+    },
+
+    async emitOperatorEscalation(
+      category: string,
+      title: string,
+      body: string,
+      urgency: NotifyUrgency,
+    ): Promise<boolean> {
+      if (!resolved) {
+        log.warn("Telegram notifier not configured — skipping emitOperatorEscalation", {
+          category,
+          title,
+          urgency,
+        });
+        return false;
+      }
+
+      const rateKey = `${category}::${urgency}`;
+      const now = Date.now();
+      const last = lastSentAt.get(rateKey);
+
+      if (last !== undefined && now - last < rateLimitMs) {
+        log.info("emitOperatorEscalation suppressed by rate limit", {
+          category,
+          title,
+          urgency,
+          nextAllowedIn: Math.ceil((rateLimitMs - (now - last)) / 1000),
+        });
+        return false;
+      }
+
+      const icon = URGENCY_ICON[urgency];
+      const text = [
+        `${icon} *[${category}] ${title}*`,
+        ``,
+        body.slice(0, 1000),
+      ].join("\n");
+
+      await this.send(text);
+      lastSentAt.set(rateKey, now);
+      return true;
     },
 
     async send(text: string): Promise<void> {

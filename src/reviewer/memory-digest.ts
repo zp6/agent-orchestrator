@@ -178,10 +178,11 @@ export class MemoryDigestScheduler {
     try {
       const report = buildMemoryDigest(this.store);
       const message = formatMemoryDigest(report);
-      await this.notifier.send(message);
+      // NOISE SUPPRESSION (#564): Memory digest is informational analysis.
+      // Operator should query /memory command if interested; no push notifications.
 
       this.store.setSystemFlag(FLAG_LAST_DIGEST_SENT, todayUtc);
-      log.info("Memory digest sent", {
+      log.info("Memory digest built (not sending to Telegram per #564)", {
         topQueried: report.top_queried_topics.length,
         repeated: report.repeated_attempt_topics.length,
         lowConfidence: report.low_confidence_topics.length,

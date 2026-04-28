@@ -79,19 +79,14 @@ export class LowScoreApprovalAlerter {
       return;
     }
 
-    try {
-      const message = this.formatAlertMessage(result, task);
-      await this.notifier.send(message);
-      log.info("Low-score approval alert sent", {
-        task_id: task.id.slice(0, 8),
-        score: result.score,
-      });
-    } catch (err) {
-      log.error("Failed to send low-score approval alert", {
-        task_id: task.id.slice(0, 8),
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+    // NOISE SUPPRESSION (#564): Low-score approvals are informational only.
+    // Operator should query /low-score-approvals if interested; no push notifications.
+    const message = this.formatAlertMessage(result, task);
+    log.info("Low-score approval detected (not sending to Telegram per #564)", {
+      task_id: task.id.slice(0, 8),
+      score: result.score,
+      message: message.slice(0, 200),
+    });
   }
 
   /**

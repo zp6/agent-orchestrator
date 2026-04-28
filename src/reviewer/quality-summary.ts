@@ -146,9 +146,10 @@ export class QualitySummaryScheduler {
         windowHours: this.windowHours,
         threshold: this.threshold,
       });
-      await this.notifier.send(formatQualitySummaryForTelegram(report));
+      // NOISE SUPPRESSION (#564): Quality summary is a periodic status report.
+      // Operator should query /quality-summary command if interested; no push notifications.
       this.store.setSystemFlag(FLAG_LAST_QUALITY_SUMMARY_SENT, todayKey);
-      log.info("Quality summary digest sent", {
+      log.info("Quality summary digest built (not sending to Telegram per #564)", {
         totalApproved: report.total_approved,
         belowThreshold: report.below_threshold_count,
         marginalRate: report.below_threshold_rate,
@@ -156,7 +157,7 @@ export class QualitySummaryScheduler {
       });
       return true;
     } catch (err) {
-      log.error("Failed to send quality summary digest", {
+      log.error("Failed to build quality summary digest", {
         error: err instanceof Error ? err.message : String(err),
       });
       return false;

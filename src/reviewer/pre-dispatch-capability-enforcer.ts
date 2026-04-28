@@ -272,10 +272,10 @@ export class PreDispatchCapabilityEnforcer {
       `_Routing boundary is enforced pre-dispatch. No task was queued on the reviewer._`,
     ];
 
-    await this.notifier.notifyOperator(
-      "Reviewer routing boundary enforced",
-      lines.join("\n"),
-      "high",
-    );
+    // NOISE SUPPRESSION (#564): Routing enforcement is operational.
+    // Operator should query /routing or /conflicts if interested; no push notifications.
+    log.warn("Reviewer routing boundary enforced (not sending to Telegram per #564)", {
+      message: lines.join("\n").slice(0, 200),
+    });
   }
 }

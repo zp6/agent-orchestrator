@@ -344,10 +344,11 @@ export class MisroutingDigestScheduler {
         researchClient: this.researchClient,
       });
       const message = formatMisroutingDigest(report);
-      await this.notifier.send(message);
+      // NOISE SUPPRESSION (#564): Misrouting digest is informational analysis.
+      // Operator should query /misrouting command if interested; no push notifications.
 
       this.store.setSystemFlag(FLAG_LAST_MISROUTING_DIGEST_SENT, todayUtc);
-      log.info("Misrouting digest sent", {
+      log.info("Misrouting digest built (not sending to Telegram per #564)", {
         entries: report.entries.length,
         researchEntries: report.research_agent_entries?.length ?? null,
         lookbackHours: report.lookback_hours,

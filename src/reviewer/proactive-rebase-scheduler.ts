@@ -394,13 +394,14 @@ export class ProactiveRebaseScheduler {
 
     const message = formatProactiveRebaseAlert(repo, stalePRs, nowMs);
     try {
-      await this.notifier.send(message);
-      log.info("Proactive rebase alert sent", {
+      // NOISE SUPPRESSION (#564): Proactive rebase alerts are informational.
+      // Operator should query /proactive-rebases if interested; no push notifications.
+      log.info("Proactive rebase alert prepared (not sending to Telegram per #564)", {
         repo,
         count: stalePRs.length,
       });
     } catch (err) {
-      log.error("Failed to send proactive rebase alert", {
+      log.error("Failed to prepare proactive rebase alert", {
         error: err instanceof Error ? err.message : String(err),
       });
     }

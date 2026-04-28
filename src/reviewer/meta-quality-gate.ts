@@ -262,13 +262,17 @@ export async function sendMetaQualityAlert(
   if (!notifier) return;
   try {
     const body = buildMetaQualityAlertBody(taskId, agentName, score, keyword);
-    await notifier.notifyOperator(
-      "Meta-quality gate: quality-enforcement task below 85% floor",
-      body,
-      "medium",
-    );
+    // NOISE SUPPRESSION (#564): Meta-quality gate is operational monitoring.
+    // Operator should query /meta-quality or /quality-health if interested; no push notifications.
+    log.warn("Meta-quality gate violation detected (not sending to Telegram per #564)", {
+      taskId,
+      agentName,
+      score,
+      keyword,
+      message: body.slice(0, 200),
+    });
   } catch (err) {
-    log.error("Failed to send meta-quality Telegram alert", {
+    log.error("Failed to process meta-quality gate", {
       taskId,
       error: err instanceof Error ? err.message : String(err),
     });

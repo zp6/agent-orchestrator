@@ -249,16 +249,17 @@ export class ThresholdAdjuster {
         const bucket = `${lo}-${hi}`;
         const mergePct = (row.actual_merge_rate * 100).toFixed(1);
 
-        await this.notifier.notifyOperator(
-          `Low merge rate: ${verifierId} (${taskType} ${bucket})`,
-          `⚠️ Verifier \`${verifierId}\` (${taskType}) — ` +
-            `score bucket ${bucket} has merge rate *${mergePct}%*, ` +
+        // NOISE SUPPRESSION (#564): Threshold monitoring is operational.
+        // Operator should query /threshold-metrics or /verifier-health if interested; no push notifications.
+        this.log.warn("Low merge rate detected (not sending to Telegram per #564)", {
+          verifierId,
+          taskType,
+          bucket: `${lo}-${hi}`,
+          mergePct,
+          message: `score bucket ${bucket} has merge rate ${mergePct}%, ` +
             `below the ${LOW_MERGE_RATE_ALERT_THRESHOLD * 100}% floor ` +
-            `for ${newBadCycles} consecutive calibration cycles ` +
-            `(n=${row.total_count}). ` +
-            `Consider reviewing task output quality or adjusting dispatch criteria.`,
-          "medium",
-        );
+            `for ${newBadCycles} consecutive calibration cycles (n=${row.total_count})`,
+        });
 
         this.log.warn("Low merge rate alert fired", {
           verifier: verifierId,

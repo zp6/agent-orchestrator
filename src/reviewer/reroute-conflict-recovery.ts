@@ -329,11 +329,12 @@ export class ConflictRecoveryAlertMonitor {
     });
 
     try {
-      await this.notifier.send(message);
+      // NOISE SUPPRESSION (#564): Conflict recovery is operational monitoring.
+      // Operator should query /conflicts or /reroute-health if interested; no push notifications.
       for (const row of active) {
         this.lastAlertedAt.set(row.agent_name, nowMs);
       }
-      log.info("Conflict recovery alert sent", {
+      log.info("Conflict recovery alert prepared (not sending to Telegram per #564)", {
         hours,
         threshold,
         agents: active.map((row) => row.agent_name),

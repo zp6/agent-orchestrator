@@ -381,26 +381,35 @@ describe("MemoryDigestScheduler", () => {
 
     const first = await scheduler.maybeFireDigest();
     expect(first).toBe(true);
+    // NOISE SUPPRESSION (#564): Memory digests no longer send to Telegram
+    // Verify state change (system flag set) instead of send call
+    const flagAfterFirst = store.getSystemFlag("last_memory_digest_sent");
+    expect(flagAfterFirst).toBeDefined();
 
     // Advance clock 30 min (still 09:xx)
     vi.advanceTimersByTime(30 * 60 * 1000);
     const second = await scheduler.maybeFireDigest();
     expect(second).toBe(false);
-
-    expect(sends).toHaveLength(1);
   });
 
   it("fires again the next day", async () => {
     vi.setSystemTime(new Date("2025-06-15T09:00:00Z"));
     const scheduler = new MemoryDigestScheduler(store, notifier, { digestHourUtc: 9 });
 
-    await scheduler.maybeFireDigest();
-    expect(sends).toHaveLength(1);
+    const first = await scheduler.maybeFireDigest();
+    expect(first).toBe(true);
+    // NOISE SUPPRESSION (#564): Memory digests no longer send to Telegram
+    // Verify state change (system flag set for first day)
+    const flagDay1 = store.getSystemFlag("last_memory_digest_sent");
+    expect(flagDay1).toBe("2025-06-15");
 
     // Advance to next day 09:00 UTC
     vi.setSystemTime(new Date("2025-06-16T09:00:00Z"));
-    await scheduler.maybeFireDigest();
-    expect(sends).toHaveLength(2);
+    const second = await scheduler.maybeFireDigest();
+    expect(second).toBe(true);
+    // Verify state changed to second day
+    const flagDay2 = store.getSystemFlag("last_memory_digest_sent");
+    expect(flagDay2).toBe("2025-06-16");
   });
 
   it("persists the last-sent date in system_flags", async () => {

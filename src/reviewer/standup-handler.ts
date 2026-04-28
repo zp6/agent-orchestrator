@@ -307,18 +307,15 @@ export async function checkAndEscalateFallbackThreshold(
   try {
     const health = store.getStandupHealth(1); // 1-day window for escalation check
     if (health.should_escalate) {
-      await notifier.notifyOperator(
-        "Standup synthesis fallback threshold exceeded",
-        `${health.fallback_count_24h} standup synthesis fallbacks in the last 24h (threshold: ${FALLBACK_ESCALATION_THRESHOLD}).\n\nStandup reports are repeatedly shipping with 0 action items. Check the orchestrator's LLM synthesis pipeline — there may be a recurring failure causing the fallback path to activate.`,
-        "high",
-      );
-      log.warn("Standup synthesis fallback threshold exceeded — escalated to Telegram", {
+      // NOISE SUPPRESSION (#564): Standup synthesis fallback is an operational metric.
+      // Operator should query /standup-quality if interested; no push notifications.
+      log.warn("Standup synthesis fallback threshold exceeded (not sending to Telegram per #564)", {
         fallback_count_24h: health.fallback_count_24h,
         threshold: FALLBACK_ESCALATION_THRESHOLD,
       });
     }
   } catch (err) {
-    log.warn("Failed to check/escalate standup fallback threshold", {
+    log.warn("Failed to check standup fallback threshold", {
       error: err instanceof Error ? err.message : String(err),
     });
   }

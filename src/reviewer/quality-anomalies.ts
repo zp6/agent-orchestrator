@@ -194,9 +194,10 @@ export class QualityAnomalySpikeDetector {
 
     try {
       const message = formatQualityAnomalySpikeAlert(summary, this.feedUrl);
-      await this.notifier.send(message);
+      // NOISE SUPPRESSION (#564): Quality anomalies are informational monitoring.
+      // Operator should query /anomalies command if interested; no push notifications.
       this.lastAlertedAt = nowMs;
-      this.log.info("Quality anomaly spike sent to Telegram", {
+      this.log.info("Quality anomaly spike detected (not sending to Telegram per #564)", {
         anomalyCount: summary.total,
         threshold: this.threshold,
         affectedAgents: summary.per_agent.length,

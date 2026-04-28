@@ -568,11 +568,10 @@ export class QualitySystemHealthMonitor {
     ].filter(Boolean).join("\n");
 
     try {
-      await this.notifier.send(
-        `🚨 *Quality gate credibility alert*\n\n${alertBody}`,
-      );
+      // NOISE SUPPRESSION (#564): Quality system health is operational status.
+      // Operator should query /quality-health if interested; no push notifications.
       this.lastAlertCycleKey = cycleKey;
-      this.log.info("Quality system health alert sent", {
+      this.log.info("Quality system health alert prepared (not sending to Telegram per #564)", {
         cycleKey,
         bypassRate: payload.current_cycle_bypass_rate,
       });
