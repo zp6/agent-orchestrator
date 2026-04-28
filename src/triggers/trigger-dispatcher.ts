@@ -150,11 +150,12 @@ function recordAlreadyInReviewTask(
       verification_notes: "Auto-approved: dispatch skipped because open PR already exists for this issue.",
     });
 
-    // Use the real task.id so the processed_triggers.task_id FK constraint
-    // (REFERENCES tasks.id) is satisfied.  Passing a synthetic string like
-    // "already-in-review-pr-N" caused "FOREIGN KEY constraint failed" because
-    // that string has no matching row in the tasks table.
-    store.markProcessed("github", sourceRef, task.id);
+    // Do NOT call store.markProcessed() here (issue #1232).
+    // Marking the issue permanently processed would prevent re-dispatch if the
+    // blocking PR is later closed or rejected.  Instead, deduplication within
+    // the same guard window is handled by hasRecentAlreadyInReviewTask (6h TTL)
+    // checked above — that guard prevents duplicate audit tasks while still
+    // allowing the issue to be re-evaluated on every daemon cycle.
 
     log.info("Recorded already-in-review task for issue with existing PR", {
       taskId: task.id,

@@ -2534,13 +2534,10 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
         quality_score: 1.0,
       }),
     );
-    // Should mark as processed using the real task ID (not a synthetic string)
-    // so the processed_triggers.task_id FK constraint is satisfied.
-    expect(mockStore.markProcessed).toHaveBeenCalledWith(
-      "github",
-      "owner/my-repo#42",
-      "task-already-in-review",
-    );
+    // Must NOT mark as processed (issue #1232): permanent marking would block
+    // re-dispatch if the PR is later closed or rejected. Deduplication within
+    // the guard window is handled by hasRecentAlreadyInReviewTask (6h TTL).
+    expect(mockStore.markProcessed).not.toHaveBeenCalled();
     // Should NOT dispatch to agent
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
   });
