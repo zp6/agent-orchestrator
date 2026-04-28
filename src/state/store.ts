@@ -689,6 +689,24 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
         ON pr_guard_cooldown (expires_at);
     `);
 
+    // PR guard surge suppression table (issue #468).
+    // Persists each 2-hour dispatch suppression entry written by PRGuardSurgeDetector
+    // so that active suppressions survive container restarts.  The detector loads
+    // active rows on startup and backs every new suppression write to this table.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pr_guard_surge_suppressions (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo             TEXT    NOT NULL,
+        issue_number     INTEGER NOT NULL,
+        suppressed_until TEXT    NOT NULL,
+        created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (repo, issue_number)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pr_guard_surge_suppressions_until
+        ON pr_guard_surge_suppressions (suppressed_until);
+    `);
+
     // Triage pre-submission validator call log (issue #413).
     // Records each call to POST /api/validate-triage-schema so that
     // getTriageHealthPayload() can compute the validator call rate vs.
@@ -923,6 +941,106 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       issueNumber: r.issue_number,
       expiresAt: r.expires_at,
     }));
+  }
+
+  // ── PR guard surge suppressions (issue #468) ────────────────────────────
+
+  /**
+   * Write (or refresh) a surge suppression entry for `(repo, issueNumber)`.
+   *
+   * Called by `PRGuardSurgeDetector` when the suppression threshold is reached.
+   * If an entry already exists it is updated so the expiry resets from the new
+   * `suppressedUntil` value.
+   *
+   * @param repo           - Repository in "owner/repo" format
+   * @param issueNumber    - GitHub issue number
+   * @param suppressedUntil - When the suppression expires (absolute timestamp)
+   */
+  setPRGuardSurgeSuppression(repo: string, issueNumber: number, suppressedUntil: Date): void {
+    this.db
+      .prepare(
+        `INSERT INTO pr_guard_surge_suppressions (repo, issue_number, suppressed_until)
+         VALUES (?, ?, ?)
+         ON CONFLICT (repo, issue_number)
+         DO UPDATE SET suppressed_until = excluded.suppressed_until,
+                       created_at = datetime('now')`,
+      )
+      .run(repo, issueNumber, suppressedUntil.toISOString());
+  }
+
+  /**
+   * Return true when an active (non-expired) surge suppression exists for
+   * `(repo, issueNumber)`.
+   *
+   * `PRGuardSurgeDetector` calls this as the DB-backed half of the dual
+   * in-memory + DB check, giving cross-restart visibility.
+   *
+   * @param repo        - Repository in "owner/repo" format
+   * @param issueNumber - GitHub issue number
+   */
+  isPRGuardSurgeSuppressionActive(repo: string, issueNumber: number): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM pr_guard_surge_suppressions
+         WHERE repo = ? AND issue_number = ? AND suppressed_until > datetime('now')
+         LIMIT 1`,
+      )
+      .get(repo, issueNumber);
+    return row !== undefined;
+  }
+
+  /**
+   * Return all currently active (non-expired) surge suppression entries.
+   *
+   * Called by `PRGuardSurgeDetector` on startup to reload in-memory state,
+   * and by the `/pr-guard-surge-suppressions` feed endpoint.
+   *
+   * @param repo  Optional "owner/repo" filter.  When omitted, all repos are returned.
+   * @returns Array ordered by suppressed_until ascending.
+   */
+  listActivePRGuardSurgeSuppressions(
+    repo?: string,
+  ): Array<{ repo: string; issueNumber: number; suppressedUntil: string }> {
+    const rows = repo
+      ? (this.db
+          .prepare(
+            `SELECT repo, issue_number, suppressed_until
+             FROM pr_guard_surge_suppressions
+             WHERE suppressed_until > datetime('now')
+               AND repo = ?
+             ORDER BY suppressed_until ASC`,
+          )
+          .all(repo) as Array<{ repo: string; issue_number: number; suppressed_until: string }>)
+      : (this.db
+          .prepare(
+            `SELECT repo, issue_number, suppressed_until
+             FROM pr_guard_surge_suppressions
+             WHERE suppressed_until > datetime('now')
+             ORDER BY suppressed_until ASC`,
+          )
+          .all() as Array<{ repo: string; issue_number: number; suppressed_until: string }>);
+
+    return rows.map((r) => ({
+      repo: r.repo,
+      issueNumber: r.issue_number,
+      suppressedUntil: r.suppressed_until,
+    }));
+  }
+
+  /**
+   * Delete expired surge suppression rows.
+   *
+   * Call periodically alongside other prune tasks in the daemon batch cycle.
+   *
+   * @returns Number of rows deleted.
+   */
+  prunePRGuardSurgeSuppressions(): number {
+    const result = this.db
+      .prepare(
+        `DELETE FROM pr_guard_surge_suppressions WHERE suppressed_until <= datetime('now')`,
+      )
+      .run();
+    return result.changes;
   }
 
   // ── Schema access instrumentation ────────────────────────────────────────

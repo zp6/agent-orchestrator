@@ -404,6 +404,8 @@ export type {
 // triggers ≥ 5 times within a 30-minute window, a 2-hour dispatch suppression entry is written
 // via IPRGuardCooldownStore and a dedicated alert fires with "dispatch suppressed until HH:MM UTC
 // — no action needed."  Leading indicator of cooldown-table failures or dispatcher polling loops.
+// Issue #468: suppressions are now also persisted to the pr_guard_surge_suppressions SQLite
+// table via IPRGuardSurgeSuppressionStore, giving cross-restart visibility.
 export {
   PRGuardSurgeDetector,
   PR_GUARD_SURGE_THRESHOLD,
@@ -417,7 +419,21 @@ export {
 export type {
   PRGuardHit,
   PRGuardSurgeConfig,
+  IPRGuardSurgeSuppressionStore,
 } from "./reviewer/pr-guard-surge-detector.js";
+
+// PR guard surge suppressions feed — /pr-guard-surge-suppressions endpoint (issue #468).
+// Returns all active entries from the pr_guard_surge_suppressions table, giving operators
+// dashboard visibility into which (repo, issue) pairs are in a 2-hour suppression window.
+// Mount: app.get('/pr-guard-surge-suppressions', (req, res) => res.json(
+//   getPRGuardSurgeSuppressionsFeedPayload(store, req.query.repo as string | undefined)
+// ));
+export { getPRGuardSurgeSuppressionsFeedPayload } from "./reviewer/pr-guard-surge-suppressions-feed.js";
+export type {
+  PRGuardSurgeSuppressionEntry,
+  PRGuardSurgeSuppressionsFeedPayload,
+  IPRGuardSurgeSuppressionsFeedStore,
+} from "./reviewer/pr-guard-surge-suppressions-feed.js";
 
 // Cross-agent in-flight duplicate dispatch guard (issue #336) — blocks dispatch when
 // another agent already has an active task for the same GitHub issue, preventing

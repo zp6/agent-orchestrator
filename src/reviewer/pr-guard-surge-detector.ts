@@ -103,6 +103,23 @@ export const PR_GUARD_SUPPRESSION_TTL_MINUTES = 120;
 
 // ── Public types ───────────────────────────────────────────────────────────────
 
+/**
+ * Minimal store interface for persisting surge suppressions to SQLite (issue #468).
+ *
+ * Implemented by `StateStore`.  Pass an instance via
+ * `PRGuardSurgeConfig.surgeSuppressionStore` so that:
+ *   1. On startup, the detector reloads active suppressions from DB.
+ *   2. On each new suppression, the entry is written to DB in addition to memory.
+ *   3. `isSuppressionActive()` checks DB as a fallback, giving cross-restart visibility.
+ */
+export interface IPRGuardSurgeSuppressionStore {
+  setPRGuardSurgeSuppression(repo: string, issueNumber: number, suppressedUntil: Date): void;
+  isPRGuardSurgeSuppressionActive(repo: string, issueNumber: number): boolean;
+  listActivePRGuardSurgeSuppressions(
+    repo?: string,
+  ): Array<{ repo: string; issueNumber: number; suppressedUntil: string }>;
+}
+
 /** A single "already-in-review" guard hit for a specific issue. */
 export interface PRGuardHit {
   /** Repository slug, e.g. "rapartlu/research-agent". */
@@ -175,6 +192,20 @@ export interface PRGuardSurgeConfig {
    * If omitted, no suppression entry is written (Telegram alert still fires).
    */
   suppressionStore?: IPRGuardCooldownStore;
+  /**
+   * State store used to persist surge suppression events to SQLite (issue #468).
+   *
+   * When provided:
+   *   - On construction, active suppression rows are loaded into the in-memory
+   *     `suppressionSentAt` map so suppressions survive container restarts.
+   *   - On each new suppression, the entry is written to the DB table
+   *     `pr_guard_surge_suppressions` in addition to the in-memory map.
+   *   - `isSuppressionActive()` falls back to the DB when the in-memory map
+   *     has no entry, giving cross-restart visibility.
+   *
+   * Implemented by `StateStore`; pass it via {@link PRGuardSurgeConfig}.
+   */
+  surgeSuppressionStore?: IPRGuardSurgeSuppressionStore;
 }
 
 // ── Detector ───────────────────────────────────────────────────────────────────
@@ -204,12 +235,52 @@ export class PRGuardSurgeDetector {
   private suppressionSentAt = new Map<string, Date>();
 
   constructor(private readonly config: PRGuardSurgeConfig) {
-    this.surgeThreshold       = config.surgeThreshold        ?? PR_GUARD_SURGE_THRESHOLD;
-    this.windowMs             = config.windowMs               ?? PR_GUARD_SURGE_WINDOW_MS;
-    this.cooldownMs           = config.cooldownMs             ?? PR_GUARD_SURGE_COOLDOWN_MS;
-    this.suppressionThreshold = config.suppressionThreshold   ?? PR_GUARD_SUPPRESSION_THRESHOLD;
-    this.suppressionWindowMs  = config.suppressionWindowMs    ?? PR_GUARD_SUPPRESSION_WINDOW_MS;
-    this.suppressionTtlMinutes = config.suppressionTtlMinutes ?? PR_GUARD_SUPPRESSION_TTL_MINUTES;
+    this.surgeThreshold        = config.surgeThreshold        ?? PR_GUARD_SURGE_THRESHOLD;
+    this.windowMs              = config.windowMs               ?? PR_GUARD_SURGE_WINDOW_MS;
+    this.cooldownMs            = config.cooldownMs             ?? PR_GUARD_SURGE_COOLDOWN_MS;
+    this.suppressionThreshold  = config.suppressionThreshold   ?? PR_GUARD_SUPPRESSION_THRESHOLD;
+    this.suppressionWindowMs   = config.suppressionWindowMs    ?? PR_GUARD_SUPPRESSION_WINDOW_MS;
+    this.suppressionTtlMinutes = config.suppressionTtlMinutes  ?? PR_GUARD_SUPPRESSION_TTL_MINUTES;
+
+    // Load active suppressions from DB on startup so cross-restart state is restored
+    // before any hits are processed (issue #468).
+    if (config.surgeSuppressionStore) {
+      this.loadSuppressionsFromStore(config.surgeSuppressionStore);
+    }
+  }
+
+  /**
+   * Reload active surge suppression entries from the DB into the in-memory
+   * `suppressionSentAt` map.
+   *
+   * Called automatically from the constructor when `surgeSuppressionStore` is
+   * provided.  May also be called manually (e.g. in tests) to force a reload.
+   *
+   * For each active DB row, back-calculates the synthetic `lastSent` timestamp
+   * as `suppressedUntil − suppressionTtlMinutes` so the existing
+   * `isSuppressionActive()` in-memory check continues to work correctly.
+   */
+  loadSuppressionsFromStore(store: IPRGuardSurgeSuppressionStore): void {
+    try {
+      const active = store.listActivePRGuardSurgeSuppressions();
+      for (const { repo, issueNumber, suppressedUntil } of active) {
+        const key = makeKey(repo, issueNumber);
+        const suppressedUntilMs = new Date(suppressedUntil).getTime();
+        const lastSent = new Date(suppressedUntilMs - this.suppressionTtlMinutes * 60_000);
+        this.suppressionSentAt.set(key, lastSent);
+        log.info("Loaded active surge suppression from DB on startup", {
+          key,
+          suppressedUntil,
+        });
+      }
+      if (active.length > 0) {
+        log.info("Surge suppression state restored from DB", { count: active.length });
+      }
+    } catch (err) {
+      log.error("Failed to load active surge suppressions from DB on startup", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**
@@ -320,6 +391,27 @@ export class PRGuardSurgeDetector {
           );
         }
 
+        // Persist the surge suppression event to the dedicated table (issue #468).
+        // This gives cross-restart visibility and a queryable suppression log.
+        if (this.config.surgeSuppressionStore) {
+          try {
+            this.config.surgeSuppressionStore.setPRGuardSurgeSuppression(
+              hit.repo,
+              hit.issueNumber,
+              suppressedUntil,
+            );
+            log.info("Surge suppression event persisted to DB", {
+              key,
+              suppressedUntil: suppressedUntil.toISOString(),
+            });
+          } catch (surgeStoreErr) {
+            log.error("Failed to persist surge suppression event to DB", {
+              key,
+              error: surgeStoreErr instanceof Error ? surgeStoreErr.message : String(surgeStoreErr),
+            });
+          }
+        }
+
         // Record before sending so a throw doesn't leave suppressionSentAt unset.
         this.suppressionSentAt.set(key, hit.timestamp);
 
@@ -387,13 +479,28 @@ export class PRGuardSurgeDetector {
   }
 
   /**
-   * Returns true if a suppression alert has been sent for the given
-   * (repo, issueNumber) pair within the suppression TTL window.
+   * Returns true if dispatch is currently suppressed for the given
+   * (repo, issueNumber) pair.
+   *
+   * Performs a dual check (issue #468):
+   *   1. **In-memory map** — fast path; populated on startup from DB and updated
+   *      each time `recordHit()` triggers a new suppression.
+   *   2. **DB fallback** — consulted when the in-memory map has no entry.
+   *      Handles the case where the detector was constructed without a
+   *      `surgeSuppressionStore` at first but one was later provided, or where a
+   *      suppression was written by a previous process that shared state.db.
    */
   isSuppressionActive(repo: string, issueNumber: number, now: Date = new Date()): boolean {
+    // 1. In-memory check (fast path)
     const lastSent = this.suppressionSentAt.get(makeKey(repo, issueNumber));
-    if (!lastSent) return false;
-    return now.getTime() - lastSent.getTime() < this.suppressionTtlMinutes * 60 * 1000;
+    if (lastSent && now.getTime() - lastSent.getTime() < this.suppressionTtlMinutes * 60 * 1000) {
+      return true;
+    }
+    // 2. DB fallback — gives cross-restart visibility (issue #468)
+    if (this.config.surgeSuppressionStore) {
+      return this.config.surgeSuppressionStore.isPRGuardSurgeSuppressionActive(repo, issueNumber);
+    }
+    return false;
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────────
