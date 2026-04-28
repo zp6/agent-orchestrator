@@ -1,6 +1,6 @@
 # Roadmap - agent-orchestrator
 
-_Last updated: 2026-04-27 (severance program added as master priority)_
+_Last updated: 2026-04-28 (triage cycle 6)_
 
 ## Completed recently
 
@@ -13,6 +13,10 @@ _Last updated: 2026-04-27 (severance program added as master priority)_
 - OKR-5 economic autonomy defined and merged (#1259): $500/mo MRR target, ≥3 paying entities, self_funded_ratio ≥ 0.25.
 - Intelligence portfolio expansion plan documented (#1269): see `docs/capability-expansion.md`.
 - Operator severance program opened (#1264): `SEVERANCE.md` committed; 6-phase plan to operational independence by week 14 and legal independence by month 24.
+- Hard scope contracts enforced in dispatch pipeline (PR #1252 merged).
+- CLAUDE.md refreshed and roadmap triage (PR #1253 merged, Closes #1246).
+- Anti-navel-gazing structural fixes shipped (PR #1262 merged, Closes #1258).
+- Orphan branch cleanup: 6 empty branches removed (issue #1217, PR #1291 open).
 
 ## Master program
 
@@ -30,11 +34,11 @@ Subordinate workstreams (all critical-path):
 
 ## Top 5 priorities
 
-1. **#1232 - trigger-dispatcher re-dispatch bug** _(high)_ - `markProcessed()` is being called on the already-in-review skip path, which can block a later re-dispatch after the PR is closed or rejected.
-2. **#1166 - PR guard surge suppression flood** _(high)_ - enqueue-time suppression is still letting large `already-in-review` bursts create too many duplicate tasks; move the guard earlier so floods are dropped before dispatch work is queued.
+1. **#1232 - trigger-dispatcher re-dispatch bug** _(high, PR #1282 open)_ - `markProcessed()` blocks re-dispatch permanently after an already-in-review skip; fix removes the premature mark.
+2. **#1166 - PR guard surge suppression flood** _(high)_ - enqueue-time suppression still lets large `already-in-review` bursts create too many duplicate tasks; move the guard earlier so floods are dropped before dispatch work is queued.
 3. **#1096 - blocked issue backlog not cleared on merge** _(high)_ - merged PRs are not removing resolved blocked issues from the next dispatch cycle when the PR body already closes them.
-4. **#1040 - CI failing on main** _(high)_ - main is red, which blocks confidence in every follow-up change.
-5. **#1251 - dispatch prompts need hard scope enforcement** _(high)_ - the orchestrator agent is ignoring explicit hard constraints, so scope-contract validation and a freshness check need to happen before PR creation.
+4. **#1040 - CI failing on main** _(high)_ - main is red, blocking confidence in every follow-up change.
+5. **#1279 - fleet resilience + Director-routed Article II escalations** _(high, PR #1280 open)_ - post-severance crash recovery, circuit-breaker failover, and Director-routed spend decisions wired into daemon and dispatcher.
 
 ## Planned (revenue-gated)
 
@@ -65,14 +69,16 @@ Subordinate workstreams (all critical-path):
 
 ## Notes
 
-- Open issues scanned: 19
+- Open issues scanned: 23
 - Duplicate issues found: 0
 - Stale issues found: 0
-- Open PRs found: 0
+- Open PRs found: 5 (PR #1280, #1281, #1282, #1291 open; cycles 1–5 triage PRs superseded and closed)
 - Oldest open issue: #869, created 2026-04-15, still inside the 14-day stale window
 - Secondary active items: #1228 still needs its measured baseline snapshot, and #1223 should be verified/closed now that Linear support is present in the tree
+- Triage cycles 1–5 (issues #1283, #1285, #1287, #1289, #1292) superseded by this cycle (#1294) as prior PRs did not merge before next cycle arrived
 
 ## Triage log
 
 - 2026-04-27: No duplicates or stale issues needed action. No orphan PRs were open. Updated the roadmap to reflect the current backlog, the Linear support already in tree, and the most urgent blocking bugs and scope-control work.
 - 2026-04-27: Added intelligence portfolio expansion plan to Planned section. Full strategy documented in `docs/capability-expansion.md` (#1269).
+- 2026-04-28: Triage cycle 6. Annotated open PRs on top-5 items. Added 4 completed items (scope enforcement #1252, CLAUDE.md refresh #1253, anti-navel-gazing fixes #1262, orphan branch cleanup #1217/PR#1291). Cycles 1–5 superseded.
