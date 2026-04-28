@@ -30,6 +30,7 @@ import { ManagementClient } from "../client/management-client.js";
 import { planSync, executeSync } from "../orchestrator/sync.js";
 import { notifyOperator, clearNotifyRateLimit, setTelegramRateLimitMs } from "./notify.js";
 import { buildHealthPostmortem, renderPostmortemBlock } from "./health-postmortem.js";
+import { checkAndEscalateDay7 } from "./survival-plan.js";
 import { setRecencyWindowHours } from "../triggers/duplicate-guard.js";
 import { DuplicateIdDetector, checkDbForDuplicateIds } from "../state/duplicate-id-detector.js";
 import { startTelegramPolling, stopTelegramPolling, pollTelegram, maybePostDailyGuardDigest, maybePostDailyAnomaliesDigest } from "./telegram.js";
@@ -105,6 +106,8 @@ const PROXY_HEALTH_CHECK_EVERY_N_CYCLES = 3;   // ~15min — check proxy server 
 const CLOSED_ISSUE_FAILURE_CLEANUP_EVERY_N_CYCLES = 60; // ~5h — clear stale failures for closed issues
 const PROACTIVE_REBASE_EVERY_N_CYCLES = 3; // ~15min — proactively rebase stale branches
 const SEMANTIC_MEMORY_AUDIT_EVERY_N_CYCLES = 288; // ~24h — check semantic memory effectiveness (issue #1016)
+/** Check survival-plan Day-7 checkpoint once per day. Issue #1267. */
+const SURVIVAL_PLAN_CHECK_EVERY_N_CYCLES = 288; // ~24h at 5min interval
 
 /**
  * Maximum time a single poll cycle is allowed to run before the watchdog
@@ -1055,6 +1058,21 @@ export class Daemon {
             error: err instanceof Error ? err.message : String(err),
           });
         }
+      }
+
+      // Survival-plan Day-7 checkpoint — runs once per day (~288 cycles).
+      // Escalates to the operator if the Day-7 deadline (2026-05-04) has
+      // passed without: (a) first dollar received, (b) ≥3 active revenue paths.
+      // Issue #1267.
+      if (this.cycleCount % SURVIVAL_PLAN_CHECK_EVERY_N_CYCLES === 0) {
+        batch4.push(
+          checkAndEscalateDay7(this.store)
+            .catch((err) => {
+              this.log.warn("Survival plan Day-7 check failed", {
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }),
+        );
       }
 
       // Already-in-review saturation check — runs every cycle.

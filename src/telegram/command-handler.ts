@@ -41,6 +41,7 @@
  *   /investigations            → list pending/active/completed research agent investigations with titles, times, and result issue URLs
  *   /meeting-goal              → meeting-facilitator-agent monthly goal tracker: core_logic_shipped + meetings_facilitated progress (issue #456)
  *   /variant-duplicates [hours] → variant-pair dispatch dedup report: (repo, issue, variant-A, variant-B, count) pairs where both pool siblings hit the already-in-review guard (issue #1270)
+ *   /survival-status           → 30-day fleet survival plan: treasury progress, Day-7 checkpoint, active revenue paths, receiving addresses (issue #1267)
  *
  * Usage:
  *   const handler = new TelegramCommandHandler(stateStore);
@@ -117,6 +118,10 @@ import {
   DEFAULT_WINDOW_HOURS as VARIANT_DEDUP_DEFAULT_HOURS,
   MAX_WINDOW_HOURS as VARIANT_DEDUP_MAX_HOURS,
 } from "../reviewer/variant-deduplication.js";
+import {
+  getSurvivalStatusPayload,
+  formatSurvivalStatusForTelegram,
+} from "../service/survival-plan.js";
 import type { MeetingFacilitatorGoalWidget } from "../state/types.js";
 import type { ReviewerConfig } from "../config.js";
 export type { ConflictStatsProvider } from "../reviewer/supervisor.js";
@@ -184,7 +189,8 @@ type CommandName =
   | "triage-health"
   | "investigations"
   | "meeting-goal"
-  | "variant-duplicates";
+  | "variant-duplicates"
+  | "survival-status";
 
 const SUPPORTED_COMMANDS = new Set<CommandName>([
   "status",
@@ -230,6 +236,7 @@ const SUPPORTED_COMMANDS = new Set<CommandName>([
   "investigations",
   "meeting-goal",
   "variant-duplicates",
+  "survival-status",
 ]);
 
 interface ParsedCommand {
@@ -623,6 +630,11 @@ async function executeCommand(
         ? Math.min(Math.max(parseInt(hoursStr, 10) || VARIANT_DEDUP_DEFAULT_HOURS, 1), VARIANT_DEDUP_MAX_HOURS)
         : VARIANT_DEDUP_DEFAULT_HOURS;
       return handleVariantDuplicates(store, lookbackHours);
+    }
+
+    case "survival-status": {
+      // /survival-status — 30-day fleet survival tracker (issue #1267)
+      return Promise.resolve(handleSurvivalStatus(store));
     }
   }
 }
@@ -2584,6 +2596,19 @@ function handleVariantDuplicates(
     windowHours,
   );
   return Promise.resolve(formatVariantDuplicatesForTelegram(payload));
+}
+
+// ── Survival status handler (issue #1267) ─────────────────────────────────
+
+/**
+ * Handle the `/survival-status` command.
+ *
+ * Reports the 30-day fleet survival plan progress: treasury balance, Day-7
+ * checkpoint status, active revenue paths, and receiving addresses.
+ */
+function handleSurvivalStatus(store: ITelegramStateStore): string {
+  const payload = getSurvivalStatusPayload(store);
+  return formatSurvivalStatusForTelegram(payload);
 }
 
 // ── Quality system health handler (issue #304) ────────────────────────────

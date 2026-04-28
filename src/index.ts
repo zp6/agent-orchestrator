@@ -1314,6 +1314,39 @@ export type {
   VariantDuplicatesPayload,
 } from "./reviewer/variant-deduplication.js";
 
+// Survival plan tracker — 30-day fleet self-funding (issue #1267)
+export {
+  checkDay7Checkpoint,
+  checkAndEscalateDay7,
+  getSurvivalStatusPayload,
+  formatSurvivalStatusForTelegram,
+  getRevenuePath,
+  setRevenuePath,
+  markPathInMotion,
+  recordEarnings,
+  getTotalEarnedUsd,
+  getFirstDollarAt,
+  countActiveRevenuePaths,
+  getWalletAddress,
+  getGitHubSponsorsUrl,
+  getPolarUrl,
+  getAlgoraUrl,
+  getGitcoinUrl,
+  APPROVED_REVENUE_PATH_IDS,
+  SURVIVAL_DEADLINE_ISO,
+  DAY7_CHECKPOINT_ISO,
+  SURVIVAL_TARGET_USD,
+  SURVIVAL_STRETCH_USD,
+} from "./service/survival-plan.js";
+export type {
+  ISurvivalPlanStore,
+  RevenuePath,
+  RevenuePathId,
+  RevenuePathStatus,
+  Day7CheckpointResult,
+  SurvivalStatusPayload,
+} from "./service/survival-plan.js";
+
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
 export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";
