@@ -1,9 +1,12 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-28 (triage cycle 22)_
+_Last updated: 2026-04-28 (triage cycle 25)_
 
 ## Completed (recent)
 
+- **PR #578** — PersistentAnomaliesDigestScheduler: persistent anomaly digest wired into orchestrator dispatch cycles (issue #546)
+- **PR #577** — Telegram noise suppression: operator-only notifications per CLAUDE.md discipline (issue #564)
+- **PR #573** — PR-guard surge suppression persistence: `pr_guard_surge_suppression` SQLite table tracks 2h suppression windows (issue #468)
 - **PR #569** — Day-7 survival plan checkpoint + `/survival-status` Telegram command: per-agent Day-7 milestone state tracker
 - **PR #562** — OKR-aware supervisor prompt: anti-navel-gazing rule + `pattern_risk` signal to flag internal-only scope tasks
 - **PR #560** — Hard scope contracts enforcement: deterministic bundling/multi-issue detection runs before LLM PR review
@@ -87,15 +90,11 @@ _Last updated: 2026-04-28 (triage cycle 22)_
 
 ## Next up
 
-1. **#546 — Wire orchestrator's persistent-anomaly store into reviewer's recordAnomalyObservation call sites** _(high)_ — Audit that all `score_anomaly_observations` writes go through `recordAnomalyObservation()`; add `PersistentAnomaliesDigestScheduler` class so the orchestrator can schedule the daily Telegram digest via a single import; eliminates parallel-implementation risk.
+1. **#587 — [bug] Reviewer LLM returning text narrative instead of JSON decision — breaking all verification** _(critical)_ — Parser in response handler is failing to extract JSON from LLM output; verify path falls back to null/zero score; blocks all task verification until fixed.
 
-2. **#489 — Add /pr-guard-status Telegram command showing active surge suppressions** _(high)_ — Surface which `(repo, issue)` pairs have active surge suppressions so operators can see the PR-guard flood gate in real time; follows directly from the surge suppression work.
+2. **#489 — Add /pr-guard-status Telegram command showing active surge suppressions** _(high)_ — Surface which `(repo, issue)` pairs have active surge suppressions so operators can see the PR-guard flood gate in real time; follows directly from the surge suppression work (PR #573).
 
 3. **#473 — Newly shipped surge suppression doesn't cover PR-guard floods** _(high)_ — Add a PR-level suppression axis so batches of different issues blocked by the same PR collapse into one consolidated suppression event.
-
-4. **#468 — Persist dispatch surge suppression events to SQLite** _(high)_ — Make `PRGuardSurgeDetector` suppression survive restarts and expose the suppression log via REST.
-
-5. **#564 — Suppress Telegram noise: operator only wants action-required messages** _(high)_ — Filter informational/diagnostic Telegram messages so operators only receive notifications that require a response; reduces alert fatigue.
 
 ## Planned
 
@@ -120,6 +119,21 @@ _Last updated: 2026-04-28 (triage cycle 22)_
 - **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
 
 ## Triage notes
+
+- **2026-04-28 cycle 25**: 15 open issues audited (excl. #584 triage trigger), 0 duplicates, 0 stale (oldest #340 at 9 days). Features shipped since cycle 22: PR #578 (PersistentAnomaliesDigestScheduler — issue #546), PR #577 (suppress Telegram noise — issue #564), PR #573 (persist surge suppression to SQLite — issue #468). New critical issue detected: #587 (LLM returning text instead of JSON, breaking verification). ROADMAP.md: promoted 3 merged PRs (#546, #564, #468) to Completed; removed #546, #468, #564 from Next up; added #587 as rank 1 Critical; renumbered subsequent ranks (489→2, 473→3, removing 468 and 564). CLAUDE.md: verified current — no new modules since cycle 22; persistent-anomalies.ts scope entry already documents PersistentAnomaliesDigestScheduler; pr-guard-surge-detector.ts entry documents surge persistence.
+
+```json
+{
+  "duplicates_checked": true,
+  "stale_issues": [],
+  "priority_reordering": [
+    {"issue": 587, "old_rank": null, "new_rank": 1, "reason": "New critical bug: LLM JSON parsing failure breaks all verification; blocks all task evaluation"},
+    {"issue": 489, "old_rank": 2, "new_rank": 2, "reason": "#546 shipped (PR #578); #564 shipped (PR #577); #468 shipped (PR #573); ranks stable"},
+    {"issue": 473, "old_rank": 3, "new_rank": 3, "reason": "#546/#564/#468 shipped; rank stable"}
+  ],
+  "outcome_summary": "Cycle 25 triage: 15 open issues audited, 0 duplicates, 0 stale (oldest 9 days). Three features shipped (#546 PersistentAnomaliesDigestScheduler, #564 Telegram noise suppression, #468 surge suppression persistence). One new critical bug detected (#587 LLM JSON parsing). ROADMAP updated with 3 newly Completed items and 1 new Critical issue at rank 1. CLAUDE.md verified current — no drift."
+}
+```
 
 - **2026-04-28 cycle 22**: 16 open issues audited (excl. #565 triage trigger), 0 duplicates, 0 stale (oldest #340 at 9 days). Closed #524 (already resolved by merged PR #547 — agent-variant.ts). Features shipped since cycle 21: PR #559 (Linear client — listIssues), PR #560 (hard scope contract enforcement), PR #562 (OKR-aware supervisor + navel-gazing risk signal), PR #569 (Day-7 survival plan checkpoint + /survival-status). ROADMAP.md: promoted 4 merged PRs to Completed; reordered Next up (546→rank 1, 489→rank 2, 473→3, 468→4, 564→5 new); moved #445 and #496 from Next up to Planned; added #564 and #571 to Planned. CLAUDE.md: added 4 missing scope entries (Linear client, hard scope contracts, OKR-aware supervisor, Day-7 survival checkpoint).
 
