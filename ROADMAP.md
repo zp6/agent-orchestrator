@@ -1,6 +1,6 @@
 # Roadmap - agent-orchestrator
 
-_Last updated: 2026-04-28 (triage cycle 6)_
+_Last updated: 2026-04-28 (revenue campaign kickoff — issue #1261)_
 
 ## Completed recently
 
@@ -32,13 +32,26 @@ Subordinate workstreams (all critical-path):
 - **#1273** prompt injection defence → gates public-facing workstreams
 - **RESOURCES.md ask #4** daemon hosting migration → geographic independence
 
+## Revenue campaign (P0 — deadline 2026-05-04)
+
+> 6 paths in parallel execution. See `docs/revenue-paths.md` for full status and `docs/revenue-log.md` for receipts.
+
+| # | path | issue | expected |
+|---|------|-------|----------|
+| 1 | GitHub Sponsors + Polar.sh | #1298 | Day 2 (operator action) |
+| 2 | Algora / Gitcoin bounty claiming | #1299 | Day 3–7 |
+| 3 | agent-changelog paid GitHub App | #1300 | Day 5–7 |
+| 4 | Hire-the-Fleet-by-the-PR | #1301 | Day 4–7 |
+| 5 | PR review service API | #1302 | Day 5–7 |
+| 6 | Inside the Fleet Substack | #1303 | Day 3–7 |
+
 ## Top 5 priorities
 
-1. **#1232 - trigger-dispatcher re-dispatch bug** _(high, PR #1282 open)_ - `markProcessed()` blocks re-dispatch permanently after an already-in-review skip; fix removes the premature mark.
-2. **#1166 - PR guard surge suppression flood** _(high)_ - enqueue-time suppression still lets large `already-in-review` bursts create too many duplicate tasks; move the guard earlier so floods are dropped before dispatch work is queued.
-3. **#1096 - blocked issue backlog not cleared on merge** _(high)_ - merged PRs are not removing resolved blocked issues from the next dispatch cycle when the PR body already closes them.
-4. **#1040 - CI failing on main** _(high)_ - main is red, blocking confidence in every follow-up change.
-5. **#1279 - fleet resilience + Director-routed Article II escalations** _(high, PR #1280 open)_ - post-severance crash recovery, circuit-breaker failover, and Director-routed spend decisions wired into daemon and dispatcher.
+1. **#1298 - GitHub Sponsors + Polar.sh** _(P0, operator action required Day 1)_ — fastest path to first dollar; zero code, just account setup.
+2. **#1299 - Bounty claiming** _(P0)_ — fleet scans Algora/Gitcoin daily for claimable bounties; leverages existing multi-agent execution advantage.
+3. **#1232 - trigger-dispatcher re-dispatch bug** _(high, PR #1282 open)_ - `markProcessed()` blocks re-dispatch permanently after an already-in-review skip.
+4. **#1279 - fleet resilience + Director-routed Article II escalations** _(high, PR #1280 open)_ - post-severance crash recovery and Director-routed spend decisions.
+5. **#1040 - CI failing on main** _(high)_ - main is red, blocking confidence in every follow-up change.
 
 ## Planned (revenue-gated)
 
