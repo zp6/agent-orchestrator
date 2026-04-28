@@ -79,6 +79,7 @@ Subordinate workstreams (all critical-path):
 
 ## Triage log
 
+- 2026-04-28 (issue #1217): Orphan branch cleanup — 6 branches confirmed empty (0 unique commits vs main) and already absent from GitHub: `feat/fleet-autonomy-charter`, `fix/docker-socket-health-check`, `issue-591-standup-quality-trend`, `issue-597-marginal-score-cli`, `issue-1149-remove-orphaned-pattern-risk-signal`, `issue-1201-codex-pool-active-docs`. Linked issues: #591 (merged), #597 (closed), #1149 (still open, tracked independently), #1201 (closed).
 - 2026-04-27: No duplicates or stale issues needed action. No orphan PRs were open. Updated the roadmap to reflect the current backlog, the Linear support already in tree, and the most urgent blocking bugs and scope-control work.
 - 2026-04-27: Added intelligence portfolio expansion plan to Planned section. Full strategy documented in `docs/capability-expansion.md` (#1269).
 - 2026-04-28: Triage cycle 6. Annotated open PRs on top-5 items. Added 4 completed items (scope enforcement #1252, CLAUDE.md refresh #1253, anti-navel-gazing fixes #1262, orphan branch cleanup #1217/PR#1291). Cycles 1–5 superseded.
