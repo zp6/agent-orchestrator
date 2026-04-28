@@ -1,9 +1,13 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-27 (triage cycle 21)_
+_Last updated: 2026-04-28 (triage cycle 22)_
 
 ## Completed (recent)
 
+- **PR #569** — Day-7 survival plan checkpoint + `/survival-status` Telegram command: per-agent Day-7 milestone state tracker
+- **PR #562** — OKR-aware supervisor prompt: anti-navel-gazing rule + `pattern_risk` signal to flag internal-only scope tasks
+- **PR #560** — Hard scope contracts enforcement: deterministic bundling/multi-issue detection runs before LLM PR review
+- **PR #559** — Linear client (`listIssues`): HTTP client for Linear API backlog queries (`linear-client.ts`)
 - **#553 / PR #554** — `synthesis-watchdog.ts`: monitors meeting/standup synthesis intake entries; fires Telegram alert + re-attempts intake when synthesis missing after 24h; `synthesis_watchlist` SQLite table; `registerSynthesisIntake()` / `recordSynthesisComplete()` / `checkWatchlist()` lifecycle
 - **#551 / PR #552** — Flag unauthenticated `raw.githubusercontent.com` fetches in PR review: `pr-reviewer.ts` detects and surfaces raw GitHub URL usage as a security signal
 - **orchestrator#1211 / PR #544** — Multi-provider reviewer pool: `multi-provider-client.ts` wraps Anthropic + Deepseek R1 behind `IReviewerLLMClient`; `reviewer-pool.ts` declares pool membership; `POOL_MEMBER_ID` / `REVIEWER_PROVIDER` env-driven factory for cognitive diversity per CHARTER Article VI
@@ -83,28 +87,29 @@ _Last updated: 2026-04-27 (triage cycle 21)_
 
 ## Next up
 
-1. **#489 — Add /pr-guard-status Telegram command showing active surge suppressions** _(high)_ — Surface which `(repo, issue)` pairs have active surge suppressions so operators can see the PR-guard flood gate in real time; follows directly from the surge suppression work.
+1. **#546 — Wire orchestrator's persistent-anomaly store into reviewer's recordAnomalyObservation call sites** _(high)_ — Audit that all `score_anomaly_observations` writes go through `recordAnomalyObservation()`; add `PersistentAnomaliesDigestScheduler` class so the orchestrator can schedule the daily Telegram digest via a single import; eliminates parallel-implementation risk.
 
-2. **#546 — Wire orchestrator's persistent-anomaly store into reviewer's recordAnomalyObservation call sites** _(high)_ — Audit that all `score_anomaly_observations` writes go through `recordAnomalyObservation()`; add `PersistentAnomaliesDigestScheduler` class so the orchestrator can schedule the daily Telegram digest via a single import; eliminates parallel-implementation risk.
+2. **#489 — Add /pr-guard-status Telegram command showing active surge suppressions** _(high)_ — Surface which `(repo, issue)` pairs have active surge suppressions so operators can see the PR-guard flood gate in real time; follows directly from the surge suppression work.
 
 3. **#473 — Newly shipped surge suppression doesn't cover PR-guard floods** _(high)_ — Add a PR-level suppression axis so batches of different issues blocked by the same PR collapse into one consolidated suppression event.
 
 4. **#468 — Persist dispatch surge suppression events to SQLite** _(high)_ — Make `PRGuardSurgeDetector` suppression survive restarts and expose the suppression log via REST.
 
-5. **#445 — Sub-0.60 approval audit entry gap** _(high)_ — Score 0.52 was approved without a bypass-audit entry; investigate the path that bypasses bypass-audit recording and add the missing hook.
-
-6. **#496 — Add /api/score-provenance/summary endpoint** _(medium)_ — Rolling 7-day breakdown of approved tasks grouped by `score_source` (`llm_parse`, `default_fallback`, `operator_override`); PR #497 was closed without merging — still needed.
+5. **#564 — Suppress Telegram noise: operator only wants action-required messages** _(high)_ — Filter informational/diagnostic Telegram messages so operators only receive notifications that require a response; reduces alert fatigue.
 
 ## Planned
 
-- **#526 — Sub-threshold bypass audit gap (cross-repo follow-up)** _(high)_ — Related to #445; cross-repo follow-up from a meeting task about the same bypass-audit gap; address together with #445.
-- **#514 — Add start_period to generated Docker healthcheck for claude-orchestrator-telegram** _(medium)_ — Prevents avoidable recovery loops on slow-start containers; confirm scope (may belong to agent-orchestrator repo).
+- **#445 — Sub-0.60 approval audit entry gap** _(high)_ — Score 0.52 was approved without a bypass-audit entry; investigate the path that bypasses bypass-audit recording and add the missing hook.
+- **#496 — Add /api/score-provenance/summary endpoint** _(medium)_ — Rolling 7-day breakdown of approved tasks grouped by `score_source` (`llm_parse`, `default_fallback`, `operator_override`); PR #497 was closed without merging — still needed.
+- **#414 — Bookkeeping task type: score 'close-by-reference' outcomes appropriately** _(high)_ — Treat close-by-reference bookkeeping work as a distinct outcome instead of letting it fall back to a null/defaulted score.
+- **#340 — Persist proactive rebase stats to SQLite** _(medium)_ — `rebase_events` table, `IRebaseStore` interface, `/rebase-stats` Telegram command, and `/rebase-stats` HTTP endpoint for dashboard.
 - **#472 — Meeting facilitator: persist synthesis results to queryable store** _(high)_ — Keep meeting results searchable across daemon cycles so follow-up sessions can retrieve prior synthesis outputs without revision churn.
 - **#530 — Fleet self-direction kickoff per CHARTER #1209 (cross-repo follow-up)** _(medium)_ — Orchestrator-generated follow-up; scope to be determined once parent task context is available.
 - **#545 — CLAUDE.md / documentation sync requested from claude-proxy triage (cross-repo follow-up)** _(low)_ — Review CLAUDE.md for any gaps identified by the claude-proxy triage cycle; close once documentation is confirmed current.
 - **#555 — Linear adapter cross-repo follow-up** _(medium)_ — Implement the `rapartlu/agent-reviewer` portion of the Linear adapter MVP (quality-assessment dimension scored 0%); scope TBD from parent task context.
-- **#414 — Bookkeeping task type: score 'close-by-reference' outcomes appropriately** _(high)_ — Treat close-by-reference bookkeeping work as a distinct outcome instead of letting it fall back to a null/defaulted score.
-- **#340 — Persist proactive rebase stats to SQLite** _(medium)_ — `rebase_events` table, `IRebaseStore` interface, `/rebase-stats` Telegram command, and `/rebase-stats` HTTP endpoint for dashboard.
+- **#514 — Add start_period to generated Docker healthcheck for claude-orchestrator-telegram** _(medium)_ — Prevents avoidable recovery loops on slow-start containers; confirm scope (may belong to agent-orchestrator repo).
+- **#571 — Orphan branch cleanup** _(low)_ — 7 orphan branches with no open PR detected on 2026-04-28; clean up stale remote branches to reduce repo noise.
+- **#526 — Sub-threshold bypass audit gap (cross-repo follow-up)** _(high)_ — Related to #445; cross-repo follow-up from a meeting task about the same bypass-audit gap; address together with #445.
 
 ## Ideas
 
@@ -115,6 +120,21 @@ _Last updated: 2026-04-27 (triage cycle 21)_
 - **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
 
 ## Triage notes
+
+- **2026-04-28 cycle 22**: 16 open issues audited (excl. #565 triage trigger), 0 duplicates, 0 stale (oldest #340 at 9 days). Closed #524 (already resolved by merged PR #547 — agent-variant.ts). Features shipped since cycle 21: PR #559 (Linear client — listIssues), PR #560 (hard scope contract enforcement), PR #562 (OKR-aware supervisor + navel-gazing risk signal), PR #569 (Day-7 survival plan checkpoint + /survival-status). ROADMAP.md: promoted 4 merged PRs to Completed; reordered Next up (546→rank 1, 489→rank 2, 473→3, 468→4, 564→5 new); moved #445 and #496 from Next up to Planned; added #564 and #571 to Planned. CLAUDE.md: added 4 missing scope entries (Linear client, hard scope contracts, OKR-aware supervisor, Day-7 survival checkpoint).
+
+```json
+{
+  "duplicates_checked": true,
+  "stale_issues": [],
+  "priority_reordering": [
+    {"issue": 546, "old_rank": 2, "new_rank": 1, "reason": "Core quality-system wiring — higher impact than Telegram command"},
+    {"issue": 489, "old_rank": 1, "new_rank": 2, "reason": "Still high priority but de-ranked one slot below core wiring"},
+    {"issue": 564, "old_rank": null, "new_rank": 5, "reason": "Newly added — operator-requested Telegram noise suppression"}
+  ],
+  "outcome_summary": "Closed #524 (resolved by merged PR #547). Zero stale, zero duplicate, zero orphan-PR issues. ROADMAP.md updated to cycle 22; CLAUDE.md synced with four newly merged PRs."
+}
+```
 
 - **2026-04-27 cycle 21**: 14 open issues audited (excl. #557 triage trigger), 0 duplicates, 0 stale (oldest #340 at 8 days). No issues closed. Features shipped since cycle 20: #553 (PR #554 — synthesis-watchdog.ts), #551 (PR #552 — raw GitHub URL detection), orchestrator#1211 (PR #544 — multi-provider reviewer pool + Deepseek R1 integration), #524 (PR #547 — agent variant canonicalization in inflight guard), #440 (PR #540 — /stale-improvements Telegram command). ROADMAP.md: promoted 5 completed items; replaced #524 in Next up with #546 (persistent-anomaly store wiring); added #545 and #555 to Planned; removed #440 from Planned (shipped). CLAUDE.md: added `multi-provider-client.ts`, `reviewer-pool.ts`, `stale-improvements-feed.ts`, `synthesis-watchdog.ts` to Source Layout and Scope; added `agent-variant.ts` to state/ section.
 

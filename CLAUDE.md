@@ -124,6 +124,10 @@ When this container is used for LLM PR reviews:
 - Multi-provider reviewer pool: `REVIEWER_POOL_NAME` constant and `KNOWN_POOL_MEMBERS` list declare pool membership; `reviewer-pool.ts` exports pool utilities and `getPoolMemberId()`; `multi-provider-client.ts` wraps Anthropic + OpenAI-compatible providers (Deepseek, Grok) behind `IReviewerLLMClient` so provider-specific reviewer variants share the same call sites; sibling-variant dispatch deduplication via `agent-variant.ts` `canonicalizeAgentName()` (`reviewer-pool.ts`, `multi-provider-client.ts`)
 - Stale improvements feed: lists improvement-detector issues older than N hours with no associated PR; powers `/stale-improvements` Telegram command; evidence count used as detection-frequency signal for priority sorting (`stale-improvements-feed.ts`)
 - Synthesis watchdog: monitors meeting/standup synthesis intake entries; fires Telegram alert + re-attempts intake when synthesis is missing after 24h threshold; persists intake moments to `synthesis_watchlist` SQLite table; `registerSynthesisIntake()` / `recordSynthesisComplete()` / `checkWatchlist()` lifecycle (`synthesis-watchdog.ts`)
+- Linear client: `listIssues()` HTTP client for Linear API; enables supervisor and improvement detector to query Linear issue backlog for cross-repo context (`linear-client.ts`; PR #559)
+- Hard scope contract enforcement: `pr-scope-checker.ts` deterministic bundling/multi-issue detection runs before any LLM review round; rejects PRs that close multiple issues or touch files outside the declared scope (`pr-scope-checker.ts`; PR #560)
+- OKR-aware supervisor prompt: anti-navel-gazing rule injected into supervisor reasoning; `pattern_risk` signal flags tasks whose scope is internal quality-system work with no user-facing OKR impact (PR #562)
+- Day-7 survival plan checkpoint: survival-status tracker records per-agent Day-7 milestone state; `/survival-status` Telegram command surfaces current checkpoint status for operator review (PR #569)
 
 **Out of scope (belongs to orchestrator-core):**
 - Daemon loop, state store, dispatching infrastructure
