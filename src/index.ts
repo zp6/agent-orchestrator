@@ -15,6 +15,14 @@
  *   const notify = createNotifier();
  */
 
+// PR Review API — paid service (Path 5, issue #1302)
+export { ReviewApiService, ARTICLE_IV_DISCLOSURE, parsePrUrl, repoFromPrUrl } from "./reviewer/review-api-service.js";
+export type { ReviewApiRequest, ReviewApiResponse, ReviewApiError, SecurityFinding, InlineComment } from "./reviewer/review-api-service.js";
+export { checkBillingAllowance, parseTierFromApiKey, clientIdFromApiKey, TIER_CONFIGS } from "./reviewer/review-api-billing.js";
+export type { ReviewTier, TierConfig, BillingCheckResult } from "./reviewer/review-api-billing.js";
+export { ensureReviewApiUsageTable, recordReviewUsage, getMonthlyUsageCount, getFleetUsageStats, getClientUsageHistory } from "./reviewer/review-api-usage.js";
+export type { ReviewApiUsageRecord, MonthlyUsageSummary } from "./reviewer/review-api-usage.js";
+
 // Core reviewer modules
 export { PRReviewer, enforceChecklist, validateClosesReferences, isExampleOrTemplateFile, isPlaceholderCredential } from "./reviewer/pr-reviewer.js";
 export type { PRInfo, PRReviewResult, RedispatchCategory, ConflictStats, CrossRepoCloseIssue } from "./reviewer/pr-reviewer.js";
