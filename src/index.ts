@@ -1355,10 +1355,6 @@ export type {
   SurvivalStatusPayload,
 } from "./service/survival-plan.js";
 
-// Fleet wallet / treasury helpers — propagated from providers.global in agents.yaml
-export { getFleetWalletAddress, getFleetWalletNetwork } from "./config/schema.js";
-export type { GlobalProviderConfig } from "./config/schema.js";
-
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
 export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";

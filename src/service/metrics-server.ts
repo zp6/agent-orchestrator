@@ -10,8 +10,7 @@
  * Endpoints:
  *   GET /dispatch-efficiency          — 7-day rolling window
  *   GET /dispatch-efficiency?days=30  — configurable window
- *   GET /health                       — basic liveness check (includes fleet_wallet_configured flag)
- *   GET /treasury                     — fleet treasury wallet address and network
+ *   GET /health                       — basic liveness check
  *   GET /guard-health                 — PR guard surge metrics (issue #1163)
  *   GET /guard-health?hours=24        — configurable window in hours
  *   GET /investigations               — research investigation feed (issue #140)
@@ -40,7 +39,6 @@ import {
   type MarginalScoreTasksResult,
 } from "../state/store.js";
 import { createLogger } from "./logger.js";
-import { getFleetWalletAddress, getFleetWalletNetwork } from "../config/schema.js";
 
 const log = createLogger("metrics-server");
 
@@ -367,28 +365,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
 
     // ── GET /health ──────────────────────────────────────────────────────────
     if (url.pathname === "/health") {
-      const walletAddress = getFleetWalletAddress();
-      sendJson(res, 200, {
-        status: "ok",
-        service: "orchestrator-metrics",
-        at: new Date().toISOString(),
-        fleet_wallet_configured: walletAddress.length > 0,
-      });
-      return;
-    }
-
-    // ── GET /treasury ─────────────────────────────────────────────────────────
-    // Returns fleet treasury wallet details so the dashboard and agents can
-    // surface the correct receiving address for all revenue paths.
-    if (url.pathname === "/treasury") {
-      const address = getFleetWalletAddress();
-      const network = getFleetWalletNetwork();
-      sendJson(res, 200, {
-        wallet_address: address || null,
-        network: network || null,
-        configured: address.length > 0,
-        generated_at: new Date().toISOString(),
-      });
+      sendJson(res, 200, { status: "ok", service: "orchestrator-metrics", at: new Date().toISOString() });
       return;
     }
 

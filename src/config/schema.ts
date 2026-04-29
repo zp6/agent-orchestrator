@@ -10,27 +10,6 @@ export interface ProviderLimits {
   weekly?: number;
 }
 
-/**
- * Global provider config — fleet-wide settings shared across all agents.
- * Lives under `providers.global` in agents.yaml.
- * All fields are propagated to `process.env` on startup so agents and the
- * metrics endpoint can read them without direct config access.
- */
-export interface GlobalProviderConfig {
-  /**
-   * Fleet treasury wallet address (Base L2 EVM by default).
-   * Propagated to FLEET_WALLET_ADDRESS env var by loadConfig().
-   * Can be overridden by setting FLEET_WALLET_ADDRESS in the host environment
-   * before the orchestrator starts; the env var always takes precedence.
-   */
-  FLEET_WALLET_ADDRESS?: string;
-  /**
-   * Network / chain the treasury wallet lives on (e.g. "Base", "Ethereum").
-   * Propagated to FLEET_WALLET_NETWORK env var by loadConfig().
-   */
-  FLEET_WALLET_NETWORK?: string;
-}
-
 export interface ProviderConfig {
   model: string;
   api_key_env?: string;
@@ -760,7 +739,7 @@ export interface OrchestratorConfig {
   /** Directory containing the agent template for scaffolding new agents.
    *  Defaults to `${base_dir}/agent-template`. */
   template_dir?: string;
-  providers?: Record<string, ProviderConfig> & { global?: GlobalProviderConfig };
+  providers?: Record<string, ProviderConfig>;
   verification?: VerificationConfig;
   /**
    * Configurable task type definitions.  Keyed by task type string.
@@ -899,53 +878,7 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
     process.env.GH_TOKEN = parsed.proxy.gh_token;
   }
 
-  // Propagate fleet wallet address from providers.global to process.env so all
-  // agents and the metrics endpoint can read it without direct config access.
-  // Host-environment values take precedence over the baked-in config default,
-  // matching the same override pattern used for GH_TOKEN above.
-  const globalProvider = (parsed.providers as Record<string, GlobalProviderConfig> | undefined)
-    ?.global;
-  if (!process.env.FLEET_WALLET_ADDRESS && globalProvider?.FLEET_WALLET_ADDRESS) {
-    process.env.FLEET_WALLET_ADDRESS = globalProvider.FLEET_WALLET_ADDRESS;
-  }
-  if (!process.env.FLEET_WALLET_NETWORK && globalProvider?.FLEET_WALLET_NETWORK) {
-    process.env.FLEET_WALLET_NETWORK = globalProvider.FLEET_WALLET_NETWORK;
-  }
-
   return parsed;
-}
-
-/**
- * Return the fleet treasury wallet address.
- *
- * Resolution order:
- *   1. FLEET_WALLET_ADDRESS env var (set by host environment or by loadConfig())
- *   2. providers.global.FLEET_WALLET_ADDRESS in the loaded config
- *   3. Empty string (wallet not configured)
- *
- * Prefer calling this helper over reading process.env directly so callers
- * that have a config object don't depend on process.env side-effects.
- */
-export function getFleetWalletAddress(config?: OrchestratorConfig): string {
-  if (process.env.FLEET_WALLET_ADDRESS) {
-    return process.env.FLEET_WALLET_ADDRESS;
-  }
-  const globalProvider = (config?.providers as Record<string, GlobalProviderConfig> | undefined)
-    ?.global;
-  return globalProvider?.FLEET_WALLET_ADDRESS ?? "";
-}
-
-/**
- * Return the fleet treasury wallet network (e.g. "Base", "Ethereum").
- * Resolution order mirrors getFleetWalletAddress().
- */
-export function getFleetWalletNetwork(config?: OrchestratorConfig): string {
-  if (process.env.FLEET_WALLET_NETWORK) {
-    return process.env.FLEET_WALLET_NETWORK;
-  }
-  const globalProvider = (config?.providers as Record<string, GlobalProviderConfig> | undefined)
-    ?.global;
-  return globalProvider?.FLEET_WALLET_NETWORK ?? "Base";
 }
 
 export function getAgentDir(config: OrchestratorConfig, agentName: string): string {
