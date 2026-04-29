@@ -221,6 +221,25 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot / (Math.sqrt(aMagnitude) * Math.sqrt(bMagnitude));
 }
 
+/**
+ * Security audit event capturing an external-input -> action chain.
+ * Used for prompt-injection quarantine, public-action gating, and forensic
+ * review of blocked or allowed operations.
+ */
+export interface SecurityEventRecord {
+  id: number;
+  event_type: string;
+  source: string | null;
+  source_ref: string | null;
+  agent_name: string | null;
+  nonce: string | null;
+  action_kind: string | null;
+  outcome: string;
+  findings_json: string | null;
+  details: string | null;
+  created_at: string;
+}
+
 export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IThresholdAdjustmentStore, ILowScoreFeedStore, IScoreViolationsStore, IBypassAuditStore, ISemanticMemoryStore, IMeetingFacilitatorGoalStore, IMeetingSynthesisStore, IImprovementBatchDeduplicationStore, IPatternRiskStore, ICalibrationRecommendationStore {
   private db: Database.Database;
 
@@ -896,6 +915,26 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
 
       CREATE INDEX IF NOT EXISTS idx_pattern_risk_recorded
         ON pattern_risk (recorded_at DESC);
+    `);
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS security_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type TEXT NOT NULL,
+        source TEXT,
+        source_ref TEXT,
+        agent_name TEXT,
+        nonce TEXT,
+        action_kind TEXT,
+        outcome TEXT NOT NULL,
+        findings_json TEXT,
+        details TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_security_events_created ON security_events(created_at);
+      CREATE INDEX IF NOT EXISTS idx_security_events_source_ref ON security_events(source_ref);
+      CREATE INDEX IF NOT EXISTS idx_security_events_event_type ON security_events(event_type);
     `);
   }
 
@@ -5416,6 +5455,50 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       threshold: THRESHOLD,
       since,
     };
+  }
+
+  // ── Security events (issue #1273) ────────────────────────────────────────
+
+  addSecurityEvent(params: {
+    event_type: string;
+    source?: string | null;
+    source_ref?: string | null;
+    agent_name?: string | null;
+    nonce?: string | null;
+    action_kind?: string | null;
+    outcome: string;
+    findings_json?: string | null;
+    details?: string | null;
+  }): SecurityEventRecord {
+    const createdAt = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `INSERT INTO security_events
+          (event_type, source, source_ref, agent_name, nonce, action_kind, outcome, findings_json, details, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        params.event_type,
+        params.source ?? null,
+        params.source_ref ?? null,
+        params.agent_name ?? null,
+        params.nonce ?? null,
+        params.action_kind ?? null,
+        params.outcome,
+        params.findings_json ?? null,
+        params.details ?? null,
+        createdAt,
+      );
+
+    return this.db
+      .prepare("SELECT * FROM security_events WHERE id = ?")
+      .get(result.lastInsertRowid as number) as SecurityEventRecord;
+  }
+
+  getRecentSecurityEvents(limit = 20): SecurityEventRecord[] {
+    return this.db
+      .prepare("SELECT * FROM security_events ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(limit) as SecurityEventRecord[];
   }
 
   /**

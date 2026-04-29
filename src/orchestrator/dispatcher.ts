@@ -52,6 +52,10 @@ import {
   FailureInterceptor,
   FAILURE_INTERCEPTION_ALERT_THRESHOLD,
 } from "./failure-interceptor.js";
+import {
+  scanSecurityFindings,
+  wrapUntrustedText,
+} from "../service/security-guard.js";
 
 /**
  * Walk the parent_task_id chain upward from `taskId` (or a parent task id) and
@@ -810,6 +814,67 @@ export class Dispatcher {
       };
     }
 
+    // Prompt-injection / credential gate (issue #1273):
+    // The incoming message is treated as untrusted until it passes the
+    // security scanner.  If the message looks like an injection attempt or
+    // leaks credentials, we block before any external action or API call.
+    const securityFindings = scanSecurityFindings(message);
+    const sourceRef = options?.sourceRef ?? null;
+    if (securityFindings.length > 0) {
+      const summary = securityFindings.map((f) => `${f.kind}:${f.pattern}:${f.match}`).join(" | ");
+      this.log.warn("Dispatch blocked: unsafe untrusted input detected", {
+        agentName,
+        source: options?.source,
+        sourceRef,
+        summary,
+      });
+      this.store.addSecurityEvent({
+        event_type: "prompt-injection",
+        source: options?.source ?? "manual",
+        source_ref: sourceRef,
+        agent_name: agentName,
+        nonce: null,
+        action_kind: "dispatch",
+        outcome: "blocked",
+        findings_json: JSON.stringify(securityFindings),
+        details: summary,
+      });
+      await notifyOperator(
+        "Prompt injection attempt blocked",
+        `Unsafe external input was blocked before dispatching to \`${agentName}\`.\n` +
+          (sourceRef ? `Source: ${sourceRef}\n` : "") +
+          `Findings: ${summary}`,
+        "warning",
+        `prompt-injection:${sourceRef ?? agentName}`,
+      );
+      return {
+        taskId: "",
+        agentName,
+        response: {
+          content: "Skipped: unsafe untrusted input blocked by prompt-injection gate",
+          model: "",
+          usage: { input_tokens: 0, output_tokens: 0 },
+          stop_reason: "prompt-injection-blocked",
+        },
+      };
+    }
+    const securityFrame = wrapUntrustedText(message, {
+      source: options?.source ?? "manual",
+      sourceRef: options?.sourceRef ?? undefined,
+      label: options?.title ?? agentName,
+    });
+    this.store.addSecurityEvent({
+      event_type: "prompt-injection",
+      source: options?.source ?? "manual",
+      source_ref: sourceRef,
+      agent_name: agentName,
+      nonce: securityFrame.nonce,
+      action_kind: "dispatch",
+      outcome: "allowed",
+      findings_json: JSON.stringify([]),
+      details: "External input wrapped in untrusted-data envelope",
+    });
+
     // Pool resolution: if the selected agent belongs to a pool, pick the
     // healthiest idle member instead of just the first idle one.  This prevents
     // routing to an instance that is 503-ing (issue #385).
@@ -1018,6 +1083,7 @@ export class Dispatcher {
     // Implementation tasks require GH_TOKEN for PR creation, so block them.
     const taskType = options?.taskType ?? "implementation";
     const failureReroute = this.maybeGetFailureRerouteDecision(options?.sourceRef, agentName, taskType);
+    let failureReroutePrefix = "";
     if (failureReroute) {
       this.log.warn("Failure reroute hard gate triggered", {
         sourceRef: failureReroute.sourceRef,
@@ -1027,7 +1093,7 @@ export class Dispatcher {
         taskType: failureReroute.taskType,
       });
       agentName = failureReroute.toAgent;
-      message = this.buildFailureRerouteHeader(failureReroute) + message;
+      failureReroutePrefix = this.buildFailureRerouteHeader(failureReroute);
     }
 
     if (taskType !== "research" && this.store.isAgentAuthDegraded(agentName)) {
@@ -1386,7 +1452,10 @@ export class Dispatcher {
     // Prepend the target-repo header so the agent always knows which repo to
     // target, even when instructions are deeply nested in a long message.
     const repoHeader = buildTargetRepoHeader(options?.sourceRef);
-    let messageToSend = repoHeader ? `${repoHeader}\n${message}` : message;
+    const prefixParts = [repoHeader, failureReroutePrefix].filter((part) => part && part.length > 0);
+    let messageToSend = prefixParts.length > 0
+      ? `${prefixParts.join("\n")}\n${securityFrame.text}`
+      : securityFrame.text;
 
     // Inject rejection history from prior attempts for the same source_ref
     // so the agent avoids repeating failed approaches.

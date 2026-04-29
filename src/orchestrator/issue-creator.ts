@@ -2,6 +2,11 @@ import { execSync } from "node:child_process";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { DetectedImprovement } from "../client/reviewer-client.js";
 import { createLogger } from "../service/logger.js";
+import {
+  consumeActionQuota,
+  guardPublicContent,
+  DEFAULT_PUBLIC_POSTS_PER_HOUR,
+} from "../service/security-guard.js";
 
 export interface CreatedIssue {
   repo: string;
@@ -56,6 +61,14 @@ export class IssueCreator {
     body: string,
     labels: string[] = ["orchestrator"],
   ): CreatedIssue {
+    guardPublicContent(title, `github issue title ${repo}`);
+    guardPublicContent(body, `github issue body ${repo}`);
+    consumeActionQuota({
+      action: "public-post",
+      scope: repo,
+      limit: DEFAULT_PUBLIC_POSTS_PER_HOUR,
+      windowMs: 60 * 60 * 1000,
+    });
     const labelArgs = labels.map((l) => `--label ${shellEscape(l)}`).join(" ");
     const output = execSync(
       `gh issue create --repo ${shellEscape(repo)} --title ${shellEscape(title)} --body ${shellEscape(body)} ${labelArgs}`,

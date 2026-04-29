@@ -611,6 +611,8 @@ describe("Dispatcher auto-reroute after repeated failures", () => {
     expect(mockSend).toHaveBeenCalledOnce();
     expect(mockSend.mock.calls[0][0]).toBe("backup-fast");
     expect(mockSend.mock.calls[0][1]).toContain("## Auto-Reroute Context");
+    expect(mockSend.mock.calls[0][1]).toContain("<<UNTRUSTED_DATA");
+    expect(mockSend.mock.calls[0][1]).toContain("Implement issue #524");
 
     const created = store.getTask(result.taskId);
     expect(created?.agent_name).toBe("backup-fast");
@@ -2254,7 +2256,8 @@ describe("Dispatcher — target-repo header injection (issue #338)", () => {
     });
 
     const [, sentMessage] = mockSend.mock.calls[0];
-    expect(sentMessage).toBe("Do something");
+    expect(sentMessage).toContain("Do something");
+    expect(sentMessage).toContain("<<UNTRUSTED_DATA");
     expect(sentMessage).not.toContain("Target repository");
   });
 
@@ -2301,7 +2304,8 @@ describe("Dispatcher — target-repo header injection (issue #338)", () => {
     });
 
     const [, sentMessage] = mockSend.mock.calls[0];
-    expect(sentMessage).toBe("A linear task");
+    expect(sentMessage).toContain("A linear task");
+    expect(sentMessage).toContain("<<UNTRUSTED_DATA");
     expect(sentMessage).not.toContain("Target repository");
   });
 });

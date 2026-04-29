@@ -8,6 +8,12 @@ import { StateStore, type MergeQueueEntry, type DiffShape, type WriteAntibodyLog
 import { Deployer } from "./deployer.js";
 import { extractIssueNumberFromBranch, findMatchingIssueNumber } from "./pr-creator.js";
 import { notifyOperator } from "../service/notify.js";
+import {
+  consumeActionQuota,
+  guardPublicContent,
+  DEFAULT_PUBLIC_POSTS_PER_HOUR,
+  DEFAULT_PR_MERGES_PER_HOUR,
+} from "../service/security-guard.js";
 import { extractCrossRepoIssueRefs } from "../service/daemon.js";
 import {
   getAndRecordPatterns,
@@ -37,6 +43,25 @@ import type { PRReviewResult } from "../client/reviewer-client.js";
 
 // Re-export triage schemas for convenient access by callers
 export { TRIAGE_HOUSEKEEPING_SCHEMA, TRIAGE_CROSS_REPO_SCHEMA } from "./verifier.js";
+
+function guardPRPublicComment(repo: string, prNumber: number, body: string, context: string): void {
+  guardPublicContent(body, context);
+  consumeActionQuota({
+    action: "public-post",
+    scope: repo,
+    limit: DEFAULT_PUBLIC_POSTS_PER_HOUR,
+    windowMs: 60 * 60 * 1000,
+  });
+}
+
+function guardPRMerge(repo: string): void {
+  consumeActionQuota({
+    action: "pr-merge",
+    scope: repo,
+    limit: DEFAULT_PR_MERGES_PER_HOUR,
+    windowMs: 60 * 60 * 1000,
+  });
+}
 
 export class PRReviewer {
   private log = createLogger("pr-reviewer");
@@ -573,6 +598,12 @@ Please add this block to your PR description and try again.`,
             ? "next in queue"
             : `position ${entry.position + 1} of ${queueSize} in queue`;
 
+          guardPRPublicComment(
+            repo,
+            prNumber,
+            `**[orchestrator] PR Review — Approved** ✅\n\n${result.comment}\n\n---\n🔀 Added to merge queue (${positionMsg}). PRs merge sequentially to avoid branch conflicts.`,
+            `pr review approved comment ${repo}#${prNumber}`,
+          );
           execSync(
             `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**[orchestrator] PR Review — Approved** ✅\n\n${result.comment}\n\n---\n🔀 Added to merge queue (${positionMsg}). PRs merge sequentially to avoid branch conflicts.`)}`,
             { encoding: "utf-8", timeout: 30000 },
@@ -586,6 +617,12 @@ Please add this block to your PR description and try again.`,
 
       case "request-changes":
         try {
+          guardPRPublicComment(
+            repo,
+            prNumber,
+            `**[orchestrator] PR Review — Changes Requested**\n\n${result.comment}`,
+            `pr review request-changes comment ${repo}#${prNumber}`,
+          );
           execSync(
             `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**[orchestrator] PR Review — Changes Requested**\n\n${result.comment}`)}`,
             { encoding: "utf-8", timeout: 30000 },
@@ -617,6 +654,12 @@ Please add this block to your PR description and try again.`,
             }
           }
           // Leave a comment explaining why
+          guardPRPublicComment(
+            repo,
+            prNumber,
+            `**Orchestrator escalation:** ${result.comment}`,
+            `pr review escalation comment ${repo}#${prNumber}`,
+          );
           execSync(
             `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(`**Orchestrator escalation:** ${result.comment}`)}`,
             { encoding: "utf-8", timeout: 30000 },
@@ -725,6 +768,12 @@ Please add this block to your PR description and try again.`,
     ].join("\n");
 
     try {
+      guardPRPublicComment(
+        repo,
+        prNumber,
+        comment,
+        `auto-close conflict comment ${repo}#${prNumber}`,
+      );
       execSync(
         `gh pr comment ${prNumber} --repo ${repo} --body ${shellEscape(comment)}`,
         { encoding: "utf-8", timeout: 30000 },
@@ -1042,6 +1091,12 @@ Please add this block to your PR description and try again.`,
       const newBody = currentBody.trim()
         ? `${currentBody.trim()}\n\nCloses #${issueNumber}`
         : `Closes #${issueNumber}`;
+      guardPRPublicComment(
+        repo,
+        prNumber,
+        newBody,
+        `patch PR body ${repo}#${prNumber}`,
+      );
       execSync(
         `gh pr edit ${prNumber} --repo ${repo} --body ${shellEscape(newBody)}`,
         { encoding: "utf-8", timeout: 30000 },
@@ -1223,6 +1278,7 @@ Please add this block to your PR description and try again.`,
       // Step 1 — try to enable GitHub's native auto-merge.
       let autoMergeEnabled = false;
       try {
+        guardPRMerge(repo);
         execSync(
           `gh pr merge ${next.pr_number} --repo ${repo} --squash --auto --delete-branch`,
           { encoding: "utf-8", timeout: 60000 },
@@ -1250,6 +1306,12 @@ Please add this block to your PR description and try again.`,
           this.store.markQueuedPRFailed(repo, next.pr_number, errMsg);
           this.log.error("Merge queue: PR merge failed (auto-merge attempt)", { repo, prNumber: next.pr_number, error: errMsg });
           try {
+            guardPRPublicComment(
+              repo,
+              next.pr_number,
+              `**[orchestrator] Merge Queue — Merge Failed** ❌\n\nFailed to enable auto-merge:\n\`\`\`\n${errMsg.slice(0, 500)}\n\`\`\`\nThis PR has been removed from the merge queue. Please resolve any issues and re-open a review.`,
+              `merge queue auto-merge failure comment ${repo}#${next.pr_number}`,
+            );
             execSync(
               `gh pr comment ${next.pr_number} --repo ${repo} --body ${shellEscape(`**[orchestrator] Merge Queue — Merge Failed** ❌\n\nFailed to enable auto-merge:\n\`\`\`\n${errMsg.slice(0, 500)}\n\`\`\`\nThis PR has been removed from the merge queue. Please resolve any issues and re-open a review.`)}`,
               { encoding: "utf-8", timeout: 30000 },
@@ -1266,6 +1328,7 @@ Please add this block to your PR description and try again.`,
           { repo, prNumber: next.pr_number },
         );
         try {
+          guardPRMerge(repo);
           execSync(
             `gh pr merge ${next.pr_number} --repo ${repo} --squash --delete-branch`,
             { encoding: "utf-8", timeout: 60000 },
@@ -1285,6 +1348,12 @@ Please add this block to your PR description and try again.`,
           this.log.error("Merge queue: PR merge failed", { repo, prNumber: next.pr_number, error: errMsg });
           // Post a comment so the agent knows the merge failed
           try {
+            guardPRPublicComment(
+              repo,
+              next.pr_number,
+              `**[orchestrator] Merge Queue — Merge Failed** ❌\n\nFailed to merge PR automatically:\n\`\`\`\n${errMsg.slice(0, 500)}\n\`\`\`\nThis PR has been removed from the merge queue. Please resolve any issues and re-open a review.`,
+              `merge queue merge failure comment ${repo}#${next.pr_number}`,
+            );
             execSync(
               `gh pr comment ${next.pr_number} --repo ${repo} --body ${shellEscape(`**[orchestrator] Merge Queue — Merge Failed** ❌\n\nFailed to merge PR automatically:\n\`\`\`\n${errMsg.slice(0, 500)}\n\`\`\`\nThis PR has been removed from the merge queue. Please resolve any issues and re-open a review.`)}`,
               { encoding: "utf-8", timeout: 30000 },
@@ -1298,6 +1367,12 @@ Please add this block to your PR description and try again.`,
       // If auto-merge was enabled, post a comment confirming it's queued.
       if (autoMergeEnabled) {
         try {
+          guardPRPublicComment(
+            repo,
+            next.pr_number,
+            `**[orchestrator] Merge Queue — Auto-merge enabled** ⏳\n\nThis PR will be merged automatically once all required status checks pass.`,
+            `merge queue auto-merge enabled comment ${repo}#${next.pr_number}`,
+          );
           execSync(
             `gh pr comment ${next.pr_number} --repo ${repo} --body ${shellEscape(`**[orchestrator] Merge Queue — Auto-merge enabled** ⏳\n\nThis PR will be merged automatically once all required status checks pass.`)}`,
             { encoding: "utf-8", timeout: 30000 },
@@ -1339,6 +1414,12 @@ Please add this block to your PR description and try again.`,
           if (state !== "OPEN") continue;
 
           const comment = `Auto-closed by orchestrator: referenced in merged PR ${prRepo}#${prNumber}.`;
+          guardPRPublicComment(
+            targetRepo,
+            ref.number,
+            comment,
+            `cross-repo issue close comment ${targetRepo}#${ref.number}`,
+          );
           execSync(
             `gh issue close ${ref.number} --repo ${targetRepo} --comment "${comment}"`,
             { encoding: "utf-8", timeout: 10000 },
