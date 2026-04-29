@@ -20,6 +20,7 @@
  */
 
 import { notifyOperator } from "./notify.js";
+import { getFleetWalletAddress } from "../config/schema.js";
 
 // ── Deadline constants ───────────────────────────────────────────────────────
 
@@ -44,11 +45,12 @@ export const SURVIVAL_STRETCH_USD = 1_000;
 
 /**
  * Crypto wallet address where revenue is received.
- * TODO(operator): create a Safe/Gnosis multi-sig wallet and set this env var.
- * Example: FLEET_WALLET_ADDRESS=0xABCDEF...
+ * Reads from FLEET_WALLET_ADDRESS env var (which loadConfig() populates from
+ * providers.global.FLEET_WALLET_ADDRESS in agents.yaml so the daemon no longer
+ * requires the operator to set this manually in the host environment).
  */
 export function getWalletAddress(): string {
-  return process.env.FLEET_WALLET_ADDRESS ?? "";
+  return getFleetWalletAddress();
 }
 
 /**

@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { loadConfig, getAgentDir, type PRReviewConfig, type OrchestratorConfig, type ProviderConfig } from "./schema.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { loadConfig, getAgentDir, getFleetWalletAddress, getFleetWalletNetwork, type PRReviewConfig, type OrchestratorConfig, type ProviderConfig } from "./schema.js";
 import { mkdtempSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
@@ -189,6 +189,9 @@ describe("ProviderConfig", () => {
   it("each provider has a model field", () => {
     const config = loadConfig(configPath);
     for (const [name, provider] of Object.entries(config.providers!)) {
+      // "global" is a GlobalProviderConfig (fleet-wide settings like wallet address)
+      // and intentionally does not have a model field.
+      if (name === "global") continue;
       expect(provider.model, `${name} missing model`).toBeTruthy();
     }
   });
@@ -208,6 +211,64 @@ describe("ProviderConfig", () => {
     expect(provider.model).toBe("test-model");
     expect(provider.api_key_env).toBe("TEST_KEY");
     expect(provider.daily_token_limit).toBe(1000000);
+  });
+
+  describe("fleet wallet propagation", () => {
+    let savedWalletAddress: string | undefined;
+    let savedWalletNetwork: string | undefined;
+
+    beforeEach(() => {
+      savedWalletAddress = process.env.FLEET_WALLET_ADDRESS;
+      savedWalletNetwork = process.env.FLEET_WALLET_NETWORK;
+      delete process.env.FLEET_WALLET_ADDRESS;
+      delete process.env.FLEET_WALLET_NETWORK;
+    });
+
+    afterEach(() => {
+      if (savedWalletAddress !== undefined) {
+        process.env.FLEET_WALLET_ADDRESS = savedWalletAddress;
+      } else {
+        delete process.env.FLEET_WALLET_ADDRESS;
+      }
+      if (savedWalletNetwork !== undefined) {
+        process.env.FLEET_WALLET_NETWORK = savedWalletNetwork;
+      } else {
+        delete process.env.FLEET_WALLET_NETWORK;
+      }
+    });
+
+    it("propagates providers.global.FLEET_WALLET_ADDRESS to process.env on loadConfig()", () => {
+      loadConfig(configPath);
+      expect(process.env.FLEET_WALLET_ADDRESS).toBeTruthy();
+    });
+
+    it("propagates providers.global.FLEET_WALLET_NETWORK to process.env on loadConfig()", () => {
+      loadConfig(configPath);
+      expect(process.env.FLEET_WALLET_NETWORK).toBe("Base");
+    });
+
+    it("getFleetWalletAddress() returns the config wallet after loadConfig()", () => {
+      loadConfig(configPath);
+      const addr = getFleetWalletAddress();
+      expect(addr).toMatch(/^0x[0-9a-fA-F]+$/);
+    });
+
+    it("getFleetWalletAddress() accepts an optional config object", () => {
+      const config = loadConfig(configPath);
+      const addr = getFleetWalletAddress(config);
+      expect(addr).toMatch(/^0x[0-9a-fA-F]+$/);
+    });
+
+    it("getFleetWalletNetwork() returns 'Base' for the default config", () => {
+      const config = loadConfig(configPath);
+      expect(getFleetWalletNetwork(config)).toBe("Base");
+    });
+
+    it("host-env FLEET_WALLET_ADDRESS takes precedence over config value", () => {
+      process.env.FLEET_WALLET_ADDRESS = "0xOverride";
+      const config = loadConfig(configPath);
+      expect(getFleetWalletAddress(config)).toBe("0xOverride");
+    });
   });
 
   it("agent provider field is set for all agents", () => {
