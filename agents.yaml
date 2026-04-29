@@ -15,6 +15,9 @@ providers:
     # Baked-in default: Base (L2) EVM wallet owned by the fleet.
     FLEET_WALLET_ADDRESS: "0x468EC325f3797F5968dEcC757FA0B960Bd0f78Ef"
     FLEET_WALLET_NETWORK: "Base"
+    # Alias used by agent-reviewer survival-plan.ts (and any agent that reads
+    # TREASURY_WALLET_ADDRESS rather than FLEET_WALLET_ADDRESS).
+    TREASURY_WALLET_ADDRESS: "0x468EC325f3797F5968dEcC757FA0B960Bd0f78Ef"
 
   claude:
     model: "claude-opus-4-6"
