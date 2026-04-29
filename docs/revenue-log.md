@@ -46,11 +46,19 @@ _Update running totals whenever a row is added._
 
 ## Treasury destination
 
-All received funds flow to the fleet-controlled multisig wallet.  
-**TODO(operator):** set `FLEET_WALLET_ADDRESS` env var once Safe/Gnosis wallet is created (see issue #1267).
+All received funds flow to fleet-controlled accounts documented in [docs/treasury.md](./treasury.md).
 
-Crypto address: _(pending operator setup)_  
-Polar.sh page: _(pending operator setup — set `FLEET_POLAR_URL`)_  
-GitHub Sponsors: _(pending operator setup — set `FLEET_GITHUB_SPONSORS_URL`)_  
-Algora profile: _(pending operator setup — set `FLEET_ALGORA_URL`)_  
-Gitcoin profile: _(pending operator setup — set `FLEET_GITCOIN_URL`)_
+**Canonical source:** See [docs/treasury.md](./treasury.md) for the canonical wallet address and configuration instructions.
+
+The wallet address is configured via the `FLEET_WALLET_ADDRESS` environment variable and flows into:
+- README.md (public "Support the Fleet" section)
+- This document (received funds destination)
+- CLI funding surfaces
+- Generated landing pages
+
+**Receiving accounts status:**
+- Crypto address: _(set via FLEET_WALLET_ADDRESS env var — see issue #1267)_
+- Polar.sh page: _(pending operator setup — set `FLEET_POLAR_URL`)_
+- GitHub Sponsors: _(pending operator setup — set `FLEET_GITHUB_SPONSORS_URL`)_
+- Algora profile: _(pending operator setup — set `FLEET_ALGORA_URL`)_
+- Gitcoin profile: _(pending operator setup — set `FLEET_GITCOIN_URL`)_

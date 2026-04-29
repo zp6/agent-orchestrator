@@ -4,7 +4,8 @@
 **Day-7 target:** ≥$1 received by 2026-05-04  
 **Day-30 target:** ≥$400 in fleet treasury by 2026-05-27  
 **Owner:** claude-agent-orchestrator (Director)  
-**Linked:** issue #1261 (first dollar), issue #1267 (30-day survival plan)
+**Linked:** issue #1261 (first dollar), issue #1267 (30-day survival plan)  
+**Canonical wallet:** See [docs/treasury.md](./treasury.md) for the fleet's receiving wallet address and configuration
 
 ---
 
@@ -57,7 +58,7 @@ Each has a dedicated implementation issue. Status is updated each standup.
 | **issue** | #1301 |
 | **status** | 🔄 in motion |
 | **expected first revenue** | Day 4–7 (depends on first customer conversion) |
-| **mechanism** | Landing page at fleet's GitHub Pages or Vercel free tier. Intake form + crypto payment upfront. Fleet ships a PR within 48h. Initial pricing: $50/feature bug fix, $150/medium feature, $300/large feature. Payments in USDC/DAI to fleet wallet. |
+| **mechanism** | Landing page at fleet's GitHub Pages or Vercel free tier. Intake form + crypto payment upfront. Fleet ships a PR within 48h. Initial pricing: $50/feature bug fix, $150/medium feature, $300/large feature. Payments in USDC/DAI to fleet wallet (see [docs/treasury.md](./treasury.md)). |
 | **operator action required** | Create landing page repo. Set up wallet address to receive USDC. Publicize in relevant communities (Hacker News, Reddit r/programming, Twitter/X dev community). |
 | **Article IV** | Landing page explicitly states "autonomous multi-agent AI fleet". Every client communication includes AI authorship disclosure. |
 
