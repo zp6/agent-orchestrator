@@ -56,6 +56,7 @@ import {
   scanSecurityFindings,
   wrapUntrustedText,
 } from "../service/security-guard.js";
+import { verifyPRCreated } from "./pr-completion-verifier.js";
 
 /**
  * Walk the parent_task_id chain upward from `taskId` (or a parent task id) and
@@ -1828,6 +1829,34 @@ export class Dispatcher {
         status: "done",
         result: finalResult,
       });
+
+      // Post-completion PR verification (issue #1306): for implementation tasks
+      // with a GitHub source_ref, confirm a PR was actually created.  Agents
+      // that hit scope-contract violations, auth failures, or other silent
+      // errors may stop after "tests pass, build succeeds" without pushing a
+      // branch.  If no PR is found, verifyPRCreated() re-marks the task
+      // "failed" so the next cycle retries instead of swallowing zero output.
+      if (task.task_type === "implementation" && task.source_ref) {
+        const verification = verifyPRCreated(task, this.store, response.content);
+        if (!verification.skipped && !verification.prFound && !verification.lookupError) {
+          this.log.warn("Post-completion PR verification failed — no PR found; task re-marked failed", {
+            taskId: task.id,
+            agentName,
+            sourceRef: task.source_ref,
+          });
+          // recordAgentSuccess is skipped when the task has no PR — the agent
+          // did not deliver the expected artifact.
+          return { taskId: task.id, agentName, response };
+        }
+        if (verification.prNumber) {
+          this.log.info("Post-completion PR verification passed", {
+            taskId: task.id,
+            agentName,
+            prNumber: verification.prNumber,
+            prUrl: verification.prUrl,
+          });
+        }
+      }
 
       // Record healthy dispatch for pool failover routing
       this.store.recordAgentSuccess(agentName);
