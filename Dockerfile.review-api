@@ -1,0 +1,56 @@
+# Fleet PR Review API — Dockerfile
+# Builds a self-contained Node.js image for the `orch review-api serve` service.
+#
+# Usage:
+#   docker build -f Dockerfile.review-api -t fleet-review-api .
+#   docker run -p 3100:3100 -v /host/data:/data fleet-review-api
+#
+# For Fly.io:
+#   flyctl launch --name fleet-review-api --dockerfile Dockerfile.review-api
+#   flyctl volumes create review_api_data --size 1
+#   flyctl secrets set STATE_DB_PATH=/data/state.db
+#
+# Deployment URL (once launched): https://fleet-review-api.fly.dev
+
+FROM node:22-slim AS builder
+
+WORKDIR /app
+
+# Install build deps for native modules (better-sqlite3)
+RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
+
+COPY package*.json ./
+RUN npm ci
+
+COPY tsconfig.json ./
+COPY scripts/ ./scripts/
+COPY src/ ./src/
+
+RUN npm run build
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+FROM node:22-slim AS runtime
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y libstdc++6 && rm -rf /var/lib/apt/lists/*
+
+# Copy only production deps
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY --from=builder /app/dist ./dist
+
+# Volume for SQLite state (review_api_usage table)
+VOLUME ["/data"]
+
+ENV NODE_ENV=production
+ENV PORT=3100
+ENV STATE_DB_PATH=/data/state.db
+
+EXPOSE 3100
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+  CMD node -e "require('http').get('http://localhost:3100/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+
+CMD ["node", "dist/cli/index.js", "review-api", "serve", "--port", "3100", "--db", "/data/state.db"]

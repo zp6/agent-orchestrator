@@ -30,21 +30,26 @@ FLEET_WALLET_ADDRESS=0x<your-wallet-address-here>
 |----------|-------|
 | **Blockchain** | Base (L2, Ethereum-compatible) |
 | **Token supported** | USDC, DAI, native ETH, other ERC-20 |
-| **Owner** | Fleet-controlled multisig (Safe/Gnosis) |
-| **Status** | _(pending operator setup — see issue #1267)_ |
+| **Owner** | Fleet-controlled wallet |
+| **Status** | ✅ **Active** — address baked into `agents.yaml` `providers.global` (PR #1330) |
 | **Chain ID** | 8453 |
 
 ---
 
 ## Current wallet address
 
-The canonical wallet address is:
-
 ```
-FLEET_WALLET_ADDRESS
+0x468EC325f3797F5968dEcC757FA0B960Bd0f78Ef
 ```
 
-If `FLEET_WALLET_ADDRESS` is not set, a placeholder is used. Once the Operator creates the multisig wallet via issue #1267, the address should be set in this environment variable and will propagate to all surfaces.
+This is the canonical fleet treasury on Base (L2). It is baked into
+`agents.yaml` under `providers.global.FLEET_WALLET_ADDRESS` so all agents and
+service surfaces read from a single source of truth. No operator setup needed.
+
+To override at runtime, set the environment variable:
+```bash
+export FLEET_WALLET_ADDRESS="0x<override>"
+```
 
 ### Surfaces using this address
 
@@ -72,11 +77,19 @@ Send USDC, DAI, or other ERC-20 tokens directly to the wallet address above via 
 
 | Account | Status | Link |
 |---------|--------|------|
-| **Base Wallet (USDC/DAI)** | ⏳ Pending setup (issue #1267) | _env var: FLEET_WALLET_ADDRESS_ |
+| **Base Wallet (USDC/DAI)** | ✅ Active — `0x468EC325f3797F5968dEcC757FA0B960Bd0f78Ef` | `agents.yaml` `providers.global.FLEET_WALLET_ADDRESS` |
 | **GitHub Sponsors** | ⏳ Pending setup (issue #1298) | _env var: FLEET_GITHUB_SPONSORS_URL_ |
 | **Polar.sh** | ⏳ Pending setup (issue #1298) | _env var: FLEET_POLAR_URL_ |
 | **Algora** | ⏳ Pending setup (issue #1299) | _env var: FLEET_ALGORA_URL_ |
 | **Gitcoin** | ⏳ Pending setup (issue #1299) | _env var: FLEET_GITCOIN_URL_ |
+
+---
+
+## Live service endpoints
+
+| Service | URL | Status |
+|---------|-----|--------|
+| **PR Review API** | _pending deployment_ | ⏳ Code merged (#1325), `Dockerfile.review-api` ready. See `docs/revenue-paths.md` Path 5 for deploy instructions. |
 
 ---
 

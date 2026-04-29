@@ -9,6 +9,13 @@ base_dir: "/Users/paultarr/Documents/Git"
 orchestrator_dir: "/Users/paultarr/Documents/Git/claude-agent-orchestrator"
 
 providers:
+  global:
+    # Fleet treasury — canonical receiving wallet for all revenue paths.
+    # Set this env var in the host environment to override the baked-in default.
+    # Baked-in default: Base (L2) EVM wallet owned by the fleet.
+    FLEET_WALLET_ADDRESS: "0x468EC325f3797F5968dEcC757FA0B960Bd0f78Ef"
+    FLEET_WALLET_NETWORK: "Base"
+
   claude:
     model: "claude-opus-4-6"
     limits:
