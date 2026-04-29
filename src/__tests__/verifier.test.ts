@@ -1656,3 +1656,88 @@ describe("updateTask score-approval invariant (issue #203)", () => {
     expect(result.quality_score).toBe(0.15);
   });
 });
+
+// ── JSON extraction fallback tests (issue #587) ──────────────────────────────
+// Verifies that parseResponse handles narrative LLM responses gracefully:
+//   1. Clean JSON (primary path) — must continue to work correctly
+//   2. JSON embedded in narrative prose — fallback regex extraction
+//   3. Markdown-fenced JSON — stripped before parsing
+//   4. Pure narrative with no JSON — returns default_fallback with score 0
+describe("parseResponse: JSON extraction strategies (issue #587)", () => {
+  const mockStore587 = {
+    getTask: vi.fn(),
+    updateTask: vi.fn(),
+    getChildTasks: vi.fn().mockReturnValue([]),
+    insertVerificationResult: vi.fn(),
+    recordLlmCallEvent: vi.fn(),
+  } as unknown as Parameters<typeof Verifier>[0];
+
+  const verifier587 = new Verifier(mockStore587);
+
+  it("strategy 1: parses clean JSON object directly", () => {
+    const text = JSON.stringify({
+      approved: true,
+      score: 0.85,
+      notes: "Good implementation",
+      dimensions: { correctness: 0.9, completeness: 0.85, test_coverage: 0.8, code_quality: 0.85 },
+    });
+    const result = (verifier587 as any).parseResponse(text, "task-1", "first-pass");
+    expect(result.approved).toBe(true);
+    expect(result.score).toBe(0.85);
+    expect(result.score_source).toBe("llm_parse");
+  });
+
+  it("strategy 1: parses JSON inside markdown fences", () => {
+    const text = "```json\n" + JSON.stringify({ approved: true, score: 0.82, notes: "OK" }) + "\n```";
+    const result = (verifier587 as any).parseResponse(text, "task-2", "first-pass");
+    expect(result.approved).toBe(true);
+    expect(result.score).toBe(0.82);
+    expect(result.score_source).toBe("llm_parse");
+  });
+
+  it("strategy 2: extracts JSON embedded in narrative preamble", () => {
+    // Simulates the bug: LLM writes narrative then a JSON block
+    const jsonPayload = JSON.stringify({ approved: false, score: 0.45, notes: "Incomplete" });
+    const narrative = `I'm checking the implementation, tests, and git state so I can confirm whether the work is complete.\n\nAfter reviewing, here is my assessment:\n${jsonPayload}`;
+    const result = (verifier587 as any).parseResponse(narrative, "task-3", "first-pass");
+    // Should recover the JSON despite the narrative preamble
+    // score 0.45 is below the hard-block threshold (0.50) so approved is forced false
+    // but the raw score is preserved (the guard runs separately in verify())
+    expect(result.score_source).toBe("llm_parse");
+    expect(result.approved).toBe(false);  // hard-blocked inline in parseResponse
+    expect(result.score).toBe(0.45);      // raw score preserved; guard applied separately
+    expect(result.blockedReason).toBe("hard_block_sub50");
+  });
+
+  it("strategy 2: extracts JSON embedded in narrative with trailing text", () => {
+    const jsonPayload = JSON.stringify({ approved: true, score: 0.88, notes: "Well done" });
+    const narrative = `Let me review this task carefully.\n\n${jsonPayload}\n\nHope that helps!`;
+    const result = (verifier587 as any).parseResponse(narrative, "task-4", "first-pass");
+    expect(result.score_source).toBe("llm_parse");
+    expect(result.approved).toBe(true);
+    expect(result.score).toBe(0.88);
+  });
+
+  it("returns default_fallback when no JSON is present at all", () => {
+    const narrative = "I'm checking the implementation, tests, and git state so I can confirm whether the survival-plan work is actually landed and whether anything still needs attention.";
+    const result = (verifier587 as any).parseResponse(narrative, "task-5", "first-pass");
+    expect(result.score_source).toBe("default_fallback");
+    expect(result.approved).toBe(false);
+    expect(result.score).toBe(0);
+  });
+
+  it("dimensions are parsed correctly when recovered from embedded JSON", () => {
+    const jsonPayload = JSON.stringify({
+      approved: true,
+      score: 0.80,
+      notes: "Solid work",
+      dimensions: { correctness: 0.85, completeness: 0.80, test_coverage: 0.75, code_quality: 0.80 },
+    });
+    const narrative = `After a thorough review:\n${jsonPayload}`;
+    const result = (verifier587 as any).parseResponse(narrative, "task-6", "first-pass");
+    expect(result.score_source).toBe("llm_parse");
+    expect(result.dimensions).toBeDefined();
+    expect(result.dimensions!.correctness).toBe(0.85);
+    expect(result.dimensions!.test_coverage).toBe(0.75);
+  });
+});

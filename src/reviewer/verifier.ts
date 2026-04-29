@@ -478,6 +478,8 @@ function categorizeFile(filePath: string): "triage" | "feature" | "neutral" {
 
 const TRIAGE_SYSTEM_PROMPT = `You are a quality reviewer for housekeeping and backlog triage tasks produced by an AI agent. Given a triage task description and the agent's output, assess the quality of the triage work.
 
+CRITICAL OUTPUT REQUIREMENT: You MUST respond with ONLY a raw JSON object. Do NOT write any explanatory text, preamble, narration, or markdown before or after the JSON. Do NOT wrap the JSON in code fences. Do NOT begin your response with sentences like "I'm checking..." or "Let me review...". Your entire response must be a single valid JSON object starting with { and ending with }.
+
 ## Required Output Schema
 
 All triage/housekeeping task outputs MUST include a JSON block with these four fields:
@@ -621,7 +623,15 @@ export const PRIORITY_QUALITY_FLOOR = 0.60;
 
 const SYSTEM_PROMPT = `You are a quality reviewer for an AI agent orchestrator. Given a task description and the agent's response, assess the quality of the work.
 
-Respond with ONLY a JSON object (no markdown, no code fences):
+CRITICAL OUTPUT REQUIREMENT: You MUST respond with ONLY a raw JSON object. Do NOT write any explanatory text, preamble, narration, or markdown before or after the JSON. Do NOT wrap the JSON in code fences. Do NOT begin your response with sentences like "I'm checking..." or "Let me review...". Your entire response must be a single valid JSON object starting with { and ending with }.
+
+Example of CORRECT output (your entire response should look exactly like this):
+{"approved":true,"score":0.85,"notes":"Implementation is correct and complete.","dimensions":{"correctness":0.9,"completeness":0.8,"test_coverage":0.85,"code_quality":0.85}}
+
+Example of INCORRECT output (never do this):
+I'm reviewing the implementation... After checking the code, here is my assessment: {"approved":true,...}
+
+Required JSON structure:
 {
   "approved": true/false,
   "score": 0.0-1.0,
@@ -653,6 +663,8 @@ Dimension guide:
 
 const RESEARCH_SYSTEM_PROMPT = `You are a quality reviewer for research and feasibility analysis produced by an AI agent. Given a research question and the agent's analysis, assess the quality of the research.
 
+CRITICAL OUTPUT REQUIREMENT: You MUST respond with ONLY a raw JSON object. Do NOT write any explanatory text, preamble, narration, or markdown before or after the JSON. Do NOT wrap the JSON in code fences. Do NOT begin your response with sentences like "I'm checking..." or "Let me review...". Your entire response must be a single valid JSON object starting with { and ending with }.
+
 ## Required Output Schema
 
 All research outputs MUST contain these five sections (exact markdown headers):
@@ -669,7 +681,7 @@ When sections are missing, the revision guidance MUST include the full required 
 
 ## Scoring
 
-Respond with ONLY a JSON object (no markdown, no code fences):
+Respond with ONLY a raw JSON object (no markdown, no code fences, no preamble):
 {
   "approved": true/false,
   "score": 0.0-1.0,
@@ -710,9 +722,11 @@ Dimension guide (for research tasks, these map to content quality):
 
 const PROPOSAL_SYSTEM_PROMPT = `You are a quality reviewer for feature proposals and roadmap tasks produced by an AI agent. Given a proposal description and the agent's output, assess the quality of the proposal.
 
+CRITICAL OUTPUT REQUIREMENT: You MUST respond with ONLY a raw JSON object. Do NOT write any explanatory text, preamble, narration, or markdown before or after the JSON. Do NOT wrap the JSON in code fences. Do NOT begin your response with sentences like "I'm checking..." or "Let me review...". Your entire response must be a single valid JSON object starting with { and ending with }.
+
 ## Scoring
 
-Respond with ONLY a JSON object (no markdown, no code fences):
+Respond with ONLY a raw JSON object (no markdown, no code fences, no preamble):
 {
   "approved": true/false,
   "score": 0.0-1.0,
@@ -763,7 +777,9 @@ Your job is to independently evaluate the work WITHOUT being anchored to that sc
 Be thorough and critical. A borderline score means the work probably has real gaps.
 Ask yourself: "Would I be comfortable merging/shipping this as-is?"
 
-Respond with ONLY a JSON object (no markdown, no code fences):
+CRITICAL OUTPUT REQUIREMENT: You MUST respond with ONLY a raw JSON object. Do NOT write any explanatory text, preamble, narration, or markdown before or after the JSON. Do NOT wrap the JSON in code fences. Do NOT begin your response with sentences like "I'm checking..." or "Let me review...". Your entire response must be a single valid JSON object starting with { and ending with }.
+
+Respond with ONLY a raw JSON object (no markdown, no code fences, no preamble):
 {
   "approved": true/false,
   "score": 0.0-1.0,
@@ -2578,7 +2594,7 @@ export class Verifier {
         .map((b) => ("text" in b ? b.text : ""))
         .join("");
 
-      return this.parseResponse(text);
+      return this.parseResponse(text, taskId, passLabel);
     } catch (err) {
       this.log.error("LLM pass failed", {
         taskId,
@@ -2591,41 +2607,93 @@ export class Verifier {
     }
   }
 
-  private parseResponse(text: string): VerificationResult {
+  /**
+   * Multi-strategy JSON extraction from LLM response text.
+   *
+   * Strategy 1 (primary): Strip markdown fences and parse the full cleaned text.
+   * Strategy 2 (fallback): Extract the first {...} object from narrative text.
+   *   Handles the case where the LLM ignores the JSON-only instruction and wraps
+   *   its JSON decision in prose (e.g. "I'm checking the implementation... {…}").
+   *
+   * When all strategies fail, returns a default_fallback result so the
+   * score-provenance guard can intercept and re-queue for re-verification.
+   */
+  private parseResponse(text: string, taskId?: string, passLabel?: string): VerificationResult {
+    // Strategy 1: strip markdown fences and attempt a direct full parse
     const cleaned = text
       .replace(/```(?:json)?\s*/g, "")
       .replace(/```/g, "")
       .trim();
+
+    let parsed: unknown | null = null;
+
     try {
-      const parsed = JSON.parse(cleaned);
-      const approved = Boolean(parsed.approved);
-      const score = Math.min(Math.max(Number(parsed.score) || 0, 0), 1);
+      parsed = JSON.parse(cleaned);
+    } catch {
+      // Strategy 1 failed — try extracting a JSON object from within narrative text
+      const jsonObjectMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (jsonObjectMatch) {
+        try {
+          parsed = JSON.parse(jsonObjectMatch[0]);
+          this.log.warn("json-extract: recovered JSON from narrative response", {
+            taskId,
+            pass: passLabel,
+            strategy: "embedded-object-regex",
+            textLength: text.length,
+            preview: text.slice(0, 120),
+          });
+        } catch {
+          // Strategy 2 also failed
+        }
+      }
+
+      if (parsed === null) {
+        this.log.warn("json-extract: all JSON extraction strategies failed", {
+          taskId,
+          pass: passLabel,
+          textLength: text.length,
+          preview: text.slice(0, 120),
+        });
+        return {
+          approved: false,
+          score: 0,
+          notes: "Failed to parse verification response — LLM returned narrative instead of JSON",
+          score_source: "default_fallback",
+        };
+      }
+    }
+
+    try {
+      const p = parsed as Record<string, unknown>;
+      const approved = Boolean(p.approved);
+      const score = Math.min(Math.max(Number(p.score) || 0, 0), 1);
       // Only surface explanation when score is genuinely sub-0.80
       const explanation =
-        score < 0.80 && parsed.explanation ? String(parsed.explanation) : undefined;
+        score < 0.80 && p.explanation ? String(p.explanation) : undefined;
 
       // Parse dimensions if provided
       let dimensions: QualityDimensions | undefined;
       if (
-        parsed.dimensions &&
-        typeof parsed.dimensions === "object" &&
-        !Array.isArray(parsed.dimensions)
+        p.dimensions &&
+        typeof p.dimensions === "object" &&
+        !Array.isArray(p.dimensions)
       ) {
+        const dims = p.dimensions as Record<string, unknown>;
         dimensions = {
           correctness: Math.min(
-            Math.max(Number(parsed.dimensions.correctness) || 0, 0),
+            Math.max(Number(dims.correctness) || 0, 0),
             1,
           ),
           completeness: Math.min(
-            Math.max(Number(parsed.dimensions.completeness) || 0, 0),
+            Math.max(Number(dims.completeness) || 0, 0),
             1,
           ),
           test_coverage: Math.min(
-            Math.max(Number(parsed.dimensions.test_coverage) || 0, 0),
+            Math.max(Number(dims.test_coverage) || 0, 0),
             1,
           ),
           code_quality: Math.min(
-            Math.max(Number(parsed.dimensions.code_quality) || 0, 0),
+            Math.max(Number(dims.code_quality) || 0, 0),
             1,
           ),
         };
@@ -2670,15 +2738,15 @@ export class Verifier {
         score >= MARGINAL_APPROVAL_LOW &&
         score <= MARGINAL_APPROVAL_HIGH;
       const marginalReason =
-        isMarginalApproval && parsed.marginal_reason
-          ? String(parsed.marginal_reason)
+        isMarginalApproval && p.marginal_reason
+          ? String(p.marginal_reason)
           : undefined;
 
       return {
         approved: effectiveApproved,
         score,
-        notes: String(parsed.notes ?? ""),
-        revision: parsed.revision ? String(parsed.revision) : undefined,
+        notes: String(p.notes ?? ""),
+        revision: p.revision ? String(p.revision) : undefined,
         explanation,
         dimensions,
         score_source: "llm_parse",
