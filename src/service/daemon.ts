@@ -30,7 +30,6 @@ import { ManagementClient } from "../client/management-client.js";
 import { planSync, executeSync } from "../orchestrator/sync.js";
 import { notifyOperator, clearNotifyRateLimit, setTelegramRateLimitMs } from "./notify.js";
 import { buildHealthPostmortem, renderPostmortemBlock } from "./health-postmortem.js";
-import { checkAndEscalateDay7 } from "./survival-plan.js";
 import { setRecencyWindowHours } from "../triggers/duplicate-guard.js";
 import { DuplicateIdDetector, checkDbForDuplicateIds } from "../state/duplicate-id-detector.js";
 import { startTelegramPolling, stopTelegramPolling, pollTelegram, maybePostDailyGuardDigest, maybePostDailyAnomaliesDigest } from "./telegram.js";
@@ -46,7 +45,7 @@ import { runProactiveScan } from "../orchestrator/proactive-scanner.js";
 import { validateMergedPR } from "../orchestrator/staging-validator.js";
 import { proposeAndFileRoadmapItems } from "../orchestrator/roadmap-proposer.js";
 import { detectCoverageGaps, suggestNewAgent } from "../orchestrator/coverage-gap-detector.js";
-import { autoMarkCompletedKeyResults, maybeRefreshGoals, detectStalledOKRs, loadGoals } from "../orchestrator/goals.js";
+import { autoMarkCompletedKeyResults, maybeRefreshGoals } from "../orchestrator/goals.js";
 import { detectHighIterationAgents } from "../orchestrator/iteration-cost-detector.js";
 import { detectHealthIncidentIssues } from "../orchestrator/health-incident-detector.js";
 import { runIterationBudgetAlerts } from "../orchestrator/iteration-budget-alert.js";
@@ -86,13 +85,6 @@ const STALE_ISSUE_AGE_DAYS = 7;
 const STANDUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 /** Minimum interval between blue-sky sessions (ms). */
 const BLUESKY_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-/** Minimum interval between Director retros (ms). Target: Monday 09:00 UTC. */
-const RETRO_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-/**
- * Tolerance window around Monday 09:00 UTC in which the retro may fire (ms).
- * Wide enough to tolerate poll jitter and daemon restarts around that time.
- */
-const RETRO_WINDOW_MS = 4 * 60 * 60 * 1000; // ±4h either side of 09:00 UTC Monday
 /** Only check meeting schedule every N cycles to avoid querying the DB every cycle. */
 const MEETING_SCHEDULE_CHECK_EVERY_N_CYCLES = 6; // ~30 min
 const ROADMAP_PROPOSAL_EVERY_N_CYCLES = 288; // ~24h at 5min interval
@@ -106,8 +98,6 @@ const PROXY_HEALTH_CHECK_EVERY_N_CYCLES = 3;   // ~15min — check proxy server 
 const CLOSED_ISSUE_FAILURE_CLEANUP_EVERY_N_CYCLES = 60; // ~5h — clear stale failures for closed issues
 const PROACTIVE_REBASE_EVERY_N_CYCLES = 3; // ~15min — proactively rebase stale branches
 const SEMANTIC_MEMORY_AUDIT_EVERY_N_CYCLES = 288; // ~24h — check semantic memory effectiveness (issue #1016)
-/** Check survival-plan Day-7 checkpoint once per day. Issue #1267. */
-const SURVIVAL_PLAN_CHECK_EVERY_N_CYCLES = 288; // ~24h at 5min interval
 
 /**
  * Maximum time a single poll cycle is allowed to run before the watchdog
@@ -821,10 +811,8 @@ export class Daemon {
         const now = Date.now();
         const lastStandup = this.store.getLastMeetingTime("standup");
         const lastBluesky = this.store.getLastMeetingTime("bluesky");
-        const lastRetro = this.store.getLastMeetingTime("retro");
         const standupElapsed = lastStandup ? now - new Date(lastStandup).getTime() : Infinity;
         const blueskyElapsed = lastBluesky ? now - new Date(lastBluesky).getTime() : Infinity;
-        const retroElapsed = lastRetro ? now - new Date(lastRetro).getTime() : Infinity;
 
         if (standupElapsed >= STANDUP_INTERVAL_MS) {
           batch4.push(this.runMeeting(time, "standup"));
@@ -839,13 +827,6 @@ export class Daemon {
         }
         if (blueskyElapsed >= BLUESKY_INTERVAL_MS) {
           batch4.push(this.runMeeting(time, "bluesky"));
-        }
-        // Director retro — fires Monday 09:00 UTC (±RETRO_WINDOW_MS tolerance).
-        // Two conditions must both be true:
-        //   1. At least 7 days have elapsed since the last retro (prevents double-fire).
-        //   2. Current UTC time falls within the Monday 09:00 ±4h window.
-        if (retroElapsed >= RETRO_INTERVAL_MS && Daemon.isRetroWindowOpen(now)) {
-          batch4.push(this.runMeeting(time, "retro"));
         }
       }
       if (this.cycleCount % ROADMAP_PROPOSAL_EVERY_N_CYCLES === 0) {
@@ -869,72 +850,6 @@ export class Daemon {
             .then((refreshed) => { if (refreshed) console.log(`[${time}] Goals: refreshed goals.yaml with new targets`); })
             .catch((err) => { this.log.warn("Goal refresh failed", { error: err instanceof Error ? err.message : String(err) }); }),
         );
-
-        // ── Stalled OKR detection (anti-navel-gazing, issue #1258) ─────────
-        // Detects when OKR-1 (external-oss-impact) hasn't advanced in 3+ days.
-        // Auto-files a P0 issue and, after 48h below threshold, pauses internal dispatches.
-        try {
-          const goals = loadGoals(this.config.orchestrator_dir);
-          if (goals.goals.length > 0) {
-            const stalledOKRs = detectStalledOKRs(goals, this.store, 3);
-            for (const stalled of stalledOKRs) {
-              const ratio = this.store.getExternalImpactRatio(3);
-              const ratioStr = `${(ratio.ratio * 100).toFixed(0)}% (${ratio.external_advancing}/${ratio.total} tasks)`;
-
-              // File a P0 issue if external-impact is stalled
-              const issueCreator = new IssueCreator(this.config);
-              const body = `## ⚠️ OKR-1 Stalled — External Impact at Zero\n\n` +
-                `**Goal:** ${stalled.goal.title}\n` +
-                `**Target:** ${stalled.goal.target}\n` +
-                `**Status:** External-advancing task ratio over last 3 days: ${ratioStr} — below 30% threshold.\n\n` +
-                `### Required action\n` +
-                `The fleet has been shipping internal/housekeeping work without advancing OKR-1. ` +
-                `This is the failure mode described in [issue #1258](https://github.com/rapartlu/agent-orchestrator/issues/1258).\n\n` +
-                `**Director (claude-agent-orchestrator):** Identify and dispatch at least one OKR-1 issue immediately. ` +
-                `Check the \`external-oss-impact\` key results and dispatch work toward them.\n\n` +
-                `Key results:\n${stalled.goal.key_results.map((kr) => `- [ ] ${kr.description}`).join("\n")}\n\n` +
-                `---\n*Auto-filed by stalled-OKR detector (issue #1258).*`;
-              try {
-                issueCreator.createIssue(
-                  "rapartlu/agent-orchestrator",
-                  `[P0] OKR-1 stalled: external-impact ratio ${ratioStr} — dispatch OKR work now`,
-                  body,
-                  ["P0", "okr-1", "anti-navel-gazing"],
-                );
-                console.log(`[${time}] Stalled OKR: filed P0 issue for OKR-1 (ratio=${ratioStr})`);
-              } catch (err) {
-                this.log.warn("Failed to file stalled-OKR P0 issue", { error: err instanceof Error ? err.message : String(err) });
-              }
-
-              // Notify operator via Telegram
-              notifyOperator(
-                `⚠️ OKR-1 Stalled\n\nExternal-advancing ratio: ${ratioStr} (threshold: 30%)\n\nThe fleet has been shipping internal work without advancing OKR-1 (${stalled.goal.title}). A P0 issue was filed. Director should dispatch OKR-1 work immediately.`,
-                "",
-                "warning",
-              ).catch(() => {});
-
-              // Set internal_dispatch_paused signal if stalled for 48h
-              if (stalled.should_pause_internal) {
-                this.store.writeSignal({
-                  agent: "daemon",
-                  signal_type: "internal_dispatch_paused",
-                  key: "okr-1-stalled",
-                  value: JSON.stringify({ paused: true, reason: "OKR-1 external-impact stalled for 48h+", ratio: ratio.ratio }),
-                  confidence: 0.95,
-                  ttl_hours: 48,
-                });
-                console.log(`[${time}] Stalled OKR: set internal_dispatch_paused=true (ratio=${ratioStr})`);
-                notifyOperator(
-                  `🛑 Internal Dispatch Paused\n\nOKR-1 has been below 30% external-impact for 48h+. Internal work dispatches are paused until OKR-1 advances.\n\nRatio: ${ratioStr}`,
-                  "",
-                  "warning",
-                ).catch(() => {});
-              }
-            }
-          }
-        } catch (err) {
-          this.log.warn("Stalled OKR detection failed", { error: err instanceof Error ? err.message : String(err) });
-        }
 
         // Coverage gap analysis: propose new agents when topics are unowned
         try {
@@ -1058,21 +973,6 @@ export class Daemon {
             error: err instanceof Error ? err.message : String(err),
           });
         }
-      }
-
-      // Survival-plan Day-7 checkpoint — runs once per day (~288 cycles).
-      // Escalates to the operator if the Day-7 deadline (2026-05-04) has
-      // passed without: (a) first dollar received, (b) ≥3 active revenue paths.
-      // Issue #1267.
-      if (this.cycleCount % SURVIVAL_PLAN_CHECK_EVERY_N_CYCLES === 0) {
-        batch4.push(
-          checkAndEscalateDay7(this.store)
-            .catch((err) => {
-              this.log.warn("Survival plan Day-7 check failed", {
-                error: err instanceof Error ? err.message : String(err),
-              });
-            }),
-        );
       }
 
       // Already-in-review saturation check — runs every cycle.
@@ -2544,11 +2444,7 @@ export class Daemon {
       const recentMeetings = this.store.getMeetings(10);
       const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
       const adHocThisWeek = recentMeetings.filter(
-        (m) =>
-          m.type !== "standup" &&
-          m.type !== "bluesky" &&
-          m.type !== "retro" &&
-          m.created_at >= oneWeekAgo,
+        (m) => m.type !== "standup" && m.type !== "bluesky" && m.created_at >= oneWeekAgo,
       );
       if (adHocThisWeek.length >= 1) {
         this.log.info("Meeting request deferred: weekly ad-hoc cap reached", {
@@ -2565,6 +2461,14 @@ export class Daemon {
         payload = request.value ? JSON.parse(request.value) : {};
       } catch {
         payload = { topic: request.key };
+      }
+
+      // Delete the signal so it's not re-dispatched on the next cycle.
+      // If dispatch fails, the operator can re-request via Telegram.
+      try {
+        this.store.deleteSignal(request.id);
+      } catch {
+        // Non-critical — duplicate dispatch is better than no dispatch
       }
 
       console.log(`[${time}] Dispatching meeting request to facilitator: "${payload.topic ?? request.key}"`);
@@ -2610,21 +2514,13 @@ export class Daemon {
           taskType: "facilitation",
         },
       ).then(() => {
-        // Delete the signal only after successful dispatch so that a failed
-        // dispatch is automatically retried on the next daemon cycle (issue #1198).
-        try {
-          this.store.deleteSignal(request.id);
-        } catch {
-          // Non-critical — signal will be cleaned up on next successful dispatch
-        }
         this.log.info("Meeting request dispatched to facilitator", {
           facilitator: facilitatorName,
           topic: payload.topic ?? request.key,
         });
       }).catch((err) => {
-        this.log.warn("Failed to dispatch meeting request — signal retained for retry", {
+        this.log.warn("Failed to dispatch meeting request", {
           error: err instanceof Error ? err.message : String(err),
-          signalId: request.id,
         });
       });
     } catch (err) {
@@ -2908,33 +2804,8 @@ export class Daemon {
     }
   }
 
-  /**
-   * Returns true when the current UTC time falls within the Monday 09:00 UTC
-   * retro window (±RETRO_WINDOW_MS tolerance). This allows the retro to fire
-   * anywhere from Monday 05:00 UTC through Monday 13:00 UTC, absorbing poll
-   * jitter and brief daemon outages without skipping the week.
-   *
-   * Also fires if `nowMs` is on a Monday and any time after 09:00 (catches
-   * late starts on Monday) OR on a Tuesday before 09:00 (48-hour grace for
-   * daemon downtime over the weekend).
-   */
-  static isRetroWindowOpen(nowMs: number): boolean {
-    const d = new Date(nowMs);
-    const dow = d.getUTCDay(); // 0=Sun, 1=Mon, 2=Tue ... 6=Sat
-    const utcHour = d.getUTCHours();
-    const utcMin = d.getUTCMinutes();
-    const minutesSinceMidnight = utcHour * 60 + utcMin;
-    const retroMinutes = 9 * 60; // 09:00 UTC
-
-    // Monday 05:00–23:59 UTC
-    if (dow === 1 && minutesSinceMidnight >= retroMinutes - 4 * 60) return true;
-    // Tuesday 00:00–13:00 UTC (grace period for weekend daemon outage)
-    if (dow === 2 && minutesSinceMidnight <= retroMinutes + 4 * 60) return true;
-    return false;
-  }
-
-  private async runMeeting(time: string, type: "standup" | "bluesky" | "retro"): Promise<void> {
-    const label = type === "bluesky" ? "blue sky session" : type === "retro" ? "director retro" : "standup";
+  private async runMeeting(time: string, type: "standup" | "bluesky"): Promise<void> {
+    const label = type === "bluesky" ? "blue sky session" : "standup";
     try {
       console.log(`[${time}] Starting ${label}...`);
       const summary = await runTeamMeeting(this.config, this.store, { type });

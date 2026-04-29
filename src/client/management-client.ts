@@ -17,13 +17,6 @@ export interface ProxyAgentConfig {
   provider?: string;
   packages?: string[];
   allowedTools?: string;
-  /**
-   * When true, instructs the proxy to run `docker build --no-cache` so that
-   * stale build-context cache layers are never reused. Set by the orchestrator
-   * on every explicit rebuild to ensure that newly pulled host source is
-   * reflected in the image (rapartlu/agent-proxy#485).
-   */
-  no_cache?: boolean;
 }
 
 export interface ProxyAgentStatus extends ProxyAgentConfig {

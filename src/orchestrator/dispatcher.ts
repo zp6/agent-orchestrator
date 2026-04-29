@@ -52,11 +52,6 @@ import {
   FailureInterceptor,
   FAILURE_INTERCEPTION_ALERT_THRESHOLD,
 } from "./failure-interceptor.js";
-import {
-  scanSecurityFindings,
-  wrapUntrustedText,
-} from "../service/security-guard.js";
-import { verifyPRCreated } from "./pr-completion-verifier.js";
 
 /**
  * Walk the parent_task_id chain upward from `taskId` (or a parent task id) and
@@ -815,67 +810,6 @@ export class Dispatcher {
       };
     }
 
-    // Prompt-injection / credential gate (issue #1273):
-    // The incoming message is treated as untrusted until it passes the
-    // security scanner.  If the message looks like an injection attempt or
-    // leaks credentials, we block before any external action or API call.
-    const securityFindings = scanSecurityFindings(message);
-    const sourceRef = options?.sourceRef ?? null;
-    if (securityFindings.length > 0) {
-      const summary = securityFindings.map((f) => `${f.kind}:${f.pattern}:${f.match}`).join(" | ");
-      this.log.warn("Dispatch blocked: unsafe untrusted input detected", {
-        agentName,
-        source: options?.source,
-        sourceRef,
-        summary,
-      });
-      this.store.addSecurityEvent({
-        event_type: "prompt-injection",
-        source: options?.source ?? "manual",
-        source_ref: sourceRef,
-        agent_name: agentName,
-        nonce: null,
-        action_kind: "dispatch",
-        outcome: "blocked",
-        findings_json: JSON.stringify(securityFindings),
-        details: summary,
-      });
-      await notifyOperator(
-        "Prompt injection attempt blocked",
-        `Unsafe external input was blocked before dispatching to \`${agentName}\`.\n` +
-          (sourceRef ? `Source: ${sourceRef}\n` : "") +
-          `Findings: ${summary}`,
-        "warning",
-        `prompt-injection:${sourceRef ?? agentName}`,
-      );
-      return {
-        taskId: "",
-        agentName,
-        response: {
-          content: "Skipped: unsafe untrusted input blocked by prompt-injection gate",
-          model: "",
-          usage: { input_tokens: 0, output_tokens: 0 },
-          stop_reason: "prompt-injection-blocked",
-        },
-      };
-    }
-    const securityFrame = wrapUntrustedText(message, {
-      source: options?.source ?? "manual",
-      sourceRef: options?.sourceRef ?? undefined,
-      label: options?.title ?? agentName,
-    });
-    this.store.addSecurityEvent({
-      event_type: "prompt-injection",
-      source: options?.source ?? "manual",
-      source_ref: sourceRef,
-      agent_name: agentName,
-      nonce: securityFrame.nonce,
-      action_kind: "dispatch",
-      outcome: "allowed",
-      findings_json: JSON.stringify([]),
-      details: "External input wrapped in untrusted-data envelope",
-    });
-
     // Pool resolution: if the selected agent belongs to a pool, pick the
     // healthiest idle member instead of just the first idle one.  This prevents
     // routing to an instance that is 503-ing (issue #385).
@@ -1084,7 +1018,6 @@ export class Dispatcher {
     // Implementation tasks require GH_TOKEN for PR creation, so block them.
     const taskType = options?.taskType ?? "implementation";
     const failureReroute = this.maybeGetFailureRerouteDecision(options?.sourceRef, agentName, taskType);
-    let failureReroutePrefix = "";
     if (failureReroute) {
       this.log.warn("Failure reroute hard gate triggered", {
         sourceRef: failureReroute.sourceRef,
@@ -1094,7 +1027,7 @@ export class Dispatcher {
         taskType: failureReroute.taskType,
       });
       agentName = failureReroute.toAgent;
-      failureReroutePrefix = this.buildFailureRerouteHeader(failureReroute);
+      message = this.buildFailureRerouteHeader(failureReroute) + message;
     }
 
     if (taskType !== "research" && this.store.isAgentAuthDegraded(agentName)) {
@@ -1453,10 +1386,7 @@ export class Dispatcher {
     // Prepend the target-repo header so the agent always knows which repo to
     // target, even when instructions are deeply nested in a long message.
     const repoHeader = buildTargetRepoHeader(options?.sourceRef);
-    const prefixParts = [repoHeader, failureReroutePrefix].filter((part) => part && part.length > 0);
-    let messageToSend = prefixParts.length > 0
-      ? `${prefixParts.join("\n")}\n${securityFrame.text}`
-      : securityFrame.text;
+    let messageToSend = repoHeader ? `${repoHeader}\n${message}` : message;
 
     // Inject rejection history from prior attempts for the same source_ref
     // so the agent avoids repeating failed approaches.
@@ -1829,34 +1759,6 @@ export class Dispatcher {
         status: "done",
         result: finalResult,
       });
-
-      // Post-completion PR verification (issue #1306): for implementation tasks
-      // with a GitHub source_ref, confirm a PR was actually created.  Agents
-      // that hit scope-contract violations, auth failures, or other silent
-      // errors may stop after "tests pass, build succeeds" without pushing a
-      // branch.  If no PR is found, verifyPRCreated() re-marks the task
-      // "failed" so the next cycle retries instead of swallowing zero output.
-      if (task.task_type === "implementation" && task.source_ref) {
-        const verification = verifyPRCreated(task, this.store, response.content);
-        if (!verification.skipped && !verification.prFound && !verification.lookupError) {
-          this.log.warn("Post-completion PR verification failed — no PR found; task re-marked failed", {
-            taskId: task.id,
-            agentName,
-            sourceRef: task.source_ref,
-          });
-          // recordAgentSuccess is skipped when the task has no PR — the agent
-          // did not deliver the expected artifact.
-          return { taskId: task.id, agentName, response };
-        }
-        if (verification.prNumber) {
-          this.log.info("Post-completion PR verification passed", {
-            taskId: task.id,
-            agentName,
-            prNumber: verification.prNumber,
-            prUrl: verification.prUrl,
-          });
-        }
-      }
 
       // Record healthy dispatch for pool failover routing
       this.store.recordAgentSuccess(agentName);

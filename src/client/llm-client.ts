@@ -1,233 +1,265 @@
-/**
- * LLM and embedding clients used by the reviewer/orchestrator modules.
- *
- * The text-generation client remains Anthropic-backed because that is what the
- * reviewer already uses. Embeddings are handled separately: local Ollama is
- * tried first, and a configured cloud embedding endpoint is used as a failover
- * so semantic-memory jobs keep running when the laptop is offline or under
- * memory pressure.
- */
-
 import Anthropic from "@anthropic-ai/sdk";
+import { createProxyClient } from "./proxy-client.js";
+import type { OrchestratorConfig, LLMTaskKind } from "../config/schema.js";
+import { getAgentDir, getAgentBaseUrl, getPoolMembers } from "../config/schema.js";
+import { createLogger } from "../service/logger.js";
+import {
+  isRateLimitError,
+  isProviderAvailable,
+  markProviderExhausted,
+  markProviderAvailable,
+  parseResetTime,
+} from "../service/provider-state.js";
 
-export interface EmbeddingClient {
-  embed(input: string | string[]): Promise<EmbeddingBatchResult>;
+const log = createLogger("llm-client");
+
+// Re-export for backwards compatibility with any callers that imported it from here.
+export type { LLMTaskKind };
+
+const DEFAULT_MODEL_BY_TASK: Record<LLMTaskKind, string> = {
+  default: "claude-sonnet-4-6",
+  router: "claude-sonnet-4-6",
+  planner: "claude-sonnet-4-6",
+  reviewer: "claude-sonnet-4-6",
+  verifier: "claude-sonnet-4-6",
+  supervisor: "claude-sonnet-4-6",
+  improvement: "claude-sonnet-4-6",
+  issue_matcher: "claude-haiku-4-5",
+};
+
+/**
+ * High-frequency LLM task kinds that benefit most from Claude's prompt caching.
+ * When the global provider is "auto" and no explicit per-task override is set,
+ * these tasks will prefer Claude over Codex to avoid re-tokenising full system
+ * prompts on every request (Codex CLI does not support prompt caching).
+ */
+const CLAUDE_PREFERRED_TASKS = new Set<LLMTaskKind>([
+  "router",
+  "planner",
+  "verifier",
+  "supervisor",
+  "improvement",
+  "issue_matcher",
+]);
+
+function getPreferredLLMAgents(config: OrchestratorConfig, taskKind?: LLMTaskKind): string[] {
+  const globalProvider = config.llm?.provider ?? "auto";
+  const preferred = config.llm?.preferred_agent;
+
+  // Resolve the effective provider for this task kind:
+  //   1. Explicit per-task override from config.llm.task_providers
+  //   2. Implicit default: Claude for cache-friendly tasks when provider is "auto"
+  //   3. Fall back to the global provider setting
+  let effectiveProvider = globalProvider;
+  if (taskKind) {
+    const taskOverride = config.llm?.task_providers?.[taskKind];
+    if (taskOverride && taskOverride !== "auto") {
+      effectiveProvider = taskOverride;
+    } else if (!taskOverride && globalProvider === "auto" && CLAUDE_PREFERRED_TASKS.has(taskKind)) {
+      // Default: steer cache-friendly tasks to Claude when no explicit override exists
+      effectiveProvider = "claude";
+    }
+  }
+
+  // Codex agents are currently disabled (out of tokens) — route only to Claude.
+  const providerDefaults = ["claude-orchestrator-reviewer"];
+
+  const fallbackReviewers = Object.keys(config.agents).filter((name) =>
+    name.endsWith("orchestrator-reviewer"),
+  );
+
+  return [preferred, ...providerDefaults, ...fallbackReviewers].filter(
+    (name, index, items): name is string => Boolean(name) && items.indexOf(name) === index,
+  );
 }
 
-export interface EmbeddingBatchResult {
-  embeddings: number[][];
-  source: "ollama" | "cloud";
-  fallbackUsed: boolean;
+/**
+ * Get the model for a given LLM task kind.
+ * Priority: config.llm.models[task] → config.llm.default_model → built-in defaults.
+ * When no explicit override is configured, returns undefined so callers
+ * can fall back to the pool member's model.
+ */
+export function getLLMModel(config: OrchestratorConfig, task: LLMTaskKind): string | undefined {
+  return (
+    config.llm?.models?.[task] ??
+    config.llm?.default_model ??
+    undefined
+  );
+}
+
+/** Default model when no agent config or LLM override is available. */
+const DEFAULT_MODEL = "claude-sonnet-4-6";
+
+/** Round-robin counter for pool-based LLM routing. */
+let rrIndex = 0;
+
+// ── Token usage recording ───────────────────────────────────────────────────
+
+/**
+ * Callback signature for recording LLM token usage.
+ * Set via `setLLMUsageRecorder()` at daemon startup so that every
+ * `messages.create()` call through `createLLMClient()` is automatically tracked.
+ */
+export type LLMUsageRecorder = (
+  provider: string,
+  agentName: string,
+  tokensIn: number,
+  tokensOut: number,
+  cacheReadTokens?: number,
+  cacheCreationTokens?: number,
+) => void;
+
+let usageRecorder: LLMUsageRecorder | null = null;
+
+/**
+ * Register a callback that will be invoked after every successful LLM call
+ * made through `createLLMClient()`. Typically called once at daemon startup
+ * with `store.recordTokenUsage.bind(store)`.
+ */
+export function setLLMUsageRecorder(recorder: LLMUsageRecorder): void {
+  usageRecorder = recorder;
+}
+
+/**
+ * Wrap an Anthropic client so that `messages.create()` automatically records
+ * token usage via the registered recorder.  Uses a Proxy on the `messages`
+ * namespace to intercept calls transparently — callers see a normal Anthropic
+ * client and don't need any changes.
+ */
+function wrapClientWithUsageTracking(
+  client: Anthropic,
+  provider: string,
+  agentName: string,
+): Anthropic {
+  if (!usageRecorder) return client;
+
+  const originalMessages = client.messages;
+  const originalCreate = originalMessages.create.bind(originalMessages);
+
+  const wrappedMessages = Object.create(originalMessages);
+  wrappedMessages.create = async function (...args: Parameters<typeof originalCreate>) {
+    let response;
+    try {
+      response = await originalCreate(...args);
+    } catch (err) {
+      if (isRateLimitError(err)) {
+        const resetAt = parseResetTime(err);
+        markProviderExhausted(provider, err instanceof Error ? err.message : String(err), resetAt ?? undefined);
+        log.warn("LLM rate limit — provider exhausted", { provider, agentName });
+      }
+      throw err;
+    }
+    markProviderAvailable(provider);
+    try {
+      const usage = (response as Anthropic.Message).usage;
+      if (usage && usageRecorder) {
+        const u = usage as unknown as Record<string, number | null>;
+        const cacheRead = u.cache_read_input_tokens ?? 0;
+        const cacheCreate = u.cache_creation_input_tokens ?? 0;
+        usageRecorder(provider, agentName, usage.input_tokens, usage.output_tokens, cacheRead, cacheCreate);
+      }
+    } catch (err) {
+      log.warn("Failed to record LLM token usage", {
+        provider,
+        agentName,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return response;
+  };
+
+  // Replace the messages property with our wrapped version
+  return new Proxy(client, {
+    get(target, prop) {
+      if (prop === "messages") return wrappedMessages;
+      return Reflect.get(target, prop);
+    },
+  });
+}
+
+/** Return type for createLLMClient — includes the selected agent's model. */
+export interface LLMClientResult {
+  client: Anthropic;
+  /** The model configured for the selected pool member (provider-aware). */
   model: string;
 }
 
-export interface EmbeddingClientOptions {
-  /** Local Ollama base URL, defaults to http://localhost:11434. */
-  ollamaBaseUrl?: string;
-  /** Ollama embedding model, defaults to nomic-embed-text. */
-  ollamaModel?: string;
-  /** Timeout in milliseconds for each HTTP request. */
-  timeoutMs?: number;
-  /** Optional cloud fallback embedding endpoint. */
-  fallback?: {
-    baseUrl: string;
-    apiKey?: string;
-    model: string;
-  };
-}
-
-const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434";
-const DEFAULT_OLLAMA_MODEL = "nomic-embed-text";
-const DEFAULT_TIMEOUT_MS = 10_000;
-
 /**
- * Wraps a system prompt string in a cache_control block so Anthropic's
- * prompt caching feature applies to it. On the first request the prompt is
- * computed normally; on subsequent requests with the same prompt the cached
- * version is used, saving ~80–90% of system-prompt input tokens.
+ * Get an Anthropic client for orchestrator LLM calls.
+ * Prefers a dedicated reviewer-style container to avoid blocking on
+ * busy agent containers. If the preferred reviewer belongs to a pool,
+ * round-robins across pool members so LLM calls are distributed across
+ * providers (Claude, Codex, etc.).
  *
- * Usage:
- *   system: buildCachedSystemContent(MY_SYSTEM_PROMPT)
+ * When `taskKind` is provided the provider preference is resolved per-task:
+ * high-frequency tasks ("verifier", "supervisor", "router", etc.) default to
+ * Claude when the global provider is "auto", so they benefit from prompt
+ * caching.  This can be overridden via `config.llm.task_providers`.
+ *
+ * Returns both the client and the selected agent's model so callers
+ * don't need to hardcode model strings.
  */
-export function buildCachedSystemContent(
-  text: string,
-): Anthropic.TextBlockParam[] {
-  return [{ type: "text", text, cache_control: { type: "ephemeral" } }];
-}
-
-let _client: Anthropic | null = null;
-let _embeddingClient: EmbeddingClient | null = null;
-
-/**
- * Returns a shared Anthropic client instance.
- * Reads credentials from environment:
- *   ANTHROPIC_API_KEY  — required
- *   ANTHROPIC_BASE_URL — optional; overrides the default API endpoint
- */
-export function createLLMClient(): Anthropic {
-  if (_client) return _client;
-
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "ANTHROPIC_API_KEY environment variable is required for the reviewer LLM client",
-    );
-  }
-
-  const baseURL = process.env.ANTHROPIC_BASE_URL;
-  _client = new Anthropic({ apiKey, ...(baseURL ? { baseURL } : {}) });
-  return _client;
-}
-
-/** Reset the cached client (useful in tests). */
-export function resetLLMClient(): void {
-  _client = null;
-}
-
-function resolveEmbeddingOptions(
-  opts: EmbeddingClientOptions = {},
-): Required<Omit<EmbeddingClientOptions, "fallback">> & { fallback?: NonNullable<EmbeddingClientOptions["fallback"]> } {
-  const ollamaBaseUrl = opts.ollamaBaseUrl ?? process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL;
-  const ollamaModel = opts.ollamaModel ?? process.env.OLLAMA_EMBEDDING_MODEL ?? DEFAULT_OLLAMA_MODEL;
-  const timeoutMs = opts.timeoutMs ?? Number(process.env.EMBEDDING_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS);
-
-  const fallbackBaseUrl = opts.fallback?.baseUrl ?? process.env.EMBEDDING_FALLBACK_BASE_URL;
-  const fallbackModel = opts.fallback?.model ?? process.env.EMBEDDING_FALLBACK_MODEL;
-  const fallbackApiKey = opts.fallback?.apiKey ?? process.env.EMBEDDING_FALLBACK_API_KEY;
-
-  const fallback = fallbackBaseUrl && fallbackModel
-    ? { baseUrl: fallbackBaseUrl, model: fallbackModel, apiKey: fallbackApiKey }
-    : undefined;
-
-  return { ollamaBaseUrl, ollamaModel, timeoutMs, fallback };
-}
-
-async function postJson<T>(url: string, body: unknown, timeoutMs: number, headers: Record<string, string> = {}): Promise<T> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...headers,
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`HTTP ${response.status}${text ? `: ${text}` : ""}`);
-    }
-
-    return (await response.json()) as T;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function normaliseEmbeddingsResponse(value: unknown): number[][] {
-  if (!value || typeof value !== "object") {
-    throw new Error("Invalid embedding response");
-  }
-
-  const record = value as Record<string, unknown>;
-  if (Array.isArray(record.embeddings)) {
-    return record.embeddings.map((embedding) => {
-      if (!Array.isArray(embedding)) throw new Error("Invalid embeddings array");
-      return embedding.map((entry) => {
-        const n = Number(entry);
-        if (!Number.isFinite(n)) throw new Error("Embedding contained a non-finite value");
-        return n;
+export function createLLMClient(config: OrchestratorConfig, taskKind?: LLMTaskKind): LLMClientResult {
+  for (const agentName of getPreferredLLMAgents(config, taskKind)) {
+    const candidates = getPoolMembers(config, agentName)
+      .filter((name) => {
+        const agent = config.agents[name];
+        if (!agent?.docker?.port || !agent?.docker?.api_key) return false;
+        // Skip agents whose provider is exhausted (rate limited)
+        const prov = agent.provider ?? "claude";
+        return isProviderAvailable(prov);
       });
-    });
-  }
 
-  if (Array.isArray(record.data)) {
-    return record.data.map((item) => {
-      if (!item || typeof item !== "object" || !Array.isArray((item as Record<string, unknown>).embedding)) {
-        throw new Error("Invalid OpenAI-compatible embeddings response");
-      }
-      return (item as { embedding: unknown[] }).embedding.map((entry) => {
-        const n = Number(entry);
-        if (!Number.isFinite(n)) throw new Error("Embedding contained a non-finite value");
-        return n;
-      });
-    });
-  }
-
-  if (Array.isArray(record.embedding)) {
-    return [record.embedding.map((entry) => {
-      const n = Number(entry);
-      if (!Number.isFinite(n)) throw new Error("Embedding contained a non-finite value");
-      return n;
-    })];
-  }
-
-  throw new Error("Unrecognised embedding response shape");
-}
-
-class OllamaEmbeddingClient implements EmbeddingClient {
-  private readonly ollamaBaseUrl: string;
-  private readonly ollamaModel: string;
-  private readonly timeoutMs: number;
-  private readonly fallback?: NonNullable<EmbeddingClientOptions["fallback"]>;
-
-  constructor(opts: EmbeddingClientOptions = {}) {
-    const resolved = resolveEmbeddingOptions(opts);
-    this.ollamaBaseUrl = resolved.ollamaBaseUrl;
-    this.ollamaModel = resolved.ollamaModel;
-    this.timeoutMs = resolved.timeoutMs;
-    this.fallback = resolved.fallback;
-  }
-
-  async embed(input: string | string[]): Promise<EmbeddingBatchResult> {
-    const payload = { model: this.ollamaModel, input };
-
-    try {
-      const response = await postJson<unknown>(
-        `${this.ollamaBaseUrl.replace(/\/$/, "")}/api/embed`,
-        payload,
-        this.timeoutMs,
-      );
+    if (candidates.length > 0) {
+      const selected = candidates[rrIndex % candidates.length];
+      rrIndex++;
+      const preferred = config.agents[selected];
+      const baseUrl = getAgentBaseUrl(config, selected);
+      const workingDir = getAgentDir(config, selected);
+      const model = preferred.model ?? DEFAULT_MODEL;
+      const provider = preferred.provider ?? "claude";
       return {
-        embeddings: normaliseEmbeddingsResponse(response),
-        source: "ollama",
-        fallbackUsed: false,
-        model: this.ollamaModel,
-      };
-    } catch (error) {
-      if (!this.fallback) throw error;
-
-      const fallbackResponse = await postJson<unknown>(
-        `${this.fallback.baseUrl.replace(/\/$/, "")}/v1/embeddings`,
-        { model: this.fallback.model, input },
-        this.timeoutMs,
-        this.fallback.apiKey ? { authorization: `Bearer ${this.fallback.apiKey}` } : {},
-      );
-      return {
-        embeddings: normaliseEmbeddingsResponse(fallbackResponse),
-        source: "cloud",
-        fallbackUsed: true,
-        model: this.fallback.model,
+        client: wrapClientWithUsageTracking(
+          createProxyClient(config.proxy, workingDir, {
+            apiKey: preferred.docker!.api_key!,
+            baseUrl,
+            provider,
+          }),
+          provider,
+          selected,
+        ),
+        model,
       };
     }
   }
-}
 
-/**
- * Returns a shared embedding client. Ollama is tried first and falls back to a
- * configured cloud embedding endpoint when available.
- */
-export function createEmbeddingClient(opts: EmbeddingClientOptions = {}): EmbeddingClient {
-  if (!_embeddingClient) {
-    _embeddingClient = new OllamaEmbeddingClient(opts);
+  // Fallback: use any available agent
+  for (const [name, agent] of Object.entries(config.agents)) {
+    if (agent.docker?.port && agent.docker?.api_key) {
+      const baseUrl = getAgentBaseUrl(config, name);
+      const workingDir = getAgentDir(config, name);
+      return {
+        client: wrapClientWithUsageTracking(
+          createProxyClient(config.proxy, workingDir, {
+            apiKey: agent.docker.api_key,
+            baseUrl,
+            provider: agent.provider,
+          }),
+          agent.provider ?? "claude",
+          name,
+        ),
+        model: agent.model ?? DEFAULT_MODEL,
+      };
+    }
   }
-  return _embeddingClient;
-}
 
-/** Reset the cached embedding client (useful in tests). */
-export function resetEmbeddingClient(): void {
-  _embeddingClient = null;
+  // Last resort: use proxy URL directly
+  return {
+    client: wrapClientWithUsageTracking(
+      createProxyClient(config.proxy, config.orchestrator_dir, {}),
+      "claude",
+      "unknown",
+    ),
+    model: DEFAULT_MODEL,
+  };
 }

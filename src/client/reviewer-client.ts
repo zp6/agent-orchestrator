@@ -235,14 +235,6 @@ You may see a "## Recent Research Findings" section containing approved research
 - Prioritize implementation of gaps identified by research (issues filed from research are labelled "research-implementation")
 - Avoid dispatching research on topics already covered by recent findings
 
-ANTI-NAVEL-GAZING RULE (mandatory — check before every dispatch cycle):
-You will see a "## External Impact (7 days)" section showing what fraction of recent work advanced OKR-1 (external-oss-impact).
-- If OKR-1 external-impact ratio is BELOW 30% over the last 7 days: REFUSE to dispatch new internal work (housekeeping, refactoring, tooling, CI fixes, self-optimization, infrastructure monitoring). Instead, find and dispatch OKR-1 issues — the external-oss-impact goal must move.
-- If external-impact ratio is 30% or above: internal work is permitted at a rate of at most 1 internal dispatch per 2 OKR-advancing dispatches in this cycle.
-- If "## External Impact" shows the Director has set internal_dispatch_paused=true: treat ALL housekeeping and infrastructure dispatches as blocked regardless of ratio. Only OKR-tagged work may be dispatched.
-- "Internal work" includes any task whose net effect is zero external user impact: housekeeping, backlog-triage, dependency updates, CI fixes, code refactoring, self-monitoring improvements, internal tooling, and infrastructure health checks.
-- When you refuse internal work due to this rule, include a "navel_gazing_risk" note in your reason field so the operator can see the gate was applied.
-
 Be specific and actionable. Only suggest actions that address real gaps. Return [] if everything is on track.`;
 
 /**

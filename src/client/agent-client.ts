@@ -4,11 +4,6 @@ import type { OrchestratorConfig } from "../config/schema.js";
 import { getAgentDir, getAgentApiKey, getAgentBaseUrl, getAgentModel } from "../config/schema.js";
 import type { TaskType } from "../state/store.js";
 import type { StateStore } from "../state/store.js";
-import {
-  isUntrustedEnvelope,
-  scanSecurityFindings,
-  wrapUntrustedText,
-} from "../service/security-guard.js";
 
 export interface AgentResponse {
   content: string;
@@ -164,36 +159,6 @@ export class AgentClient {
   }
 
   /**
-   * Prepare user-supplied content for the LLM boundary.
-   * The envelope is idempotent so pre-wrapped content will not be nested.
-   */
-  private prepareUntrustedMessage(
-    message: string,
-    context: { source?: string; sourceRef?: string; label?: string },
-  ): { message: string; nonce: string } {
-    const findings = scanSecurityFindings(message);
-    if (findings.length > 0) {
-      const summary = findings.map((f) => `${f.kind}:${f.pattern}`).join(", ");
-      throw new Error(
-        `Prompt injection or secret exposure blocked for ${context.label ?? "message"}` +
-        `${context.sourceRef ? ` (${context.sourceRef})` : ""}: ${summary}`,
-      );
-    }
-
-    if (isUntrustedEnvelope(message)) {
-      const nonceMatch = message.match(/nonce="([^"]+)"/);
-      return { message, nonce: nonceMatch?.[1] ?? "existing" };
-    }
-
-    const wrapped = wrapUntrustedText(message, {
-      source: context.source,
-      sourceRef: context.sourceRef,
-      label: context.label,
-    });
-    return { message: wrapped.text, nonce: wrapped.nonce };
-  }
-
-  /**
    * Lightweight liveness check: does an HTTP request to the agent's base URL.
    * Returns true if the agent proxy port is responding (any HTTP response),
    * false if the port is unreachable (connection refused, timeout, etc.).
@@ -309,17 +274,13 @@ export class AgentClient {
     const systemPrompt = options?.systemPrompt
       ? `${basePrompt}\n\n${options.systemPrompt}${directivesSuffix}`
       : `${basePrompt}${directivesSuffix}`;
-    const prepared = this.prepareUntrustedMessage(message, {
-      source: "agent-client",
-      label: `${agentName}:${options?.taskType ?? "default"}`,
-    });
 
     const response = await client.messages.create(
       {
         model: options?.model ?? getAgentModel(this.config, agentName),
         max_tokens: 16384,
         system: systemPrompt,
-        messages: [{ role: "user", content: prepared.message }],
+        messages: [{ role: "user", content: message }],
       },
       options?.signal ? { signal: options.signal } : undefined,
     );
@@ -364,16 +325,12 @@ export class AgentClient {
     const systemPrompt = options?.systemPrompt
       ? `${basePrompt}\n\n${options.systemPrompt}${directivesSuffix}`
       : `${basePrompt}${directivesSuffix}`;
-    const prepared = this.prepareUntrustedMessage(message, {
-      source: "agent-client",
-      label: `${agentName}:${options?.taskType ?? "default"}`,
-    });
 
     const stream = client.messages.stream({
       model: options?.model ?? getAgentModel(this.config, agentName),
       max_tokens: 16384,
       system: systemPrompt,
-      messages: [{ role: "user", content: prepared.message }],
+      messages: [{ role: "user", content: message }],
     });
 
     for await (const event of stream) {

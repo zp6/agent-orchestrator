@@ -28,11 +28,6 @@
 import { execSync } from "node:child_process";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { createLogger } from "../service/logger.js";
-import {
-  consumeActionQuota,
-  guardPublicContent,
-  DEFAULT_PUBLIC_POSTS_PER_HOUR,
-} from "../service/security-guard.js";
 
 const log = createLogger("post-merge-regression-detector");
 
@@ -221,8 +216,6 @@ export async function openRegressionIssue(
   });
 
   try {
-    guardPublicContent(title, `post-merge regression title ${repo}#${prNumber}`);
-    guardPublicContent(body, `post-merge regression body ${repo}#${prNumber}`);
     // Check for duplicate open regression issue for this PR first
     const existingRaw = execSync(
       `gh issue list --repo ${shellEscape(repo)} --state open --label ${shellEscape(REGRESSION_LABEL)} --search ${shellEscape(`[post-merge regression] PR #${prNumber}`)} --json number,url --limit 5`,
@@ -246,12 +239,6 @@ export async function openRegressionIssue(
       }
     }
 
-    consumeActionQuota({
-      action: "public-post",
-      scope: repo,
-      limit: DEFAULT_PUBLIC_POSTS_PER_HOUR,
-      windowMs: 60 * 60 * 1000,
-    });
     const output = execSync(
       `gh issue create --repo ${shellEscape(repo)} --title ${shellEscape(title)} --body ${shellEscape(body)} --label ${shellEscape(REGRESSION_LABEL)}`,
       { encoding: "utf-8", timeout: 30_000 },

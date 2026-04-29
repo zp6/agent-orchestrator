@@ -1,41 +1,27 @@
 {
-  "name": "claude-orchestrator-reviewer",
+  "name": "claude-agent-orchestrator",
   "version": "0.1.0",
-  "description": "Quality and oversight layer for the Claude Agent Orchestrator — PR review, task verification, supervision, and improvement detection.",
+  "description": "Orchestrator for coordinating multiple Claude Code agent directories",
+  "license": "MIT",
   "type": "module",
   "scripts": {
-    "build": "tsc && node scripts/copy-schema-contract.mjs",
-    "prepare": "tsc && node scripts/copy-schema-contract.mjs",
+    "dev": "tsx src/cli/index.ts",
+    "build": "tsc",
+    "start": "node dist/cli/index.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
-    },
-    "./integration": {
-      "import": "./dist/integration/orchestrator-adapter.js",
-      "types": "./dist/integration/orchestrator-adapter.d.ts"
-    }
-  },
-  "files": [
-    "dist",
-    "README.md"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/rapartlu/claude-orchestrator-reviewer.git"
-  },
-  "license": "MIT",
-  "publishConfig": {
-    "access": "public"
+  "bin": {
+    "orch": "./dist/cli/index.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
-    "better-sqlite3": "^11.0.0"
+    "better-sqlite3": "^11.0.0",
+    "chalk": "^5.4.0",
+    "commander": "^13.0.0",
+    "dotenv": "^16.4.0",
+    "ulid": "^2.3.0",
+    "yaml": "^2.7.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",

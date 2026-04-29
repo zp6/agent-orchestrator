@@ -150,12 +150,11 @@ function recordAlreadyInReviewTask(
       verification_notes: "Auto-approved: dispatch skipped because open PR already exists for this issue.",
     });
 
-    // Do NOT call store.markProcessed() here (issue #1232).
-    // Marking the issue permanently processed would prevent re-dispatch if the
-    // blocking PR is later closed or rejected.  Instead, deduplication within
-    // the same guard window is handled by hasRecentAlreadyInReviewTask (6h TTL)
-    // checked above — that guard prevents duplicate audit tasks while still
-    // allowing the issue to be re-evaluated on every daemon cycle.
+    // Use the real task.id so the processed_triggers.task_id FK constraint
+    // (REFERENCES tasks.id) is satisfied.  Passing a synthetic string like
+    // "already-in-review-pr-N" caused "FOREIGN KEY constraint failed" because
+    // that string has no matching row in the tasks table.
+    store.markProcessed("github", sourceRef, task.id);
 
     log.info("Recorded already-in-review task for issue with existing PR", {
       taskId: task.id,
@@ -1284,43 +1283,6 @@ export async function dispatchIdleAgentBacklog(
         }
       }
 
-      // Cross-agent inflight guard — idle pickup path (issue #1196).
-      // The main dispatch path checks hasRecentSurgeEvent() to enforce the
-      // 60-minute flood-gate after a PR guard fires.  Without this same check
-      // here, the idle pickup path can re-dispatch an issue within that window
-      // even when the main path already blocked it — bypassing the guard
-      // entirely.  Adding this check closes the gap so both dispatch paths
-      // respect the same flood-gate window.
-      {
-        if (store.hasRecentSurgeEvent(issue.repo, issue.number, GUARD_FLOOD_GATE_WINDOW_MS)) {
-          const mostRecentEventAt = store.getMostRecentSurgeEventAt(
-            issue.repo, issue.number, GUARD_FLOOD_GATE_WINDOW_MS,
-          );
-          const expiresAt = mostRecentEventAt
-            ? new Date(new Date(mostRecentEventAt).getTime() + GUARD_FLOOD_GATE_WINDOW_MS).toISOString()
-            : null;
-          log.info(
-            "Idle pickup: skipping dispatch — recent already-in-review event within flood-gate window (issue #1196)",
-            { sourceRef, agentName, windowMs: GUARD_FLOOD_GATE_WINDOW_MS, expiresAt },
-          );
-          reportDashboardSkip({
-            issue_id: sourceRef,
-            agent_name: agentName,
-            skip_reason: "cross_agent_inflight_guard",
-            condition_value: [
-              `recent_surge_event=true`,
-              `window_ms=${GUARD_FLOOD_GATE_WINDOW_MS}`,
-              expiresAt ? `expires_at=${expiresAt}` : null,
-            ].filter(Boolean).join(","),
-            context: expiresAt
-              ? `Idle pickup: dispatch suppressed (PR in review) until ${expiresAt}`
-              : "Idle pickup: cross-agent inflight guard — recent surge event within flood-gate window",
-          });
-          result.skipped++;
-          continue;
-        }
-      }
-
       const validation = runGitHubPreDispatchValidation({
         config,
         store,
@@ -1349,27 +1311,6 @@ export async function dispatchIdleAgentBacklog(
           (validation.failureCode === "open_pr_exists" || validation.failureCode === "approved_pr_waiting") &&
           validation.blockingPRNumber
         ) {
-          // Atomic PR guard cooldown lock (issue #1095, #1196) — idle pickup path.
-          // Mirror the tryAcquirePRGuardLock() check from the main dispatch path so
-          // the idle path cannot create a second "already-in-review" task when the
-          // main path already acquired the lock this cycle (or within the last 60 min).
-          const idleLockAcquired = store.tryAcquirePRGuardLock(sourceRef, GUARD_FLOOD_GATE_WINDOW_MS);
-          if (!idleLockAcquired) {
-            log.info(
-              "Idle pickup: PR guard cooldown lock active — suppressing duplicate guard fire (issue #1196)",
-              {
-                sourceRef,
-                blockingPRNumber: validation.blockingPRNumber,
-                failureCode: validation.failureCode,
-                windowMs: GUARD_FLOOD_GATE_WINDOW_MS,
-              },
-            );
-            store.recordPRGuardDuplicateAttempt(sourceRef, validation.blockingPRNumber);
-            store.recordGuardHit(issue.repo, issue.number, false);
-            result.skipped++;
-            continue;
-          }
-
           recordAlreadyInReviewTask(store, {
             sourceRef,
             agentName,

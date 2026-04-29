@@ -755,24 +755,6 @@ export function buildSupervisorContext(config: OrchestratorConfig, store: StateS
     sections.unshift(buildGoalsContext(progress));
   }
 
-  // ── External-impact ratio (anti-navel-gazing, issue #1258) ─────────────────
-  // Show what fraction of recent work advanced OKR-1 (external-oss-impact).
-  // The supervisor uses this to gate internal-work dispatches.
-  try {
-    const impactRatio = store.getExternalImpactRatio(7);
-    const ratioStr = impactRatio.total > 0
-      ? `${(impactRatio.ratio * 100).toFixed(0)}% (${impactRatio.external_advancing}/${impactRatio.total} tasks)`
-      : "No data (0 tasks completed in last 7 days)";
-    const alert = impactRatio.total > 0 && impactRatio.ratio < 0.30
-      ? " ⚠️ BELOW 30% THRESHOLD — block new internal work until OKR-1 advances"
-      : "";
-    const pausedSignals = store.readSignals({ signal_type: "internal_dispatch_paused", limit: 1 });
-    const pausedVal = pausedSignals.length > 0 ? (pausedSignals[0].value as string) : null;
-    const isPaused = pausedVal ? (JSON.parse(pausedVal) as { paused: boolean }).paused === true : false;
-    const pauseLine = isPaused ? "\ninternal_dispatch_paused: true — Director has paused all internal-work dispatches. Only OKR-tagged work may dispatch." : "";
-    sections.push(`## External Impact (7 days)\nExternal-advancing tasks (OKR-1): ${ratioStr}${alert}${pauseLine}`);
-  } catch { /* external impact ratio is optional */ }
-
   // Surface positive efficiency metrics so the improvement detector can
   // recognise what's working well, not just what's failing (issue #595).
   const followUpsAvoided = store.getStat("follow_ups_avoided");

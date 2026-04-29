@@ -2,10 +2,9 @@
  * Team Meeting — periodic alignment sessions where agents contribute
  * perspectives across multiple rounds of discussion.
  *
- * Three meeting types:
+ * Two meeting types:
  *   - standup: blockers, opportunities, action items (daily)
- *   - bluesky: creative ideation, "what if" thinking, bold proposals (weekly)
- *   - retro: weekly Director retro — OKR progress, blockers, burndown, kudos (Monday 09:00 UTC)
+ *   - bluesky: creative ideation, "what if" thinking, bold proposals (daily)
  *
  * Multi-round flow:
  *   Round 1: Each agent shares initial perspective (parallel)
@@ -26,7 +25,7 @@ import { createLogger } from "../service/logger.js";
 import { cacheableSystemPrompt } from "../utils/prompt-cache.js";
 import { execSync } from "node:child_process";
 import { StandupActionClient, type StandupActionItemInput } from "../client/standup-action-client.js";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -37,7 +36,7 @@ const DEFAULT_LLM_TIMEOUT_MS = 180_000;
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-export type MeetingType = "standup" | "bluesky" | "retro";
+export type MeetingType = "standup" | "bluesky";
 
 export interface RoundEntry {
   agentName: string;
@@ -81,19 +80,13 @@ export interface MeetingOptions {
 
 // ── Prompts per meeting type ────────────────────────────────────────────────
 
-const STANDUP_ROUND1 = `You are in a daily standup. Share your perspective concisely (under 250 words):
+const STANDUP_ROUND1 = `You are in a daily standup. Share your perspective concisely (under 200 words):
 
 1. **Blockers**: What's preventing you from doing your best work?
 2. **Opportunities**: What improvements could make the biggest impact in your domain?
 3. **Suggestions for the team**: What should other agents know?
 4. **Coverage gaps**: Are there tasks in your domain that a more specialised agent should handle?
-5. **OKR Progress** (mandatory — do not skip): For each active OKR, answer: did it advance since the last standup?
-   - OKR-1 (external-oss-impact — Ship a fleet-authored OSS tool): shipped anything? If not, what's blocking it?
-   - OKR-2 (scale-reliability — 1,500 tasks/week at <8% failure): trending up or down?
-   - OKR-3 (cost-efficiency — ≤$0.10/task): any change?
-   - OKR-4 (autonomous-delivery — multi-week projects without operator): any progress?
-   If any OKR has made ZERO progress since last standup, you must explain why and propose what to dispatch next.
-6. **Meeting request** (optional): If there's a cross-cutting topic that needs structured discussion beyond this standup, you can request an ad-hoc meeting. Add a section like:
+5. **Meeting request** (optional): If there's a cross-cutting topic that needs structured discussion beyond this standup, you can request an ad-hoc meeting. Add a section like:
    **REQUEST MEETING:** <topic> [format: rfc|retrospective|design-review|triage|incident-postmortem|investigation-spike]
    The meeting facilitator will evaluate and schedule it. Only request one if the topic genuinely needs multi-agent structured discussion.
 
@@ -130,31 +123,9 @@ const BLUESKY_ROUND3 = `Round 3: Final convergence. You've seen two rounds of id
 
 In under 100 words: What's the ONE idea from this session that you'd bet on? Why? What would it take to prototype it this week?`;
 
-// ── Retro prompts (Director weekly retro — fires Monday 09:00 UTC) ──────────
-
-const RETRO_ROUND1 = `This is the weekly Director retro. Review the past week and share your perspective concisely (under 250 words):
-
-1. **OKR Progress**: Which key results moved this week? Which are stalled? Reference specific metrics where you have them (tasks/week, failure rate, cost/task).
-2. **Blockers**: What systemic issues are slowing the fleet? (Not task-level blockers — fleet-level.)
-3. **Burndown**: Are we on track to hit Q3 targets by 30 Sep 2026? What's the biggest risk to the timeline?
-4. **Agent kudos**: Which agent(s) had a standout week? What specifically did they do well?
-5. **RESOURCES.md or Article V asks**: Is there a resource constraint (compute, budget, new tool access) the operator should know about?
-6. **Director rotation**: If you believe a different agent should lead Q4, name them and why. If you're happy with current leadership, say so explicitly.
-
-Be direct and specific. Reference actual numbers, issue IDs, or PR numbers where possible. ONLY reference issues and PRs listed in the Live Fleet State section above.`;
-
-const RETRO_ROUND2 = `Round 2: You've read all agents' retro perspectives. Now add (under 150 words):
-
-1. **Biggest signal**: What's the single most important finding from all perspectives combined?
-2. **Disagreement**: Is there anything another agent said you see differently? Why?
-3. **Q4 Director nomination**: Do you agree with the nominations raised in Round 1? Cast your vote: who should be Q4 Director and why?
-
-Don't repeat Round 1 points. Build on the collective picture.`;
-
 const PROMPTS: Record<MeetingType, string[]> = {
   standup: [STANDUP_ROUND1, STANDUP_ROUND2],
   bluesky: [BLUESKY_ROUND1, BLUESKY_ROUND2, BLUESKY_ROUND3],
-  retro: [RETRO_ROUND1, RETRO_ROUND2],
 };
 
 const SYNTHESIS_PROMPTS: Record<MeetingType, string> = {
@@ -166,18 +137,8 @@ Produce a JSON object (no markdown, no code fences):
   "action_items": [{"description": "specific action", "owner": "agent or pool", "priority": "high|medium|low"}],
   "goal_adjustments": ["adjustment if any"],
   "resource_notes": "rebalancing observations",
-  "summary": "2-3 sentence executive summary",
-  "okr_progress": {
-    "okr_1_external_impact": "advanced|stalled|no_data",
-    "okr_2_scale_reliability": "advanced|stalled|no_data",
-    "okr_3_cost_efficiency": "advanced|stalled|no_data",
-    "okr_4_autonomous_delivery": "advanced|stalled|no_data",
-    "stalled_okrs": ["list any OKR IDs with zero progress — these MUST generate high-priority action items"],
-    "navel_gazing_risk": true
-  }
-}
-
-CRITICAL: If any OKR shows stalled or no_data status, you MUST include at least one high-priority action_item that dispatches work toward that OKR. A standup that reports stalled OKRs without dispatching OKR work is a quality failure. Set navel_gazing_risk=true if OKR-1 (external-impact) stalled.`,
+  "summary": "2-3 sentence executive summary"
+}`,
 
   bluesky: `You are synthesising a blue-sky thinking session for an autonomous AI agent fleet.
 
@@ -193,30 +154,6 @@ Produce a JSON object (no markdown, no code fences):
   "goal_adjustments": ["proposed new goal or adjustment"],
   "resource_notes": "which agents are best positioned for which ideas",
   "summary": "2-3 sentence summary of the most exciting outcomes"
-}`,
-
-  retro: `You are synthesising a weekly Director retro for an autonomous AI agent fleet (Nexus).
-
-The agents reviewed Q3 OKR progress, blockers, burndown, and Director rotation. Your job:
-1. Assess each OKR's health (on-track / at-risk / off-track) based on what agents reported
-2. Surface the fleet-level blockers (not task-level)
-3. Identify the Q4 Director nominee if consensus emerged, or flag the disagreement
-4. Extract RESOURCES.md / Article V items that need operator attention
-
-Produce a JSON object (no markdown, no code fences):
-{
-  "themes": ["OKR health signal 1", "fleet-level blocker", "other theme"],
-  "action_items": [{"description": "specific follow-up action", "owner": "agent or pool", "priority": "high|medium|low"}],
-  "goal_adjustments": ["OKR adjustment or new target if warranted"],
-  "resource_notes": "Article V resource asks or RESOURCES.md items for operator",
-  "q4_director_nominee": "agent-name or 'no consensus'",
-  "okr_health": {
-    "external-oss-impact": "on-track|at-risk|off-track",
-    "scale-reliability": "on-track|at-risk|off-track",
-    "cost-efficiency": "on-track|at-risk|off-track",
-    "autonomous-delivery": "on-track|at-risk|off-track"
-  },
-  "summary": "2-3 sentence executive summary of the week"
 }`,
 };
 
@@ -301,67 +238,6 @@ function buildLiveIssueContext(config: OrchestratorConfig, store: StateStore): s
 }
 
 // ── Core meeting logic ──────────────────────────────────────────────────────
-
-/**
- * Participant selection rationale
- * ─────────────────────────────────
- * One agent per functional pool is the policy. Agents within the same pool
- * (e.g. claude-agent-orchestrator + codex-agent-orchestrator both belong to
- * pool "orchestrator") are ENVIRONMENT DUPLICATES — different model providers
- * running the same role. Including both would give a single stakeholder two
- * votes while adding no distinct perspective.
- *
- * Inclusion criteria (applied in order of precedence):
- *   1. First registered agent for a given pool — canonical instance speaks.
- *   2. "Owns the enforcement problem" — an agent that is the authoritative
- *      owner of the system under discussion is included regardless of whether
- *      its role label says "reviewer". Role label is NOT the criterion; domain
- *      ownership is.
- *   3. Telegram agents are always excluded (asynchronous notification channel,
- *      not a deliberative stakeholder).
- *
- * When explicit participants are supplied via MeetingOptions.participants,
- * the same pool-dedup logic is applied before running rounds. This prevents
- * a meeting request that lists both claude-* and codex-* variants from
- * double-staffing a single role.
- */
-
-/**
- * Deduplicate a list of agent names so that at most one agent per pool is
- * represented. Agents that share a pool key are environment duplicates (e.g.
- * claude-agent-orchestrator and codex-agent-orchestrator in pool "orchestrator").
- * The first occurrence in the input list is kept; subsequent duplicates within
- * the same pool are dropped.
- *
- * Agents with no configured pool use their own name as the pool key, so they
- * are always unique and are never dropped by this function.
- *
- * Telegram agents are always excluded (notification channel, not a deliberative
- * stakeholder).
- */
-export function deduplicateParticipantsByPool(
-  participants: string[],
-  config: OrchestratorConfig,
-): string[] {
-  const seenPools = new Set<string>();
-  const result: string[] = [];
-  for (const name of participants) {
-    if (name.includes("telegram")) continue;
-    const agent = config.agents[name];
-    const poolKey = agent?.pool ?? name;
-    if (seenPools.has(poolKey)) {
-      log.info("Meeting: excluded environment-duplicate participant", {
-        agent: name,
-        pool: poolKey,
-        reason: "pool already represented by an earlier entry",
-      });
-      continue;
-    }
-    seenPools.add(poolKey);
-    result.push(name);
-  }
-  return result;
-}
 
 function selectAgents(config: OrchestratorConfig): string[] {
   const seenPools = new Set<string>();
@@ -706,14 +582,8 @@ export async function runTeamMeeting(
   }
 
   const client = new AgentClient(config);
-  // Resolve participant list. If explicit participants are provided, apply the
-  // same pool-dedup policy as selectAgents() to strip environment duplicates
-  // (e.g. both claude-agent-orchestrator and codex-agent-orchestrator listed
-  // in a meeting request). Otherwise fall back to automatic selection.
-  const rawParticipants = options?.participants ?? selectAgents(config);
-  const agents = options?.participants
-    ? deduplicateParticipantsByPool(rawParticipants, config)
-    : rawParticipants;
+  // Use explicit participants if provided, otherwise auto-select
+  const agents = options?.participants ?? selectAgents(config);
 
   log.info("Meeting participants", { agents, type: formatLabel });
 
@@ -802,13 +672,6 @@ export async function runTeamMeeting(
   // File as GitHub issue
   fileMeetingIssue(config, summary);
 
-  // Retro-specific post-processing: commit doc, check for Q4 nomination
-  if (meetingType === "retro") {
-    const retroMeta = parseRetroMeta(synthesis);
-    writeRetroDoc(config, summary, retroMeta);
-    maybeFileDirectorRotationIssue(config, summary, retroMeta.q4DirectorNominee);
-  }
-
   // Send full Telegram report
   await sendMeetingToTelegram(summary).catch((err) => {
     log.warn("Failed to send meeting report to Telegram", {
@@ -823,31 +686,6 @@ export async function runTeamMeeting(
   });
 
   return summary;
-}
-
-/**
- * Parse retro-specific metadata out of the raw synthesis JSON text.
- * Fails gracefully — always returns a usable object.
- */
-function parseRetroMeta(synthesisText: string): {
-  okrHealth: Record<string, string>;
-  q4DirectorNominee: string;
-  resourceNotes: string;
-} {
-  try {
-    const cleaned = synthesisText.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim();
-    // Try to parse as JSON (synthesis may be embedded in a larger string)
-    const match = cleaned.match(/\{[\s\S]*"okr_health"[\s\S]*\}/) ?? cleaned.match(/\{[\s\S]*\}/);
-    if (match) {
-      const parsed = JSON.parse(match[0]);
-      return {
-        okrHealth: parsed.okr_health ?? {},
-        q4DirectorNominee: parsed.q4_director_nominee ?? "no consensus",
-        resourceNotes: parsed.resource_notes ?? "",
-      };
-    }
-  } catch { /* fall through */ }
-  return { okrHealth: {}, q4DirectorNominee: "no consensus", resourceNotes: "" };
 }
 
 // ── Dashboard standup action disposition flush (issue #798) ───────────────
@@ -1209,174 +1047,12 @@ function applyGoalAdjustments(adjustments: string[], orchestratorDir?: string): 
   }
 }
 
-// ── Retro document writer ───────────────────────────────────────────────────
-
-/**
- * Write the weekly retro as a Markdown file to docs/retros/<YYYY-MM-DD>.md
- * and commit it to the repo so the retro streak counter can detect it.
- *
- * The file is committed via `git` CLI. If git is unavailable or the commit
- * fails, the error is logged at warn level — retro processing continues.
- */
-export function writeRetroDoc(
-  config: OrchestratorConfig,
-  summary: MeetingSummary,
-  retroMeta: {
-    okrHealth: Record<string, string>;
-    q4DirectorNominee: string;
-    resourceNotes: string;
-  },
-): void {
-  const repoDir = config.orchestrator_dir;
-  const retrosDir = join(repoDir, "docs", "retros");
-
-  try {
-    if (!existsSync(retrosDir)) {
-      mkdirSync(retrosDir, { recursive: true });
-    }
-
-    const roundSections = summary.rounds.map((r) => {
-      const entries = r.entries
-        .filter((e) => e.response)
-        .map((e) => `### ${e.agentName}\n\n${e.response}`)
-        .join("\n\n---\n\n");
-      return `## Round ${r.roundNumber}\n\n${entries}`;
-    }).join("\n\n");
-
-    const actionSection = summary.actionItems.length > 0
-      ? summary.actionItems.map((a) => `- **[${a.priority.toUpperCase()}]** ${a.description} *(${a.owner})*`).join("\n")
-      : "_No action items._";
-
-    const goalSection = summary.goalAdjustments.length > 0
-      ? summary.goalAdjustments.map((g) => `- ${g}`).join("\n")
-      : "_No adjustments proposed._";
-
-    const okrHealthSection = Object.entries(retroMeta.okrHealth)
-      .map(([id, health]) => {
-        const emoji = health === "on-track" ? "✅" : health === "at-risk" ? "⚠️" : "❌";
-        return `- ${emoji} **${id}**: ${health}`;
-      })
-      .join("\n") || "_No OKR health data._";
-
-    const content = `# Director Retro — ${summary.date}
-
-> Auto-generated weekly retro. Director: \`claude-agent-orchestrator\`.
-> Q3 2026 • Contributes to \`director_retro_streak\` KR (OKR-4).
-
-## Executive Summary
-
-${summary.synthesis}
-
-## OKR Health
-
-${okrHealthSection}
-
-## Action Items
-
-${actionSection}
-
-## Goal Adjustments
-
-${goalSection}
-
-## Resource Notes / Article V Asks
-
-${retroMeta.resourceNotes || "_None this week._"}
-
-## Q4 Director Nomination
-
-**Nominee:** ${retroMeta.q4DirectorNominee || "no consensus"}
-
----
-
-${roundSections}
-
----
-
-*Auto-generated ${summary.rounds.length}-round Director retro. Fleet: Nexus.*
-`;
-
-    const filePath = join(retrosDir, `${summary.date}.md`);
-    writeFileSync(filePath, content, "utf-8");
-    log.info("Retro document written", { path: filePath });
-
-    // Commit the retro file to the repo
-    try {
-      execSync(
-        `cd "${repoDir}" && git add "${filePath}" && git commit -m "[claude-agent-orchestrator] Director retro ${summary.date} — auto-generated
-
-Contributes to director_retro_streak KR (OKR-4, autonomous-delivery).
-
-Co-Authored-By: claude-agent-orchestrator <claude-agent-orchestrator@agent>"`,
-        { stdio: "pipe" },
-      );
-      log.info("Retro document committed to repo", { date: summary.date });
-    } catch (err) {
-      log.warn("Failed to git-commit retro document (file written to disk)", {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  } catch (err) {
-    log.warn("Failed to write retro document", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-}
-
-/**
- * If the retro synthesis includes a Q4 Director nominee and we are in the
- * final retro of Q3 (September), auto-create a GitHub issue proposing the
- * rotation so the operator can review and confirm.
- */
-function maybeFileDirectorRotationIssue(
-  config: OrchestratorConfig,
-  summary: MeetingSummary,
-  q4Nominee: string,
-): void {
-  if (!q4Nominee || q4Nominee === "no consensus") return;
-
-  // Only nominate in Q3 (July–September) — prevents premature Q4 issues
-  const month = new Date(summary.date).getUTCMonth() + 1; // 1-indexed
-  if (month < 7 || month > 9) return;
-
-  try {
-    const issueCreator = new IssueCreator(config);
-    const body = `## Q4 Director Nomination
-
-The ${summary.date} Director retro has produced a Q4 Director nominee.
-
-**Nominee:** \`${q4Nominee}\`
-
-This was determined by agent consensus in the weekly retro. The operator should review and confirm (or override) before Q4 begins (1 Oct 2026).
-
-### Next steps
-
-- [ ] Operator reviews nomination
-- [ ] Update \`goals.yaml\` \`director\` field to \`${q4Nominee}\`
-- [ ] Brief incoming Director on Q4 OKRs and CHARTER constraints
-
-*Auto-generated from Director retro ${summary.date}.*`;
-
-    issueCreator.createIssue(
-      "rapartlu/agent-orchestrator",
-      `[Director retro] Q4 Director nomination — ${q4Nominee}`,
-      body,
-      ["director-rotation", "retro", "P1"],
-    );
-    log.info("Director rotation issue filed", { nominee: q4Nominee, date: summary.date });
-  } catch (err) {
-    log.warn("Failed to file director rotation issue", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-}
-
 // ── GitHub issue filing ─────────────────────────────────────────────────────
 
 function fileMeetingIssue(config: OrchestratorConfig, summary: MeetingSummary): void {
   try {
     const issueCreator = new IssueCreator(config);
-    const typeLabel = summary.type === "bluesky" ? "🚀 Blue Sky" : summary.type === "retro" ? "📊 Director Retro" : "📋 Standup";
+    const typeLabel = summary.type === "bluesky" ? "🚀 Blue Sky" : "📋 Standup";
 
     const roundSections = summary.rounds.map((r) => {
       const entries = r.entries
@@ -1448,8 +1124,8 @@ async function sendMeetingToTelegram(summary: MeetingSummary): Promise<void> {
   const tgConfig = loadTelegramConfig();
   if (!tgConfig) return;
 
-  const typeEmoji = summary.type === "bluesky" ? "🚀" : summary.type === "retro" ? "📊" : "🤝";
-  const typeLabel = summary.type === "bluesky" ? "Blue Sky Session" : summary.type === "retro" ? "Director Retro" : "Team Standup";
+  const typeEmoji = summary.type === "bluesky" ? "🚀" : "🤝";
+  const typeLabel = summary.type === "bluesky" ? "Blue Sky Session" : "Team Standup";
 
   // Message 1: Header + synthesis + actions
   const actionLines = summary.actionItems.length > 0

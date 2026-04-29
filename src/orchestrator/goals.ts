@@ -200,19 +200,9 @@ function evaluateMetricValue(name: string, store: StateStore): number | null {
     }
     case "meetings_facilitated": {
       try {
-        // Count meeting_outcome signals with decision="proceed" written by
-        // the facilitator-agent. These land in the shared signals store via
-        // `orch signals write`. The meetings table only contains standup and
-        // bluesky runs (orchestrator-owned), so it would always return 0 for
-        // facilitated meetings. Signals have a 168h TTL; count all unexpired
-        // ones to approximate "this period's" facilitated runs.
-        const outcomes = store.readSignals({ signal_type: "meeting_outcome" });
-        return outcomes.filter((s) => {
-          try {
-            const v = JSON.parse(s.value as string) as { decision?: string };
-            return v.decision === "proceed";
-          } catch { return false; }
-        }).length;
+        // Count non-standup/non-bluesky meetings from getMeetings
+        const meetings = store.getMeetings(100);
+        return meetings.filter((m) => m.type !== "standup" && m.type !== "bluesky").length;
       } catch { return 0; }
     }
 
@@ -460,67 +450,6 @@ function getNextMonth(): string {
   const now = new Date();
   const next = new Date(now.getFullYear(), now.getMonth() + 1, 1);
   return next.toISOString().slice(0, 7);
-}
-
-// ── Stalled OKR detection (anti-navel-gazing, issue #1258) ───────────────────
-
-export interface StalledOKR {
-  goal: Goal;
-  /** How many days since any external-advancing task was recorded for this goal. */
-  days_stalled: number;
-  /** Whether the fleet has been below the external-impact threshold for 48h+. */
-  should_pause_internal: boolean;
-}
-
-/**
- * Detect OKRs that have not advanced in `staleDays` days.
- *
- * Currently checks OKR-1 (external-oss-impact): if the external-impact ratio
- * is below 30% for more than `staleDays`, the OKR is considered stalled.
- * This triggers a P0 issue and (after 48h) sets `internal_dispatch_paused`.
- *
- * @param goals - Loaded GoalsConfig.
- * @param store - StateStore for querying task history.
- * @param staleDays - Number of days of zero external-advancing work before flagging (default 3).
- */
-export function detectStalledOKRs(
-  goals: GoalsConfig,
-  store: StateStore,
-  staleDays = 3,
-): StalledOKR[] {
-  const stalled: StalledOKR[] = [];
-
-  for (const goal of goals.goals) {
-    // Only check the external-oss-impact goal (OKR-1) — the others are
-    // scale/cost/delivery goals that don't gate internal work.
-    if (goal.id !== "external-oss-impact") continue;
-
-    // Check if external-advancing ratio is below threshold over staleDays window
-    const ratio = store.getExternalImpactRatio(staleDays);
-    if (ratio.total === 0 || ratio.ratio >= ratio.threshold) continue;
-
-    // Also check the 2-day window for the "pause internal" escalation
-    const ratio48h = store.getExternalImpactRatio(2);
-    const shouldPause = ratio48h.total > 0 && ratio48h.ratio < ratio48h.threshold;
-
-    stalled.push({
-      goal,
-      days_stalled: staleDays,
-      should_pause_internal: shouldPause,
-    });
-
-    log.warn("Stalled OKR detected", {
-      goal: goal.id,
-      days: staleDays,
-      ratio: ratio.ratio.toFixed(2),
-      threshold: ratio.threshold,
-      external_advancing: ratio.external_advancing,
-      total: ratio.total,
-      should_pause_internal: shouldPause,
-    });
-  }
-
-  return stalled;
 }
 
 export function findGoalsPath(orchestratorDir?: string): string | null {

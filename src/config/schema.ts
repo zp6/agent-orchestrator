@@ -13,15 +13,6 @@ export interface ProviderLimits {
 export interface ProviderConfig {
   model: string;
   api_key_env?: string;
-  /**
-   * Base URL override for OpenAI-API-compatible providers (e.g. xAI, Deepseek).
-   * When set, the proxy routes requests to this URL instead of the provider's
-   * default endpoint.  Gemini uses its own REST path and does not need this.
-   * Examples:
-   *   grok:     https://api.x.ai/v1
-   *   deepseek: https://api.deepseek.com/v1
-   */
-  base_url?: string;
   daily_token_limit?: number;  // deprecated — use limits.daily
   limits?: ProviderLimits;
 }
