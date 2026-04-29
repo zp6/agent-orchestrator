@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc && node scripts/copy-schema-contract.mjs",
     "prepare": "tsc && node scripts/copy-schema-contract.mjs",
+    "render:revenue-assets": "node scripts/render-revenue-assets.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

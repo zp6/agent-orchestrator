@@ -340,3 +340,20 @@ export function createNotifier(
     },
   };
 }
+
+const defaultNotifier = createNotifier();
+
+/**
+ * Backwards-compatible module-level operator notifier.
+ *
+ * Some survival-plan and escalation helpers import a named `notifyOperator`
+ * function directly. Keep that surface available while the rest of the code
+ * continues to prefer `createNotifier()`.
+ */
+export async function notifyOperator(
+  title: string,
+  body: string,
+  urgency: NotifyUrgency,
+): Promise<boolean> {
+  return defaultNotifier.notifyOperator(title, body, urgency);
+}

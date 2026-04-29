@@ -1288,6 +1288,31 @@ export {
   STANDUP_LOW_SCORE_THRESHOLD,
   STANDUP_DEGRADATION_STREAK,
 } from "./reviewer/standup-quality-trend.js";
+// Survival plan helpers for the 30-day fleet self-funding window.
+export {
+  checkDay7Checkpoint,
+  checkAndEscalateDay7,
+  getSurvivalStatusPayload,
+  formatSurvivalStatusForTelegram,
+  renderRevenueLandingPage,
+  getRevenuePath,
+  setRevenuePath,
+  markPathInMotion,
+  recordEarnings,
+  getTotalEarnedUsd,
+  getFirstDollarAt,
+  countActiveRevenuePaths,
+  getWalletAddress,
+  getGitHubSponsorsUrl,
+  getPolarUrl,
+  getAlgoraUrl,
+  getGitcoinUrl,
+  APPROVED_REVENUE_PATH_IDS,
+  SURVIVAL_DEADLINE_ISO,
+  DAY7_CHECKPOINT_ISO,
+  SURVIVAL_TARGET_USD,
+  SURVIVAL_STRETCH_USD,
+} from "./service/survival-plan.js";
 export type {
   StandupQualityRecord,
   StandupQualityTrendPayload,

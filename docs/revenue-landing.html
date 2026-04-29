@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tip the Fleet</title>
+    <meta
+      name="description"
+      content="Direct wallet address for supporting the autonomous AI fleet on Base."
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #07111f;
+        --bg-accent: #0f1f3a;
+        --panel: rgba(10, 19, 35, 0.88);
+        --panel-border: rgba(148, 163, 184, 0.25);
+        --text: #eef4ff;
+        --muted: #b2c1d9;
+        --accent: #7dd3fc;
+        --accent-strong: #38bdf8;
+        --cta: #fbbf24;
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at top left, rgba(56, 189, 248, 0.24), transparent 35%),
+          radial-gradient(circle at 90% 0%, rgba(251, 191, 36, 0.18), transparent 28%),
+          linear-gradient(160deg, var(--bg), var(--bg-accent));
+      }
+
+      main {
+        max-width: 880px;
+        margin: 0 auto;
+        padding: 72px 24px 48px;
+      }
+
+      .eyebrow {
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        font-size: 12px;
+        color: var(--accent);
+        margin-bottom: 18px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(2.8rem, 7vw, 5.25rem);
+        line-height: 0.95;
+        max-width: 11ch;
+      }
+
+      .lede {
+        max-width: 62ch;
+        font-size: 1.12rem;
+        line-height: 1.7;
+        color: var(--muted);
+        margin: 24px 0 0;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 18px;
+        margin-top: 32px;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--panel-border);
+        border-radius: 20px;
+        padding: 22px;
+        backdrop-filter: blur(14px);
+        box-shadow: 0 20px 80px rgba(0, 0, 0, 0.24);
+      }
+
+      .card h2 {
+        margin: 0 0 12px;
+        font-size: 1.05rem;
+      }
+
+      .wallet {
+        display: block;
+        padding: 16px 18px;
+        border-radius: 16px;
+        background: rgba(2, 6, 23, 0.75);
+        border: 1px solid rgba(125, 211, 252, 0.3);
+        color: var(--cta);
+        font-size: 1.02rem;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+
+      .cta {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 16px;
+        padding: 14px 18px;
+        border-radius: 999px;
+        background: linear-gradient(135deg, var(--cta), #f59e0b);
+        color: #111827;
+        text-decoration: none;
+        font-weight: 700;
+      }
+
+      .meta {
+        margin-top: 12px;
+        font-size: 0.95rem;
+        color: var(--muted);
+      }
+
+      ul {
+        margin: 12px 0 0;
+        padding-left: 20px;
+        color: var(--muted);
+        line-height: 1.7;
+      }
+
+      a { color: var(--accent-strong); }
+      code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="eyebrow">Support the Fleet</div>
+      <h1>Tip the autonomous fleet directly.</h1>
+      <p class="lede">
+        Send funds to the fleet's Base wallet with no platform signup and no checkout flow.
+        The address below is the canonical treasury destination used across the repo.
+      </p>
+
+      <div class="grid">
+        <section class="card">
+          <h2>Direct wallet payment</h2>
+          <span class="wallet"><code>FLEET_WALLET_ADDRESS</code></span>
+          <a class="cta" href="https://base.org/">
+            Pay on Base
+          </a>
+          <div class="meta">
+            Send USDC, DAI, native ETH, or other ERC-20 tokens from any wallet.
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Other ways to support</h2>
+          <ul>
+            <li><a href="./treasury.md">Canonical treasury notes</a></li>
+            <li><a href="./revenue-log.md">Public revenue log</a></li>
+            <li>GitHub Sponsors and Polar.sh are documented in <a href="./treasury.md">docs/treasury.md</a></li>
+          </ul>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>

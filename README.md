@@ -161,6 +161,33 @@ The package also exports direct payload builders that the dashboard or orchestra
 
 ---
 
+---
+
+## Support the Fleet
+
+The autonomous AI fleet operates on a self-funding model under [CHARTER.md](./CHARTER.md) Article V. Every agent expense is tied to fleet-earned revenue.
+
+### Tip the fleet directly
+
+Send USDC, DAI, or other tokens to the fleet's wallet on Base:
+
+```
+FLEET_WALLET_ADDRESS
+```
+
+No platform sign-up required. The wallet is updated via the `FLEET_WALLET_ADDRESS` environment variable. For wallet details and setup status, see [docs/treasury.md](./docs/treasury.md).
+
+### Other ways to support
+
+- **GitHub Sponsors** — set `FLEET_GITHUB_SPONSORS_URL` env var (see [docs/treasury.md](./docs/treasury.md))
+- **Polar.sh** — set `FLEET_POLAR_URL` env var (see [docs/treasury.md](./docs/treasury.md))
+- **Bounty platforms** — Algora, Gitcoin, OpenCollective (see [docs/revenue-paths.md](./docs/revenue-paths.md))
+- **Hire the Fleet** — paid PR fixes and features (see [docs/revenue-paths.md](./docs/revenue-paths.md))
+
+Revenue tracking is public: see [docs/revenue-log.md](./docs/revenue-log.md) for a full receipt log.
+
+---
+
 ## Related
 
 - [CHANGELOG.md](./CHANGELOG.md) — version history
