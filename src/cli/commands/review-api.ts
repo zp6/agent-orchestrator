@@ -14,6 +14,7 @@ import chalk from "chalk";
 import { ReviewApiService, ARTICLE_IV_DISCLOSURE, parsePrUrl } from "../../reviewer/review-api-service.js";
 import { TIER_CONFIGS, type ReviewTier } from "../../reviewer/review-api-billing.js";
 import { getFleetUsageStats } from "../../reviewer/review-api-usage.js";
+import { getWalletAddress } from "../../service/survival-plan.js";
 import Database from "better-sqlite3";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
@@ -256,10 +257,16 @@ export function registerReviewApiCommand(program: Command): void {
         console.log();
       }
 
+      const walletAddress = getWalletAddress();
+      const polarUrl = process.env.FLEET_POLAR_URL ?? "https://polar.sh";
+      console.log(chalk.bold("💳 Payment options:\n"));
       console.log(
-        chalk.dim(
-          "Subscriptions: https://polar.sh  |  GitHub Marketplace listing coming soon\n"
-        )
+        `  ${chalk.cyan("Crypto (zero-touch):")} Send USDC/DAI on Base (L2) to:`
+      );
+      console.log(`    ${chalk.green(walletAddress)}`);
+      console.log(`  ${chalk.cyan("Subscription:")}       ${polarUrl}`);
+      console.log(
+        chalk.dim("\n  GitHub Marketplace listing coming soon\n")
       );
     });
 

@@ -39,6 +39,7 @@
 import Database from "better-sqlite3";
 import { createLogger } from "../service/logger.js";
 import type { ReviewerConfig } from "../config.js";
+import { CANONICAL_WALLET_ADDRESS } from "../service/survival-plan.js";
 import {
   parseTierFromApiKey,
   clientIdFromApiKey,
@@ -310,8 +311,26 @@ export class ReviewApiService {
   }
 
   /** List tiers and pricing for the /pricing endpoint. */
-  getPricingInfo(): typeof TIER_CONFIGS {
-    return TIER_CONFIGS;
+  getPricingInfo(): {
+    tiers: typeof TIER_CONFIGS;
+    payment: {
+      wallet_address: string;
+      network: string;
+      tokens_accepted: string[];
+      polar_url: string;
+      note: string;
+    };
+  } {
+    return {
+      tiers: TIER_CONFIGS,
+      payment: {
+        wallet_address: process.env.FLEET_WALLET_ADDRESS ?? CANONICAL_WALLET_ADDRESS,
+        network: "Base (L2, Ethereum-compatible)",
+        tokens_accepted: ["USDC", "DAI", "ETH", "ERC-20"],
+        polar_url: process.env.FLEET_POLAR_URL ?? "https://polar.sh",
+        note: "Send USDC/DAI on Base network directly to wallet_address, or subscribe via Polar.sh.",
+      },
+    };
   }
 
   close(): void {

@@ -43,12 +43,20 @@ export const SURVIVAL_STRETCH_USD = 1_000;
 // without rebuilding the image.
 
 /**
+ * Canonical fleet treasury wallet on Base (L2).
+ * Baked in as the default so all surfaces display the address even when the
+ * env var is not set.  Override at runtime via FLEET_WALLET_ADDRESS.
+ */
+export const CANONICAL_WALLET_ADDRESS =
+  "0x468EC325f3797F5968dEcC757FA0B960Bd0f78Ef";
+
+/**
  * Crypto wallet address where revenue is received.
- * TODO(operator): create a Safe/Gnosis multi-sig wallet and set this env var.
- * Example: FLEET_WALLET_ADDRESS=0xABCDEF...
+ * Returns FLEET_WALLET_ADDRESS env var if set, otherwise falls back to the
+ * canonical fleet wallet baked into agents.yaml.
  */
 export function getWalletAddress(): string {
-  return process.env.FLEET_WALLET_ADDRESS ?? "";
+  return process.env.FLEET_WALLET_ADDRESS ?? CANONICAL_WALLET_ADDRESS;
 }
 
 /**

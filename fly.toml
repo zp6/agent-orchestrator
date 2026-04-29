@@ -1,0 +1,50 @@
+# fly.toml — Fly.io configuration for the fleet PR Review API
+#
+# Deploy with:
+#   flyctl deploy --dockerfile Dockerfile.review-api
+#
+# First-time setup (one-off):
+#   flyctl launch --name fleet-review-api --dockerfile Dockerfile.review-api \
+#     --region sjc --no-deploy
+#   flyctl volumes create review_api_data --size 1 --region sjc
+#   flyctl secrets set STATE_DB_PATH=/data/state.db
+#   flyctl deploy --dockerfile Dockerfile.review-api
+#
+# After first-time setup, subsequent deploys only need:
+#   flyctl deploy --dockerfile Dockerfile.review-api
+
+app = "fleet-review-api"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile.review-api"
+
+[env]
+  NODE_ENV    = "production"
+  PORT        = "3100"
+  # Canonical fleet treasury wallet (Base L2). Override via flyctl secrets set if needed.
+  FLEET_WALLET_ADDRESS = "0x468EC325f3797F5968dEcC757FA0B960Bd0f78Ef"
+  FLEET_WALLET_NETWORK = "Base"
+
+[http_service]
+  internal_port       = 3100
+  force_https         = true
+  auto_stop_machines  = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period  = "10s"
+    interval      = "30s"
+    method        = "GET"
+    path          = "/health"
+    timeout       = "5s"
+
+[[mounts]]
+  source      = "review_api_data"
+  destination = "/data"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus     = 1
+  memory   = "512mb"
