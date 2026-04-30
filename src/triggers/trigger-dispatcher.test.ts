@@ -136,6 +136,12 @@ describe("dispatchGitHubIssues", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch hang suppression (issue #1374)
+      checkSourceRefHangSuppression: vi.fn().mockReturnValue({
+        suppressed: false,
+        reason: "Within acceptable failure bounds",
+        stats: { source_ref: "", total_tasks: 0, failed_or_retried_count: 0, max_retry_count: 0, oldest_at: null, newest_at: null },
+      }),
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
@@ -441,6 +447,12 @@ describe("pre-dispatch issue state validation", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch hang suppression (issue #1374)
+      checkSourceRefHangSuppression: vi.fn().mockReturnValue({
+        suppressed: false,
+        reason: "Within acceptable failure bounds",
+        stats: { source_ref: "", total_tasks: 0, failed_or_retried_count: 0, max_retry_count: 0, oldest_at: null, newest_at: null },
+      }),
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
@@ -563,6 +575,12 @@ describe("duplicate PR detection before dispatch", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch hang suppression (issue #1374)
+      checkSourceRefHangSuppression: vi.fn().mockReturnValue({
+        suppressed: false,
+        reason: "Within acceptable failure bounds",
+        stats: { source_ref: "", total_tasks: 0, failed_or_retried_count: 0, max_retry_count: 0, oldest_at: null, newest_at: null },
+      }),
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
@@ -822,6 +840,12 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch hang suppression (issue #1374)
+      checkSourceRefHangSuppression: vi.fn().mockReturnValue({
+        suppressed: false,
+        reason: "Within acceptable failure bounds",
+        stats: { source_ref: "", total_tasks: 0, failed_or_retried_count: 0, max_retry_count: 0, oldest_at: null, newest_at: null },
+      }),
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
@@ -980,6 +1004,12 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch hang suppression (issue #1374)
+      checkSourceRefHangSuppression: vi.fn().mockReturnValue({
+        suppressed: false,
+        reason: "Within acceptable failure bounds",
+        stats: { source_ref: "", total_tasks: 0, failed_or_retried_count: 0, max_retry_count: 0, oldest_at: null, newest_at: null },
+      }),
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
@@ -1360,6 +1390,12 @@ describe("dispatchIdleAgentBacklog", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch hang suppression (issue #1374)
+      checkSourceRefHangSuppression: vi.fn().mockReturnValue({
+        suppressed: false,
+        reason: "Within acceptable failure bounds",
+        stats: { source_ref: "", total_tasks: 0, failed_or_retried_count: 0, max_retry_count: 0, oldest_at: null, newest_at: null },
+      }),
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
@@ -1657,6 +1693,12 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch hang suppression (issue #1374)
+      checkSourceRefHangSuppression: vi.fn().mockReturnValue({
+        suppressed: false,
+        reason: "Within acceptable failure bounds",
+        stats: { source_ref: "", total_tasks: 0, failed_or_retried_count: 0, max_retry_count: 0, oldest_at: null, newest_at: null },
+      }),
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
@@ -1834,6 +1876,12 @@ describe("in-flight branch detection", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch hang suppression (issue #1374)
+      checkSourceRefHangSuppression: vi.fn().mockReturnValue({
+        suppressed: false,
+        reason: "Within acceptable failure bounds",
+        stats: { source_ref: "", total_tasks: 0, failed_or_retried_count: 0, max_retry_count: 0, oldest_at: null, newest_at: null },
+      }),
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
@@ -1922,6 +1970,12 @@ describe("in-flight branch detection", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch hang suppression (issue #1374)
+      checkSourceRefHangSuppression: vi.fn().mockReturnValue({
+        suppressed: false,
+        reason: "Within acceptable failure bounds",
+        stats: { source_ref: "", total_tasks: 0, failed_or_retried_count: 0, max_retry_count: 0, oldest_at: null, newest_at: null },
+      }),
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
@@ -2011,6 +2065,12 @@ describe("in-flight branch detection", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch hang suppression (issue #1374)
+      checkSourceRefHangSuppression: vi.fn().mockReturnValue({
+        suppressed: false,
+        reason: "Within acceptable failure bounds",
+        stats: { source_ref: "", total_tasks: 0, failed_or_retried_count: 0, max_retry_count: 0, oldest_at: null, newest_at: null },
+      }),
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
@@ -2095,6 +2155,12 @@ describe("in-flight branch detection", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch hang suppression (issue #1374)
+      checkSourceRefHangSuppression: vi.fn().mockReturnValue({
+        suppressed: false,
+        reason: "Within acceptable failure bounds",
+        stats: { source_ref: "", total_tasks: 0, failed_or_retried_count: 0, max_retry_count: 0, oldest_at: null, newest_at: null },
+      }),
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
@@ -2182,6 +2248,12 @@ describe("approved PR skip logic", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch hang suppression (issue #1374)
+      checkSourceRefHangSuppression: vi.fn().mockReturnValue({
+        suppressed: false,
+        reason: "Within acceptable failure bounds",
+        stats: { source_ref: "", total_tasks: 0, failed_or_retried_count: 0, max_retry_count: 0, oldest_at: null, newest_at: null },
+      }),
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
@@ -2373,6 +2445,12 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch hang suppression (issue #1374)
+      checkSourceRefHangSuppression: vi.fn().mockReturnValue({
+        suppressed: false,
+        reason: "Within acceptable failure bounds",
+        stats: { source_ref: "", total_tasks: 0, failed_or_retried_count: 0, max_retry_count: 0, oldest_at: null, newest_at: null },
+      }),
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
@@ -2664,6 +2742,12 @@ describe("dispatch flood gate (issue #1060)", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch hang suppression (issue #1374)
+      checkSourceRefHangSuppression: vi.fn().mockReturnValue({
+        suppressed: false,
+        reason: "Within acceptable failure bounds",
+        stats: { source_ref: "", total_tasks: 0, failed_or_retried_count: 0, max_retry_count: 0, oldest_at: null, newest_at: null },
+      }),
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
@@ -2882,6 +2966,12 @@ describe("PR guard surge alert (issue #1082)", () => {
       recordPRGuardDuplicateAttempt: vi.fn(),
       getRecentPRGuardDuplicates: vi.fn().mockReturnValue([]),
       recordDispatchBlock: vi.fn(),
+      // Dispatch hang suppression (issue #1374)
+      checkSourceRefHangSuppression: vi.fn().mockReturnValue({
+        suppressed: false,
+        reason: "Within acceptable failure bounds",
+        stats: { source_ref: "", total_tasks: 0, failed_or_retried_count: 0, max_retry_count: 0, oldest_at: null, newest_at: null },
+      }),
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),

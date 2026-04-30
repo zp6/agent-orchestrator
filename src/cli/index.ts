@@ -53,6 +53,7 @@ import { registerFailureInterceptionsCommand } from "./commands/failure-intercep
 import { registerStandupQualityCommand } from "./commands/standup-quality.js";
 import { registerMarginalScoreTasksCommand } from "./commands/marginal-score-tasks.js";
 import { registerAnomaliesCommand } from "./commands/anomalies.js";
+import { registerDispatchHangWatchCommand } from "./commands/dispatch-hang-watch.js";
 import { registerExternalImpactCommand } from "./commands/external-impact.js";
 
 const program = new Command();
@@ -116,6 +117,7 @@ registerFailureInterceptionsCommand(program);
 registerStandupQualityCommand(program);
 registerMarginalScoreTasksCommand(program);
 registerAnomaliesCommand(program);
+registerDispatchHangWatchCommand(program);
 registerExternalImpactCommand(program);
 
 program.parse();

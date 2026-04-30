@@ -118,6 +118,43 @@ export function runGitHubPreDispatchValidation(params: {
     existingBranch: null as string | null,
   };
 
+  // ── Dispatch-hang suppression check (issue #1374) ────────────────────────
+  // Guard against chronic dispatch-hang: if this source_ref has accumulated
+  // >= 3 failed/timed-out tasks in the last 24 hours, block further dispatch
+  // without touching any GitHub API.  This is the cheapest possible gate
+  // (pure SQLite read) and runs before all network calls.
+  {
+    const hangCheck = store.checkSourceRefHangSuppression(sourceRef);
+    if (hangCheck.suppressed) {
+      const failed = makeFailedResult(
+        base,
+        "dispatch_hang_suppression",
+        "DISPATCH_HANG_SUPPRESSED",
+        hangCheck.reason,
+      );
+      store.addDispatchValidation({
+        source,
+        source_ref: sourceRef,
+        agent_name: agentName,
+        repo: issue.repo,
+        issue_number: issue.number,
+        outcome: failed.outcome,
+        failure_check: failed.failureCheck,
+        failure_code: failed.failureCode,
+        failure_reason: failed.failureReason,
+        checklist: failed.checks,
+      });
+      return failed;
+    }
+    checks.push(
+      makePassedCheck(
+        "dispatch_hang_suppression",
+        "HANG_COUNT_OK",
+        hangCheck.reason,
+      ),
+    );
+  }
+
   // ── Agent registry check (issue #864) ────────────────────────────────────
   // Reject any dispatch to an agent not present in the registry before
   // touching any GitHub API or store state.  This is the earliest possible

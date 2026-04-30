@@ -1642,6 +1642,47 @@ export interface VerificationCalibrationRecommendationRow {
   review_notes: string | null;
 }
 
+// ── Dispatch-hang suppression types (issue #1374) ────────────────────────────
+
+/**
+ * Per-source-ref dispatch failure history, used to detect chronic hang patterns.
+ * A "hang" is identified by tasks that were retried (retry_count > 0) or failed
+ * within a rolling time window, which indicates the dispatch repeatedly timed out.
+ */
+export interface SourceRefHangStats {
+  /** The source_ref being evaluated, e.g. "rapartlu/agent-orchestrator#1212". */
+  source_ref: string;
+  /** Total root tasks created for this source_ref in the window. */
+  total_tasks: number;
+  /**
+   * Count of root tasks that were retried (retry_count > 0) or have status
+   * 'failed' or 'escalated' in the window.  This is the hang indicator.
+   */
+  failed_or_retried_count: number;
+  /** Highest retry_count seen across all tasks for this source_ref. */
+  max_retry_count: number;
+  /** ISO timestamp of the oldest task in the window, or null if no tasks. */
+  oldest_at: string | null;
+  /** ISO timestamp of the newest task in the window, or null if no tasks. */
+  newest_at: string | null;
+}
+
+/**
+ * Result of the per-source-ref hang suppression check.
+ * Returned by `checkSourceRefHangSuppression()`.
+ */
+export interface SourceRefHangSuppression {
+  /**
+   * True when dispatch to this source_ref should be suppressed because it
+   * has accumulated enough timeout/failure evidence in the window.
+   */
+  suppressed: boolean;
+  /** Human-readable explanation (used as the dispatch failure reason). */
+  reason: string;
+  /** Raw stats used to reach the decision. */
+  stats: SourceRefHangStats;
+}
+
 // ── External-impact ratio types ───────────────────────────────────────────────
 
 /**
@@ -12326,6 +12367,50 @@ export class StateStore {
   }
 
   /**
+   * Compute dispatch failure history for a single source_ref over a rolling
+   * time window.  Used to detect the chronic dispatch-hang pattern where a
+   * single source_ref repeatedly times out the daemon (issue #1374).
+   *
+   * @param sourceRef   The source_ref to query, e.g. "rapartlu/agent-orchestrator#1212".
+   * @param windowHours Rolling window in hours (default 24).
+   */
+  getSourceRefHangStats(sourceRef: string, windowHours = 24): SourceRefHangStats {
+    const since = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
+
+    const row = this.db
+      .prepare(
+        `SELECT
+           COUNT(*)                                        AS total_tasks,
+           COALESCE(SUM(CASE WHEN retry_count > 0
+                    OR status IN ('failed', 'escalated')
+               THEN 1 ELSE 0 END), 0)                    AS failed_or_retried_count,
+           COALESCE(MAX(retry_count), 0)                  AS max_retry_count,
+           MIN(created_at)                                AS oldest_at,
+           MAX(created_at)                                AS newest_at
+         FROM tasks
+         WHERE source_ref = ?
+           AND parent_task_id IS NULL
+           AND created_at >= ?`,
+      )
+      .get(sourceRef, since) as {
+        total_tasks: number;
+        failed_or_retried_count: number;
+        max_retry_count: number;
+        oldest_at: string | null;
+        newest_at: string | null;
+      };
+
+    return {
+      source_ref: sourceRef,
+      total_tasks: row.total_tasks,
+      failed_or_retried_count: row.failed_or_retried_count,
+      max_retry_count: row.max_retry_count,
+      oldest_at: row.oldest_at,
+      newest_at: row.newest_at,
+    };
+  }
+
+  /**
    * Compute the external-impact ratio for the given rolling window.
    *
    * A task is classified as **external** when its `source_ref` points to a
@@ -12421,6 +12506,104 @@ export class StateStore {
       daily,
       generated_at: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Check whether dispatches to a source_ref should be suppressed because it
+   * has triggered enough timeout/failure events in the rolling window to qualify
+   * as a chronic dispatch-hang (issue #1374).
+   *
+   * Suppression fires when ALL of:
+   *   - total_tasks >= threshold (enough evidence)
+   *   - failed_or_retried_count >= threshold (not just new tasks)
+   *
+   * The suppression is advisory: the pre-dispatch validator uses this to block
+   * the dispatch and file an escalation, but the operator can override.
+   *
+   * @param sourceRef     The source_ref to check.
+   * @param threshold     Minimum failed/retried task count to trigger suppression (default 3).
+   * @param windowHours   Rolling window in hours (default 24).
+   */
+  checkSourceRefHangSuppression(
+    sourceRef: string,
+    threshold = 3,
+    windowHours = 24,
+  ): SourceRefHangSuppression {
+    const stats = this.getSourceRefHangStats(sourceRef, windowHours);
+    const suppressed =
+      stats.total_tasks >= threshold && stats.failed_or_retried_count >= threshold;
+
+    const reason = suppressed
+      ? `Dispatch hang suppressed for "${sourceRef}": ` +
+        `${stats.failed_or_retried_count} of ${stats.total_tasks} tasks failed/timed-out ` +
+        `in the last ${windowHours}h (threshold: ${threshold}). ` +
+        `Max retry_count seen: ${stats.max_retry_count}. ` +
+        "Operator action required — investigate root cause before re-enabling dispatch."
+      : `"${sourceRef}" is within acceptable failure bounds ` +
+        `(${stats.failed_or_retried_count}/${threshold} failures in ${windowHours}h window).`;
+
+    return { suppressed, reason, stats };
+  }
+
+  /**
+   * List all source_refs currently meeting the hang-suppression threshold.
+   * Used by `orch dispatch-hang-watch` CLI and the pre-dispatch validator
+   * overview.
+   *
+   * @param threshold    Minimum failed/retried task count (default 3).
+   * @param windowHours  Rolling window in hours (default 24).
+   * @param limit        Maximum rows to return (default 50).
+   */
+  getHangSuppressedSourceRefs(
+    threshold = 3,
+    windowHours = 24,
+    limit = 50,
+  ): SourceRefHangSuppression[] {
+    const since = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
+
+    const rows = this.db
+      .prepare(
+        `SELECT
+           source_ref,
+           COUNT(*)                                        AS total_tasks,
+           COALESCE(SUM(CASE WHEN retry_count > 0
+                    OR status IN ('failed', 'escalated')
+               THEN 1 ELSE 0 END), 0)                    AS failed_or_retried_count,
+           COALESCE(MAX(retry_count), 0)                  AS max_retry_count,
+           MIN(created_at)                                AS oldest_at,
+           MAX(created_at)                                AS newest_at
+         FROM tasks
+         WHERE source_ref IS NOT NULL
+           AND parent_task_id IS NULL
+           AND created_at >= ?
+         GROUP BY source_ref
+         HAVING SUM(CASE WHEN retry_count > 0 OR status IN ('failed','escalated') THEN 1 ELSE 0 END) >= ?
+         ORDER BY failed_or_retried_count DESC, total_tasks DESC
+         LIMIT ?`,
+      )
+      .all(since, threshold, limit) as Array<{
+        source_ref: string;
+        total_tasks: number;
+        failed_or_retried_count: number;
+        max_retry_count: number;
+        oldest_at: string | null;
+        newest_at: string | null;
+      }>;
+
+    return rows.map((r) => ({
+      suppressed: true,
+      reason:
+        `Dispatch hang: ${r.failed_or_retried_count}/${r.total_tasks} tasks failed/timed-out ` +
+        `in ${windowHours}h window. Max retry_count: ${r.max_retry_count}.`,
+      stats: {
+        source_ref: r.source_ref,
+        total_tasks: r.total_tasks,
+        failed_or_retried_count: r.failed_or_retried_count,
+        max_retry_count: r.max_retry_count,
+        oldest_at: r.oldest_at,
+        newest_at: r.newest_at,
+      },
+    }));
   }
 
   /**
