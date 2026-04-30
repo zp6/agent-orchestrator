@@ -288,6 +288,18 @@ describe("getAgentDir", () => {
   });
 });
 
+describe("reviewer pool model guard", () => {
+  it("no reviewer pool member uses deepseek-reasoner (unavailable model)", () => {
+    const configPath = resolve(import.meta.dirname, "..", "..", "agents.yaml");
+    const config = loadConfig(configPath);
+    for (const [name, agent] of Object.entries(config.agents)) {
+      if (agent.pool === "reviewer") {
+        expect(agent.model, `${name} uses unavailable deepseek-reasoner`).not.toBe("deepseek-reasoner");
+      }
+    }
+  });
+});
+
 describe("AgentConfig auto-reroute threshold", () => {
   it("loads per-agent auto_reroute_rejection_threshold from config", () => {
     const tmp = mkdtempSync(join(tmpdir(), "orch-reroute-config-"));

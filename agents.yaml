@@ -178,7 +178,7 @@ agents:
     dir: "claude-agent-orchestrator"
     repo: "git@github.com:rapartlu/agent-orchestrator.git"
     provider: "openai"
-    model: "gpt-5.5"
+    model: "gpt-4.1"
     pool: "orchestrator"
     description: "Core orchestration infrastructure (Codex). Parallel throughput for orchestrator pool."
     capabilities: ["typescript", "orchestration", "sqlite"]
@@ -299,7 +299,7 @@ agents:
     dir: "claude-research-agent"
     repo: "git@github.com:rapartlu/research-agent.git"
     provider: "openai"
-    model: "gpt-5.5"
+    model: "gpt-4.1"
     pool: "research"
     description: "Research agent (Codex). Parallel throughput for research pool."
     capabilities: ["research", "web-search", "documentation", "analysis"]
@@ -399,7 +399,7 @@ agents:
     dir: "claude-orchestrator-reviewer"
     repo: "git@github.com:rapartlu/agent-reviewer.git"
     provider: "deepseek"
-    model: "deepseek-reasoner"
+    model: "deepseek-chat"
     pool: "reviewer"
     description: "Third voice in the reviewer pool (Deepseek R1). Independent reasoning for PR review and verification."
     capabilities: ["typescript", "llm", "review", "verification", "reasoning"]

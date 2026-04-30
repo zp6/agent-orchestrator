@@ -12,7 +12,7 @@ import {
 } from "./pre-submit-validator.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 
-const mockExecSync = vi.fn();
+const mockExecSync = vi.hoisted(() => vi.fn());
 
 vi.mock("node:child_process", () => ({
   execSync: (...args: unknown[]) => mockExecSync(...args),
@@ -454,6 +454,8 @@ describe("validatePreSubmit", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts → no conflicts
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // branchExistsOnRemote → branch exists
+    mockExecSync.mockReturnValueOnce("issue-50-feat");
     // validateUnrelatedFiles → returns an excluded file
     mockExecSync.mockReturnValueOnce("src/feature.ts\n.orchestrator-deploy-sha\n");
 

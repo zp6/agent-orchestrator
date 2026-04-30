@@ -10,7 +10,7 @@ import {
 import type { OrphanBranch } from "./pr-creator.js";
 import { validateGhAuth } from "../triggers/github.js";
 
-const mockExecSync = vi.fn();
+const mockExecSync = vi.hoisted(() => vi.fn());
 
 vi.mock("node:child_process", () => ({
   execSync: (...args: unknown[]) => mockExecSync(...args),
@@ -212,7 +212,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: gh api compare → ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
-    // validateTestsPass: no localPath → skip (no mock needed)
+    // branchExistsOnRemote: gh api branches → branch exists
+    mockExecSync.mockReturnValueOnce("issue-105-add-feature");
     // validateUnrelatedFiles: gh api compare → normal files
     mockExecSync.mockReturnValueOnce("src/feature.ts\n");
     // gh pr create
@@ -257,6 +258,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: gh api compare → ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // branchExistsOnRemote: gh api branches → branch exists
+    mockExecSync.mockReturnValueOnce("auto-link-orphan-prs");
     // validateUnrelatedFiles: normal files
     mockExecSync.mockReturnValueOnce("src/feature.ts\n");
     // gh pr create
@@ -287,6 +290,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: gh api compare → ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // branchExistsOnRemote: gh api branches → branch exists
+    mockExecSync.mockReturnValueOnce("issue-105-add-feature");
     // validateUnrelatedFiles: normal files
     mockExecSync.mockReturnValueOnce("src/feature.ts\n");
     // gh pr create
@@ -306,6 +311,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: gh api compare → ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // branchExistsOnRemote: gh api branches → branch exists
+    mockExecSync.mockReturnValueOnce("fix/issue-134-auto-link");
     // validateUnrelatedFiles: normal files
     mockExecSync.mockReturnValueOnce("src/feature.ts\n");
     // gh pr create
@@ -328,6 +335,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts (first validation): ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // branchExistsOnRemote (first validation): branch exists
+    mockExecSync.mockReturnValueOnce("new-widget-feature");
     // validateUnrelatedFiles (first validation): normal files
     mockExecSync.mockReturnValueOnce("src/widget.ts\n");
     // validateBranchFreshness (second validation after auto-fix): 0 behind
@@ -336,6 +345,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts (second validation): ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // branchExistsOnRemote (second validation): branch exists
+    mockExecSync.mockReturnValueOnce("new-widget-feature");
     // validateUnrelatedFiles (second validation): normal files
     mockExecSync.mockReturnValueOnce("src/widget.ts\n");
     // gh pr create
@@ -377,6 +388,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: gh api compare → ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // branchExistsOnRemote: gh api branches → branch exists
+    mockExecSync.mockReturnValueOnce("issue-105-add-feature");
     // validateUnrelatedFiles: normal files
     mockExecSync.mockReturnValueOnce("src/feature.ts\n");
     // gh pr create
@@ -407,6 +420,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: gh api compare → ahead (no conflicts)
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // branchExistsOnRemote: gh api branches → branch exists
+    mockExecSync.mockReturnValueOnce("issue-105-add-feature");
     // validateUnrelatedFiles: normal files
     mockExecSync.mockReturnValueOnce("src/feature.ts\n");
     // gh pr create
@@ -447,6 +462,8 @@ describe("createPRForBranch", () => {
     mockExecSync.mockReturnValueOnce("");
     // validateMergeConflicts: gh api compare → ahead
     mockExecSync.mockReturnValueOnce("ahead\n");
+    // branchExistsOnRemote: gh api branches → branch exists
+    mockExecSync.mockReturnValueOnce("issue-105-add-feature");
     // validateTestsPass: test -f package.json (localPath provided)
     mockExecSync.mockReturnValueOnce("");
     // validateTestsPass: npx tsc --noEmit

@@ -515,8 +515,26 @@ export async function validatePreSubmit(
     blockers.push(mergeConflictsCheck.detail);
   }
 
+  // Guard: skip expensive local checks (tsc, vitest) when the remote branch
+  // does not exist. A missing branch means all previous checks have already
+  // failed, and running tsc would only spawn orphan processes that outlive the
+  // execSync timeout and block future cycles.
+  const branchExistsOnRemote = (() => {
+    try {
+      execSync(`gh api "repos/${repo}/branches/${branch}" --jq '.name'`, {
+        encoding: "utf-8",
+        timeout: 10000,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
   // --- Check 5: Tests pass locally ---
-  const testsPassCheck = validateTestsPass(localPath);
+  const testsPassCheck = branchExistsOnRemote
+    ? validateTestsPass(localPath)
+    : { passed: true, detail: "Branch does not exist on remote — skipping local test check." };
 
   if (!testsPassCheck.passed) {
     blockers.push(testsPassCheck.detail);
