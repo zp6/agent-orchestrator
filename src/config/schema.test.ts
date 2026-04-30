@@ -298,6 +298,30 @@ describe("reviewer pool model guard", () => {
       }
     }
   });
+
+  it("no reviewer pool member uses deepseek-chat (not routable by proxy)", () => {
+    const configPath = resolve(import.meta.dirname, "..", "..", "agents.yaml");
+    const config = loadConfig(configPath);
+    for (const [name, agent] of Object.entries(config.agents)) {
+      if (agent.pool === "reviewer") {
+        expect(agent.model, `${name} uses deepseek-chat which the proxy cannot route`).not.toBe("deepseek-chat");
+      }
+    }
+  });
+
+  it("all reviewer pool members use a provider the proxy can route", () => {
+    const configPath = resolve(import.meta.dirname, "..", "..", "agents.yaml");
+    const config = loadConfig(configPath);
+    const proxyRoutableProviders = new Set(["claude", "openai"]);
+    for (const [name, agent] of Object.entries(config.agents)) {
+      if (agent.pool === "reviewer") {
+        expect(
+          proxyRoutableProviders.has(agent.provider ?? ""),
+          `${name} uses provider "${agent.provider}" which the proxy cannot route`,
+        ).toBe(true);
+      }
+    }
+  });
 });
 
 describe("AgentConfig auto-reroute threshold", () => {
