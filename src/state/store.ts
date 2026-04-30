@@ -1868,6 +1868,7 @@ export class StateStore {
     this.runFailureInterceptionMigration();
     this.runGuardHealthMetricsMigration();
     this.runGuardDuplicateSuppressionsMigration();
+    this.runOSSEngagementMigration();
   }
 
   private runPhase2Migration(): void {
@@ -12460,6 +12461,103 @@ export class StateStore {
       task_type: original.task_type as TaskType,
       parent_task_id: originalTaskId,
     });
+  }
+
+  // ── OSS Engagement Tracking (issue #1212) ─────────────────────────────────
+
+  private runOSSEngagementMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS oss_engagement (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        engagement_type TEXT NOT NULL,
+        reference TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        notes TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_oss_engagement_repo
+        ON oss_engagement(repo, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_oss_engagement_type
+        ON oss_engagement(engagement_type);
+      CREATE INDEX IF NOT EXISTS idx_oss_engagement_agent
+        ON oss_engagement(agent);
+    `);
+  }
+
+  /**
+   * Record an OSS engagement event for an external repository.
+   */
+  addOSSEngagementRecord(params: {
+    repo: string;
+    engagement_type: string;
+    reference: string;
+    agent: string;
+    notes: string | null;
+  }): void {
+    this.runOSSEngagementMigration();
+    this.db.prepare(`
+      INSERT INTO oss_engagement (repo, engagement_type, reference, agent, notes)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(params.repo, params.engagement_type, params.reference, params.agent, params.notes);
+  }
+
+  /**
+   * Get all engagement records for a specific external repo, ordered by most recent first.
+   */
+  getOSSEngagementRecords(repo: string): Array<{
+    id: number;
+    repo: string;
+    engagement_type: string;
+    reference: string;
+    agent: string;
+    notes: string | null;
+    created_at: string;
+  }> {
+    this.runOSSEngagementMigration();
+    return this.db.prepare(`
+      SELECT id, repo, engagement_type, reference, agent, notes, created_at
+      FROM oss_engagement
+      WHERE repo = ?
+      ORDER BY created_at DESC
+    `).all(repo) as Array<{
+      id: number;
+      repo: string;
+      engagement_type: string;
+      reference: string;
+      agent: string;
+      notes: string | null;
+      created_at: string;
+    }>;
+  }
+
+  /**
+   * Get all engagement records since a given ISO timestamp, ordered by most recent first.
+   */
+  getRecentOSSEngagementRecords(since: string): Array<{
+    id: number;
+    repo: string;
+    engagement_type: string;
+    reference: string;
+    agent: string;
+    notes: string | null;
+    created_at: string;
+  }> {
+    this.runOSSEngagementMigration();
+    return this.db.prepare(`
+      SELECT id, repo, engagement_type, reference, agent, notes, created_at
+      FROM oss_engagement
+      WHERE created_at >= ?
+      ORDER BY created_at DESC
+    `).all(since) as Array<{
+      id: number;
+      repo: string;
+      engagement_type: string;
+      reference: string;
+      agent: string;
+      notes: string | null;
+      created_at: string;
+    }>;
   }
 }
 

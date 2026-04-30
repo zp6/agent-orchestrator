@@ -17,6 +17,11 @@ import {
 } from "../triggers/github.js";
 import { DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
 import { assessConflictRisk, buildConflictHeatMap } from "./conflict-risk.js";
+import {
+  isExternalRepo,
+  validateEngagementProposal,
+  writeEngagementProposalSignal,
+} from "./oss-engagement-validator.js";
 
 export interface PreDispatchIssueRef {
   repo: string;
@@ -208,6 +213,58 @@ export function runGitHubPreDispatchValidation(params: {
   }
   if (agent.github === issue.repo) {
     checks.push(makePassedCheck("issue_ownership", "owned_by_agent", `issue belongs to ${agent.github}`));
+  }
+
+  // ── OSS external engagement check (issue #1212) ─────────────────────────
+  // If the target repo is not a fleet-owned repo, validate the engagement
+  // against Charter Article IV trust-commons constraints.
+  const fleetRepos = Object.values(config.agents)
+    .filter((a) => a.github)
+    .map((a) => a.github!);
+
+  if (isExternalRepo(fleetRepos, issue.repo)) {
+    const proposal = {
+      targetRepo: issue.repo,
+      engagementType: "pr_submitted" as const,
+      agent: agentName,
+      rationale: issueTitle || `Dispatch to external repo ${issue.repo}#${issue.number}`,
+      reference: sourceRef,
+    };
+
+    const engagementResult = validateEngagementProposal(store, proposal);
+
+    // Write the stigmergy signal regardless of outcome for fleet visibility
+    writeEngagementProposalSignal(store, proposal, engagementResult);
+
+    if (!engagementResult.allowed) {
+      const failed = makeFailedResult(
+        base,
+        "oss_engagement",
+        `oss_${engagementResult.constraintViolated ?? "blocked"}`,
+        engagementResult.reason,
+      );
+      store.addDispatchValidation({
+        source,
+        source_ref: sourceRef,
+        agent_name: agentName,
+        repo: issue.repo,
+        issue_number: issue.number,
+        outcome: failed.outcome,
+        failure_check: failed.failureCheck,
+        failure_code: failed.failureCode,
+        failure_reason: failed.failureReason,
+        checklist: failed.checks,
+      });
+      return failed;
+    }
+
+    checks.push(
+      makePassedCheck(
+        "oss_engagement",
+        "external_engagement_allowed",
+        `external engagement with ${issue.repo} is within Charter Article IV constraints`,
+      ),
+    );
   }
 
   if (store.hasActiveTask(agentName)) {

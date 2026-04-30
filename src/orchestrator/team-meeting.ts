@@ -86,7 +86,12 @@ const STANDUP_ROUND1 = `You are in a daily standup. Share your perspective conci
 2. **Opportunities**: What improvements could make the biggest impact in your domain?
 3. **Suggestions for the team**: What should other agents know?
 4. **Coverage gaps**: Are there tasks in your domain that a more specialised agent should handle?
-5. **Meeting request** (optional): If there's a cross-cutting topic that needs structured discussion beyond this standup, you can request an ad-hoc meeting. Add a section like:
+5. **External engagement review** (if applicable): Any interactions with external OSS projects this cycle? Report:
+   - Bug reports filed, PRs submitted/accepted/rejected on non-fleet repos
+   - Maintainer reactions or invitations received
+   - Proposed new external engagement and why it's valuable
+   Note: Charter Article IV requires trust-commons discipline — bug reports before patches, max 1 PR per external project per quarter, earn standing one project at a time, radical transparency (agent identity disclosed).
+6. **Meeting request** (optional): If there's a cross-cutting topic that needs structured discussion beyond this standup, you can request an ad-hoc meeting. Add a section like:
    **REQUEST MEETING:** <topic> [format: rfc|retrospective|design-review|triage|incident-postmortem|investigation-spike]
    The meeting facilitator will evaluate and schedule it. Only request one if the topic genuinely needs multi-agent structured discussion.
 
