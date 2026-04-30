@@ -335,6 +335,18 @@ describe("reviewer pool model guard", () => {
   });
 });
 
+describe("reviewer pool unique ports guard", () => {
+  it("all reviewer pool members have unique docker ports", () => {
+    const configPath = resolve(import.meta.dirname, "..", "..", "agents.yaml");
+    const config = loadConfig(configPath);
+    const reviewerPorts = Object.entries(config.agents)
+      .filter(([, agent]) => agent.pool === "reviewer")
+      .map(([, agent]) => agent.docker?.port);
+    const unique = new Set(reviewerPorts);
+    expect(unique.size).toBe(reviewerPorts.length);
+  });
+});
+
 describe("AgentConfig auto-reroute threshold", () => {
   it("loads per-agent auto_reroute_rejection_threshold from config", () => {
     const tmp = mkdtempSync(join(tmpdir(), "orch-reroute-config-"));
