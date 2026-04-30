@@ -309,16 +309,15 @@ describe("reviewer pool model guard", () => {
     }
   });
 
-  it("all reviewer pool members use a provider the proxy can route", () => {
+  it("all reviewer pool members use claude provider (only provider the Claude Code containers support)", () => {
     const configPath = resolve(import.meta.dirname, "..", "..", "agents.yaml");
     const config = loadConfig(configPath);
-    const proxyRoutableProviders = new Set(["claude", "openai"]);
     for (const [name, agent] of Object.entries(config.agents)) {
       if (agent.pool === "reviewer") {
         expect(
-          proxyRoutableProviders.has(agent.provider ?? ""),
-          `${name} uses provider "${agent.provider}" which the proxy cannot route`,
-        ).toBe(true);
+          agent.provider,
+          `${name} uses provider "${agent.provider}" but reviewer containers run Claude Code which only supports the claude provider`,
+        ).toBe("claude");
       }
     }
   });
