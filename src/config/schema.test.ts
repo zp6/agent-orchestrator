@@ -321,6 +321,18 @@ describe("reviewer pool model guard", () => {
       }
     }
   });
+
+  it("reviewer pool members using claude provider have a valid claude model ID", () => {
+    const configPath = resolve(import.meta.dirname, "..", "..", "agents.yaml");
+    const config = loadConfig(configPath);
+    for (const [name, agent] of Object.entries(config.agents)) {
+      if (agent.pool === "reviewer" && agent.provider === "claude") {
+        expect(agent.model, `${name} uses claude provider but has non-claude model ID "${agent.model}"`).toMatch(
+          /^claude-/,
+        );
+      }
+    }
+  });
 });
 
 describe("AgentConfig auto-reroute threshold", () => {
