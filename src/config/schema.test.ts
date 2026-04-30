@@ -189,6 +189,9 @@ describe("ProviderConfig", () => {
   it("each provider has a model field", () => {
     const config = loadConfig(configPath);
     for (const [name, provider] of Object.entries(config.providers!)) {
+      // "global" is a fleet-wide config namespace (wallet addresses, shared env vars),
+      // not an LLM provider — it intentionally has no model field.
+      if (name === "global") continue;
       expect(provider.model, `${name} missing model`).toBeTruthy();
     }
   });

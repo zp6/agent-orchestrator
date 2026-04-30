@@ -654,9 +654,11 @@ describe("duplicate PR detection before dispatch", () => {
     expect(result.dispatched).toBe(0);
     expect(result.skipped).toBe(1);
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
-    // Must NOT mark processed — the issue should be re-evaluated on the next cycle
-    // in case the PR is closed/rejected and needs re-dispatch
-    expect(mockStore.markProcessed).not.toHaveBeenCalled();
+    // recordAlreadyInReviewTask creates an audit-trail task and calls markProcessed
+    // for the FK constraint on processed_triggers.task_id. This does NOT block
+    // re-dispatch: the GitHub dispatch path never calls isProcessed("github", …),
+    // so the issue will be re-evaluated next cycle if the PR closes.
+    expect(mockStore.markProcessed).toHaveBeenCalledWith("github", "owner/my-repo#42", "task-already-in-review");
   });
 
   it("dispatches with draft PR context injected when only a draft PR exists", async () => {
