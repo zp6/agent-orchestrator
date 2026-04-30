@@ -213,10 +213,10 @@ agents:
   codex-orchestrator-reviewer:
     dir: "claude-orchestrator-reviewer"
     repo: "git@github.com:rapartlu/agent-reviewer.git"
-    provider: "openai"
-    model: "gpt-5.4-mini"
+    provider: "claude"
+    model: "claude-haiku-4-5-20251001"
     pool: "reviewer"
-    description: "PR reviewer, verifier, supervisor (Codex). Parallel throughput for reviewer pool."
+    description: "PR reviewer, verifier, supervisor (Claude Haiku). Parallel throughput for reviewer pool."
     capabilities: ["typescript", "llm", "review", "verification"]
     github: "rapartlu/agent-reviewer"
     owns_topics: ["review", "verification", "supervisor", "improvement", "escalation", "telegram", "quality"]
