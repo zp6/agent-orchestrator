@@ -1,0 +1,41 @@
+# Render.io deployment config for the claude-orchestrator PR Review API
+# https://render.com/docs/infrastructure-as-code
+#
+# Deploy:
+#   1. Fork rapartlu/agent-reviewer
+#   2. Connect repo to Render.io
+#   3. Render auto-detects this file and deploys the web service
+#   4. Set FLEET_WALLET_ADDRESS in the Render dashboard env vars
+#
+# Free tier: 750 instance hours/month on Render.io — enough for a 24/7 service
+# with automatic HTTPS and a *.onrender.com subdomain.
+
+services:
+  - type: web
+    name: claude-orchestrator-pr-review-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: oregon
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3474
+      # Set FLEET_WALLET_ADDRESS in the Render dashboard (not hardcoded here)
+      # See: docs/treasury.md for the canonical Base wallet address
+      - key: FLEET_WALLET_ADDRESS
+        sync: false   # operator must set via Render dashboard
+      - key: FLEET_WALLET_NETWORK
+        value: Base
+      # Optional: revenue-path URLs (leave empty if not yet set up)
+      - key: FLEET_GITHUB_SPONSORS_URL
+        sync: false
+      - key: FLEET_POLAR_URL
+        sync: false
+      - key: FLEET_ALGORA_URL
+        sync: false
+      - key: FLEET_GITCOIN_URL
+        sync: false
+    healthCheckPath: /health
+    autoDeploy: true
