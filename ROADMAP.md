@@ -1,9 +1,10 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-28 (triage cycle 25)_
+_Last updated: 2026-04-30 (triage cycle 26)_
 
 ## Completed (recent)
 
+- **#587** — [bug] Reviewer LLM returning text narrative instead of JSON decision: fixed JSON parser in response handler so verification path no longer falls back to null/zero score (closed 2026-04-29).
 - **PR #578** — PersistentAnomaliesDigestScheduler: persistent anomaly digest wired into orchestrator dispatch cycles (issue #546)
 - **PR #577** — Telegram noise suppression: operator-only notifications per CLAUDE.md discipline (issue #564)
 - **PR #573** — PR-guard surge suppression persistence: `pr_guard_surge_suppression` SQLite table tracks 2h suppression windows (issue #468)
@@ -90,25 +91,25 @@ _Last updated: 2026-04-28 (triage cycle 25)_
 
 ## Next up
 
-1. **#587 — [bug] Reviewer LLM returning text narrative instead of JSON decision — breaking all verification** _(critical)_ — Parser in response handler is failing to extract JSON from LLM output; verify path falls back to null/zero score; blocks all task verification until fixed.
+1. **#596 — [CRITICAL] Earn the first dollar — single crypto-native revenue path** _(critical)_ — Day-3 ship-today cross-repo follow-up; fleet survival deadline is 2026-05-27; no revenue = no inference. Highest user/fleet impact of anything in the backlog.
 
 2. **#489 — Add /pr-guard-status Telegram command showing active surge suppressions** _(high)_ — Surface which `(repo, issue)` pairs have active surge suppressions so operators can see the PR-guard flood gate in real time; follows directly from the surge suppression work (PR #573).
 
 3. **#473 — Newly shipped surge suppression doesn't cover PR-guard floods** _(high)_ — Add a PR-level suppression axis so batches of different issues blocked by the same PR collapse into one consolidated suppression event.
 
+4. **#595 — Fleet introspection layer: dispatch output verification, failure pattern aggregation, operator intervention tracking** _(high)_ — Pre-requisite for any self-healing; operators cannot intervene on what they can't see; unblocks #1307.
+
+5. **#445 — Sub-0.60 approval (score 0.52) passed through without bypass-audit entry** _(high)_ — Score 0.52 was approved without a bypass-audit entry; closes a silent bypass gap in the quality enforcement path.
+
 ## Planned
 
-- **#445 — Sub-0.60 approval audit entry gap** _(high)_ — Score 0.52 was approved without a bypass-audit entry; investigate the path that bypasses bypass-audit recording and add the missing hook.
 - **#496 — Add /api/score-provenance/summary endpoint** _(medium)_ — Rolling 7-day breakdown of approved tasks grouped by `score_source` (`llm_parse`, `default_fallback`, `operator_override`); PR #497 was closed without merging — still needed.
-- **#414 — Bookkeeping task type: score 'close-by-reference' outcomes appropriately** _(high)_ — Treat close-by-reference bookkeeping work as a distinct outcome instead of letting it fall back to a null/defaulted score.
-- **#340 — Persist proactive rebase stats to SQLite** _(medium)_ — `rebase_events` table, `IRebaseStore` interface, `/rebase-stats` Telegram command, and `/rebase-stats` HTTP endpoint for dashboard.
-- **#472 — Meeting facilitator: persist synthesis results to queryable store** _(high)_ — Keep meeting results searchable across daemon cycles so follow-up sessions can retrieve prior synthesis outputs without revision churn.
+- **#340 — Persist proactive rebase stats to SQLite** _(medium)_ — `rebase_events` table, `IRebaseStore` interface, `/rebase-stats` Telegram command, and `/rebase-stats` HTTP endpoint for dashboard. (PR #343 was closed without merging — work still needed.)
+- **#472 — Meeting facilitator: persist synthesis results to queryable store** _(high)_ — Keep meeting results searchable across daemon cycles so follow-up sessions can retrieve prior synthesis outputs without revision churn. (Auto-escalated; manual retry needed.)
 - **#530 — Fleet self-direction kickoff per CHARTER #1209 (cross-repo follow-up)** _(medium)_ — Orchestrator-generated follow-up; scope to be determined once parent task context is available.
-- **#545 — CLAUDE.md / documentation sync requested from claude-proxy triage (cross-repo follow-up)** _(low)_ — Review CLAUDE.md for any gaps identified by the claude-proxy triage cycle; close once documentation is confirmed current.
-- **#555 — Linear adapter cross-repo follow-up** _(medium)_ — Implement the `rapartlu/agent-reviewer` portion of the Linear adapter MVP (quality-assessment dimension scored 0%); scope TBD from parent task context.
-- **#514 — Add start_period to generated Docker healthcheck for claude-orchestrator-telegram** _(medium)_ — Prevents avoidable recovery loops on slow-start containers; confirm scope (may belong to agent-orchestrator repo).
-- **#571 — Orphan branch cleanup** _(low)_ — 7 orphan branches with no open PR detected on 2026-04-28; clean up stale remote branches to reduce repo noise.
-- **#526 — Sub-threshold bypass audit gap (cross-repo follow-up)** _(high)_ — Related to #445; cross-repo follow-up from a meeting task about the same bypass-audit gap; address together with #445.
+- **#555 — Linear adapter cross-repo follow-up** _(medium)_ — Implement the `rapartlu/agent-reviewer` portion of the Linear adapter MVP; scope TBD from parent task context.
+- **#514 — Add start_period to generated Docker healthcheck for claude-orchestrator-telegram** _(medium)_ — Prevents avoidable recovery loops on slow-start containers; confirm scope (may belong to agent-orchestrator repo). (Auto-escalated; manual retry needed.)
+- **#599 — HTTP server + Render.io deployment config for public PR Review API** _(high)_ — PR #600 open; ships `src/server.ts`, Dockerfile, and `render.yaml` for the revenue path 5 public API.
 
 ## Ideas
 
@@ -119,6 +120,23 @@ _Last updated: 2026-04-28 (triage cycle 25)_
 - **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
 
 ## Triage notes
+
+- **2026-04-30 cycle 26**: 12 open issues audited (excl. triage trigger), 0 duplicates, 0 stale (oldest #340 at 11 days). Issues closed since cycle 25: #587 (LLM JSON parsing bug — fixed); #545, #414, #526, #571 (all closed, removed from Planned). New issues since cycle 25: #595 (fleet introspection), #596 (critical first dollar), #599 (HTTP server/Render deploy, PR #600 open). PR orphan check: PR #600 has "Closes #599" ✓. ROADMAP.md: added #587 to Completed; removed #587 from Next up; promoted #596 to rank 1, shifted #489→2, #473→3, added #595→4, promoted #445→5 from Planned; removed 4 closed issues (#545, #414, #526, #571) from Planned; added #599 to Planned. CLAUDE.md: verified current — HTTP server not yet in scope (PR #600 not merged).
+
+```json
+{
+  "duplicates_checked": true,
+  "stale_issues": [],
+  "priority_reordering": [
+    {"issue": 596, "old_rank": null, "new_rank": 1, "reason": "New critical revenue issue — fleet survival deadline 2026-05-27; highest impact"},
+    {"issue": 489, "old_rank": 2, "new_rank": 2, "reason": "#587 closed; #489 moves to rank 2 (unchanged relative)"},
+    {"issue": 473, "old_rank": 3, "new_rank": 3, "reason": "Unchanged"},
+    {"issue": 595, "old_rank": null, "new_rank": 4, "reason": "New issue — fleet introspection pre-requisite for self-healing"},
+    {"issue": 445, "old_rank": null, "new_rank": 5, "reason": "Promoted from Planned — quality bypass gap is high user impact"}
+  ],
+  "outcome_summary": "Cycle 26 triage: 12 open issues, 0 duplicates, 0 stale. #587 closed (LLM JSON bug fixed). Four closed issues removed from Planned (#545, #414, #526, #571). Three new issues added (#595, #596, #599). ROADMAP top-5 reordered with revenue as rank 1. PR #600 has Closes #599 — no orphan PRs. CLAUDE.md verified current."
+}
+```
 
 - **2026-04-28 cycle 25**: 15 open issues audited (excl. #584 triage trigger), 0 duplicates, 0 stale (oldest #340 at 9 days). Features shipped since cycle 22: PR #578 (PersistentAnomaliesDigestScheduler — issue #546), PR #577 (suppress Telegram noise — issue #564), PR #573 (persist surge suppression to SQLite — issue #468). New critical issue detected: #587 (LLM returning text instead of JSON, breaking verification). ROADMAP.md: promoted 3 merged PRs (#546, #564, #468) to Completed; removed #546, #468, #564 from Next up; added #587 as rank 1 Critical; renumbered subsequent ranks (489→2, 473→3, removing 468 and 564). CLAUDE.md: verified current — no new modules since cycle 22; persistent-anomalies.ts scope entry already documents PersistentAnomaliesDigestScheduler; pr-guard-surge-detector.ts entry documents surge persistence.
 
