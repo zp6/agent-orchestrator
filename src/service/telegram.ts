@@ -16,6 +16,7 @@ import { buildCalibrationReport, formatCalibrationForTelegram } from "../orchest
 import { deescalateAllEscalatedTasks, deescalateEscalatedTask, normaliseSourceRef } from "../cli/commands/deescalate.js";
 import type { DigestSchedulerState } from "../service/slack-digest.js";
 import { isScheduledTimeReached, todayLocalDateString } from "../service/slack-digest.js";
+import { daemonStaleness } from "../utils/daemon-staleness.js";
 
 const log = createLogger("telegram");
 
@@ -345,7 +346,20 @@ export async function handleCommand(text: string, ctx: TelegramContext): Promise
         return `❌ ${name} (unreachable)`;
       }
     }));
-    return `🏥 *Health*\n\n${checks.join("\n")}`;
+
+    // Daemon staleness check
+    const staleness = daemonStaleness();
+    let stalenessLine: string;
+    if (staleness.error) {
+      stalenessLine = `❓ Staleness: unable to determine`;
+    } else if (staleness.commitsBehind === 0) {
+      stalenessLine = `✅ Up to date (\`${staleness.currentHash}\`)`;
+    } else {
+      const icon = staleness.isStale ? "⚠️" : "ℹ️";
+      stalenessLine = `${icon} ${staleness.commitsBehind} commit${staleness.commitsBehind === 1 ? "" : "s"} behind origin/main (\`${staleness.currentHash}\`)`;
+    }
+
+    return `🏥 *Health*\n\n${checks.join("\n")}\n\n📦 *Daemon version*\n${stalenessLine}`;
   }
 
   // Guard Health (PR guard surge suppression metrics, issue #1163)

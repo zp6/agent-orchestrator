@@ -15,6 +15,9 @@ import {
   formatTokens,
   type AgentBudgetStatus,
 } from "./budget.js";
+import { daemonStaleness, type DaemonStaleness } from "../../utils/daemon-staleness.js";
+
+export type { DaemonStaleness };
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -87,6 +90,8 @@ export interface HealthSnapshot {
   budgetStatuses: Map<string, AgentBudgetStatus>;
   /** Token spend dashboard rows for operators. Empty when DB unavailable. */
   tokenBudgetPanel: TokenBudgetPanelSnapshot;
+  /** Git staleness relative to origin/main. */
+  staleness: DaemonStaleness;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -367,6 +372,9 @@ async function gatherHealthSnapshot(
   const TIMEOUT_RATE_CRITICAL_PCT = 25;
   const RETRY_BUDGET_ALERT_THRESHOLD = 3;
 
+  // 0. Git staleness
+  const staleness = daemonStaleness();
+
   // 1. Daemon
   const pid = readPid();
   const running = isRunning();
@@ -503,6 +511,12 @@ async function gatherHealthSnapshot(
   const alerts: string[] = [];
   let hasCriticalFailure = false;
 
+  if (staleness.isStale) {
+    alerts.push(
+      `WARN: Daemon is ${staleness.commitsBehind} commits behind origin/main (hash ${staleness.currentHash}) — consider pulling`,
+    );
+  }
+
   if (!running) {
     hasCriticalFailure = true;
     alerts.push("CRITICAL: Daemon is not running — autonomous loop is stopped");
@@ -626,6 +640,7 @@ async function gatherHealthSnapshot(
     dbUnavailable,
     budgetStatuses,
     tokenBudgetPanel,
+    staleness,
   };
 }
 
@@ -646,6 +661,22 @@ function printHealthSnapshot(snap: HealthSnapshot): void {
     console.log(`  ${chalk.yellow("⚠ stale PID")}  (process ${pid} not found)`);
   } else {
     console.log(`  ${chalk.red("✗ not running")}`);
+  }
+
+  // Staleness line
+  {
+    const s = snap.staleness;
+    if (s.error) {
+      console.log(`  ${chalk.dim("Staleness: unable to determine")}  ${chalk.dim(s.error)}`);
+    } else if (s.commitsBehind === 0) {
+      console.log(`  ${chalk.green("✓ up to date")}  ${chalk.dim(`(${s.currentHash})`)}`);
+    } else {
+      const behindColor = s.isStale ? chalk.yellow : chalk.dim;
+      const staleLabel = s.isStale ? chalk.yellow("  ⚠ stale") : "";
+      console.log(
+        `  ${behindColor(`${s.commitsBehind} commit${s.commitsBehind === 1 ? "" : "s"} behind origin/main`)}  ${chalk.dim(`(${s.currentHash})`)}${staleLabel}`,
+      );
+    }
   }
 
   if (snap.lastCycleAt && snap.lastCycleAgeMs !== null) {
