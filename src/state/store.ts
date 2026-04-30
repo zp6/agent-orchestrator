@@ -1642,6 +1642,55 @@ export interface VerificationCalibrationRecommendationRow {
   review_notes: string | null;
 }
 
+// ── External-impact ratio types ───────────────────────────────────────────────
+
+/**
+ * One day's breakdown for the external-impact ratio metric.
+ */
+export interface ExternalImpactDay {
+  /** UTC date string (YYYY-MM-DD). */
+  date: string;
+  /** Tasks with external-facing source_ref on this day. */
+  external: number;
+  /** Internal-only tasks on this day (fleet infra work). */
+  internal: number;
+  /** external / (external + internal) * 100, or null when total = 0. */
+  ratio_pct: number | null;
+}
+
+/**
+ * Result returned by `StateStore.getExternalImpactRatio()`.
+ *
+ * "External" tasks are tasks whose `source_ref` links to a repo outside the
+ * fleet's own infrastructure repositories (i.e. repos NOT matching
+ * `rapartlu/agent-*`).  Internal tasks have no source_ref, or link to the
+ * fleet's own repos.
+ *
+ * The 7-day ratio falling below 30% is the trigger condition for a Telegram
+ * alert (anti-navel-gazing layer 1, re-implemented from issue #1262).
+ */
+export interface ExternalImpactRatioResult {
+  /** Rolling window in days. */
+  days: number;
+  /** Total root tasks created in the window. */
+  total_tasks: number;
+  /** Tasks classified as external-impact in the window. */
+  external_tasks: number;
+  /** Tasks classified as internal-only in the window. */
+  internal_tasks: number;
+  /**
+   * external_tasks / total_tasks * 100, or null when total_tasks = 0.
+   * Alert threshold: < 30 for 7-day window.
+   */
+  ratio_pct: number | null;
+  /** True when ratio_pct < 30 and total_tasks > 0 (alert threshold crossed). */
+  alert: boolean;
+  /** Per-day breakdown for sparkline rendering, oldest-first. */
+  daily: ExternalImpactDay[];
+  /** ISO timestamp when this result was computed. */
+  generated_at: string;
+}
+
 /**
  * SQL WHERE clauses that exclude infrastructure/transient failures from
  * retry-budget counts.  Centralised so all consumers stay in sync when
@@ -12272,6 +12321,104 @@ export class StateStore {
         count: r.count,
         avg_score: Math.round(r.avg_score * 1000) / 1000,
       })),
+    };
+  }
+
+  /**
+   * Compute the external-impact ratio for the given rolling window.
+   *
+   * A task is classified as **external** when its `source_ref` points to a
+   * GitHub repo that is NOT a fleet-internal infrastructure repository.
+   * Fleet-internal repos match the pattern `rapartlu/agent-*` (e.g.
+   * `rapartlu/agent-orchestrator`, `rapartlu/agent-reviewer`).
+   *
+   * Tasks with no `source_ref`, or with a source_ref from a fleet-internal
+   * repo, are classified as **internal**.
+   *
+   * The alert threshold is 30%: when fewer than 30% of tasks in the 7-day
+   * window are external-impact, the Telegram alert fires.
+   *
+   * @param days  Rolling window in calendar days (default 7).
+   */
+  getExternalImpactRatio(days = 7): ExternalImpactRatioResult {
+    const cutoff = `datetime('now', '-' || ${days} || ' days')`;
+
+    // Fleet-internal repos: any source_ref whose repo segment matches agent-*.
+    // We use a SQLite GLOB pattern: source_ref LIKE 'rapartlu/agent-%#%'
+    const INTERNAL_PATTERN = "rapartlu/agent-%#%";
+
+    // Total root tasks in window
+    const totalRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n
+         FROM tasks
+         WHERE parent_task_id IS NULL
+           AND created_at >= ${cutoff}`,
+      )
+      .get() as { n: number };
+    const total_tasks = totalRow.n;
+
+    // External tasks: have a source_ref AND repo is NOT fleet-internal
+    const externalRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n
+         FROM tasks
+         WHERE parent_task_id IS NULL
+           AND created_at >= ${cutoff}
+           AND source_ref IS NOT NULL
+           AND source_ref NOT LIKE ?`,
+      )
+      .get(INTERNAL_PATTERN) as { n: number };
+    const external_tasks = externalRow.n;
+
+    const internal_tasks = total_tasks - external_tasks;
+    const ratio_pct = total_tasks > 0
+      ? Math.round((external_tasks / total_tasks) * 10000) / 100
+      : null;
+    const alert = total_tasks > 0 && ratio_pct !== null && ratio_pct < 30;
+
+    // Per-day breakdown for sparkline
+    const dailyRows = this.db
+      .prepare(
+        `SELECT
+           DATE(created_at) AS date,
+           COUNT(*) AS total,
+           SUM(CASE
+             WHEN source_ref IS NOT NULL AND source_ref NOT LIKE ?
+             THEN 1 ELSE 0
+           END) AS external_count
+         FROM tasks
+         WHERE parent_task_id IS NULL
+           AND created_at >= ${cutoff}
+         GROUP BY DATE(created_at)
+         ORDER BY DATE(created_at) ASC`,
+      )
+      .all(INTERNAL_PATTERN) as Array<{
+        date: string;
+        total: number;
+        external_count: number;
+      }>;
+
+    const daily: ExternalImpactDay[] = dailyRows.map((r) => {
+      const ext = r.external_count;
+      const tot = r.total;
+      return {
+        date: r.date,
+        external: ext,
+        internal: tot - ext,
+        ratio_pct: tot > 0 ? Math.round((ext / tot) * 10000) / 100 : null,
+      };
+    });
+
+    return {
+      days,
+      total_tasks,
+      external_tasks,
+      internal_tasks,
+      ratio_pct,
+      alert,
+      daily,
+      generated_at: new Date().toISOString(),
     };
   }
 

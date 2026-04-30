@@ -22,6 +22,8 @@
  *   GET /marginal-score-tasks                         — tasks with marginal quality scores + trend + per-agent (issue #597)
  *   GET /marginal-score-tasks?days=30&min_score=0.5&max_score=0.75&agent=<name>&limit=50&offset=0
  *   POST /marginal-score-tasks/:id/redispatch         — create a re-dispatch task for a marginal-score task
+ *   GET /external-impact-ratio                        — anti-navel-gazing ratio: external vs internal work (issue #1372)
+ *   GET /external-impact-ratio?days=7                 — configurable window
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
@@ -35,6 +37,7 @@ import {
   type SupervisorDecisionRecord,
   type StandupQualityAgentTrend,
   type MarginalScoreTasksResult,
+  type ExternalImpactRatioResult,
 } from "../state/store.js";
 import { createLogger } from "./logger.js";
 
@@ -253,6 +256,13 @@ export interface MarginalRedispatchResponse {
   /** ISO timestamp of when the re-dispatch was created. */
   created_at: string;
 }
+
+/**
+ * JSON response shape for GET /external-impact-ratio (issue #1372).
+ * Exposes the anti-navel-gazing external-impact ratio for dashboard and
+ * Telegram alert consumers. Re-implemented from issue #1262.
+ */
+export type ExternalImpactRatioResponse = ExternalImpactRatioResult;
 
 /**
  * JSON response shape for GET /misrouting.
@@ -807,6 +817,21 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
           error: err instanceof Error ? err.message : String(err),
         });
         sendJson(res, 500, { error: "Failed to fetch persistent anomalies" });
+      }
+      return;
+    }
+
+    // ── GET /external-impact-ratio (issue #1372) ──────────────────────────────
+    if (url.pathname === "/external-impact-ratio") {
+      const days = parseWindowDays(req);
+      try {
+        const result: ExternalImpactRatioResponse = store.getExternalImpactRatio(days);
+        sendJson(res, 200, result);
+      } catch (err) {
+        log.warn("Failed to compute external-impact ratio", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to compute external-impact ratio" });
       }
       return;
     }
