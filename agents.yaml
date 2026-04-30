@@ -398,10 +398,10 @@ agents:
   deepseek-reasoning:
     dir: "claude-orchestrator-reviewer"
     repo: "git@github.com:rapartlu/agent-reviewer.git"
-    provider: "deepseek"
-    model: "deepseek-chat"
+    provider: "claude"
+    model: "claude-haiku-4-5-20251001"
     pool: "reviewer"
-    description: "Third voice in the reviewer pool (Deepseek R1). Independent reasoning for PR review and verification."
+    description: "Third voice in the reviewer pool (Claude Haiku). Independent review throughput."
     capabilities: ["typescript", "llm", "review", "verification", "reasoning"]
     github: "rapartlu/agent-reviewer"
     owns_topics: ["review", "verification", "reasoning"]
