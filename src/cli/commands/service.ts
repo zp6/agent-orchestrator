@@ -255,19 +255,21 @@ export function registerServiceCommand(program: Command): void {
           const ts = new Date(entry.timestamp);
           const dateStr = ts.toLocaleString();
           const eventColor =
-            entry.event === "start" ? chalk.green :
-            entry.event === "stop"  ? chalk.blue  :
+            entry.event === "start"       ? chalk.green   :
+            entry.event === "stop"        ? chalk.blue    :
+            entry.event === "self-update" ? chalk.magenta :
             chalk.red; // crash
 
-          const eventLabel = eventColor(entry.event.toUpperCase().padEnd(5));
+          const eventLabel = eventColor(entry.event.toUpperCase().padEnd(11));
           const pidStr = entry.pid != null ? chalk.dim(`PID ${entry.pid}`) : "";
           const durationStr = entry.duration_ms != null
             ? chalk.dim(` uptime=${formatUptime(entry.duration_ms)}`)
             : "";
           const exitStr = entry.exit_code != null ? chalk.dim(` exit=${entry.exit_code}`) : "";
-          const reasonStr = entry.reason ? `  ${chalk.yellow(entry.reason)}` : "";
+          const commitStr = entry.commit_hash ? chalk.yellow(` @${entry.commit_hash}`) : "";
+          const reasonStr = entry.reason ? `  ${chalk.dim(entry.reason)}` : "";
 
-          console.log(`  ${eventLabel}  ${chalk.cyan(dateStr)}  ${pidStr}${durationStr}${exitStr}${reasonStr}`);
+          console.log(`  ${eventLabel}  ${chalk.cyan(dateStr)}  ${pidStr}${durationStr}${exitStr}${commitStr}${reasonStr}`);
         }
         console.log();
       } catch (err) {

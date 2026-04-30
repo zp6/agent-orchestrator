@@ -100,6 +100,18 @@ const PROACTIVE_REBASE_EVERY_N_CYCLES = 3; // ~15min — proactively rebase stal
 const SEMANTIC_MEMORY_AUDIT_EVERY_N_CYCLES = 288; // ~24h — check semantic memory effectiveness (issue #1016)
 
 /**
+ * Get the current git HEAD commit hash (short form) for audit logging.
+ * Returns "unknown" if git is unavailable.
+ */
+function getCurrentCommitHash(): string {
+  try {
+    return execSync("git rev-parse --short HEAD", { stdio: "pipe" }).toString().trim();
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
  * Maximum time a single poll cycle is allowed to run before the watchdog
  * kills it and moves on to the next cycle. Prevents a hung LLM call or
  * Docker operation from deadlocking the entire daemon for hours.
@@ -389,9 +401,16 @@ export class Daemon {
     this.startedAt = Date.now();
     writePid();
 
-    // Record daemon start in the lifecycle audit trail.
+    // Record daemon start in the lifecycle audit trail (issue #1337 — include commit hash).
+    const startCommit = getCurrentCommitHash();
     try {
-      this.store.recordDaemonLifecycleEvent({ event: "start", pid: process.pid });
+      this.store.recordDaemonLifecycleEvent({
+        event: "start",
+        pid: process.pid,
+        commit_hash: startCommit,
+        reason: `started from commit ${startCommit}`,
+      });
+      this.log.info("Daemon started", { commit: startCommit, pid: process.pid });
     } catch (err) {
       this.log.warn("Failed to record daemon start lifecycle event", { error: String(err) });
     }
@@ -1180,6 +1199,7 @@ export class Daemon {
   private async selfUpdate(): Promise<void> {
     const repoDir = resolve(new URL("../../..", import.meta.url).pathname);
     try {
+      const beforeHash = getCurrentCommitHash();
       execSync("git fetch origin main --quiet", { cwd: repoDir, stdio: "pipe" });
       const behind = execSync("git rev-list HEAD..origin/main --count", { cwd: repoDir, stdio: "pipe" })
         .toString()
@@ -1203,10 +1223,29 @@ export class Daemon {
       execSync("git pull --ff-only origin main", { cwd: repoDir, stdio: "pipe" });
       execSync("npm run build", { cwd: repoDir, stdio: "pipe" });
 
-      this.log.info("Self-update: rebuild complete, re-execing daemon");
+      const afterHash = getCurrentCommitHash();
+      this.log.info("Self-update: rebuild complete, re-execing daemon", {
+        from: beforeHash,
+        to: afterHash,
+      });
+
+      // Record self-update event in the audit trail (issue #1337).
+      const durationMs = this.startedAt > 0 ? Date.now() - this.startedAt : undefined;
+      try {
+        this.store.recordDaemonLifecycleEvent({
+          event: "self-update",
+          pid: process.pid,
+          reason: `updated ${beforeHash} → ${afterHash} (${behind} commit${Number(behind) === 1 ? "" : "s"}): ${commits.split("\n").slice(0, 5).join("; ")}`,
+          duration_ms: durationMs,
+          commit_hash: afterHash,
+        });
+      } catch (auditErr) {
+        this.log.warn("Failed to record self-update lifecycle event", { error: String(auditErr) });
+      }
+
       await notifyOperator(
         `Daemon self-updated (${behind} commit${Number(behind) === 1 ? "" : "s"})`,
-        commits,
+        `${beforeHash} → ${afterHash}\n${commits}`,
         "info",
       );
 

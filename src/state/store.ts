@@ -12,12 +12,12 @@ const storeLog = createLogger("store");
 // ── Daemon lifecycle audit types ──────────────────────────────────────────────
 
 /** The type of daemon lifecycle event recorded in the audit trail. */
-export type DaemonLifecycleEvent = "start" | "stop" | "crash";
+export type DaemonLifecycleEvent = "start" | "stop" | "crash" | "self-update";
 
 /** A single daemon lifecycle event as persisted in the `daemon_lifecycle` table. */
 export interface DaemonLifecycleEntry {
   id: number;
-  /** Event type: start | stop | crash */
+  /** Event type: start | stop | crash | self-update */
   event: DaemonLifecycleEvent;
   /** PID of the daemon process at the time of the event. */
   pid: number | null;
@@ -27,6 +27,8 @@ export interface DaemonLifecycleEntry {
   exit_code: number | null;
   /** Wall-clock duration of the daemon run in milliseconds (stop/crash events). */
   duration_ms: number | null;
+  /** Git commit hash the daemon is running from (start/self-update events). */
+  commit_hash: string | null;
   /** ISO 8601 timestamp of the event. */
   timestamp: string;
 }
@@ -8516,16 +8518,23 @@ export class StateStore {
       CREATE INDEX IF NOT EXISTS idx_daemon_lifecycle_event ON daemon_lifecycle(event);
       CREATE INDEX IF NOT EXISTS idx_daemon_lifecycle_ts    ON daemon_lifecycle(timestamp);
     `);
+    // Migration: add commit_hash column (issue #1337 — self-update auditing)
+    try {
+      this.db.exec(`ALTER TABLE daemon_lifecycle ADD COLUMN commit_hash TEXT`);
+    } catch {
+      // Column already exists — safe to ignore
+    }
   }
 
   /**
-   * Record a daemon lifecycle event (start, stop, or crash) in the audit trail.
+   * Record a daemon lifecycle event (start, stop, crash, or self-update) in the audit trail.
    *
-   * @param params.event      - "start" | "stop" | "crash"
-   * @param params.pid        - Process ID (defaults to current process.pid)
-   * @param params.reason     - Human-readable description (e.g. "SIGTERM", error message)
-   * @param params.exit_code  - Process exit code for crash events
+   * @param params.event       - "start" | "stop" | "crash" | "self-update"
+   * @param params.pid         - Process ID (defaults to current process.pid)
+   * @param params.reason      - Human-readable description (e.g. "SIGTERM", error message)
+   * @param params.exit_code   - Process exit code for crash events
    * @param params.duration_ms - Daemon uptime in ms for stop/crash events
+   * @param params.commit_hash - Git commit hash the daemon is running from
    */
   recordDaemonLifecycleEvent(params: {
     event: DaemonLifecycleEvent;
@@ -8533,17 +8542,19 @@ export class StateStore {
     reason?: string;
     exit_code?: number;
     duration_ms?: number;
+    commit_hash?: string;
   }): DaemonLifecycleEntry {
     const now = new Date().toISOString();
     const result = this.db.prepare(`
-      INSERT INTO daemon_lifecycle (event, pid, reason, exit_code, duration_ms, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO daemon_lifecycle (event, pid, reason, exit_code, duration_ms, commit_hash, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(
       params.event,
       params.pid ?? process.pid,
       params.reason ?? null,
       params.exit_code ?? null,
       params.duration_ms ?? null,
+      params.commit_hash ?? null,
       now,
     );
     return this.db
