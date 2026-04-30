@@ -1741,3 +1741,113 @@ describe("parseResponse: JSON extraction strategies (issue #587)", () => {
     expect(result.dimensions!.test_coverage).toBe(0.75);
   });
 });
+
+// ── Stale-result pre-check tests (issue #604) ─────────────────────────────────
+// Verifies that checkStaleResultPattern correctly identifies agents returning
+// cached/recalled results instead of live tool-call output for status-check tasks.
+describe("checkStaleResultPattern (issue #604)", () => {
+  const mockStore604 = {
+    getTask: vi.fn(),
+    updateTask: vi.fn(),
+    getChildTasks: vi.fn().mockReturnValue([]),
+    insertVerificationResult: vi.fn(),
+    recordLlmCallEvent: vi.fn(),
+  } as unknown as Parameters<typeof Verifier>[0];
+
+  const verifier604 = new Verifier(mockStore604);
+
+  // ── No detection for non-status-check tasks ──────────────────────────────
+
+  it("does not fire for a regular feature implementation task", () => {
+    const title = "feat(auth): add OAuth2 login flow";
+    const result = "I already ran that check just moments ago. The results are still current.";
+    const check = verifier604.checkStaleResultPattern(title, result);
+    expect(check.detected).toBe(false);
+  });
+
+  it("does not fire for a housekeeping task even with stale phrases", () => {
+    const title = "[housekeeping] Backlog triage 2026-04-30";
+    const result = "I already ran that check — results are still current.";
+    const check = verifier604.checkStaleResultPattern(title, result);
+    expect(check.detected).toBe(false);
+  });
+
+  // ── Detection for status-check tasks ─────────────────────────────────────
+
+  it("detects 'I already ran that check' in a self-check task", () => {
+    const title = "Run a quick self-check: list the 3 most recently merged PRs";
+    const result = "I already ran that check just moments ago. The results are still current:\n\n| #1363 | Standup |";
+    const check = verifier604.checkStaleResultPattern(title, result);
+    expect(check.detected).toBe(true);
+    if (check.detected) {
+      expect(check.matchedPhrase).toMatch(/i already ran that check/i);
+    }
+  });
+
+  it("detects 'results are still current' in a list-merged-PRs task", () => {
+    const title = "List the 3 most recently merged PRs in rapartlu/agent-orchestrator and report back";
+    const result = "The results are still current:\n\nPR #1363 was merged at 2026-04-30T05:46:00Z";
+    const check = verifier604.checkStaleResultPattern(title, result);
+    expect(check.detected).toBe(true);
+    if (check.detected) {
+      expect(check.matchedPhrase).toMatch(/results are still current/i);
+    }
+  });
+
+  it("detects 'already ran.*moments ago' pattern", () => {
+    const title = "Quick status check on recent merged PRs";
+    const result = "I already ran this just moments ago and the data is fresh enough.";
+    const check = verifier604.checkStaleResultPattern(title, result);
+    expect(check.detected).toBe(true);
+  });
+
+  it("detects 'no need to re-run' phrase", () => {
+    const title = "Run a self-check: verify repo health";
+    const result = "No need to re-run; results from the prior cycle are still valid.";
+    const check = verifier604.checkStaleResultPattern(title, result);
+    expect(check.detected).toBe(true);
+    if (check.detected) {
+      expect(check.matchedPhrase).toMatch(/no need to re-run/i);
+    }
+  });
+
+  it("does NOT fire for status-check task with clean live result (no stale phrases)", () => {
+    const title = "Run a quick self-check: list the 3 most recently merged PRs";
+    const result = `Here are the 3 most recently merged PRs in rapartlu/agent-orchestrator (live query):
+
+| # | Title | Merged At |
+|---|-------|-----------|
+| #1363 | Standup synthesis | 2026-04-30 05:46 UTC |
+| #1365 | fix: route codex-orchestrator-reviewer | 2026-04-30 03:51 UTC |
+| #1362 | fix: route deepseek-reasoning reviewer | 2026-04-30 03:29 UTC |`;
+    const check = verifier604.checkStaleResultPattern(title, result);
+    expect(check.detected).toBe(false);
+  });
+
+  it("is case-insensitive for phrase matching", () => {
+    const title = "SELF-CHECK: list merged prs";
+    const result = "I ALREADY RAN THAT CHECK. Results are STILL CURRENT.";
+    const check = verifier604.checkStaleResultPattern(title, result);
+    expect(check.detected).toBe(true);
+  });
+
+  it("matches 'previously recalled' phrase", () => {
+    const title = "Quick self-check on merged PRs";
+    const result = "Using previously recalled output: PR #1363 merged at 2026-04-30.";
+    const check = verifier604.checkStaleResultPattern(title, result);
+    expect(check.detected).toBe(true);
+    if (check.detected) {
+      expect(check.matchedPhrase).toMatch(/previously recalled/i);
+    }
+  });
+
+  it("matches 'from just moments ago' phrase", () => {
+    const title = "list recent merged PRs and report back";
+    const result = "The data from just moments ago is still valid; here it is again.";
+    const check = verifier604.checkStaleResultPattern(title, result);
+    expect(check.detected).toBe(true);
+    if (check.detected) {
+      expect(check.matchedPhrase).toMatch(/from just moments ago/i);
+    }
+  });
+});

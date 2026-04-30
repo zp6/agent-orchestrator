@@ -414,6 +414,49 @@ const TRIAGE_FIELD_WEIGHTS: Record<string, number> = {
 };
 
 /**
+ * Score assigned when the stale-result anti-pattern is detected (issue #604).
+ * Matches the correctness score observed on the triggering parent task (25%).
+ */
+const STALE_RESULT_SCORE = 0.25;
+
+/**
+ * Phrase patterns that indicate an agent returned cached/recalled results
+ * instead of executing a live tool call for a status-check task.
+ *
+ * These are matched case-insensitively against the task result.
+ */
+const STALE_RESULT_PHRASES: RegExp[] = [
+  /i already ran that check/i,
+  /results are still current/i,
+  /already ran.*moments ago/i,
+  /previously recalled/i,
+  /from my previous/i,
+  /from just moments ago/i,
+  /already checked this/i,
+  /already performed this/i,
+  /same results as before/i,
+  /no need to re-run/i,
+  /no need to rerun/i,
+  /cache.*still valid/i,
+];
+
+/**
+ * Title patterns that identify status-check or live-query tasks.
+ * When a task title matches one of these patterns AND the result contains
+ * a STALE_RESULT_PHRASE, the stale-result pre-check fires.
+ */
+const STATUS_CHECK_TITLE_PATTERNS: RegExp[] = [
+  /self.?check/i,
+  /list.*merged.*pr/i,
+  /list.*recent.*pr/i,
+  /recent.*pr/i,
+  /merged.*pr/i,
+  /status.*check/i,
+  /quick.*check/i,
+  /live.*query/i,
+];
+
+/**
  * File patterns that identify "triage-only" concerns (documentation, admin files).
  * A PR mixing these files with feature files is considered bundled work.
  */
@@ -993,6 +1036,41 @@ export class Verifier {
       missingFields,
       passes: score >= TRIAGE_SCHEMA_COMPLIANCE_THRESHOLD,
     };
+  }
+
+  /**
+   * Checks whether an agent result shows the stale-result anti-pattern (issue #604).
+   *
+   * The anti-pattern occurs when a status-check task (e.g. "Run a self-check:
+   * list the 3 most recently merged PRs") is answered with previously recalled
+   * or cached data rather than a fresh live tool call.  Examples include phrases
+   * like "I already ran that check just moments ago" or "results are still current".
+   *
+   * When detected, the pre-check short-circuits verification with a fixed low
+   * score (STALE_RESULT_SCORE = 0.25) and a specific revision message instructing
+   * the agent to execute the live command.
+   *
+   * @param title  - The task title, used to identify status-check tasks.
+   * @param result - The agent's result string to scan for stale-result phrases.
+   * @returns `{ detected: true, matchedPhrase }` when the pattern fires, otherwise `{ detected: false }`.
+   */
+  checkStaleResultPattern(
+    title: string,
+    result: string,
+  ): { detected: true; matchedPhrase: string } | { detected: false } {
+    const isStatusCheck = STATUS_CHECK_TITLE_PATTERNS.some((p) => p.test(title));
+    if (!isStatusCheck) {
+      return { detected: false };
+    }
+
+    for (const phrase of STALE_RESULT_PHRASES) {
+      const match = result.match(phrase);
+      if (match) {
+        return { detected: true, matchedPhrase: match[0] };
+      }
+    }
+
+    return { detected: false };
   }
 
   /**
@@ -1770,6 +1848,69 @@ export class Verifier {
         "no_action_needed",
         "Agent correctly identified that work was already handled (existing open PR or already-in-review).",
       );
+    }
+
+    // ── Stale-result pre-check (issue #604) ─────────────────────────────────
+    // Detects when an agent returns cached/recalled results for a status-check
+    // task (e.g. "Run a self-check: list the 3 most recently merged PRs") instead
+    // of executing a live tool call.  When detected, short-circuit immediately
+    // with STALE_RESULT_SCORE (0.25) and specific revision guidance — no LLM
+    // scoring can override this gate.
+    const staleCheck = this.checkStaleResultPattern(task.title, resultText);
+    if (staleCheck.detected) {
+      const revision = [
+        `Stale result detected — the agent returned cached or previously recalled data instead of executing a live tool call.`,
+        ``,
+        `Matched phrase: "${staleCheck.matchedPhrase}"`,
+        ``,
+        `For status-check tasks the result MUST come from a fresh live command.`,
+        `Re-run the task and execute the command directly, for example:`,
+        `  gh pr list --repo <owner>/<repo> --state merged --limit 3 --json number,title,mergedAt`,
+        ``,
+        `Do NOT reuse results from a previous session or context window.`,
+      ].join("\n");
+
+      const explanation = `Agent returned previously recalled results rather than executing a live tool call. Matched stale-result phrase: "${staleCheck.matchedPhrase}".`;
+
+      const failResult: VerificationResult = {
+        approved: false,
+        score: STALE_RESULT_SCORE,
+        notes: `Stale result detected — agent reused cached output instead of running a live command (phrase: "${staleCheck.matchedPhrase}")`,
+        revision,
+        explanation,
+        dimensions: {
+          correctness: STALE_RESULT_SCORE,
+          completeness: 0.4,
+          test_coverage: 0.5,
+          code_quality: 0.35,
+        },
+      };
+
+      this.log.warn("Stale-result anti-pattern detected — short-circuiting with low score", {
+        taskId,
+        agentName: task.agent_name,
+        matchedPhrase: staleCheck.matchedPhrase,
+        title: task.title,
+      });
+
+      this.store.updateTask(taskId, {
+        verification_status: "rejected",
+        quality_score: STALE_RESULT_SCORE,
+        verification_notes: failResult.notes,
+        quality_explanation: failResult.explanation ?? null,
+      });
+
+      this.recordVerificationResult(
+        taskId,
+        task.agent_name ?? "unknown",
+        STALE_RESULT_SCORE,
+        false,
+        failResult.explanation,
+        undefined,
+        undefined,
+      );
+
+      return failResult;
     }
 
     this.store.updateTask(taskId, { verification_status: "pending" });
