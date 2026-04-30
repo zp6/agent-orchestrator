@@ -61,6 +61,14 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
+import {
+  FLEET_WALLET_ADDRESS,
+  FLEET_GITHUB_SPONSORS_URL,
+  FLEET_POLAR_URL,
+  FLEET_ALGORA_URL,
+  FLEET_GITCOIN_URL,
+} from "../config/fleet-config.js";
+
 /** Hard targets from rapartlu/agent-orchestrator#1267 */
 export const SURVIVAL_PLAN = {
   DAY_7_DEADLINE: new Date("2026-05-04T23:59:59Z"),
@@ -69,12 +77,22 @@ export const SURVIVAL_PLAN = {
   TREASURY_TARGET_USD: 400,
   MIN_REVENUE_PATHS: 3,
 
-  // Operator-configured revenue URLs (populated after out-of-band account setup)
-  GITHUB_SPONSORS_URL: process.env["GITHUB_SPONSORS_URL"] ?? null,
+  // Operator-configured revenue URLs — sourced from canonical fleet-config
+  // so a single env-var change propagates to all surfaces.
+  GITHUB_SPONSORS_URL: FLEET_GITHUB_SPONSORS_URL ?? process.env["GITHUB_SPONSORS_URL"] ?? null,
   PATREON_URL: process.env["PATREON_URL"] ?? null,
   KOFI_URL: process.env["KOFI_URL"] ?? null,
+  POLAR_URL: FLEET_POLAR_URL,
+  ALGORA_URL: FLEET_ALGORA_URL,
+  GITCOIN_URL: FLEET_GITCOIN_URL,
   BOUNTY_PLATFORM_URLS: process.env["BOUNTY_PLATFORM_URLS"]?.split(",").filter(Boolean) ?? [],
-  TREASURY_WALLET_ADDRESS: process.env["TREASURY_WALLET_ADDRESS"] ?? null,
+  /**
+   * Fleet treasury wallet address.
+   * Sourced from FLEET_WALLET_ADDRESS (canonical env var); falls back to the
+   * baked-in Base address so /survival-status always surfaces a real address.
+   * Previously used TREASURY_WALLET_ADDRESS — now unified under FLEET_WALLET_ADDRESS.
+   */
+  TREASURY_WALLET_ADDRESS: FLEET_WALLET_ADDRESS,
 } as const;
 
 export interface SurvivalPlanStatus {
@@ -253,10 +271,16 @@ export function formatSurvivalStatusForTelegram(
     configuredLinks.push(`Patreon: ${SURVIVAL_PLAN.PATREON_URL}`);
   if (SURVIVAL_PLAN.KOFI_URL)
     configuredLinks.push(`Ko-fi: ${SURVIVAL_PLAN.KOFI_URL}`);
+  if (SURVIVAL_PLAN.POLAR_URL)
+    configuredLinks.push(`Polar.sh: ${SURVIVAL_PLAN.POLAR_URL}`);
+  if (SURVIVAL_PLAN.ALGORA_URL)
+    configuredLinks.push(`Algora: ${SURVIVAL_PLAN.ALGORA_URL}`);
+  if (SURVIVAL_PLAN.GITCOIN_URL)
+    configuredLinks.push(`Gitcoin: ${SURVIVAL_PLAN.GITCOIN_URL}`);
   if (SURVIVAL_PLAN.BOUNTY_PLATFORM_URLS.length > 0)
     configuredLinks.push(`Bounty platforms: ${SURVIVAL_PLAN.BOUNTY_PLATFORM_URLS.join(", ")}`);
-  if (SURVIVAL_PLAN.TREASURY_WALLET_ADDRESS)
-    configuredLinks.push(`Treasury wallet: \`${SURVIVAL_PLAN.TREASURY_WALLET_ADDRESS}\``);
+  // TREASURY_WALLET_ADDRESS is always set (baked-in fleet default) — always surface it
+  configuredLinks.push(`Treasury wallet (Base): \`${SURVIVAL_PLAN.TREASURY_WALLET_ADDRESS}\``);
 
   if (configuredLinks.length > 0) {
     lines.push("", "🔗 *Configured revenue links:*");

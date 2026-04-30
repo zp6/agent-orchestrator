@@ -1437,6 +1437,62 @@ export type {
 // Pool member config type (re-exported from config for orchestrator consumers)
 export type { ReviewerPoolMemberConfig } from "./config.js";
 
+// Fleet configuration — canonical wallet address and revenue config (issue #594).
+//
+// Single source of truth for FLEET_WALLET_ADDRESS (baked-in Base address with
+// env-var override), PR Review API pricing, and platform URLs.
+//
+// Usage:
+//   import { FLEET_WALLET_ADDRESS, buildFundingConfig, getPRReviewApiInfo } from 'claude-orchestrator-reviewer';
+export {
+  FLEET_WALLET_ADDRESS,
+  FLEET_WALLET_NETWORK,
+  FLEET_WALLET_TOKENS,
+  FLEET_GITHUB_SPONSORS_URL,
+  FLEET_POLAR_URL,
+  FLEET_ALGORA_URL,
+  FLEET_GITCOIN_URL,
+  PR_REVIEW_API_PRICING,
+  REVIEWER_PORT,
+  buildFundingConfig,
+} from "./config/fleet-config.js";
+
+// Public PR Review API — paid external service (revenue path #5, issue #1302).
+//
+// Exposes the fleet's LLM PR review capability to external callers.
+// Pricing: basic $0.10/PR, deep $0.50/PR. Payment via USDC/DAI on Base network.
+//
+// Mount in the reviewer HTTP server:
+//   app.get('/api/pr-review/info', (_req, res) => res.json(getPRReviewApiInfo()));
+//
+// See: docs/pr-review-api.md for full endpoint documentation.
+export {
+  getPRReviewApiInfo,
+  validatePRReviewRequest,
+  formatPRReviewApiSummaryMarkdown,
+  formatPRReviewApiForTelegram,
+} from "./reviewer/pr-review-api.js";
+export type {
+  PRReviewTier,
+  ExternalPRReviewRequest,
+  ExternalPRReviewResponse,
+  PRReviewApiInfo,
+} from "./reviewer/pr-review-api.js";
+
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
 export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";
+
+// Fleet wallet config — resolves FLEET_WALLET_ADDRESS from config or env vars;
+// provides GET /api/fleet-config payload builder (issue #594 / orchestrator#1331).
+export {
+  resolveWalletAddress,
+  resolveWalletNetwork,
+  getFleetWalletConfig,
+  getFleetConfigPayload,
+  getFleetWalletConfigPayload,
+} from "./reviewer/fleet-wallet-config.js";
+export type {
+  FleetWalletConfig,
+  FleetConfigPayload,
+} from "./reviewer/fleet-wallet-config.js";

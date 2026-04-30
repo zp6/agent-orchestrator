@@ -338,8 +338,7 @@ export async function checkAndEscalateDay7(
   await notifyOperator(
     "🚨 Day-7 Survival Checkpoint MISSED",
     body,
-    "warning",
-    "survival:day7-checkpoint-missed",
+    "high",
   );
 
   // Record the escalation timestamp for audit purposes.

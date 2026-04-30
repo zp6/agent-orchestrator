@@ -154,9 +154,12 @@ describe("formatSurvivalStatusForTelegram", () => {
     expect(output).toContain("First dollar received: Yes");
   });
 
-  it("warns when no revenue URLs are configured (default env)", () => {
+  it("always surfaces the baked-in fleet wallet address (default env)", () => {
     const output = formatSurvivalStatusForTelegram(makeEmptyDb());
-    expect(output).toContain("No revenue URLs configured");
+    // The fleet wallet address is now baked-in as a default so it always appears,
+    // even when no platform URLs (Polar, Sponsors, etc.) are configured.
+    expect(output).toContain("0x468EC325f3797F5968dEcC757FA0B960Bd0f78Ef");
+    expect(output).toContain("Treasury wallet");
   });
 
   it("shows active revenue paths when present", () => {

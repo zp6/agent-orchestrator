@@ -74,4 +74,40 @@ export interface ReviewerConfig {
    * The calibration path `/calibration` is appended automatically.
    */
   dashboard_url?: string;
+  /**
+   * Fleet-level wallet and revenue-URL configuration.
+   *
+   * All fields are optional and fall back to their corresponding env vars
+   * (set in agents.yaml `providers.global`, per orchestrator#1331):
+   *   - FLEET_WALLET_ADDRESS
+   *   - FLEET_WALLET_NETWORK
+   *   - FLEET_GITHUB_SPONSORS_URL
+   *   - FLEET_POLAR_URL
+   *   - FLEET_ALGORA_URL
+   *   - FLEET_GITCOIN_URL
+   *
+   * Passing them here allows the orchestrator daemon to inject values
+   * programmatically without relying on the process environment, which
+   * is useful in tests or multi-tenant deployments.
+   */
+  fleet?: {
+    /**
+     * EVM-compatible wallet address (e.g. "0x468EC325f3797F5968dEcC757FA0B960Bd0f78Ef").
+     * Used by the metrics endpoint and survival-plan revenue tracking.
+     */
+    wallet_address?: string;
+    /**
+     * Network name where the wallet lives (e.g. "Base", "Ethereum").
+     * Surfaced in `GET /api/fleet-config` and Telegram status messages.
+     */
+    wallet_network?: string;
+    /** GitHub Sponsors profile URL. */
+    github_sponsors_url?: string;
+    /** Polar.sh page URL. */
+    polar_url?: string;
+    /** Algora bounty profile URL. */
+    algora_url?: string;
+    /** Gitcoin grants page URL. */
+    gitcoin_url?: string;
+  };
 }

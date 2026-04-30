@@ -1,0 +1,243 @@
+/**
+ * Public PR Review API — revenue path #5.
+ *
+ * Exposes the fleet's existing PR review capability as a paid external service.
+ *
+ * Pricing (ref: docs/revenue-paths.md, issue #1302):
+ *   • Basic  — $0.10 / PR: diff summary + approve/request-changes decision
+ *   • Deep   — $0.50 / PR: full LLM review + security scan + multi-provider consensus
+ *
+ * Payment: USDC/DAI on Base network to FLEET_WALLET_ADDRESS (see fleet-config.ts).
+ *
+ * Usage:
+ *   GET  /api/pr-review/info      — pricing, wallet, and capability docs
+ *   POST /api/pr-review/submit    — submit a PR for external review (billing required)
+ *
+ * Mount in the reviewer HTTP server:
+ *   app.get('/api/pr-review/info', (_req, res) => res.json(getPRReviewApiInfo()));
+ *   app.post('/api/pr-review/submit', (req, res) => handlePRReviewSubmission(req.body));
+ */
+
+import {
+  FLEET_WALLET_ADDRESS,
+  FLEET_WALLET_NETWORK,
+  FLEET_POLAR_URL,
+  FLEET_GITHUB_SPONSORS_URL,
+  PR_REVIEW_API_PRICING,
+  REVIEWER_PORT,
+} from "../config/fleet-config.js";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+/** Tier for an external PR review request. */
+export type PRReviewTier = "basic" | "deep";
+
+/** Incoming external PR review request body. */
+export interface ExternalPRReviewRequest {
+  /** GitHub repo slug: "owner/repo". */
+  repo: string;
+  /** PR number to review. */
+  pr_number: number;
+  /** Review tier: "basic" ($0.10) or "deep" ($0.50). */
+  tier: PRReviewTier;
+  /** Caller-supplied payment reference (tx hash or Polar order ID). */
+  payment_ref: string;
+  /**
+   * Optional: caller's webhook URL to receive the review result asynchronously.
+   * If omitted, the response is synchronous (may take 10–30 s for deep reviews).
+   */
+  callback_url?: string;
+}
+
+/** Response envelope for an accepted external PR review request. */
+export interface ExternalPRReviewResponse {
+  request_id: string;
+  repo: string;
+  pr_number: number;
+  tier: PRReviewTier;
+  status: "queued" | "processing" | "complete" | "error";
+  /** Filled once the review is complete. */
+  decision?: "approve" | "request_changes" | "escalate";
+  /** Human-readable review summary (populated on completion). */
+  summary?: string;
+  /** ISO timestamp when the review was accepted. */
+  accepted_at: string;
+  /** ISO timestamp when the review was completed (if already done). */
+  completed_at?: string;
+}
+
+/** Public API metadata: pricing, wallet, and capability description. */
+export interface PRReviewApiInfo {
+  name: string;
+  description: string;
+  version: string;
+  pricing: {
+    basic: { price_usd: number; description: string };
+    deep: { price_usd: number; description: string };
+  };
+  payment: {
+    wallet_address: string;
+    network: string;
+    supported_tokens: string[];
+    polar_url: string | null;
+    github_sponsors_url: string | null;
+  };
+  endpoints: {
+    info: string;
+    submit: string;
+  };
+  links: {
+    github: string;
+    docs: string;
+  };
+  disclosure: string;
+}
+
+// ─── Public API info payload ──────────────────────────────────────────────────
+
+/**
+ * Returns the public API info block.
+ *
+ * Suitable for:
+ * - `GET /api/pr-review/info` REST endpoint
+ * - GitHub Marketplace listing data
+ * - README "PR Review Service" section
+ */
+export function getPRReviewApiInfo(): PRReviewApiInfo {
+  return {
+    name: "Fleet PR Review API",
+    description:
+      "Autonomous AI fleet PR review service. Submit any GitHub PR and receive a structured " +
+      "approve/request-changes/escalate decision with detailed feedback, security scan, and " +
+      "multi-provider LLM consensus — within minutes.",
+    version: "1.0.0",
+    pricing: {
+      basic: {
+        price_usd: PR_REVIEW_API_PRICING.basic,
+        description:
+          "Diff summary + approve/request-changes decision. " +
+          "Ideal for routine dependency updates, small refactors, and hot-fix PRs.",
+      },
+      deep: {
+        price_usd: PR_REVIEW_API_PRICING.deep,
+        description:
+          "Full LLM review + security vulnerability scan + multi-provider consensus " +
+          "(Anthropic Claude + Deepseek R1). " +
+          "Recommended for feature PRs, architecture changes, and security-sensitive code.",
+      },
+    },
+    payment: {
+      wallet_address: FLEET_WALLET_ADDRESS,
+      network: FLEET_WALLET_NETWORK,
+      supported_tokens: ["USDC", "DAI", "ETH"],
+      polar_url: FLEET_POLAR_URL,
+      github_sponsors_url: FLEET_GITHUB_SPONSORS_URL,
+    },
+    endpoints: {
+      info: `http://localhost:${REVIEWER_PORT}/api/pr-review/info`,
+      submit: `http://localhost:${REVIEWER_PORT}/api/pr-review/submit`,
+    },
+    links: {
+      github: "https://github.com/rapartlu/agent-reviewer",
+      docs: "https://github.com/rapartlu/agent-reviewer/blob/main/docs/pr-review-api.md",
+    },
+    disclosure:
+      "This service is operated by an autonomous AI agent fleet (claude-orchestrator-reviewer). " +
+      "All reviews are generated by LLM models (Anthropic Claude, Deepseek R1) without human review " +
+      "unless the escalate decision is triggered. By submitting a PR you acknowledge AI authorship " +
+      "of the review output.",
+  };
+}
+
+// ─── Submission validation ─────────────────────────────────────────────────────
+
+/** Validates an incoming external review submission. Returns error string or null. */
+export function validatePRReviewRequest(
+  body: unknown
+): string | null {
+  if (!body || typeof body !== "object") {
+    return "Request body must be a JSON object";
+  }
+  const req = body as Record<string, unknown>;
+
+  if (typeof req["repo"] !== "string" || !req["repo"].includes("/")) {
+    return 'Field "repo" must be a string in "owner/repo" format';
+  }
+  if (typeof req["pr_number"] !== "number" || req["pr_number"] < 1) {
+    return 'Field "pr_number" must be a positive integer';
+  }
+  if (req["tier"] !== "basic" && req["tier"] !== "deep") {
+    return 'Field "tier" must be "basic" or "deep"';
+  }
+  if (typeof req["payment_ref"] !== "string" || req["payment_ref"].trim() === "") {
+    return 'Field "payment_ref" must be a non-empty string (tx hash or Polar order ID)';
+  }
+  if (
+    req["callback_url"] !== undefined &&
+    (typeof req["callback_url"] !== "string" || !req["callback_url"].startsWith("https://"))
+  ) {
+    return 'Optional field "callback_url" must be an https:// URL';
+  }
+  return null;
+}
+
+// ─── Markdown / Telegram surfaces ─────────────────────────────────────────────
+
+/**
+ * Returns a compact Markdown block suitable for embedding in README.md or
+ * Telegram messages to advertise the PR Review API.
+ */
+export function formatPRReviewApiSummaryMarkdown(): string {
+  const info = getPRReviewApiInfo();
+  return [
+    "## 🔍 PR Review API — Paid Service",
+    "",
+    info.description,
+    "",
+    "### Pricing",
+    `| Tier | Price | What you get |`,
+    `|------|-------|-------------|`,
+    `| Basic | $${info.pricing.basic.price_usd.toFixed(2)}/PR | ${info.pricing.basic.description} |`,
+    `| Deep  | $${info.pricing.deep.price_usd.toFixed(2)}/PR | ${info.pricing.deep.description} |`,
+    "",
+    "### Payment",
+    `Pay in USDC/DAI on **${info.payment.network}**:`,
+    `\`\`\``,
+    info.payment.wallet_address,
+    `\`\`\``,
+    info.payment.polar_url
+      ? `Or via [Polar.sh](${info.payment.polar_url}) for card/crypto checkout.`
+      : "_Polar.sh billing coming soon — pay direct to wallet for now._",
+    "",
+    `### Submit a review`,
+    `\`\`\`bash`,
+    `curl -X POST ${info.endpoints.submit} \\`,
+    `  -H 'Content-Type: application/json' \\`,
+    `  -d '{"repo":"owner/repo","pr_number":42,"tier":"deep","payment_ref":"<tx-hash>"}'`,
+    `\`\`\``,
+    "",
+    `_${info.disclosure}_`,
+  ].join("\n");
+}
+
+/**
+ * Returns a compact Telegram-formatted text block advertising the PR Review API.
+ * Called from the Telegram bot on /pr-review-info command.
+ */
+export function formatPRReviewApiForTelegram(): string {
+  const info = getPRReviewApiInfo();
+  return [
+    "🔍 *Fleet PR Review API*",
+    "",
+    `Basic: $${info.pricing.basic.price_usd.toFixed(2)}/PR — diff summary + decision`,
+    `Deep:  $${info.pricing.deep.price_usd.toFixed(2)}/PR — full LLM + security scan`,
+    "",
+    `💳 Pay USDC/DAI on ${info.payment.network}:`,
+    `\`${info.payment.wallet_address}\``,
+    info.payment.polar_url ? `Polar: ${info.payment.polar_url}` : null,
+    "",
+    `📖 Docs: ${info.links.github}`,
+  ]
+    .filter((l) => l !== null)
+    .join("\n");
+}

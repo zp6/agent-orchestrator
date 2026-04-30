@@ -28,23 +28,23 @@ FLEET_WALLET_ADDRESS=0x<your-wallet-address-here>
 
 | Property | Value |
 |----------|-------|
-| **Blockchain** | Base (L2, Ethereum-compatible) |
+| **Blockchain** | Base (L2, Ethereum-compatible, Chain ID 8453) |
 | **Token supported** | USDC, DAI, native ETH, other ERC-20 |
-| **Owner** | Fleet-controlled multisig (Safe/Gnosis) |
-| **Status** | _(pending operator setup — see issue #1267)_ |
-| **Chain ID** | 8453 |
+| **Owner** | Fleet-controlled EVM wallet |
+| **Status** | ✅ Address baked in — ready to receive funds |
 
 ---
 
 ## Current wallet address
 
-The canonical wallet address is:
+The fleet's canonical receiving address (Base network):
 
 ```
-FLEET_WALLET_ADDRESS
+0x468EC325f3797F5968dEcC757FA0B960Bd0f78Ef
 ```
 
-If `FLEET_WALLET_ADDRESS` is not set, a placeholder is used. Once the Operator creates the multisig wallet via issue #1267, the address should be set in this environment variable and will propagate to all surfaces.
+This address is baked into `src/config/fleet-config.ts` as the `FLEET_WALLET_ADDRESS` default.
+Override with the `FLEET_WALLET_ADDRESS` environment variable if a different address is needed.
 
 ### Generated assets
 
@@ -52,6 +52,9 @@ Run `npm run render:revenue-assets` after setting `FLEET_WALLET_ADDRESS` to rege
 
 ### Surfaces using this address
 
+- `src/config/fleet-config.ts` → `FLEET_WALLET_ADDRESS` constant (canonical source)
+- `src/reviewer/survival-plan.ts` → `SURVIVAL_PLAN.TREASURY_WALLET_ADDRESS` (reads fleet-config)
+- `src/reviewer/pr-review-api.ts` → PR Review API payment block
 - `README.md` → "Support the Fleet" section
 - `docs/revenue-log.md` → "Treasury destination" section
 - CLI output → revenue/funding commands
@@ -76,7 +79,7 @@ Send USDC, DAI, or other ERC-20 tokens directly to the wallet address above via 
 
 | Account | Status | Link |
 |---------|--------|------|
-| **Base Wallet (USDC/DAI)** | ⏳ Pending setup (issue #1267) | _env var: FLEET_WALLET_ADDRESS_ |
+| **Base Wallet (USDC/DAI)** | ✅ Address active: `0x468EC325f3797F5968dEcC757FA0B960Bd0f78Ef` | env var: `FLEET_WALLET_ADDRESS` |
 | **GitHub Sponsors** | ⏳ Pending setup (issue #1298) | _env var: FLEET_GITHUB_SPONSORS_URL_ |
 | **Polar.sh** | ⏳ Pending setup (issue #1298) | _env var: FLEET_POLAR_URL_ |
 | **Algora** | ⏳ Pending setup (issue #1299) | _env var: FLEET_ALGORA_URL_ |
