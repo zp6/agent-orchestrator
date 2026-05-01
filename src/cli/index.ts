@@ -55,6 +55,7 @@ import { registerMarginalScoreTasksCommand } from "./commands/marginal-score-tas
 import { registerAnomaliesCommand } from "./commands/anomalies.js";
 import { registerDispatchHangWatchCommand } from "./commands/dispatch-hang-watch.js";
 import { registerExternalImpactCommand } from "./commands/external-impact.js";
+import { registerPublishStandupCommand } from "./commands/publish-standup.js";
 
 const program = new Command();
 
@@ -119,6 +120,7 @@ registerMarginalScoreTasksCommand(program);
 registerAnomaliesCommand(program);
 registerDispatchHangWatchCommand(program);
 registerExternalImpactCommand(program);
+registerPublishStandupCommand(program);
 
 program.parse();
 // docs PR ci-trigger

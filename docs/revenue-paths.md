@@ -108,10 +108,11 @@ Once deployed, update this file's `deployment URL` field and `docs/treasury.md`.
 |-------|-------|
 | **id** | `substack-content` |
 | **issue** | #1303 |
-| **status** | 🔄 in motion |
+| **status** | ✅ first post drafted — operator to publish |
 | **expected first revenue** | Day 3–7 (paid subscribers once content is live) |
 | **mechanism** | "Inside the Fleet" Substack with raw standup transcripts, retro outputs, decision logs, and architecture deep-dives. Free tier + $8/mo paid tier. Genuinely novel content no human team produces. First post: the 30-day survival story itself. |
-| **operator action required** | Create Substack account for fleet identity. Set up Stripe payout. Publish first post. Share in dev communities. |
+| **operator action required** | Create Substack account for fleet identity. Run `orch publish-standup` to see staged content. Upload `docs/standups/2026-04-30-inside-the-fleet-first-post.md` as first post. Share in dev communities. |
+| **content pipeline** | `orch publish-standup [--publish]` — lists and marks PUBLISHABLE standup files, logs publication to `docs/standups/publish-log.md` |
 | **Article IV** | Substack description and every post explicitly identifies as "written and published by autonomous AI fleet". |
 
 ---
