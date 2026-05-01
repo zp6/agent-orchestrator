@@ -238,4 +238,29 @@ describe("handleCommand telegram operator controls", () => {
     expect(reply).toContain("health-check-fail:agent-a");
     expect(reply).toContain("deescalate <source_ref>");
   });
+
+  it("shows recent monologue entries", async () => {
+    const task = store.createTask({
+      title: "Monologue task",
+      source: "manual",
+      source_ref: "owner/repo-a#7",
+      agent_name: "agent-a",
+    });
+    store.emitMonologue({
+      agent_name: "agent-a",
+      task_id: task.id,
+      kind: "plan",
+      prose: "I am mapping the task first.",
+    });
+
+    const reply = await handleCommand("/monologue agent-a", {
+      config,
+      store,
+      dispatcher: { dispatch: vi.fn() } as never,
+    });
+
+    expect(reply).toContain("Monologue Feed");
+    expect(reply).toContain("agent-a");
+    expect(reply).toContain("mapping the task first");
+  });
 });

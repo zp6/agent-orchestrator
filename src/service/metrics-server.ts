@@ -24,6 +24,8 @@
  *   POST /marginal-score-tasks/:id/redispatch         — create a re-dispatch task for a marginal-score task
  *   GET /external-impact-ratio                        — anti-navel-gazing ratio: external vs internal work (issue #1372)
  *   GET /external-impact-ratio?days=7                 — configurable window
+ *   GET /monologue                                    — prose monologue feed
+ *   GET /monologue?agent=<name>&task=<id>&kind=<kind>&limit=50&offset=0
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
@@ -38,6 +40,8 @@ import {
   type StandupQualityAgentTrend,
   type MarginalScoreTasksResult,
   type ExternalImpactRatioResult,
+  type MonologueKind,
+  type MonologueEntry,
 } from "../state/store.js";
 import { createLogger } from "./logger.js";
 
@@ -51,6 +55,8 @@ const MAX_WINDOW_DAYS = 90;
 
 /** Maximum number of investigation items per page. */
 const MAX_INVESTIGATIONS_LIMIT = 100;
+/** Maximum number of monologue entries per page. */
+const MAX_MONOLOGUE_LIMIT = 200;
 
 /**
  * JSON response shape for GET /dispatch-efficiency.
@@ -312,6 +318,28 @@ export interface GuardHealthResponse {
   generated_at: string;
 }
 
+/**
+ * JSON response shape for GET /monologue.
+ */
+export interface MonologueFeedResponse {
+  /** Total matching entries. */
+  total: number;
+  /** Page entries, newest first. */
+  items: MonologueEntry[];
+  /** Page size used. */
+  limit: number;
+  /** Pagination offset. */
+  offset: number;
+  /** Optional agent filter. */
+  agent: string | null;
+  /** Optional task filter. */
+  task: string | null;
+  /** Optional kind filter. */
+  kind: MonologueKind | null;
+  /** ISO timestamp of when this response was generated. */
+  generated_at: string;
+}
+
 // ── Handler helpers ────────────────────────────────────────────────────────────
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -341,6 +369,20 @@ function parseWindowHours(req: IncomingMessage): number {
   if (isNaN(n) || n < 1) return 24;
   // Max 30 days = 720 hours
   return Math.min(n, 720);
+}
+
+function parseMonologueKind(value: string | null): MonologueKind | null {
+  if (
+    value === "plan" ||
+    value === "observation" ||
+    value === "decision" ||
+    value === "execution" ||
+    value === "reflection" ||
+    value === "escalation"
+  ) {
+    return value;
+  }
+  return null;
 }
 
 // ── Server factory ─────────────────────────────────────────────────────────────
@@ -555,6 +597,49 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
           error: err instanceof Error ? err.message : String(err),
         });
         sendJson(res, 500, { error: "Failed to compute metrics" });
+      }
+      return;
+    }
+
+    // ── GET /monologue ───────────────────────────────────────────────────────
+    if (url.pathname === "/monologue") {
+      const rawLimit = parseInt(url.searchParams.get("limit") ?? "50", 10);
+      const rawOffset = parseInt(url.searchParams.get("offset") ?? "0", 10);
+      const limit = isNaN(rawLimit) || rawLimit < 1 ? 50 : Math.min(rawLimit, MAX_MONOLOGUE_LIMIT);
+      const offset = isNaN(rawOffset) || rawOffset < 0 ? 0 : rawOffset;
+      const agent = url.searchParams.get("agent") ?? undefined;
+      const task = url.searchParams.get("task") ?? undefined;
+      const kind = parseMonologueKind(url.searchParams.get("kind"));
+
+      try {
+        const total = store.getMonologueCount({
+          agent_name: agent,
+          task_id: task,
+          kind: kind ?? undefined,
+        });
+        const items = store.getMonologue({
+          agent_name: agent,
+          task_id: task,
+          kind: kind ?? undefined,
+          limit,
+          offset,
+        });
+        const body: MonologueFeedResponse = {
+          total,
+          items,
+          limit,
+          offset,
+          agent: agent ?? null,
+          task: task ?? null,
+          kind,
+          generated_at: new Date().toISOString(),
+        };
+        sendJson(res, 200, body);
+      } catch (err) {
+        log.warn("Failed to fetch monologue feed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to fetch monologue feed" });
       }
       return;
     }

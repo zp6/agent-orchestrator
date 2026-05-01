@@ -17,6 +17,7 @@ import { deescalateAllEscalatedTasks, deescalateEscalatedTask, normaliseSourceRe
 import type { DigestSchedulerState } from "../service/slack-digest.js";
 import { isScheduledTimeReached, todayLocalDateString } from "../service/slack-digest.js";
 import { daemonStaleness } from "../utils/daemon-staleness.js";
+import type { MonologueEntry } from "../state/store.js";
 
 const log = createLogger("telegram");
 
@@ -217,6 +218,23 @@ function formatEscalatedTaskDetails(tasks: Array<{
   return `⚠️ *Escalated Tasks (${tasks.length})*\n\n${lines.join("\n")}\n\nUse \`deescalate <source_ref>\` or \`deescalate all\` to unblock.`;
 }
 
+function formatMonologueEntries(entries: MonologueEntry[]): string {
+  if (entries.length === 0) {
+    return "No monologue entries found.";
+  }
+
+  const lines = entries.map((entry) => {
+    const ts = new Date(entry.created_at).toISOString().replace("T", " ").slice(0, 19);
+    const shortTask = entry.task_id ? entry.task_id.slice(0, 8) : "no-task";
+    return (
+      `• ${ts} · ${entry.agent_name} · ${entry.kind} · \`${shortTask}\`\n` +
+      `  ${entry.prose.replace(/\n/g, "\n  ")}`
+    );
+  });
+
+  return `🗣️ *Monologue Feed*\n\n${lines.join("\n\n")}`;
+}
+
 async function handleTelegramEscalatedList(ctx: TelegramContext): Promise<string> {
   const escalated = ctx.store.findAllEscalatedTasks();
   if (escalated.length === 0) {
@@ -311,6 +329,30 @@ export async function handleCommand(text: string, ctx: TelegramContext): Promise
 
   if (cmd === "escalated" || cmd === "/escalated") {
     return await handleTelegramEscalatedList(ctx);
+  }
+
+  if (cmd === "monologue" || cmd === "/monologue" || cmd.startsWith("monologue ") || cmd.startsWith("/monologue ")) {
+    const parts = text.trim().split(/\s+/).slice(1);
+    let agentFilter: string | undefined;
+    let limit = 10;
+    for (const part of parts) {
+      if (/^\d+$/.test(part)) {
+        limit = Math.min(Math.max(parseInt(part, 10), 1), 25);
+      } else if (!agentFilter) {
+        agentFilter = part;
+      }
+    }
+
+    const entries = ctx.store.getMonologue({
+      agent_name: agentFilter,
+      limit,
+    }).reverse();
+    if (entries.length === 0) {
+      return agentFilter
+        ? `No monologue entries found for ${agentFilter}.`
+        : "No monologue entries found.";
+    }
+    return formatMonologueEntries(entries);
   }
 
   // Summary — the main command
@@ -521,13 +563,25 @@ Steps:
     }
     const conversationId = chatConversations.get(agentName)!;
 
-    const client = ctx.agentClient ?? new AgentClient(ctx.config);
+    const client = new AgentClient(ctx.config, ctx.store);
+    client.emitMonologue(
+      agentName,
+      null,
+      "plan",
+      "I am opening a direct chat session and will answer the operator's request now.",
+    );
 
     // Send "thinking..." then edit with response
     const thinkingId = await sendReply(`💭 ${agentName} is thinking...`);
 
     client.send(agentName, message, { conversationId })
       .then(async (response) => {
+        client.emitMonologue(
+          agentName,
+          null,
+          "reflection",
+          "I have finished the direct chat response and am handing the answer back.",
+        );
         const reply = response.content.slice(0, 3900);
         if (thinkingId) {
           await editMessage(thinkingId, `🤖 *${agentName}*\n\n${reply}`);
@@ -537,6 +591,12 @@ Steps:
       })
       .catch(async (err) => {
         const errMsg = err instanceof Error ? err.message : String(err);
+        client.emitMonologue(
+          agentName,
+          null,
+          "escalation",
+          "The direct chat request failed, so I am logging the blocker and surfacing the error.",
+        );
         if (thinkingId) {
           await editMessage(thinkingId, `❌ ${agentName} error: ${errMsg.slice(0, 200)}`);
         } else {
@@ -890,6 +950,7 @@ newchat <agent> — reset conversation
 issue <N> — pre-dispatch issue inspection
 issue <idea> — create issue from rough idea
 dispatch <agent> <msg> — send task
+/monologue [agent] — recent prose monologue entries
 /reassign <issue> <agent> — reroute issue now
 /prioritize <issue> — move issue to front next cycle
 /pause <task-id> — pause an in-flight task
@@ -970,6 +1031,43 @@ help — this message`;
       return `  • ${statusIcon} ${shortId} | ${typeLabel} | ${c.status} | ${ts}`;
     });
     return `🎛 *Operator Controls* (last 10)\n\n${lines.join("\n")}`;
+  }
+
+  // Monologue — agent prose narrative logs (issue #1383)
+  if (cmd === "monologue" || cmd === "/monologue" || cmd.startsWith("monologue ") || cmd.startsWith("/monologue ")) {
+    const parts = text.trim().split(/\s+/).slice(1);
+    const agentFilter = parts[0] || null;
+    const limit = 10;
+
+    const entries = ctx.store.getMonologue({
+      agent_name: agentFilter ?? undefined,
+      limit,
+    });
+
+    if (entries.length === 0) {
+      return agentFilter
+        ? `🎙 No monologue entries for *${agentFilter}*.`
+        : "🎙 No monologue entries yet.";
+    }
+
+    const kindIcons: Record<string, string> = {
+      plan: "📋", observation: "👁", decision: "⚖️",
+      execution: "⚙️", reflection: "💭", escalation: "🚨",
+    };
+
+    const lines = [...entries].reverse().map((e) => {
+      const ts = e.created_at.slice(11, 16); // HH:MM
+      const icon = kindIcons[e.kind] ?? "•";
+      const task = e.task_id ? ` [${e.task_id.slice(0, 8)}]` : "";
+      const prose = e.prose.replace(/\n/g, " ").slice(0, 140);
+      return `${icon} *${ts}* ${e.agent_name}${task}\n  ${prose}${e.prose.length > 140 ? "…" : ""}`;
+    });
+
+    const header = agentFilter
+      ? `🎙 *Monologue — ${agentFilter}* (last ${entries.length})`
+      : `🎙 *Monologue — fleet* (last ${entries.length})`;
+
+    return `${header}\n\n${lines.join("\n\n")}`;
   }
 
   // Default: treat as directive (fire-and-forget)

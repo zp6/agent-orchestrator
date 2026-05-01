@@ -67,7 +67,13 @@ export async function validateMergedPR(
   const validationTimer = setTimeout(() => controller.abort(), VALIDATION_TIMEOUT_MS);
 
   try {
-    const client = new AgentClient(config);
+    const client = new AgentClient(config, store);
+    client.emitMonologue(
+      agentName,
+      null,
+      "plan",
+      `I am starting post-merge validation for PR #${prNumber} on ${repo}; I will run the requested test sequence and report the result.`,
+    );
     const response = await client.send(agentName, [
       `Post-merge validation for PR #${prNumber} (${mergeSha.slice(0, 8)}).`,
       "",
@@ -92,6 +98,15 @@ export async function validateMergedPR(
       output: response.content.slice(0, 1000),
       duration_ms: Date.now() - start,
     };
+
+    client.emitMonologue(
+      agentName,
+      null,
+      passed ? "reflection" : "escalation",
+      passed
+        ? `The validation finished cleanly, so I am persisting the pass and closing the loop.`
+        : "The validation failed, so I am recording the regression path and preparing the revert workflow.",
+    );
 
     if (passed) {
       log.info("Post-merge validation PASSED", { repo, prNumber, duration: result.duration_ms });

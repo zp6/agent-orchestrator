@@ -267,7 +267,19 @@ async function queryAgent(
 ): Promise<RoundEntry> {
   const agent = config.agents[agentName];
   try {
+    client.emitMonologue(
+      agentName,
+      null,
+      "plan",
+      "I am joining the meeting round now and reviewing the shared context before I respond.",
+    );
     const response = await client.send(agentName, prompt, { systemPrompt });
+    client.emitMonologue(
+      agentName,
+      null,
+      "reflection",
+      "I have finished my meeting response and am handing it back to the facilitator.",
+    );
     return {
       agentName,
       provider: agent?.provider ?? "claude",
@@ -276,6 +288,12 @@ async function queryAgent(
       error: null,
     };
   } catch (err) {
+    client.emitMonologue(
+      agentName,
+      null,
+      "escalation",
+      "The meeting response failed, so I am recording the blocker and moving on.",
+    );
     log.warn("Agent failed to respond in meeting", {
       agentName,
       error: err instanceof Error ? err.message : String(err),
@@ -586,7 +604,7 @@ export async function runTeamMeeting(
     goalsContext += `\n\n${liveContext}`;
   }
 
-  const client = new AgentClient(config);
+  const client = new AgentClient(config, store);
   // Use explicit participants if provided, otherwise auto-select
   const agents = options?.participants ?? selectAgents(config);
 

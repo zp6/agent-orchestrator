@@ -119,6 +119,42 @@ describe("MetricsServer", () => {
     });
   });
 
+  describe("GET /monologue", () => {
+    it("returns paginated prose monologue entries", async () => {
+      const first = store.createTask({ title: "Monologue task 1", source: "manual", agent_name: "agent-a" });
+      const second = store.createTask({ title: "Monologue task 2", source: "manual", agent_name: "agent-a" });
+
+      store.emitMonologue({
+        agent_name: "agent-a",
+        task_id: first.id,
+        kind: "plan",
+        prose: "I am mapping the task first.",
+      });
+      store.emitMonologue({
+        agent_name: "agent-a",
+        task_id: second.id,
+        kind: "execution",
+        prose: "I am sending the work now.",
+      });
+
+      const { status, body } = await fetchJson(`http://127.0.0.1:${port}/monologue?agent=agent-a&limit=1&offset=0`) as {
+        status: number;
+        body: {
+          total: number;
+          items: Array<{ task_id: string; kind: string; prose: string }>;
+          agent: string | null;
+          kind: string | null;
+        };
+      };
+
+      expect(status).toBe(200);
+      expect(body.total).toBe(2);
+      expect(body.agent).toBe("agent-a");
+      expect(body.items).toHaveLength(1);
+      expect(body.items[0].kind).toBe("execution");
+    });
+  });
+
   describe("GET /unknown-route", () => {
     it("returns 404", async () => {
       const { status } = await fetchJson(`http://127.0.0.1:${port}/unknown-route`);

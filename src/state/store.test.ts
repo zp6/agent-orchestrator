@@ -131,6 +131,49 @@ describe("StateStore", () => {
     });
   });
 
+  describe("monologues", () => {
+    it("records prose monologue entries and filters them", () => {
+      const t1 = store.createTask({ title: "Monologue task 1", source: "manual" });
+      const t2 = store.createTask({ title: "Monologue task 2", source: "manual" });
+
+      store.emitMonologue({
+        agent_name: "claude-agent-orchestrator",
+        task_id: t1.id,
+        kind: "plan",
+        prose: "I am mapping the task first, then I will verify the store path.",
+      });
+      store.emitMonologue({
+        agent_name: "claude-agent-orchestrator",
+        task_id: t2.id,
+        kind: "execution",
+        prose: "The migration is in place, and I am wiring the helper next.",
+      });
+
+      const all = store.getMonologue({ limit: 10 }).reverse();
+      expect(all).toHaveLength(2);
+      expect(all[0]).toMatchObject({
+        agent_name: "claude-agent-orchestrator",
+        task_id: t1.id,
+        kind: "plan",
+      });
+      expect(all[1]).toMatchObject({
+        task_id: t2.id,
+        kind: "execution",
+      });
+
+      const filtered = store.getMonologue({ task_id: t1.id });
+      expect(filtered).toHaveLength(1);
+      expect(filtered[0].prose).toContain("mapping the task first");
+
+      const counted = store.getMonologueCount({ agent_name: "claude-agent-orchestrator" });
+      expect(counted).toBe(2);
+
+      const paged = store.getMonologue({ limit: 1, offset: 1 });
+      expect(paged).toHaveLength(1);
+      expect(paged[0].task_id).toBe(t1.id);
+    });
+  });
+
   describe("token usage", () => {
     it("records token usage and aggregates it by agent", () => {
       store.recordTokenUsage("claude", "claude-agent-orchestrator", 100, 40);

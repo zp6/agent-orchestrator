@@ -93,6 +93,7 @@ function makeMockStore(overrides: Partial<StateStore> = {}): StateStore {
     updateCoordinationGroup: vi.fn(),
     hasActiveTask: vi.fn().mockReturnValue(false),
     getPriorAttempts: vi.fn().mockReturnValue([]),
+    emitMonologue: vi.fn().mockReturnValue({ id: 1, created_at: new Date().toISOString() }),
     ...overrides,
   } as unknown as StateStore;
 }

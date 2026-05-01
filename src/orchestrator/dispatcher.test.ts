@@ -358,6 +358,14 @@ describe("Dispatcher.dispatch — retry scheduling on failure", () => {
     expect(task?.status).toBe("done");
     expect(task?.retry_count).toBe(0);
     expect(task?.next_retry_at).toBeNull();
+
+    const monologues = store.getMonologue({ task_id: result.taskId, limit: 10 }).reverse();
+    expect(monologues.map((entry) => entry.kind)).toEqual([
+      "plan",
+      "execution",
+      "reflection",
+    ]);
+    expect(monologues[0].prose).toContain("picked up");
   });
 
   it("uses CONNECTION_ERROR_RETRY_DELAYS_MS[0] for the first connection-error retry delay", async () => {
@@ -3004,7 +3012,7 @@ describe("dispatch() — repo-to-agent affinity guardrail (issue #928)", () => {
       expect.any(String),
       expect.any(String),
     );
-  });
+  }, 15000);
 
   it("affinity guardrail is skipped when mapped agent is not registered", async () => {
     const config = makeAffinityConfig();

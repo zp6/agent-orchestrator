@@ -37,6 +37,7 @@ import { registerRoutingAccuracyCommand } from "./commands/routing-accuracy.js";
 import { registerSignalsCommand } from "./commands/signals.js";
 import { registerLearnedPatternsCommand } from "./commands/learned-patterns.js";
 import { registerAgentGapsCommand } from "./commands/agent-gaps.js";
+import { registerMonologueCommand } from "./commands/monologue.js";
 import { registerLineageCommand } from "./commands/lineage.js";
 import { registerAntibodiesCommand } from "./commands/antibodies.js";
 import { registerHealthCheckEfficiencyCommand } from "./commands/health-check-efficiency.js";
@@ -103,6 +104,7 @@ registerRoutingMismatchesCommand(program);
 registerSignalsCommand(program);
 registerLearnedPatternsCommand(program);
 registerLineageCommand(program);
+registerMonologueCommand(program);
 registerAntibodiesCommand(program);
 registerHealthCheckEfficiencyCommand(program);
 registerHealthChecksCommand(program);
@@ -121,6 +123,7 @@ registerAnomaliesCommand(program);
 registerDispatchHangWatchCommand(program);
 registerExternalImpactCommand(program);
 registerPublishStandupCommand(program);
+registerMonologueCommand(program);
 
 program.parse();
 // docs PR ci-trigger

@@ -2,8 +2,14 @@ import Anthropic from "@anthropic-ai/sdk";
 import { createProxyClient } from "./proxy-client.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import { getAgentDir, getAgentApiKey, getAgentBaseUrl, getAgentModel } from "../config/schema.js";
-import type { TaskType } from "../state/store.js";
+import type { MonologueKind, TaskType } from "../state/store.js";
 import type { StateStore } from "../state/store.js";
+
+const MONOLOGUE_GUIDANCE = `MONOLOGUE LOGGING:
+- At decision points and major transitions, write a brief prose monologue entry.
+- Keep it to 1-4 sentences and speak as if updating a colleague on what you are doing.
+- Use concrete progress, blockers, and next steps. Be honest about dead ends and uncertainty.
+- Do not log secrets or raw private data.`;
 
 export interface AgentResponse {
   content: string;
@@ -79,6 +85,8 @@ CRITICAL — PR discipline (one issue, one branch, one PR):
 - Do NOT fix "other things you noticed" while working on an issue. Create a new issue for it instead.
 - Do NOT add CI workflows, changelog automation, or meta-tooling unless the issue specifically asks for it.
 
+${MONOLOGUE_GUIDANCE}
+
 CRITICAL — Backlog triage and roadmap:
 - You own your issue backlog. Regularly review open issues and PRs on your repo.
 - **Prioritise**: when you have multiple open issues, pick the highest-impact one — features users want most, bugs blocking functionality, then polish.
@@ -103,6 +111,25 @@ Avoid pure-tech suggestions (refactoring, tooling, testing infrastructure) unles
 export const buildAgentIdentityPrompt = buildAgentSystemPrompt;
 
 /**
+ * Convenience helper for agent code that has a StateStore-backed client.
+ * This keeps monologue emission one call away from agent logic without
+ * requiring the caller to touch SQLite directly.
+ */
+export function buildMonologueEntry(
+  agentName: string,
+  taskId: string | null | undefined,
+  kind: MonologueKind,
+  prose: string,
+): { agent_name: string; task_id?: string; kind: MonologueKind; prose: string } {
+  return {
+    agent_name: agentName,
+    ...(taskId ? { task_id: taskId } : {}),
+    kind,
+    prose,
+  };
+}
+
+/**
  * Build the system prompt for research tasks.
  * Instructs the agent to investigate and analyze, NOT to create PRs/issues/code.
  */
@@ -125,6 +152,8 @@ Structure your response as:
 4. **Risks & Unknowns** — what could go wrong, what needs more investigation
 5. **Recommendation** — clear yes/no/maybe with conditions
 
+${MONOLOGUE_GUIDANCE}
+
 IMPORTANT: Do NOT create branches, PRs, issues, or make any code changes.
 Do NOT suggest self-improvement issues or create GitHub issues.
 This is a research-only task — your entire output should be your findings.`;
@@ -145,6 +174,16 @@ export class AgentClient {
     private config: OrchestratorConfig,
     private store?: StateStore,
   ) {}
+
+  emitMonologue(
+    agentName: string,
+    taskId: string | null | undefined,
+    kind: MonologueKind,
+    prose: string,
+  ): void {
+    if (!this.store) return;
+    this.store.emitMonologue(buildMonologueEntry(agentName, taskId, kind, prose));
+  }
 
   /**
    * Build the directives suffix to append to every system prompt.

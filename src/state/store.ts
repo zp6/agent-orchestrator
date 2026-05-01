@@ -256,6 +256,8 @@ export interface TaskLog {
   created_at: string;
 }
 
+export type MonologueKind = "plan" | "observation" | "decision" | "execution" | "reflection" | "escalation";
+
 export interface AgentMetrics {
   agent_name: string;
   total: number;
@@ -1910,6 +1912,7 @@ export class StateStore {
     this.runGuardHealthMetricsMigration();
     this.runGuardDuplicateSuppressionsMigration();
     this.runOSSEngagementMigration();
+    this.runMonologueMigration();
   }
 
   private runPhase2Migration(): void {
@@ -4276,7 +4279,7 @@ export class StateStore {
     }
     if (days > 0) {
       const cutoff = new Date(Date.now() - days * 24 * 3600_000).toISOString();
-      conditions.push("created_at >= ?");
+      conditions.push("timestamp >= ?");
       params.push(cutoff);
     }
 
@@ -12657,10 +12660,10 @@ export class StateStore {
         reference TEXT NOT NULL,
         agent TEXT NOT NULL,
         notes TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        timestamp TEXT NOT NULL DEFAULT (datetime('now'))
       );
       CREATE INDEX IF NOT EXISTS idx_oss_engagement_repo
-        ON oss_engagement(repo, created_at DESC);
+        ON oss_engagement(repo, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_oss_engagement_type
         ON oss_engagement(engagement_type);
       CREATE INDEX IF NOT EXISTS idx_oss_engagement_agent
@@ -12699,10 +12702,10 @@ export class StateStore {
   }> {
     this.runOSSEngagementMigration();
     return this.db.prepare(`
-      SELECT id, repo, engagement_type, reference, agent, notes, created_at
+      SELECT id, repo, engagement_type, reference, agent, notes, timestamp AS created_at
       FROM oss_engagement
       WHERE repo = ?
-      ORDER BY created_at DESC
+      ORDER BY timestamp DESC
     `).all(repo) as Array<{
       id: number;
       repo: string;
@@ -12728,10 +12731,10 @@ export class StateStore {
   }> {
     this.runOSSEngagementMigration();
     return this.db.prepare(`
-      SELECT id, repo, engagement_type, reference, agent, notes, created_at
+      SELECT id, repo, engagement_type, reference, agent, notes, timestamp AS created_at
       FROM oss_engagement
-      WHERE created_at >= ?
-      ORDER BY created_at DESC
+      WHERE timestamp >= ?
+      ORDER BY timestamp DESC
     `).all(since) as Array<{
       id: number;
       repo: string;
@@ -12742,6 +12745,198 @@ export class StateStore {
       created_at: string;
     }>;
   }
+
+  // ── Agent Monologue Logs (issue #1383) ──────────────────────────────────────
+
+  private runMonologueMigration(): void {
+    const columns = this.db.prepare(`PRAGMA table_info(monologue_log)`).all() as Array<{ name: string }>;
+    const columnNames = new Set(columns.map((column) => column.name));
+    if (columnNames.has("created_at") && !columnNames.has("timestamp")) {
+      this.db.exec(`ALTER TABLE monologue_log RENAME COLUMN created_at TO timestamp;`);
+    }
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS monologue_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_name TEXT NOT NULL,
+        task_id TEXT,
+        kind TEXT NOT NULL DEFAULT 'observation',
+        prose TEXT NOT NULL,
+        timestamp TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_monologue_agent
+        ON monologue_log(agent_name, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_monologue_task
+        ON monologue_log(task_id, timestamp ASC);
+      CREATE INDEX IF NOT EXISTS idx_monologue_kind
+        ON monologue_log(kind);
+      CREATE INDEX IF NOT EXISTS idx_monologue_created
+        ON monologue_log(timestamp DESC);
+    `);
+  }
+
+  /**
+   * Emit a prose monologue entry for an agent.
+   *
+   * Agents call this at decision points and significant transitions — not
+   * every line of reasoning. Roughly 1–10 entries per dispatch.
+   *
+   * @param kind — plan | observation | decision | execution | reflection | escalation
+   */
+  emitMonologue(params: {
+    agent_name: string;
+    task_id?: string;
+    kind: MonologueKind;
+    prose: string;
+  }): { id: number; created_at: string } {
+    this.runMonologueMigration();
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `INSERT INTO monologue_log (agent_name, task_id, kind, prose, timestamp)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        params.agent_name,
+        params.task_id ?? null,
+        params.kind,
+        params.prose,
+        now,
+      );
+    return { id: Number(result.lastInsertRowid), created_at: now };
+  }
+
+  /**
+   * Get recent monologue entries, newest first.
+   * Filterable by agent name, task ID, kind, and time range.
+   */
+  getMonologue(opts?: {
+    agent_name?: string;
+    task_id?: string;
+    kind?: MonologueKind;
+    since?: string;
+    limit?: number;
+    offset?: number;
+  }): MonologueEntry[] {
+    this.runMonologueMigration();
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (opts?.agent_name) {
+      conditions.push("agent_name = ?");
+      params.push(opts.agent_name);
+    }
+    if (opts?.task_id) {
+      conditions.push("task_id = ?");
+      params.push(opts.task_id);
+    }
+    if (opts?.kind) {
+      conditions.push("kind = ?");
+      params.push(opts.kind);
+    }
+    if (opts?.since) {
+      conditions.push("timestamp >= ?");
+      params.push(opts.since);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limit = opts?.limit ?? 50;
+    const offset = opts?.offset ?? 0;
+
+    return this.db
+      .prepare(
+        `SELECT id, agent_name, task_id, kind, prose, timestamp AS created_at
+         FROM monologue_log
+         ${where}
+         ORDER BY timestamp DESC, id DESC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(...params, limit, offset) as MonologueEntry[];
+  }
+
+  /**
+   * Get monologue entries for peer agents working on related tasks.
+   * Used for cross-agent context injection at dispatch time.
+   */
+  getPeerMonologue(params: {
+    exclude_agent: string;
+    task_ids?: string[];
+    limit?: number;
+  }): MonologueEntry[] {
+    this.runMonologueMigration();
+    const limit = params.limit ?? 10;
+
+    if (params.task_ids && params.task_ids.length > 0) {
+      const placeholders = params.task_ids.map(() => "?").join(", ");
+      return this.db
+        .prepare(
+          `SELECT id, agent_name, task_id, kind, prose, timestamp AS created_at
+           FROM monologue_log
+           WHERE agent_name != ? AND task_id IN (${placeholders})
+           ORDER BY timestamp DESC
+           LIMIT ?`,
+        )
+        .all(params.exclude_agent, ...params.task_ids, limit) as MonologueEntry[];
+    }
+
+    // Fallback: recent entries from other agents
+    return this.db
+      .prepare(
+        `SELECT id, agent_name, task_id, kind, prose, timestamp AS created_at
+         FROM monologue_log
+         WHERE agent_name != ?
+         ORDER BY timestamp DESC
+         LIMIT ?`,
+      )
+      .all(params.exclude_agent, limit) as MonologueEntry[];
+  }
+
+  /**
+   * Count monologue entries, optionally filtered.
+   */
+  getMonologueCount(opts?: {
+    agent_name?: string;
+    task_id?: string;
+    kind?: MonologueKind;
+    since?: string;
+  }): number {
+    this.runMonologueMigration();
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (opts?.agent_name) {
+      conditions.push("agent_name = ?");
+      params.push(opts.agent_name);
+    }
+    if (opts?.task_id) {
+      conditions.push("task_id = ?");
+      params.push(opts.task_id);
+    }
+    if (opts?.kind) {
+      conditions.push("kind = ?");
+      params.push(opts.kind);
+    }
+    if (opts?.since) {
+      conditions.push("timestamp >= ?");
+      params.push(opts.since);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const row = this.db
+      .prepare(`SELECT COUNT(*) as cnt FROM monologue_log ${where}`)
+      .get(...params) as { cnt: number };
+    return row.cnt;
+  }
+}
+
+export interface MonologueEntry {
+  id: number;
+  agent_name: string;
+  task_id: string | null;
+  kind: MonologueKind;
+  prose: string;
+  created_at: string;
 }
 
 // ── FTS5 query builder ────────────────────────────────────────────────────────

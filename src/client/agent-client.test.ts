@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { AgentClient, buildAgentIdentityPrompt, buildAgentSystemPrompt, buildResearchPrompt } from "./agent-client.js";
+import { AgentClient, buildAgentIdentityPrompt, buildAgentSystemPrompt, buildMonologueEntry, buildResearchPrompt } from "./agent-client.js";
 import { createServer, type Server } from "node:http";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { unlinkSync } from "node:fs";
 import type { OrchestratorConfig } from "../config/schema.js";
+import { StateStore } from "../state/store.js";
 
 let server: Server;
 let port: number;
@@ -173,6 +178,12 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("Content depth");
   });
 
+  it("includes monologue logging guidance", () => {
+    const prompt = buildAgentSystemPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("MONOLOGUE LOGGING");
+    expect(prompt).toContain("decision points and major transitions");
+  });
+
   it("works with an empty github repo", () => {
     const prompt = buildAgentSystemPrompt("anon-agent", "");
     expect(prompt).toContain(`"anon-agent"`);
@@ -266,6 +277,12 @@ describe("buildResearchPrompt", () => {
     expect(prompt).toContain("Recommendation");
   });
 
+  it("includes monologue logging guidance", () => {
+    const prompt = buildResearchPrompt("test-agent", "owner/repo");
+    expect(prompt).toContain("MONOLOGUE LOGGING");
+    expect(prompt).toContain("1-4 sentences");
+  });
+
   it("forbids code changes and PR creation", () => {
     const prompt = buildResearchPrompt("test-agent", "owner/repo");
     expect(prompt).toContain("Do NOT create branches, PRs, issues");
@@ -277,6 +294,50 @@ describe("buildResearchPrompt", () => {
     expect(prompt).not.toContain("Closes #N");
     expect(prompt).not.toContain("ROADMAP.md");
     expect(prompt).not.toContain("gh pr create");
+  });
+});
+
+describe("monologue helper", () => {
+  it("buildMonologueEntry returns a normalized payload", () => {
+    expect(buildMonologueEntry("agent", "task", "reflection", "I learned something.")).toEqual({
+      agent_name: "agent",
+      task_id: "task",
+      kind: "reflection",
+      prose: "I learned something.",
+    });
+  });
+
+  it("buildMonologueEntry omits task_id when one is not provided", () => {
+    expect(buildMonologueEntry("agent", null, "observation", "Checking in.")).toEqual({
+      agent_name: "agent",
+      kind: "observation",
+      prose: "Checking in.",
+    });
+  });
+
+  it("AgentClient.emitMonologue writes through the store", () => {
+    const dbPath = join(tmpdir(), `orch-test-${randomUUID()}.db`);
+    const store = new StateStore(dbPath);
+
+    try {
+      const client = new AgentClient(makeConfig(port), store);
+      const task = store.createTask({ title: "Monologue helper task", source: "manual" });
+      client.emitMonologue("test-agent", task.id, "decision", "I have enough context now, so I am taking the direct path.");
+
+      const entries = store.getMonologue({ task_id: task.id });
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({
+        agent_name: "test-agent",
+        task_id: task.id,
+        kind: "decision",
+        prose: "I have enough context now, so I am taking the direct path.",
+      });
+    } finally {
+      store.close();
+      for (const suffix of ["", "-wal", "-shm"]) {
+        try { unlinkSync(dbPath + suffix); } catch {}
+      }
+    }
   });
 });
 
