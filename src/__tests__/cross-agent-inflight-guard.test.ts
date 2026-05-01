@@ -258,6 +258,117 @@ describe("CrossAgentInflightGuard — same-agent tasks excluded", () => {
   });
 });
 
+// ── Sibling-variant deduplication (issue #606) ───────────────────────────────
+
+describe("CrossAgentInflightGuard — sibling-variant deduplication (issue #606)", () => {
+  it("does NOT block dispatch when the only in-flight task belongs to a sibling variant of the target", async () => {
+    // claude-research-agent is in-flight; grok-research-agent is being dispatched.
+    // Both belong to the same canonical family ("research-agent") — not a conflict.
+    const siblingTask = makeTask({
+      agent_name: "claude-research-agent",
+      source_ref: "rapartlu/research-agent#237",
+      status: "in_progress",
+    });
+    const store = makeStore([siblingTask]);
+    const guard = new CrossAgentInflightGuard(store);
+
+    const result = await guard.check({
+      source_ref: "rapartlu/research-agent#237",
+      target_agent: "grok-research-agent",
+    });
+
+    expect(result.skip).toBe(false);
+    expect(result.resolution).toBe("no-conflict");
+  });
+
+  it("does NOT block dispatch for any sibling pair (codex → deepseek)", async () => {
+    const siblingTask = makeTask({
+      agent_name: "codex-research-agent",
+      source_ref: "owner/repo#55",
+      status: "dispatched",
+    });
+    const store = makeStore([siblingTask]);
+    const guard = new CrossAgentInflightGuard(store);
+
+    const result = await guard.check({
+      source_ref: "owner/repo#55",
+      target_agent: "deepseek-research-agent",
+    });
+
+    expect(result.skip).toBe(false);
+    expect(result.resolution).toBe("no-conflict");
+  });
+
+  it("does NOT block when target is the canonical name and in-flight is a variant", async () => {
+    // Non-prefixed canonical target vs. prefixed in-flight: not a real conflict
+    // because the canonical name doesn't resolve to a variant family (it stays itself).
+    // However, a prefixed variant's in-flight task IS a conflict for a differently-
+    // named canonical agent — just not for itself.
+    const siblingTask = makeTask({
+      agent_name: "grok-orchestrator-reviewer",
+      source_ref: "owner/repo#77",
+      status: "in_progress",
+    });
+    const store = makeStore([siblingTask]);
+    const guard = new CrossAgentInflightGuard(store);
+
+    // Same sibling family — all variants strip to "orchestrator-reviewer"
+    const result = await guard.check({
+      source_ref: "owner/repo#77",
+      target_agent: "claude-orchestrator-reviewer",
+    });
+
+    expect(result.skip).toBe(false);
+    expect(result.resolution).toBe("no-conflict");
+  });
+
+  it("still blocks dispatch when a genuinely different agent family is in-flight", async () => {
+    // claude-research-agent is in-flight; claude-orchestrator-reviewer is being dispatched.
+    // Different families — this IS a real cross-agent conflict.
+    const differentFamilyTask = makeTask({
+      agent_name: "claude-research-agent",
+      source_ref: "owner/repo#88",
+      status: "in_progress",
+    });
+    const store = makeStore([differentFamilyTask]);
+    const guard = new CrossAgentInflightGuard(store);
+
+    const result = await guard.check({
+      source_ref: "owner/repo#88",
+      target_agent: "claude-orchestrator-reviewer",
+    });
+
+    expect(result.skip).toBe(true);
+    expect(result.resolution).toBe("already-in-flight");
+    expect(result.conflicting_agent).toBe("claude-research-agent");
+  });
+
+  it("multiple sibling variants in-flight for same issue do not block the family", async () => {
+    // Both claude and grok variants of research-agent are in-flight (ghost entries).
+    // Dispatching a third sibling (deepseek) should still be no-conflict.
+    const task1 = makeTask({
+      agent_name: "claude-research-agent",
+      source_ref: "owner/repo#99",
+      status: "in_progress",
+    });
+    const task2 = makeTask({
+      agent_name: "grok-research-agent",
+      source_ref: "owner/repo#99",
+      status: "dispatched",
+    });
+    const store = makeStore([task1, task2]);
+    const guard = new CrossAgentInflightGuard(store);
+
+    const result = await guard.check({
+      source_ref: "owner/repo#99",
+      target_agent: "deepseek-research-agent",
+    });
+
+    expect(result.skip).toBe(false);
+    expect(result.resolution).toBe("no-conflict");
+  });
+});
+
 // ── Telegram alert ────────────────────────────────────────────────────────────
 
 describe("CrossAgentInflightGuard — Telegram alert", () => {

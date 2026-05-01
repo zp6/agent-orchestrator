@@ -30,6 +30,7 @@
 import type { IStateStore, Task } from "../state/types.js";
 import type { Notifier } from "../notify.js";
 import { createLogger } from "../service/logger.js";
+import { canonicalizeAgentVariantName } from "../state/agent-variant.js";
 
 const log = createLogger("cross-agent-inflight-guard");
 
@@ -160,9 +161,17 @@ export class CrossAgentInflightGuard {
       };
     }
 
-    // Filter out tasks owned by the target agent — only cross-agent conflicts matter.
+    // Filter out tasks owned by the target agent (or a sibling variant of the same
+    // canonical family) — only genuine cross-family conflicts matter.
+    //
+    // Without canonicalization, `claude-research-agent` and `grok-research-agent`
+    // would appear as different agents, causing the guard to block a sibling variant
+    // from being dispatched to an issue that the other sibling is already handling.
+    // Both variants should be treated as the same family (issue #606).
+    const targetCanonical = canonicalizeAgentVariantName(target_agent);
     const crossAgentTasks = inFlightTasks.filter(
-      (t) => t.agent_name !== target_agent && t.agent_name != null,
+      (t) => t.agent_name != null &&
+        canonicalizeAgentVariantName(t.agent_name) !== targetCanonical,
     );
 
     if (crossAgentTasks.length === 0) {
