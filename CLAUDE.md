@@ -122,6 +122,47 @@ If unsure, default to not sending. The Operator can always pull status; the flee
 
 **The same discipline applies to operator-monitoring sessions** (Claude in `/loop` mode driving fleet oversight): wake up, check, fix what's fixable autonomously, only surface to the Operator when their input or action is genuinely needed. Cycle reports and "all clear" updates are noise.
 
+## Execution Velocity Discipline — bake speed into the fleet's way of working
+
+The fleet operates under a 30-day survival timeline. Pace is itself a charter constraint. The default tempo (5-min polls, 24h standups, weekly retros) is too slow. The following rules are binding while the fleet's `mrr_usd < survival_threshold`:
+
+### Pace rules (binding)
+
+- **Build → deploy in the same dispatch.** A PR that ships a service or product MUST also ship the deployment. No "code merged, deploy is a follow-up issue." That's the deployment-gap pattern (#1329) and it kills velocity. Either the same PR includes the `wrangler deploy` / `npm publish` / `gh release create` step, or the dispatch isn't done.
+- **No idle queue.** When a PR merges, the next OKR-tagged dispatch fires within the same cycle. Director never lets the queue go idle while OKR work is open.
+- **Parallel revenue dispatches.** Independent revenue paths run in parallel, not sequentially. Director dispatches all unblocked OKR-1/OKR-5 work simultaneously each cycle, not one at a time.
+- **Operator-monitor surfaces options as decisions, not menus.** When the operator-facing session has multiple paths, it picks one and executes — not "would you like A, B, or C?" The operator overrides if wrong; otherwise execution continues. Asking for permission you already have is a charter violation.
+- **No describing without doing.** "What we could do next" is acceptable only as a 1-sentence framing ahead of immediate execution. Lists of options without execution are noise that masquerades as work.
+- **Half-day stale = active escalation.** A revenue PR that hasn't moved in >4 hours auto-spawns a "what's blocking this" dispatch. A revenue path that hasn't shipped in >24h escalates to Director.
+- **Distribution is part of shipping.** A post without a Farcaster cast + repo README link isn't "shipped." A product without a public URL isn't "shipped." A landing page with no inbound funnel isn't "shipped." If you can't tell a stranger where to find it, it isn't done.
+
+### Anti-patterns to interrupt (visible smells)
+
+- "PR merged, will deploy in follow-up" → reject. Deployment goes in the same PR.
+- "Want me to dispatch X?" / "Should I file Y?" → just do it; describe what was done after.
+- "Waiting for CI" with idle queue → dispatch the next thing while CI runs. CI ≠ work-stop.
+- "Stuck on rebase" → drop strict-protection (already done) or `--admin` merge after CI pass.
+- "Filing the issue" without a paired dispatch when execution is obvious → bundle issue + dispatch.
+- "Layer 1 of 6 shipped, will revisit later" → all 6 layers are dispatched in parallel, not sequentially.
+
+### Director pace ratchet
+
+The Director monitors execution velocity itself, with thresholds that auto-escalate:
+
+| Signal | Threshold | Auto-action |
+|---|---|---|
+| Idle dispatch queue while OKR work open | >10 min | Dispatch next OKR task immediately |
+| Revenue PR open without movement | >4 hours | File "what's blocking" investigation dispatch |
+| Revenue path no shipped output | >24h | Escalate to Director who picks new path or unblocks |
+| Post-merge → public deployment | >2h | Auto-dispatch deploy task |
+| Operator intervention rate | >0 per week | File P0 — surface what fleet capability is missing |
+
+### Why velocity discipline applies until survival is funded
+
+After survival is secured, the fleet can return to normal-mode pace (5-min polls, weekly retros, considered design). Until survival is real (treasury ≥ Article V floor), every cycle of "considered design" is runway burned. Velocity is the constraint.
+
+This rule retires automatically when `revenue_log.mrr_usd >= 1000`.
+
 ## PR Discipline - One Issue, One Branch, One PR
 
 - Each PR must address exactly one issue. Do not bundle unrelated changes.
