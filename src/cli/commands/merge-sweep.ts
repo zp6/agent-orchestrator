@@ -3,9 +3,11 @@ import chalk from "chalk";
 import { loadConfig } from "../../config/schema.js";
 import {
   scanFleetMergeStalls,
+  autoMergeFleetPRs,
   getMergeStallThresholdHours,
   setMergeStallThresholdHours,
   type MergeablePR,
+  type MergeResult,
 } from "../../triggers/merge-stall-guard.js";
 
 function formatStaleHours(hours: number): string {
@@ -52,13 +54,41 @@ function printTable(prs: MergeablePR[]): void {
   );
 }
 
+function printMergeResults(results: MergeResult[]): void {
+  const succeeded = results.filter((r) => r.success);
+  const failed = results.filter((r) => !r.success);
+
+  console.log();
+  if (succeeded.length > 0) {
+    console.log(chalk.green(`✓ Merged ${succeeded.length} PR(s):`));
+    for (const r of succeeded) {
+      console.log(chalk.green(`  ✓ ${r.pr.repo}#${r.pr.number} — ${r.pr.title}`));
+    }
+  }
+
+  if (failed.length > 0) {
+    console.log(chalk.red(`✗ Failed to merge ${failed.length} PR(s):`));
+    for (const r of failed) {
+      console.log(chalk.red(`  ✗ ${r.pr.repo}#${r.pr.number} — ${r.error}`));
+    }
+  }
+
+  console.log();
+  const total = results.length;
+  console.log(
+    `${chalk.bold("Summary:")} ${succeeded.length}/${total} merged` +
+    (failed.length > 0 ? `, ${failed.length} failed` : ""),
+  );
+}
+
 export function registerMergeSweepCommand(program: Command): void {
   program
     .command("merge-sweep")
     .description("Scan fleet repos for stale MERGEABLE PRs that block dispatch")
     .option("--threshold <hours>", "Override stale threshold (hours)", parseFloat)
     .option("--json", "Output as JSON")
-    .action(async (opts: { threshold?: number; json?: boolean }) => {
+    .option("--execute", "Actually merge qualifying PRs (default is dry-run)")
+    .action(async (opts: { threshold?: number; json?: boolean; execute?: boolean }) => {
       const configPath = program.opts().config ?? "agents.yaml";
 
       let config: ReturnType<typeof loadConfig>;
@@ -87,20 +117,44 @@ export function registerMergeSweepCommand(program: Command): void {
         return;
       }
 
+      const mode = opts.execute ? chalk.red("EXECUTE") : chalk.dim("dry-run");
       console.log(
         chalk.dim(
-          `Scanning ${repos.size} repo(s) for stale MERGEABLE PRs (threshold: ${getMergeStallThresholdHours()}h)…`,
-        ),
+          `Scanning ${repos.size} repo(s) for stale MERGEABLE PRs (threshold: ${getMergeStallThresholdHours()}h, mode: `,
+        ) + mode + chalk.dim(")…"),
       );
       console.log();
 
       const stalePRs = scanFleetMergeStalls([...repos]);
 
-      if (opts.json) {
+      if (opts.json && !opts.execute) {
         console.log(JSON.stringify(stalePRs, null, 2));
         return;
       }
 
       printTable(stalePRs);
+
+      if (!opts.execute) {
+        if (stalePRs.length > 0) {
+          console.log();
+          console.log(chalk.dim("Run with --execute to merge these PRs."));
+        }
+        return;
+      }
+
+      // Execute mode: merge the stale PRs
+      if (stalePRs.length === 0) return;
+
+      console.log();
+      console.log(chalk.yellow(`Merging ${stalePRs.length} PR(s)…`));
+
+      const results = autoMergeFleetPRs(stalePRs);
+
+      if (opts.json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+
+      printMergeResults(results);
     });
 }

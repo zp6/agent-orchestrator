@@ -2,9 +2,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   checkMergeStall,
   scanFleetMergeStalls,
+  mergePR,
+  autoMergeFleetPRs,
   setMergeStallThresholdHours,
   getMergeStallThresholdHours,
   DEFAULT_MERGE_STALL_THRESHOLD_HOURS,
+  type MergeablePR,
 } from "./merge-stall-guard.js";
 
 vi.mock("../service/logger.js", () => ({
@@ -186,5 +189,99 @@ describe("scanFleetMergeStalls", () => {
     const mockExec = vi.fn().mockReturnValue("[]");
     const result = scanFleetMergeStalls(["owner/repo-a"], mockExec);
     expect(result).toHaveLength(0);
+  });
+});
+
+function makeMergeablePR(overrides: Partial<MergeablePR> = {}): MergeablePR {
+  return {
+    number: 123,
+    title: "fix: some improvement",
+    url: "https://github.com/owner/repo/pull/123",
+    repo: "owner/repo",
+    updatedAt: hoursAgo(6),
+    headRefName: "issue-123-fix",
+    staleHours: 6,
+    ...overrides,
+  };
+}
+
+describe("mergePR", () => {
+  it("calls gh pr merge with correct args on success", () => {
+    const mockExec = vi.fn().mockReturnValue("");
+    const pr = makeMergeablePR();
+    const result = mergePR(pr, mockExec);
+
+    expect(result.success).toBe(true);
+    expect(result.pr).toBe(pr);
+    expect(result.error).toBeUndefined();
+    expect(mockExec).toHaveBeenCalledWith(
+      "gh pr merge 123 --repo owner/repo --squash --delete-branch",
+      { encoding: "utf-8", timeout: 30000 },
+    );
+  });
+
+  it("captures error on merge failure without throwing", () => {
+    const mockExec = vi.fn().mockImplementation(() => {
+      throw new Error("merge conflict");
+    });
+    const pr = makeMergeablePR();
+    const result = mergePR(pr, mockExec);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("merge conflict");
+    expect(result.pr).toBe(pr);
+  });
+
+  it("handles non-Error thrown values", () => {
+    const mockExec = vi.fn().mockImplementation(() => {
+      throw "string error";
+    });
+    const pr = makeMergeablePR();
+    const result = mergePR(pr, mockExec);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("string error");
+  });
+});
+
+describe("autoMergeFleetPRs", () => {
+  it("merges all PRs and returns results", () => {
+    const mockExec = vi.fn().mockReturnValue("");
+    const prs = [
+      makeMergeablePR({ number: 1, repo: "owner/repo-a" }),
+      makeMergeablePR({ number: 2, repo: "owner/repo-b" }),
+    ];
+
+    const results = autoMergeFleetPRs(prs, mockExec);
+
+    expect(results).toHaveLength(2);
+    expect(results[0].success).toBe(true);
+    expect(results[1].success).toBe(true);
+    expect(mockExec).toHaveBeenCalledTimes(2);
+  });
+
+  it("continues merging after individual failures", () => {
+    const mockExec = vi.fn()
+      .mockImplementationOnce(() => { throw new Error("failed"); })
+      .mockReturnValueOnce("");
+
+    const prs = [
+      makeMergeablePR({ number: 1 }),
+      makeMergeablePR({ number: 2 }),
+    ];
+
+    const results = autoMergeFleetPRs(prs, mockExec);
+
+    expect(results).toHaveLength(2);
+    expect(results[0].success).toBe(false);
+    expect(results[1].success).toBe(true);
+  });
+
+  it("returns empty array for empty input", () => {
+    const mockExec = vi.fn();
+    const results = autoMergeFleetPRs([], mockExec);
+
+    expect(results).toHaveLength(0);
+    expect(mockExec).not.toHaveBeenCalled();
   });
 });

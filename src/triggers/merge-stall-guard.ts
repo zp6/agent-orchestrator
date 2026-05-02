@@ -173,3 +173,66 @@ export function scanFleetMergeStalls(
   allStale.sort((a, b) => b.staleHours - a.staleHours);
   return allStale;
 }
+
+export interface MergeResult {
+  pr: MergeablePR;
+  success: boolean;
+  error?: string;
+}
+
+/**
+ * Attempt to squash-merge a single PR via the GitHub CLI.
+ *
+ * Returns a MergeResult indicating success or failure.
+ * Never throws — failures are captured in the result.
+ */
+export function mergePR(
+  pr: MergeablePR,
+  execFn: (cmd: string, opts: { encoding: "utf-8"; timeout: number }) => string = (cmd, opts) =>
+    execSync(cmd, opts),
+): MergeResult {
+  try {
+    execFn(
+      `gh pr merge ${pr.number} --repo ${pr.repo} --squash --delete-branch`,
+      { encoding: "utf-8", timeout: 30000 },
+    );
+
+    log.info("Auto-merged stale PR", {
+      repo: pr.repo,
+      prNumber: pr.number,
+      title: pr.title,
+      staleHours: pr.staleHours,
+    });
+
+    return { pr, success: true };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    log.warn("Failed to auto-merge PR", {
+      repo: pr.repo,
+      prNumber: pr.number,
+      error,
+    });
+
+    return { pr, success: false, error };
+  }
+}
+
+/**
+ * Auto-merge all stale MERGEABLE PRs across the fleet.
+ *
+ * Used by `orch merge-sweep --execute` to land rotting PRs.
+ * Merges sequentially (one at a time) to avoid race conditions.
+ */
+export function autoMergeFleetPRs(
+  prs: MergeablePR[],
+  execFn?: (cmd: string, opts: { encoding: "utf-8"; timeout: number }) => string,
+): MergeResult[] {
+  const results: MergeResult[] = [];
+
+  for (const pr of prs) {
+    const result = execFn ? mergePR(pr, execFn) : mergePR(pr);
+    results.push(result);
+  }
+
+  return results;
+}
