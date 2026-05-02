@@ -31,6 +31,7 @@ import { planSync, executeSync } from "../orchestrator/sync.js";
 import { notifyOperator, clearNotifyRateLimit, setTelegramRateLimitMs } from "./notify.js";
 import { buildHealthPostmortem, renderPostmortemBlock } from "./health-postmortem.js";
 import { setRecencyWindowHours } from "../triggers/duplicate-guard.js";
+import { setMergeStallThresholdHours } from "../triggers/merge-stall-guard.js";
 import { DuplicateIdDetector, checkDbForDuplicateIds } from "../state/duplicate-id-detector.js";
 import { startTelegramPolling, stopTelegramPolling, pollTelegram, maybePostDailyGuardDigest, maybePostDailyAnomaliesDigest } from "./telegram.js";
 import { OperatorControlProcessor } from "./operator-controls.js";
@@ -385,6 +386,7 @@ export class Daemon {
 
     // Apply config overrides to modules that use module-level state
     setRecencyWindowHours(this.config.triggers?.recency_window_hours);
+    setMergeStallThresholdHours(this.config.triggers?.merge_stall_threshold_hours);
     setTelegramRateLimitMs(this.config.notifications?.telegram_rate_limit_ms);
     this.dispatcher = new Dispatcher(this.config, this.store);
     // Wire duplicate-ID detector into dispatcher so it can record IDs and

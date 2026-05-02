@@ -562,6 +562,22 @@ export interface TriggersConfig {
    * Defaults to 10 when omitted.
    */
   max_open_orchestrator_issues?: number;
+
+  /**
+   * Enable or disable the merge-stall guard (issue #1399).
+   * When enabled (default), agents with stale MERGEABLE PRs are blocked
+   * from receiving new dispatches until they land their existing work.
+   * Set to false to disable.
+   * Defaults to true when omitted.
+   */
+  merge_stall_guard?: boolean;
+
+  /**
+   * Hours a MERGEABLE PR can sit without updates before the merge-stall
+   * guard blocks new dispatches for that agent.
+   * Defaults to 4 when omitted.
+   */
+  merge_stall_threshold_hours?: number;
 }
 
 export interface NotificationsConfig {

@@ -7,6 +7,7 @@ import { createLogger } from "../service/logger.js";
 import { scoreIssuePriority } from "../orchestrator/priority-scorer.js";
 import { sendTelegramAlert } from "../service/telegram.js";
 import { queryPRGuardCooldown, DEFAULT_REVIEWER_URL } from "../client/pr-guard-cooldown-client.js";
+import { checkMergeStall } from "./merge-stall-guard.js";
 
 /**
  * Default TTL for issue claims: 2 hours (matches agents.yaml stale_timeout_ms conventions).
@@ -516,6 +517,24 @@ export async function dispatchGitHubIssues(
       });
       result.skipped++;
       continue;
+    }
+
+    // Merge-stall guard (issue #1399): block dispatch when the agent has stale
+    // MERGEABLE PRs. Forces "land before launch" discipline — agents must merge
+    // their completed work before receiving new tasks. Fail-open on API errors.
+    const mergeStallEnabled = config.triggers?.merge_stall_guard !== false;
+    if (mergeStallEnabled) {
+      const mergeStall = checkMergeStall(agent.github, agentName);
+      if (mergeStall.blocked) {
+        log.warn("Merge-stall guard: holding dispatch for agent with rotting PRs", {
+          agentName,
+          repo: agent.github,
+          stalePRCount: mergeStall.stalePRs.length,
+          reason: mergeStall.reason,
+        });
+        result.skipped++;
+        continue;
+      }
     }
 
     // Early exit: skip entire repo if at PR capacity (saves all per-issue validation calls).

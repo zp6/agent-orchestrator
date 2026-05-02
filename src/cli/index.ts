@@ -57,6 +57,7 @@ import { registerAnomaliesCommand } from "./commands/anomalies.js";
 import { registerDispatchHangWatchCommand } from "./commands/dispatch-hang-watch.js";
 import { registerExternalImpactCommand } from "./commands/external-impact.js";
 import { registerPublishStandupCommand } from "./commands/publish-standup.js";
+import { registerMergeSweepCommand } from "./commands/merge-sweep.js";
 
 const program = new Command();
 
@@ -123,6 +124,7 @@ registerAnomaliesCommand(program);
 registerDispatchHangWatchCommand(program);
 registerExternalImpactCommand(program);
 registerPublishStandupCommand(program);
+registerMergeSweepCommand(program);
 registerMonologueCommand(program);
 
 program.parse();
