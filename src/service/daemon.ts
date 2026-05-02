@@ -54,6 +54,11 @@ import { learnPatterns } from "../orchestrator/pattern-learner.js";
 import { runScheduledRebases } from "../orchestrator/proactive-rebase-scheduler.js";
 import { buildConflictRedispatchMessage } from "../orchestrator/conflict-redispatch.js";
 import {
+  assessTaskDisciplineAlignment,
+  captureDisciplineContext,
+  readTaskDisciplineSnapshot,
+} from "../orchestrator/discipline-context.js";
+import {
   type GateResult,
   detectImprovements,
   extractIssueRefs,
@@ -756,6 +761,7 @@ export class Daemon {
         this.checkHealthRecoveries(),
         this.checkResultMissingTasks(time),
         this.processRetries(time),
+        this.pauseDisciplineDriftTasks(time),
       ];
       if (this.cycleCount % PROXY_HEALTH_CHECK_EVERY_N_CYCLES === 0) {
         batch1.push(this.checkProxyHealth(time));
@@ -4547,6 +4553,39 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
     console.warn(`[config] ⚠️  ${msg}`);
 
     notifyOperator("Config drift detected", msg, "warning", "config-drift").catch(() => {});
+  }
+
+  private async pauseDisciplineDriftTasks(time: string): Promise<void> {
+    const orchestratorDir = this.config.orchestrator_dir;
+    if (!orchestratorDir) return;
+
+    const snapshot = captureDisciplineContext(orchestratorDir);
+    const activeStatuses = ["pending", "planning", "dispatched", "in_progress"] as const;
+
+    for (const status of activeStatuses) {
+      const tasks = this.store.getTasksByStatus(status);
+      for (const task of tasks) {
+        if (task.parent_task_id) continue;
+        const priorSnapshot = readTaskDisciplineSnapshot(this.store, task.id);
+        if (!priorSnapshot) continue;
+        const alignment = assessTaskDisciplineAlignment(task, snapshot, priorSnapshot);
+        if (alignment.aligned || !alignment.requires_rescope) continue;
+
+        this.store.pauseTask(task.id);
+        this.store.addLog({
+          task_id: task.id,
+          direction: "system",
+          content:
+            `Discipline drift detected at ${time}: ${alignment.reason ?? "task conflicts with current discipline"}; task paused for redispatch.`,
+        });
+        this.log.warn("Paused task due to discipline drift", {
+          taskId: task.id,
+          status: task.status,
+          staleSnapshot: alignment.stale_snapshot,
+          matchedPatterns: alignment.matched_patterns,
+        });
+      }
+    }
   }
 
   private cleanupStaleIssues(time: string): void {

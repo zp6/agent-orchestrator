@@ -160,6 +160,7 @@ Supported commands (sent to your Telegram bot):
 | `/pr-guard-status` | Active PR guard surge suppressions with repo, issue, PR, hit count, expiry, and remaining time |
 | `/tasks` | List pending and in-progress tasks |
 | `/quality [tasks]` | Live per-agent quality health snapshot over the most recent tasks |
+| `/monologue [agent]` | Recent prose monologue entries for the fleet or one agent |
 | `/approve <task-id>` | Manually approve a task |
 
 For proactive recovery alerts, use `HealthRecoveryTracker` together with `createNotifier().healthRecovery(...)`. The tracker waits for the configured confirmation window before sending a single recovery message per incident, which prevents oscillating health checks from spamming Telegram.
@@ -173,6 +174,7 @@ The package also exports direct payload builders that the dashboard or orchestra
 - `getAgentTrendsApiPayload(store)` → `GET /agent-trends`
 - `getQualityAnomaliesApiPayload(store, opts)` → `GET /quality-anomalies`
 - `getReroutesApiPayload(store, opts)` → `GET /api/reroutes`
+- `GET /monologue` → prose monologue feed for agents and tasks
 
 ---
 

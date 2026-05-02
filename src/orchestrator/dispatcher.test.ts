@@ -398,6 +398,28 @@ describe("Dispatcher.dispatch — retry scheduling on failure", () => {
     // Logic errors are NOT retried — next_retry_at stays null
     expect(tasks[0].next_retry_at).toBeNull();
   });
+
+  it("prepends a discipline refresh block and stores the snapshot for verification", async () => {
+    mockSend.mockResolvedValueOnce({
+      content: "all done",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    const result = await dispatcher.dispatch("Build a Substack draft flow", {
+      agentName: "test-agent",
+      source: "manual",
+    });
+
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    const sentMessage = mockSend.mock.calls[0]?.[1] as string;
+    expect(sentMessage).toContain("Discipline refresh");
+    expect(sentMessage).toContain("re-read the current `CLAUDE.md` and `CHARTER.md`");
+
+    const snapshotLog = store.getLatestTaskLogByPrefix(result.taskId, "[discipline-context]");
+    expect(snapshotLog).toBeDefined();
+    expect(snapshotLog?.content).toContain("CLAUDE.md");
+    expect(snapshotLog?.content).toContain("CHARTER.md");
+  });
 });
 
 describe("Dispatcher.dispatch — superseded task guard (issue #557)", () => {
@@ -2262,7 +2284,7 @@ describe("Dispatcher — target-repo header injection (issue #338)", () => {
     });
 
     const [, sentMessage] = mockSend.mock.calls[0];
-    expect(sentMessage).toBe("Do something");
+    expect(sentMessage).toContain("Do something");
     expect(sentMessage).not.toContain("Target repository");
   });
 
@@ -2309,7 +2331,7 @@ describe("Dispatcher — target-repo header injection (issue #338)", () => {
     });
 
     const [, sentMessage] = mockSend.mock.calls[0];
-    expect(sentMessage).toBe("A linear task");
+    expect(sentMessage).toContain("A linear task");
     expect(sentMessage).not.toContain("Target repository");
   });
 });

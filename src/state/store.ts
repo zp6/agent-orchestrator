@@ -1777,6 +1777,15 @@ CREATE TABLE IF NOT EXISTS task_logs (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS monologue_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_name TEXT NOT NULL,
+  task_id TEXT,
+  timestamp TEXT NOT NULL,
+  prose TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'observation'
+);
+
 CREATE TABLE IF NOT EXISTS processed_triggers (
   source TEXT NOT NULL,
   source_ref TEXT NOT NULL,
@@ -1815,6 +1824,7 @@ CREATE TABLE IF NOT EXISTS token_usage (
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(agent_name);
 CREATE INDEX IF NOT EXISTS idx_task_logs_task ON task_logs(task_id);
+CREATE INDEX IF NOT EXISTS idx_monologue_log_timestamp ON monologue_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_daemon_cycles_started ON daemon_cycles(started_at);
 CREATE INDEX IF NOT EXISTS idx_token_usage_recorded_at ON token_usage(recorded_at);
 CREATE INDEX IF NOT EXISTS idx_token_usage_agent_name ON token_usage(agent_name);
@@ -2444,6 +2454,17 @@ export class StateStore {
 
   getLogs(taskId: string): TaskLog[] {
     return this.db.prepare("SELECT * FROM task_logs WHERE task_id = ? ORDER BY created_at ASC").all(taskId) as TaskLog[];
+  }
+
+  getLatestTaskLogByPrefix(taskId: string, prefix: string): TaskLog | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM task_logs
+         WHERE task_id = ? AND content LIKE ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`,
+      )
+      .get(taskId, `${prefix}%`) as TaskLog | undefined;
   }
 
   isProcessed(source: string, sourceRef: string): boolean {

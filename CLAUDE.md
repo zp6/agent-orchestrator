@@ -234,11 +234,11 @@ This repository exposes three main API surfaces:
 
 2. **CLI commands** via `orch`
    - The CLI entrypoint is `src/cli/index.ts`
-   - It wires the operational command families for status, dispatch, review, supervision, health, metrics, routing, triage, memory, anomalies, and fleet operations
+   - It wires the operational command families for status, dispatch, review, supervision, health, metrics, routing, triage, memory, monologue, anomalies, and fleet operations
    - Run `npx tsx src/cli/index.ts --help` in development or `node dist/cli/index.js --help` after building to see the full command list
 
 3. **Telegram commands** via `TelegramCommandHandler`
-   - Common operator commands include `/status`, `/health`, `/pause`, `/resume`, `/dispatch`, `/prioritize`, `/queue`, `/review-queue`, `/approve`, `/reject`, `/quality`, `/quality-health`, `/quality-summary`, `/pr-guard-status`, `/triage-health`, `/investigations`, `/memory`, `/misrouting`, and `/meeting-goal`
+   - Common operator commands include `/status`, `/health`, `/pause`, `/resume`, `/dispatch`, `/prioritize`, `/queue`, `/review-queue`, `/approve`, `/reject`, `/quality`, `/quality-health`, `/quality-summary`, `/pr-guard-status`, `/triage-health`, `/investigations`, `/memory`, `/monologue`, `/misrouting`, and `/meeting-goal`
    - These commands read from the shared `state.db` and the reporting helpers exported from `src/index.ts`
 
 If you need the exact runtime shape of any helper, treat `src/index.ts` and the module-level source file as the source of truth.

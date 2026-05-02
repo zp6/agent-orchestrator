@@ -22,6 +22,29 @@ import { unlinkSync } from "node:fs";
 const mockCreate = vi.fn();
 const mockDispatch = vi.fn();
 const mockLiveValidateForDispatch = vi.fn().mockReturnValue(null);
+const mockCaptureDisciplineContext = vi.fn();
+const mockReadTaskDisciplineSnapshot = vi.fn();
+
+function makeDisciplineSnapshot(suffix: string) {
+  return {
+    captured_at: `2026-05-01T00:00:00.000Z`,
+    root_dir: "/tmp/orchestrator",
+    docs: [
+      {
+        path: "CLAUDE.md",
+        exists: true,
+        sha256: `claude-${suffix}`,
+        size_bytes: 1024,
+      },
+      {
+        path: "CHARTER.md",
+        exists: true,
+        sha256: `charter-${suffix}`,
+        size_bytes: 2048,
+      },
+    ],
+  };
+}
 
 vi.mock("../client/proxy-client.js", () => ({
   createProxyClient: () => ({
@@ -58,6 +81,15 @@ vi.mock("../triggers/issue-state-bridge.js", async (importOriginal) => {
     ...actual,
     cachedGetIssueState: vi.fn().mockImplementation(() => { throw new Error("cache miss"); }),
     liveValidateForDispatch: (...args: unknown[]) => mockLiveValidateForDispatch(...args),
+  };
+});
+
+vi.mock("../orchestrator/discipline-context.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../orchestrator/discipline-context.js")>();
+  return {
+    ...actual,
+    captureDisciplineContext: (...args: unknown[]) => mockCaptureDisciplineContext(...args),
+    readTaskDisciplineSnapshot: (...args: unknown[]) => mockReadTaskDisciplineSnapshot(...args),
   };
 });
 
@@ -121,6 +153,8 @@ describe("reviewer-ops", () => {
     vi.clearAllMocks();
     dbPath = join(tmpdir(), `orch-reviewer-ops-${Date.now()}.db`);
     store = new StateStore(dbPath);
+    mockCaptureDisciplineContext.mockReturnValue(makeDisciplineSnapshot("current"));
+    mockReadTaskDisciplineSnapshot.mockReturnValue(makeDisciplineSnapshot("current"));
   });
 
   afterEach(() => {
@@ -179,6 +213,43 @@ describe("reviewer-ops", () => {
 
     expect(result.approved).toBe(false);
     expect(result.score).toBe(0.5);
+    expect(store.getTask(task.id)?.verification_status).toBe("rejected");
+  });
+
+  it("verifyTask blocks work that conflicts with current discipline before calling the reviewer", async () => {
+    const task = store.createTask({
+      title: "Stage a Substack draft",
+      description: "Publish via Substack with a paid tier and operator sign-up.",
+      source: "manual",
+      agent_name: "agent-a",
+    });
+    store.updateTask(task.id, { status: "done", result: "Drafted" });
+
+    const result = await verifyTask(store, new ReviewerClient(config), task.id, config);
+
+    expect(result.approved).toBe(false);
+    expect(result.notes).toContain("discipline");
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(store.getTask(task.id)?.verification_status).toBe("rejected");
+  });
+
+  it("verifyTask blocks stale in-flight work even when the task text itself is neutral", async () => {
+    mockReadTaskDisciplineSnapshot.mockReturnValueOnce(makeDisciplineSnapshot("old"));
+
+    const task = store.createTask({
+      title: "Refactor orchestration",
+      description: "Improve the task pipeline and align the verifier path.",
+      source: "manual",
+      agent_name: "agent-a",
+    });
+    store.updateTask(task.id, { status: "done", result: "Implemented" });
+
+    const result = await verifyTask(store, new ReviewerClient(config), task.id, config);
+
+    expect(result.approved).toBe(false);
+    expect(result.notes).toContain("re-evaluated");
+    expect(result.notes.toLowerCase()).toContain("discipline");
+    expect(mockCreate).not.toHaveBeenCalled();
     expect(store.getTask(task.id)?.verification_status).toBe("rejected");
   });
 

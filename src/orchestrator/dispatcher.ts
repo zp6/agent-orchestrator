@@ -52,6 +52,11 @@ import {
   FailureInterceptor,
   FAILURE_INTERCEPTION_ALERT_THRESHOLD,
 } from "./failure-interceptor.js";
+import {
+  captureDisciplineContext,
+  formatDisciplineRefreshBlock,
+  storeDisciplineContextSnapshot,
+} from "./discipline-context.js";
 
 /**
  * Walk the parent_task_id chain upward from `taskId` (or a parent task id) and
@@ -1403,6 +1408,11 @@ export class Dispatcher {
     const repoHeader = buildTargetRepoHeader(options?.sourceRef);
     let messageToSend = repoHeader ? `${repoHeader}\n${message}` : message;
 
+    const disciplineSnapshot = captureDisciplineContext(this.config.orchestrator_dir);
+    const disciplineBlock = formatDisciplineRefreshBlock(disciplineSnapshot, message);
+    messageToSend = disciplineBlock + messageToSend;
+    storeDisciplineContextSnapshot(this.store, task.id, disciplineSnapshot);
+
     // Inject rejection history from prior attempts for the same source_ref
     // so the agent avoids repeating failed approaches.
     if (options?.sourceRef) {
@@ -1979,6 +1989,10 @@ export class Dispatcher {
     const message = task.description ?? task.title;
     const repoHeader = buildTargetRepoHeader(task.source_ref);
     const messageToSend = repoHeader ? `${repoHeader}\n${message}` : message;
+    const disciplineSnapshot = captureDisciplineContext(this.config.orchestrator_dir);
+    const disciplineBlock = formatDisciplineRefreshBlock(disciplineSnapshot, message);
+    const messageWithDiscipline = disciplineBlock + messageToSend;
+    storeDisciplineContextSnapshot(this.store, task.id, disciplineSnapshot);
 
     // Mark dispatched before the network call so watchdog timers can track age.
     this.store.updateTask(task.id, {
@@ -1995,7 +2009,7 @@ export class Dispatcher {
       task_id: task.id,
       direction: "to_agent",
       agent_name: agentName,
-      content: messageToSend,
+      content: messageWithDiscipline,
     });
 
     const provider = this.config.agents[agentName]?.provider ?? "claude";
@@ -2019,7 +2033,7 @@ export class Dispatcher {
     );
 
     try {
-      const response = await this.client.send(agentName, messageToSend, {
+      const response = await this.client.send(agentName, messageWithDiscipline, {
         conversationId,
         taskType: "implementation",
         model: modelRoute.model,
@@ -2260,6 +2274,10 @@ export class Dispatcher {
     const conversationId = task.conversation_id ?? ulid();
     const repoHeader = buildTargetRepoHeader(task.source_ref);
     let messageToSend = repoHeader ? `${repoHeader}\n${message}` : message;
+    const disciplineSnapshot = captureDisciplineContext(this.config.orchestrator_dir);
+    const disciplineBlock = formatDisciplineRefreshBlock(disciplineSnapshot, message);
+    messageToSend = disciplineBlock + messageToSend;
+    storeDisciplineContextSnapshot(this.store, task.id, disciplineSnapshot);
 
     // Inject rejection history from prior attempts for the same source_ref
     // so the agent avoids repeating failed approaches on retry.

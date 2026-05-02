@@ -16,6 +16,11 @@ import { detectCoverageGaps } from "../orchestrator/coverage-gap-detector.js";
 import { scoreIssuePriority } from "../orchestrator/priority-scorer.js";
 import { extractAndStoreRules } from "../orchestrator/learned-rules.js";
 import { extractRepoFromSourceRef } from "../orchestrator/dispatcher.js";
+import {
+  assessTaskDisciplineAlignment,
+  captureDisciplineContext,
+  readTaskDisciplineSnapshot,
+} from "../orchestrator/discipline-context.js";
 
 const verifierLog = createLogger("verifier");
 const supervisorLog = createLogger("supervisor");
@@ -60,6 +65,32 @@ export async function verifyTask(
   }
   if (task.status !== "done") {
     throw new Error(`Task ${taskId} is not done (status: ${task.status})`);
+  }
+
+  if (config?.orchestrator_dir) {
+    const currentSnapshot = captureDisciplineContext(config.orchestrator_dir);
+    const priorSnapshot = readTaskDisciplineSnapshot(store, taskId);
+    const alignment = assessTaskDisciplineAlignment(task, currentSnapshot, priorSnapshot);
+    if (!alignment.aligned && alignment.requires_rescope) {
+      const notes = alignment.reason ?? "Task conflicts with current discipline and must be re-scoped.";
+      verifierLog.warn("Verification blocked by discipline drift", {
+        taskId,
+        staleSnapshot: alignment.stale_snapshot,
+        matchedPatterns: alignment.matched_patterns,
+      });
+      store.updateTask(taskId, {
+        verification_status: "rejected",
+        quality_score: 0,
+        verification_notes: notes,
+      });
+      return {
+        approved: false,
+        score: 0,
+        notes,
+        revision: "Re-scope this task against the current CLAUDE.md / CHARTER.md before continuing.",
+        score_source: "llm",
+      };
+    }
   }
 
   store.updateTask(taskId, { verification_status: "pending" });
