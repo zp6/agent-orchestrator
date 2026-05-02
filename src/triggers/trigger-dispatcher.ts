@@ -59,6 +59,7 @@ let prGuardDuplicateSuppressedThisCycle = false;
 
 import { runGitHubPreDispatchValidation } from "../orchestrator/pre-dispatch-validator.js";
 import { looksLikeStandupTask, extractStandupIssueNumber, shouldSkipStandupDispatch } from "./standup-dispatch-guard.js";
+import { injectDispatchAntibodies } from "./dispatch-antibodies.js";
 
 /**
  * Dashboard URL for the dispatch-skip-log HTTP API.
@@ -949,6 +950,32 @@ export async function dispatchGitHubIssues(
           message += `\n\n---\nWhen done: push to branch \`${existingBranch}\` and open a PR with \`gh pr create --head ${existingBranch} --title "[${agentName}] <title>" --body "Closes #${issue.number}"\`.`;
         } else {
           message += `\n\n---\nWhen done: create a branch, commit, push, and open a PR with \`gh pr create --title "[${agentName}] <title>" --body "Closes #${issue.number}"\`. The "Closes #${issue.number}" is required so the issue auto-closes on merge.`;
+        }
+      }
+
+      // Dispatch-time antibody injection (issue #1392): query the fleet signal
+      // layer for failure-prevention hints relevant to this repo and inject them
+      // into the dispatch message.  This gives the agent pre-tested remediation
+      // context before it starts work, preventing known failure classes from
+      // recurring.  Non-blocking: if the query fails, dispatch proceeds without
+      // enrichment.
+      {
+        const antibodyResult = injectDispatchAntibodies(store, message, {
+          repo: issue.repo,
+          agentName,
+          issueNumber: issue.number,
+          labels: issue.labels,
+          sourceRef,
+        });
+        if (antibodyResult.injected) {
+          message = antibodyResult.message;
+          log.info("Dispatch message enriched with antibody hints", {
+            sourceRef,
+            agentName,
+            hintCount: antibodyResult.count,
+            signalIds: antibodyResult.signalIds,
+            patternIds: antibodyResult.patternIds,
+          });
         }
       }
 

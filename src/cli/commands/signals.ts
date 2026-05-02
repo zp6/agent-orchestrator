@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { StateStore, type Signal, type SignalActivityEvent } from "../../state/store.js";
+import { seedAntibodies, INITIAL_ANTIBODY_SEEDS } from "../../triggers/seed-antibodies.js";
 
 export function registerSignalsCommand(program: Command): void {
   const signals = program
@@ -285,6 +286,58 @@ export function registerSignalsCommand(program: Command): void {
         }
       },
     );
+
+  // ── seed-antibodies ───────────────────────────────────────────────────────
+  signals
+    .command("seed-antibodies")
+    .description(
+      "Seed initial failure-prevention antibodies into the signals table (issue #1392). " +
+      "Idempotent: existing signals with the same key are skipped.",
+    )
+    .option("--dry-run", "Show what would be seeded without writing to the database")
+    .action((opts: { dryRun?: boolean }) => {
+      if (opts.dryRun) {
+        console.log(chalk.bold("\n🧬 Antibody Seeds (dry run — nothing will be written)\n"));
+        for (const seed of INITIAL_ANTIBODY_SEEDS) {
+          console.log(
+            `  ${chalk.cyan(seed.signal_type)} ${chalk.bold(seed.key)}` +
+            (seed.repo ? chalk.dim(` [${seed.repo}]`) : chalk.dim(" [fleet-wide]")),
+          );
+          console.log(
+            `    ${chalk.dim("fix:")} ${seed.value.fix_hint.slice(0, 100)}...`,
+          );
+        }
+        console.log(chalk.dim(`\n  ${INITIAL_ANTIBODY_SEEDS.length} seeds total. Run without --dry-run to write.\n`));
+        return;
+      }
+
+      let store: StateStore;
+      try {
+        store = new StateStore();
+      } catch (err) {
+        console.error(
+          chalk.red("Could not open state database:"),
+          err instanceof Error ? err.message : String(err),
+        );
+        process.exit(1);
+      }
+
+      try {
+        const result = seedAntibodies(store);
+        if (result.seeded === 0 && result.skipped > 0) {
+          console.log(
+            chalk.dim(`All ${result.skipped} antibody seeds already exist in the signals table. Nothing to do.`),
+          );
+        } else {
+          console.log(
+            chalk.green(`✓ Seeded ${result.seeded} antibod${result.seeded === 1 ? "y" : "ies"}`) +
+            (result.skipped > 0 ? chalk.dim(` (${result.skipped} already existed)`) : ""),
+          );
+        }
+      } finally {
+        store.close();
+      }
+    });
 
   // ── prune ─────────────────────────────────────────────────────────────────
   signals
