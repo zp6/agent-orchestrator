@@ -1479,6 +1479,37 @@ export type {
   PRReviewApiInfo,
 } from "./reviewer/pr-review-api.js";
 
+// Quality Passport — per-repo PR review score badge + freemium gate (issue #610).
+// Phase 1: post score comments on OSS PRs. Phase 2: GitHub App webhook.
+export {
+  getBadgeLabel,
+  getBadgeColor,
+  getTrendArrow,
+  buildBadgeUrl,
+  buildBadgeMarkdown,
+  computeTrend,
+  buildQualityPassportComment,
+  buildBadgePayload,
+  evaluateFreemiumGate,
+  nextMonthlyReset,
+  postQualityPassportComment,
+  getQualityPassportInfo,
+  QUALITY_PASSPORT_MIGRATION_SQL,
+  FREEMIUM_MONTHLY_LIMIT,
+  BADGE_PASS_THRESHOLD,
+  BADGE_FAIL_THRESHOLD,
+  TREND_WINDOW,
+} from "./reviewer/quality-passport.js";
+export type {
+  QualityTrend,
+  BadgeLabel,
+  RepoQualityPassport,
+  QualityBadgePayload,
+  QualityPassportCommentResult,
+  FreemiumGateResult,
+  IQualityPassportStore,
+} from "./reviewer/quality-passport.js";
+
 // Integration adapter (also available via 'claude-orchestrator-reviewer/integration')
 export { createReviewerInstances } from "./integration/orchestrator-adapter.js";
 export type { ReviewerInstances, CreateReviewerOptions } from "./integration/orchestrator-adapter.js";
