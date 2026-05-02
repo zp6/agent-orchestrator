@@ -3,16 +3,6 @@ name: CI
 on:
   pull_request:
     branches: [main]
-    # Only run CI when source code, tests, or build config changes.
-    # This avoids burning Actions minutes on docs/yaml/markdown PRs.
-    paths:
-      - "src/**"
-      - "test/**"
-      - "package.json"
-      - "package-lock.json"
-      - "tsconfig.json"
-      - "vitest.config.*"
-      - ".github/workflows/**"
   workflow_dispatch:
 
 # Cancel any in-progress run for the same branch when a new commit is pushed.
