@@ -94,6 +94,21 @@ export function registerSignalsCommand(program: Command): void {
             if (s.value) {
               try {
                 const parsed = JSON.parse(s.value);
+                if (parsed.error_class) {
+                  console.log(
+                    `         ${chalk.dim("class:")} ${chalk.yellow(String(parsed.error_class))}`,
+                  );
+                }
+                if (parsed.source_pr) {
+                  console.log(
+                    `         ${chalk.dim("source:")} ${chalk.cyan(String(parsed.source_pr))}`,
+                  );
+                }
+                if (parsed.fix_hint) {
+                  console.log(
+                    `         ${chalk.dim("fix:")} ${chalk.yellow(String(parsed.fix_hint).slice(0, 120))}`,
+                  );
+                }
                 if (parsed.revision_hint) {
                   console.log(
                     `         ${chalk.dim("hint:")} ${chalk.yellow(String(parsed.revision_hint).slice(0, 120))}`,

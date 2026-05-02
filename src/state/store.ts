@@ -7863,6 +7863,89 @@ export class StateStore {
   }
 
   /**
+   * Fetch a single active signal by ID.
+   */
+  getSignalById(id: number): Signal | undefined {
+    return this.db
+      .prepare("SELECT * FROM signals WHERE id = ?")
+      .get(id) as Signal | undefined;
+  }
+
+  /**
+   * Fetch active signals that were consumed in the given task context.
+   * The context is typically the task ID supplied when the signal was read.
+   */
+  getSignalsReadByContext(context: string, signalType?: string): Signal[] {
+    const conditions = ["sr.context = ?"];
+    const bindings: unknown[] = [context];
+
+    if (signalType) {
+      conditions.push("s.signal_type = ?");
+      bindings.push(signalType);
+    }
+
+    return this.db
+      .prepare(`
+        SELECT DISTINCT s.*
+        FROM signal_reads sr
+        JOIN signals s ON s.id = sr.signal_id
+        WHERE ${conditions.join(" AND ")}
+        ORDER BY sr.read_at ASC
+      `)
+      .all(...bindings) as Signal[];
+  }
+
+  /**
+   * Count how many times a signal has been consumed.
+   */
+  countSignalReads(signalId: number): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS cnt FROM signal_reads WHERE signal_id = ?")
+      .get(signalId) as { cnt: number } | undefined;
+    return row?.cnt ?? 0;
+  }
+
+  /**
+   * Update selected fields on an existing signal.
+   */
+  updateSignal(
+    id: number,
+    updates: {
+      confidence?: number;
+      value?: unknown;
+      ttl_hours?: number;
+      expires_at?: string;
+    },
+  ): Signal | undefined {
+    const fields: string[] = [];
+    const params: unknown[] = [];
+
+    if (updates.confidence !== undefined) {
+      fields.push("confidence = ?");
+      params.push(updates.confidence);
+    }
+    if (updates.value !== undefined) {
+      fields.push("value = ?");
+      params.push(JSON.stringify(updates.value));
+    }
+    if (updates.ttl_hours !== undefined) {
+      fields.push("ttl_hours = ?");
+      params.push(updates.ttl_hours);
+    }
+    if (updates.expires_at !== undefined) {
+      fields.push("expires_at = ?");
+      params.push(updates.expires_at);
+    }
+
+    if (fields.length === 0) return this.getSignalById(id);
+
+    this.db
+      .prepare(`UPDATE signals SET ${fields.join(", ")} WHERE id = ?`)
+      .run(...params, id);
+    return this.getSignalById(id);
+  }
+
+  /**
    * Delete all signals whose `expires_at` timestamp is in the past.
    * Called once per daemon poll cycle to keep the table small.
    *
@@ -8474,8 +8557,10 @@ export class StateStore {
     decision?: AntibodyLogEntry["decision"];
     limit?: number;
     includeFalsePositives?: boolean;
+    /** ISO timestamp: only return entries at or after this time. */
+    since?: string;
   } = {}): AntibodyLogEntry[] {
-    const { repo, decision, limit = 50, includeFalsePositives = false } = opts;
+    const { repo, decision, limit = 50, includeFalsePositives = false, since } = opts;
     const conditions: string[] = [];
     const args: unknown[] = [];
 
@@ -8490,6 +8575,10 @@ export class StateStore {
       conditions.push("decision = ?");
       args.push(decision);
     }
+    if (since) {
+      conditions.push("timestamp >= ?");
+      args.push(since);
+    }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     args.push(limit);
@@ -8497,6 +8586,84 @@ export class StateStore {
     return this.db
       .prepare(`SELECT * FROM antibody_log ${where} ORDER BY timestamp DESC LIMIT ?`)
       .all(...args) as AntibodyLogEntry[];
+  }
+
+  /**
+   * Update the confidence of a signal by applying a signed delta.
+   * Confidence is clamped to [0.0, 1.0].
+   *
+   * Used by AntibodyHarvester to apply fitness scoring after dispatch outcomes:
+   *   - success dispatch  → delta = +0.05
+   *   - failure dispatch  → delta = -0.10
+   *
+   * @param id    - Primary key of the signals row.
+   * @param delta - Signed confidence delta (positive = boost, negative = decay).
+   */
+  updateSignalConfidence(id: number, delta: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE signals
+         SET confidence = MAX(0.0, MIN(1.0, confidence + ?)),
+             created_at = created_at   -- preserve original timestamp
+         WHERE id = ?`,
+      )
+      .run(delta, id);
+    // Touch updated_at via a no-op if the column exists (best-effort — schema
+    // may not have updated_at on all deployments).
+    try {
+      this.db
+        .prepare(`UPDATE signals SET created_at = created_at WHERE id = ?`)
+        .run(id);
+    } catch {
+      // ignore — column may not exist
+    }
+    void now; // used only for documentation clarity
+  }
+
+  /**
+   * Delete failure_antibody signals that have been injected at least
+   * `minInjections` times (signal_reads count) but whose confidence has
+   * fallen below `minConfidence`.
+   *
+   * This implements natural selection: antibodies that have been tried many
+   * times without improving dispatch outcomes are automatically removed.
+   *
+   * @param minConfidence - Confidence floor (default 0.2).
+   * @param minInjections - Minimum reads before culling (default 10).
+   * @returns Number of signals deleted.
+   */
+  cullFailureAntibodies(
+    minConfidence = 0.2,
+    minInjections = 10,
+  ): number {
+    // Find candidate signal IDs: failure_antibody type + low confidence
+    const candidates = this.db
+      .prepare(
+        `SELECT id FROM signals
+         WHERE signal_type = 'failure_antibody'
+           AND confidence < ?`,
+      )
+      .all(minConfidence) as Array<{ id: number }>;
+
+    if (candidates.length === 0) return 0;
+
+    let deleted = 0;
+    for (const { id } of candidates) {
+      // Count how many times this signal was injected (read)
+      const row = this.db
+        .prepare(
+          `SELECT COUNT(*) AS cnt FROM signal_reads WHERE signal_id = ?`,
+        )
+        .get(id) as { cnt: number };
+
+      if (row.cnt >= minInjections) {
+        this.db.prepare(`DELETE FROM signals WHERE id = ?`).run(id);
+        this.db.prepare(`DELETE FROM signal_reads WHERE signal_id = ?`).run(id);
+        deleted++;
+      }
+    }
+    return deleted;
   }
 
   /**

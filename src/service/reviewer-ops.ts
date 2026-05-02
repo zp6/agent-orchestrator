@@ -21,6 +21,10 @@ import {
   captureDisciplineContext,
   readTaskDisciplineSnapshot,
 } from "../orchestrator/discipline-context.js";
+import {
+  applyFailureAntibodyFitness,
+  harvestFailureAntibodyForTask,
+} from "../orchestrator/failure-antibody.js";
 
 const verifierLog = createLogger("verifier");
 const supervisorLog = createLogger("supervisor");
@@ -162,6 +166,19 @@ export async function verifyTask(
     if (result.score != null) {
       store.updateRoutingOutcomeScore(taskId, result.score);
     }
+
+    // Failure antibody auto-harvest and fitness scoring:
+    // - successful retries become new antibodies
+    // - injected antibodies are rewarded/punished based on the outcome
+    const verifiedTask = {
+      ...task,
+      verification_status: (result.approved ? "approved" : "rejected") as Task["verification_status"],
+      verification_notes: result.notes,
+    } as Task;
+    if (result.approved) {
+      harvestFailureAntibodyForTask(store, verifiedTask, task.result ?? result.revision ?? result.notes ?? task.title);
+    }
+    applyFailureAntibodyFitness(store, taskId, result.approved ? "approved" : "rejected", result.notes ?? task.verification_notes);
 
     // Cross-task learning: extract rules from reviewer feedback
     const feedbackText = result.revision || result.notes;

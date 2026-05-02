@@ -14,6 +14,7 @@ import { checkDuplicate } from "../triggers/duplicate-guard.js";
 import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
 import { buildRejectionHistoryBlock } from "./rejection-history.js";
 import { getAndApplyRules } from "./learned-rules.js";
+import { runFailureAntibodyPreDispatchCheck } from "./failure-antibody.js";
 import { runAntibodyPreDispatchCheck } from "./antibody-filter.js";
 import {
   findBestReferenceImplementation,
@@ -1513,6 +1514,34 @@ export class Dispatcher {
           content: `[learned-rules] Applied rule IDs: ${ruleIds.join(",")}`,
         });
       }
+    }
+
+    // Failure antibody pre-dispatch check: inject auto-harvested remediation
+    // patterns derived from prior failure→fix sequences.
+    const failureAntibodyCheck = runFailureAntibodyPreDispatchCheck(
+      this.store,
+      message,
+      task.id,
+      agentName,
+      sourceRepo ?? undefined,
+    );
+    if (failureAntibodyCheck.flagged) {
+      this.log.warn("Failure antibody pre-dispatch: task matches known fix pattern(s)", {
+        taskId: task.id,
+        agentName,
+        repo: sourceRepo,
+        matchCount: failureAntibodyCheck.matches.length,
+        topScore: failureAntibodyCheck.matches[0]?.score?.toFixed(3),
+      });
+      messageToSend = messageToSend + failureAntibodyCheck.warningBlock;
+      this.store.addLog({
+        task_id: task.id,
+        direction: "system",
+        agent_name: agentName,
+        content: `[failure-antibody] Matched ${failureAntibodyCheck.matches.length} fix pattern(s): ${failureAntibodyCheck.matches
+          .map((m) => `${m.signal.key}(${(m.score * 100).toFixed(0)}%)`)
+          .join(",")}`,
+      });
     }
 
     // Antibody pre-dispatch check: attach known-risk warning when the task
