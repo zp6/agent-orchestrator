@@ -823,6 +823,22 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
       CREATE INDEX IF NOT EXISTS idx_synthesis_watchlist_intake
         ON synthesis_watchlist (intake_at DESC);
     `);
+
+    // brainstorm_sessions — records each dispatched brainstorm session so the
+    // brainstorm gate can detect duplicate-state dispatches (issue #625).
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS brainstorm_sessions (
+        id                  TEXT    PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+        fleet_hash          TEXT    NOT NULL,
+        dispatched_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+        failure_rate        REAL,
+        open_issues_count   INTEGER,
+        mergeable_prs_count INTEGER
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_brainstorm_sessions_dispatched_at
+        ON brainstorm_sessions (dispatched_at DESC);
+    `);
   }
 
   // ── PR guard cooldown (issue #390) ───────────────────────────────────────
@@ -5368,6 +5384,51 @@ export class StateStore implements ITelegramStateStore, IQualityAnomalyStore, IT
           WHERE repo = ? AND issue_number = ?`,
       )
       .run(repo, issueNumber);
+  }
+
+  // ── Brainstorm gate (issue #625) ─────────────────────────────────────────
+
+  /**
+   * Return the most recent brainstorm session row, or `null` when no sessions
+   * have been recorded yet.
+   *
+   * Implements `IBrainstormGateStore.getLastBrainstormSession`.
+   */
+  getLastBrainstormSession(): import("../reviewer/brainstorm-gate.js").BrainstormSessionRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, fleet_hash, dispatched_at, failure_rate,
+                open_issues_count, mergeable_prs_count
+           FROM brainstorm_sessions
+          ORDER BY dispatched_at DESC
+          LIMIT 1`,
+      )
+      .get() as import("../reviewer/brainstorm-gate.js").BrainstormSessionRow | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * Persist a new brainstorm session record.
+   *
+   * Implements `IBrainstormGateStore.recordBrainstormSession`.
+   */
+  recordBrainstormSession(
+    record: import("../reviewer/brainstorm-gate.js").BrainstormSessionRecord,
+  ): void {
+    const dispatchedAt = record.dispatched_at ?? new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO brainstorm_sessions
+           (fleet_hash, dispatched_at, failure_rate, open_issues_count, mergeable_prs_count)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.fleet_hash,
+        dispatchedAt,
+        record.failure_rate ?? null,
+        record.open_issues_count ?? null,
+        record.mergeable_prs_count ?? null,
+      );
   }
 
   /**

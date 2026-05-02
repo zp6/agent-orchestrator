@@ -1527,3 +1527,18 @@ export type {
   FleetWalletConfig,
   FleetConfigPayload,
 } from "./reviewer/fleet-wallet-config.js";
+
+
+// Brainstorm gate — idempotency check for repeated blue-sky brainstorm sessions (issue #625).
+// computeBatchHash is already exported above (from improvement-detector).
+export {
+  getBrainstormGatePayload,
+  parseBrainstormGateParams,
+} from "./reviewer/brainstorm-gate.js";
+export type {
+  IBrainstormGateStore,
+  BrainstormSessionRow,
+  BrainstormSessionRecord,
+  BrainstormGateReason,
+  BrainstormGatePayload,
+} from "./reviewer/brainstorm-gate.js";
