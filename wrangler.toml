@@ -1,0 +1,23 @@
+name = "hire-the-fleet"
+type = "javascript"
+account_id = ""  # Set via CLOUDFLARE_ACCOUNT_ID environment variable
+workers_dev = true
+route = ""  # Optional: set to deploy to a specific domain
+zone_id = ""  # Optional: set if deploying to a domain under a Cloudflare Zone
+
+# Compatibility date for Cloudflare Workers
+compatibility_date = "2024-12-16"
+
+# Environment configuration
+[env.production]
+account_id = ""  # Set via CLOUDFLARE_ACCOUNT_ID environment variable
+route = ""  # Set to your custom domain when ready
+
+# Service bindings (optional, for future use)
+# [[services]]
+# binding = "BACKEND"
+# service = "other-worker"
+
+# Triggers for scheduled deployments (optional)
+# [triggers]
+# crons = ["0 0 * * *"]
