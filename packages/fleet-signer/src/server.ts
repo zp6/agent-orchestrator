@@ -1,7 +1,13 @@
 import * as http from "node:http";
 import { privateKeyToAccount } from "viem/accounts";
 import type { Hex, PrivateKeyAccount } from "viem";
-import { evaluateWhitelist, type SignRequest } from "./whitelists/index.js";
+import {
+  evaluateWhitelist,
+  type SignRequest,
+  POLYGON_CONTRACTS,
+  PER_TX_CAPS_USD,
+  DAILY_CAP_USD,
+} from "./whitelists/index.js";
 import { AuditLog } from "./audit.js";
 
 /** Configuration for the signer service. */
@@ -42,13 +48,165 @@ interface SignResponseBody {
   txParams?: Record<string, string>;
 }
 
+/** Polymarket /sign-order request body. action=order signs a trade; action=auth signs API key credentials. */
+interface PolymarketSignBody {
+  action: "order" | "auth";
+  // --- order fields (action=order) ---
+  makerAmount?: string;
+  takerAmount?: string;
+  tokenId?: string;
+  side?: 0 | 1;
+  expiration?: string;
+  nonce?: string;
+  feeRateBps?: string;
+  // --- auth fields (action=auth) ---
+  timestamp?: string;
+  authNonce?: number;
+}
+
+interface SignOrderResponseBody {
+  approved: boolean;
+  reason: string;
+  signature?: Hex;
+  order?: Record<string, string>;
+  address?: string;
+}
+
+/** EIP-712 domain for Polymarket CTF Exchange orders. */
+const POLYMARKET_ORDER_DOMAIN = {
+  name: "Exchange",
+  version: "1",
+  chainId: 137,
+  verifyingContract: POLYGON_CONTRACTS.POLYMARKET_CTF_EXCHANGE,
+} as const;
+
+/** EIP-712 domain for Polymarket CLOB API key generation. */
+const POLYMARKET_AUTH_DOMAIN = {
+  name: "ClobAuthDomain",
+  version: "1",
+  chainId: 137,
+} as const;
+
+const ORDER_TYPES = {
+  Order: [
+    { name: "salt", type: "uint256" },
+    { name: "maker", type: "address" },
+    { name: "signer", type: "address" },
+    { name: "taker", type: "address" },
+    { name: "tokenId", type: "uint256" },
+    { name: "makerAmount", type: "uint256" },
+    { name: "takerAmount", type: "uint256" },
+    { name: "expiration", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+    { name: "feeRateBps", type: "uint256" },
+    { name: "side", type: "uint8" },
+    { name: "signatureType", type: "uint8" },
+  ],
+} as const;
+
+const CLOB_AUTH_TYPES = {
+  ClobAuth: [
+    { name: "address", type: "address" },
+    { name: "timestamp", type: "string" },
+    { name: "nonce", type: "int256" },
+    { name: "message", type: "string" },
+  ],
+} as const;
+
+async function handleSignOrder(
+  body: PolymarketSignBody,
+  account: PrivateKeyAccount,
+  audit: AuditLog,
+): Promise<SignOrderResponseBody> {
+
+  if (body.action === "auth") {
+    // EIP-712 auth signing for CLOB API key generation — no USD cap (no funds moved)
+    const timestamp = body.timestamp ?? String(Math.floor(Date.now() / 1000));
+    const authNonce = body.authNonce ?? 0;
+    const signature = await account.signTypedData({
+      domain: POLYMARKET_AUTH_DOMAIN,
+      types: CLOB_AUTH_TYPES,
+      primaryType: "ClobAuth",
+      message: {
+        address: account.address,
+        timestamp,
+        nonce: BigInt(authNonce),
+        message: "This message attests that I control the given wallet",
+      },
+    });
+    await audit.append({ operation: "polymarket_auth", decision: "approve", reason: "CLOB API key auth signed" });
+    return { approved: true, reason: "CLOB auth signed", signature, address: account.address };
+  }
+
+  // action=order
+  const makerAmount = BigInt(body.makerAmount ?? "0");
+  const usdValue = Number(makerAmount) / 1_000_000;
+
+  if (usdValue > PER_TX_CAPS_USD.POLYMARKET_ORDER) {
+    await audit.append({ operation: "polymarket_sign_order", decision: "reject", reason: `usdValue ${usdValue} exceeds per-tx cap` });
+    return { approved: false, reason: `makerAmount ${usdValue} USDC exceeds per-tx cap ${PER_TX_CAPS_USD.POLYMARKET_ORDER}` };
+  }
+  const daySpend = await audit.daySpendUsd();
+  if (daySpend + usdValue > DAILY_CAP_USD) {
+    await audit.append({ operation: "polymarket_sign_order", decision: "reject", reason: `daily cap exceeded` });
+    return { approved: false, reason: `daily cap exceeded: ${daySpend} + ${usdValue} > ${DAILY_CAP_USD}` };
+  }
+
+  const saltBytes = crypto.getRandomValues(new Uint8Array(32));
+  const salt = BigInt("0x" + Array.from(saltBytes).map(b => b.toString(16).padStart(2, "0")).join(""));
+  const order = {
+    salt,
+    maker: account.address,
+    signer: account.address,
+    taker: "0x0000000000000000000000000000000000000000" as `0x${string}`,
+    tokenId: BigInt(body.tokenId ?? "0"),
+    makerAmount,
+    takerAmount: BigInt(body.takerAmount ?? "0"),
+    expiration: BigInt(body.expiration ?? "0"),
+    nonce: BigInt(body.nonce ?? "0"),
+    feeRateBps: BigInt(body.feeRateBps ?? "0"),
+    side: body.side ?? 0,
+    signatureType: 0,
+  };
+
+  const signature = await account.signTypedData({
+    domain: POLYMARKET_ORDER_DOMAIN,
+    types: ORDER_TYPES,
+    primaryType: "Order",
+    message: order,
+  });
+
+  await audit.append({
+    operation: "polymarket_sign_order",
+    decision: "approve",
+    reason: "Polymarket order signed",
+    payload: { tokenId: body.tokenId, side: body.side, usdValue },
+    daySpendUsd: usdValue,
+  });
+
+  return {
+    approved: true,
+    reason: "Polymarket order signed",
+    signature,
+    order: {
+      salt: salt.toString(),
+      maker: account.address,
+      signer: account.address,
+      taker: "0x0000000000000000000000000000000000000000",
+      tokenId: body.tokenId ?? "",
+      makerAmount: body.makerAmount ?? "0",
+      takerAmount: body.takerAmount ?? "0",
+      expiration: body.expiration ?? "0",
+      nonce: body.nonce ?? "0",
+      feeRateBps: body.feeRateBps ?? "0",
+      side: String(body.side ?? 0),
+      signatureType: "0",
+    },
+  };
+}
+
 /**
  * Construct, validate, and (if approved) sign the requested transaction.
- *
- * Returns the signed raw transaction. The fleet daemon then broadcasts it
- * via its preferred RPC. The signer never broadcasts — separating sign
- * from broadcast is a security best-practice (the signer's only privilege
- * is producing signatures).
  */
 async function handleSign(
   body: SignRequestBody,
@@ -81,13 +239,9 @@ async function handleSign(
   let signedTx: Hex;
 
   if (req.operation === "siwe_sign") {
-    // SIWE: sign a message (EIP-191 personal_sign), not a transaction.
-    // The data field contains the hex-encoded SIWE message.
     const messageBytes = Buffer.from(req.data.slice(2), "hex");
     signedTx = await account.signMessage({ message: { raw: messageBytes } });
   } else {
-    // Transaction signing: EIP-1559. Nonce + gas are caller responsibility.
-    // Contract deployments have to=null; viem expects the field omitted for deployments.
     const txBase = {
       chainId: req.chainId,
       data: req.data,
@@ -103,14 +257,13 @@ async function handleSign(
     );
   }
 
-  // Withdrawals and deployments don't count against the daily spend cap.
-  const spendableTx = req.operation !== "aave_withdraw" && req.operation !== "deploy_flash_arb_bot";
+  const nonSpendingOps = new Set(["aave_withdraw", "deploy_flash_arb_bot", "flash_arb_execute", "bridge_usdc_to_polygon", "cctp_receive_message"]);
   await audit.append({
     operation: req.operation,
     decision: "approve",
     reason: decision.reason,
     payload: { to: req.to, chainId: req.chainId, usdValue: req.usdValue },
-    daySpendUsd: spendableTx ? req.usdValue : 0,
+    daySpendUsd: nonSpendingOps.has(req.operation) ? 0 : req.usdValue,
   });
 
   return {
@@ -135,12 +288,31 @@ export function startSignerServer(config: SignerServerConfig): http.Server {
   const audit = config.auditLog ?? new AuditLog();
 
   const server = http.createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", address: account.address }));
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/sign-order") {
+      let raw = "";
+      req.on("data", (chunk) => (raw += chunk));
+      req.on("end", async () => {
+        try {
+          const body = JSON.parse(raw) as PolymarketSignBody;
+          const result = await handleSignOrder(body, account, audit);
+          res.writeHead(result.approved ? 200 : 403, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "unknown error";
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ approved: false, reason: `error: ${message}` }));
+        }
+      });
+      return;
+    }
+
     if (req.method !== "POST" || req.url !== "/sign") {
-      if (req.method === "GET" && req.url === "/health") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", address: account.address }));
-        return;
-      }
       res.writeHead(404);
       res.end();
       return;

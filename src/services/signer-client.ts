@@ -1,7 +1,7 @@
 import type { Hex } from "viem";
 
 export interface SignerSignRequest {
-  operation: "aave_supply_usdc" | "erc20_approve_usdc" | "polymarket_place_order" | "siwe_sign" | "aave_withdraw" | "morpho_deposit" | "deploy_flash_arb_bot" | "flash_arb_execute";
+  operation: "aave_supply_usdc" | "erc20_approve_usdc" | "polymarket_place_order" | "siwe_sign" | "aave_withdraw" | "morpho_deposit" | "deploy_flash_arb_bot" | "flash_arb_execute" | "bridge_usdc_to_polygon" | "erc20_approve_usdc_polygon" | "cctp_receive_message";
   chainId: number;
   /** Null for contract deployments (deploy_flash_arb_bot). */
   to: `0x${string}` | null;
@@ -85,6 +85,36 @@ export class SignerClient {
       throw new SignerRejectedError(res.reason);
     }
     return res;
+  }
+
+  async signOrder(req: {
+    makerAmount: bigint;
+    takerAmount: bigint;
+    tokenId: string;
+    side: 0 | 1;
+    expiration?: bigint;
+    nonce?: bigint;
+    feeRateBps?: bigint;
+  }): Promise<{ signature: Hex; order: Record<string, string> }> {
+    const body = {
+      action: "order",
+      makerAmount: req.makerAmount.toString(),
+      takerAmount: req.takerAmount.toString(),
+      tokenId: req.tokenId,
+      side: req.side,
+      expiration: (req.expiration ?? 0n).toString(),
+      nonce: (req.nonce ?? 0n).toString(),
+      feeRateBps: (req.feeRateBps ?? 0n).toString(),
+    };
+    const res = (await this.request("POST", "/sign-order", body)) as { approved: boolean; reason: string; signature?: Hex; order?: Record<string, string> };
+    if (!res.approved) throw new SignerRejectedError(res.reason);
+    return { signature: res.signature!, order: res.order! };
+  }
+
+  async signPolymarketAuth(timestamp: string, nonce = 0): Promise<{ signature: Hex; address: string }> {
+    const res = (await this.request("POST", "/sign-order", { action: "auth", timestamp, authNonce: nonce })) as { approved: boolean; reason: string; signature?: Hex; address?: string };
+    if (!res.approved) throw new SignerRejectedError(res.reason);
+    return { signature: res.signature!, address: res.address! };
   }
 
   private async request(method: "GET" | "POST", path: string, body?: unknown): Promise<unknown> {

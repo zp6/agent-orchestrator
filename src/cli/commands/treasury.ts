@@ -4,7 +4,8 @@ import { dirname, join } from "node:path";
 import type { Command } from "commander";
 import chalk from "chalk";
 import type { Hex } from "viem";
-import { TreasuryClient, AAVE_V3_POOL_BASE, USDC_BASE, TREASURY_ADDRESS, MORPHO_STEAKHOUSE_USDC, USDC_DECIMALS } from "../../services/treasury.js";
+import { TreasuryClient, AAVE_V3_POOL_BASE, USDC_BASE, USDC_POLYGON, TREASURY_ADDRESS, MORPHO_STEAKHOUSE_USDC, USDC_DECIMALS, CCTP_TOKEN_MESSENGER_BASE, CCTP_MESSAGE_TRANSMITTER_POLYGON, POLYMARKET_CTF_EXCHANGE } from "../../services/treasury.js";
+import { PolymarketClient } from "../../services/polymarket-client.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -203,5 +204,135 @@ export function registerTreasuryCommand(program: Command): void {
       console.log(`  Tx: ${receipt.transactionHash}`);
       console.log(`\nBasescan: https://basescan.org/address/${contractAddress}`);
       console.log(chalk.cyan(`\nSave this address — set FLASH_ARB_BOT_ADDRESS=${contractAddress} in .env`));
+    });
+
+  treasury
+    .command("polymarket-bridge")
+    .description("Bridge USDC from Base to Polygon via CCTP (for Polymarket betting)")
+    .requiredOption("--amount <usd>", "Amount in USD to bridge (max $50)")
+    .action(async (opts: { amount: string }) => {
+      const usd = Number(opts.amount);
+      if (!Number.isFinite(usd) || usd <= 0 || usd > 50) {
+        console.error(chalk.red("--amount must be 0–50"));
+        process.exit(1);
+      }
+
+      const client = new TreasuryClient();
+      const amountUnits = BigInt(Math.round(usd * 10 ** USDC_DECIMALS));
+
+      console.log(chalk.dim("Pre-flight: checking balances..."));
+      const [baseBalance, polygonBalance] = await Promise.all([
+        client.treasuryUsdcBalance(),
+        client.treasuryPolygonUsdcBalance(),
+      ]);
+      console.log(`  Base USDC:    ${formatUsdc(baseBalance)}`);
+      console.log(`  Polygon USDC: ${formatUsdc(polygonBalance)}`);
+      if (baseBalance < amountUnits) {
+        console.error(chalk.red(`Insufficient Base USDC: need ${formatUsdc(amountUnits)}, have ${formatUsdc(baseBalance)}`));
+        process.exit(1);
+      }
+
+      console.log(chalk.yellow(`\n⚠  Treasury needs MATIC on Polygon for gas to receive the bridge.`));
+      console.log(chalk.yellow(`   Send ~$2 MATIC to ${TREASURY_ADDRESS} on Polygon if not already funded.`));
+
+      console.log(chalk.cyan("\nStep 1/3: Approve USDC → CCTP TokenMessenger on Base"));
+      const approveReceipt = await client.signAndBroadcast({
+        operation: "erc20_approve_usdc",
+        to: USDC_BASE,
+        data: client.buildCctpApproveCalldata(amountUnits),
+        usdValue: usd,
+      });
+      console.log(chalk.green(`  ✓ approve: ${approveReceipt.transactionHash}`));
+      await new Promise(r => setTimeout(r, 3000));
+
+      console.log(chalk.cyan("\nStep 2/3: depositForBurn (CCTP bridge Base → Polygon)"));
+      const burnReceipt = await client.signAndBroadcast({
+        operation: "bridge_usdc_to_polygon",
+        to: CCTP_TOKEN_MESSENGER_BASE,
+        data: client.buildCctpDepositForBurnCalldata(amountUnits),
+        usdValue: usd,
+      });
+      console.log(chalk.green(`  ✓ burn tx: ${burnReceipt.transactionHash}`));
+      console.log(chalk.dim(`  Polling Circle attestation API (~2–10 min)...`));
+
+      const { message, attestation } = await client.pollCctpAttestation(burnReceipt.transactionHash);
+      console.log(chalk.green(`  ✓ attestation ready`));
+
+      console.log(chalk.cyan("\nStep 3/3: receiveMessage on Polygon"));
+      const receiveReceipt = await client.signAndBroadcastPolygon({
+        operation: "cctp_receive_message",
+        to: CCTP_MESSAGE_TRANSMITTER_POLYGON,
+        data: client.buildCctpReceiveMessageCalldata(message, attestation),
+        usdValue: 0,
+      });
+      console.log(chalk.green(`  ✓ USDC received on Polygon: ${receiveReceipt.transactionHash}`));
+      console.log(`\nPolygonscan: https://polygonscan.com/tx/${receiveReceipt.transactionHash}`);
+
+      const newBalance = await client.treasuryPolygonUsdcBalance();
+      console.log(chalk.green(`\nPolygon treasury USDC: ${formatUsdc(newBalance)}`));
+    });
+
+  treasury
+    .command("polymarket-bet")
+    .description("Place a Polymarket CLOB order (sign + submit off-chain)")
+    .requiredOption("--market <slug>", "Market slug from Polymarket URL (e.g. gemini-3pt5-released-by)")
+    .requiredOption("--side <yes|no>", "YES or NO outcome")
+    .requiredOption("--amount <usd>", "USDC amount to stake (max $50)")
+    .requiredOption("--price <0-1>", "Max price per token (0–1). E.g. 0.53 = 53¢ per token")
+    .option("--skip-approve", "Skip USDC approve to CTF Exchange (if already approved)")
+    .action(async (opts: { market: string; side: string; amount: string; price: string; skipApprove?: boolean }) => {
+      const side = opts.side.toLowerCase();
+      if (side !== "yes" && side !== "no") {
+        console.error(chalk.red("--side must be 'yes' or 'no'"));
+        process.exit(1);
+      }
+      const usd = Number(opts.amount);
+      const price = Number(opts.price);
+      if (!Number.isFinite(usd) || usd <= 0 || usd > 50) {
+        console.error(chalk.red("--amount must be 0–50"));
+        process.exit(1);
+      }
+      if (!Number.isFinite(price) || price <= 0 || price >= 1) {
+        console.error(chalk.red("--price must be between 0 and 1"));
+        process.exit(1);
+      }
+
+      const client = new TreasuryClient();
+      const polymarket = new PolymarketClient(client.signerClient);
+
+      console.log(chalk.dim(`Fetching market: ${opts.market}`));
+      const market = await polymarket.getMarket(opts.market);
+      console.log(`  ${market.question}`);
+      console.log(`  YES: ${(market.yesPrice * 100).toFixed(1)}¢  NO: ${(market.noPrice * 100).toFixed(1)}¢`);
+
+      const tokenId = side === "yes" ? market.yesTokenId : market.noTokenId;
+      const currentPrice = side === "yes" ? market.yesPrice : market.noPrice;
+      if (currentPrice > price) {
+        console.log(chalk.yellow(`  ⚠  Current ${side.toUpperCase()} price (${(currentPrice * 100).toFixed(1)}¢) > your limit (${(price * 100).toFixed(1)}¢)`));
+        console.log(chalk.yellow(`     Order will rest on the book until filled.`));
+      }
+
+      const amountUnits = BigInt(Math.round(usd * 10 ** USDC_DECIMALS));
+
+      if (!opts.skipApprove) {
+        console.log(chalk.cyan("\nStep 1/2: Approve USDC → Polymarket CTF Exchange on Polygon"));
+        console.log(chalk.yellow(`  ⚠  Needs MATIC on Polygon for gas. Treasury: ${TREASURY_ADDRESS}`));
+        const approveReceipt = await client.signAndBroadcastPolygon({
+          operation: "erc20_approve_usdc_polygon",
+          to: USDC_POLYGON,
+          data: client.buildPolygonUsdcApproveCalldata(POLYMARKET_CTF_EXCHANGE, amountUnits),
+          usdValue: usd,
+        });
+        console.log(chalk.green(`  ✓ approve: ${approveReceipt.transactionHash}`));
+      }
+
+      console.log(chalk.cyan("\nStep 2/2: Authenticate + submit CLOB order"));
+      await polymarket.authenticate(TREASURY_ADDRESS);
+      const orderId = await polymarket.placeOrder({ tokenId, side: "BUY", amountUsdc: usd, price });
+      console.log(chalk.green(`\n  ✓ Order submitted: ${orderId}`));
+      console.log(`  Market: ${market.question}`);
+      console.log(`  Bet:    $${usd} ${side.toUpperCase()} @ ${(price * 100).toFixed(1)}¢`);
+      console.log(`  Expected payout if correct: $${(usd / price).toFixed(2)}`);
+      console.log(`\nPolymarket: https://polymarket.com/event/${opts.market}`);
     });
 }

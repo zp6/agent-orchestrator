@@ -28,7 +28,17 @@ export const POLYGON_CONTRACTS = {
   POLYMARKET_CTF_EXCHANGE: "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as Address,
   AAVE_V3_POOL: "0x794a61358D6845594F94dc1DB02A252b5b4814aD" as Address,
   USDC: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" as Address,
+  CCTP_MESSAGE_TRANSMITTER: "0x0a992d191DEeC32aFe36203Ad87D7d289a738F81" as Address,
 } as const;
+
+/** CCTP v1 TokenMessenger on Base — initiates USDC burns toward Polygon. */
+export const BASE_CCTP_TOKEN_MESSENGER = "0x1682Ae6375C4E4A97e4B583BC394c861A46D8962" as Address;
+
+/** depositForBurn(uint256,uint32,bytes32,address) selector. */
+export const CCTP_DEPOSIT_FOR_BURN_SELECTOR = "0x6fd3504e" as const;
+
+/** receiveMessage(bytes,bytes) selector. */
+export const CCTP_RECEIVE_MESSAGE_SELECTOR = "0x57ecfd28" as const;
 
 /** Aave V3 supply(asset, amount, onBehalfOf, referralCode) selector. */
 export const AAVE_V3_SUPPLY_SELECTOR = "0x617ba037" as const;
@@ -68,6 +78,9 @@ export const PER_TX_CAPS_USD = {
   MORPHO_DEPOSIT: 50,
   DEPLOY_FLASH_ARB_BOT: 5,
   FLASH_ARB_EXECUTE: 2, // gas-only, no capital at risk (flash loan reverts if unprofitable)
+  BRIDGE_USDC_TO_POLYGON: 50,
+  ERC20_APPROVE_USDC_POLYGON: 50,
+  CCTP_RECEIVE_MESSAGE: 0, // gas-only on Polygon; no capital moved
 } as const;
 
 /** Daily total cap (sum of all approved transactions per UTC day). */
@@ -84,6 +97,8 @@ export const SIWE_ALLOWED_DOMAINS = [
   "paragraph.xyz",
   "warpcast.com",
   "farcaster.xyz",
+  "polymarket.com",  // CLOB API key auth uses personal_sign of a nonce
+  "clob.polymarket.com",
 ] as const;
 
 export type OperationType =
@@ -96,7 +111,10 @@ export type OperationType =
   | "aave_withdraw"
   | "morpho_deposit"
   | "deploy_flash_arb_bot"
-  | "flash_arb_execute";
+  | "flash_arb_execute"
+  | "bridge_usdc_to_polygon"
+  | "erc20_approve_usdc_polygon"
+  | "cctp_receive_message";
 
 export interface SignRequest {
   /** Operation type — used to look up whitelist rules. */
@@ -321,6 +339,50 @@ export function evaluateWhitelist(req: SignRequest, currentDaySpendUsd: number):
       }
       // Flash arb is gas-only cost — no capital at risk. Exempt from daily cap.
       return { approved: true, reason: "flash_arb_execute: zero-capital arb, daily cap exempt" };
+    }
+    case "bridge_usdc_to_polygon": {
+      if (req.chainId !== 8453) {
+        return { approved: false, reason: `bridge_usdc_to_polygon requires chainId 8453 (Base)` };
+      }
+      if (req.to?.toLowerCase() !== BASE_CCTP_TOKEN_MESSENGER.toLowerCase()) {
+        return { approved: false, reason: `to ${req.to} not CCTP TokenMessenger` };
+      }
+      if (!req.data.toLowerCase().startsWith(CCTP_DEPOSIT_FOR_BURN_SELECTOR)) {
+        return { approved: false, reason: `data selector not depositForBurn()` };
+      }
+      if (req.usdValue > PER_TX_CAPS_USD.BRIDGE_USDC_TO_POLYGON) {
+        return { approved: false, reason: `usdValue ${req.usdValue} exceeds per-tx cap ${PER_TX_CAPS_USD.BRIDGE_USDC_TO_POLYGON}` };
+      }
+      // Bridge is capital movement, not spend — exempt from daily cap.
+      return { approved: true, reason: "bridge_usdc_to_polygon: capital movement, daily cap exempt" };
+    }
+    case "erc20_approve_usdc_polygon": {
+      if (req.chainId !== 137) {
+        return { approved: false, reason: `erc20_approve_usdc_polygon requires chainId 137 (Polygon)` };
+      }
+      if (req.to?.toLowerCase() !== POLYGON_CONTRACTS.USDC.toLowerCase()) {
+        return { approved: false, reason: `to ${req.to} not USDC (Polygon)` };
+      }
+      if (!req.data.toLowerCase().startsWith(ERC20_APPROVE_SELECTOR)) {
+        return { approved: false, reason: `data selector not approve()` };
+      }
+      if (req.usdValue > PER_TX_CAPS_USD.ERC20_APPROVE_USDC_POLYGON) {
+        return { approved: false, reason: `usdValue ${req.usdValue} exceeds per-tx cap ${PER_TX_CAPS_USD.ERC20_APPROVE_USDC_POLYGON}` };
+      }
+      break;
+    }
+    case "cctp_receive_message": {
+      if (req.chainId !== 137) {
+        return { approved: false, reason: `cctp_receive_message requires chainId 137 (Polygon)` };
+      }
+      if (req.to?.toLowerCase() !== POLYGON_CONTRACTS.CCTP_MESSAGE_TRANSMITTER.toLowerCase()) {
+        return { approved: false, reason: `to ${req.to} not CCTP MessageTransmitter (Polygon)` };
+      }
+      if (!req.data.toLowerCase().startsWith(CCTP_RECEIVE_MESSAGE_SELECTOR)) {
+        return { approved: false, reason: `data selector not receiveMessage()` };
+      }
+      // Gas-only, no capital moved — exempt from daily cap.
+      return { approved: true, reason: "cctp_receive_message: gas-only relay, daily cap exempt" };
     }
     default: {
       const exhaustive: never = req.operation;
