@@ -10,6 +10,12 @@ export interface SignerServerConfig {
   privateKey: `0x${string}`;
   /** TCP port for the localhost HTTP listener. Defaults to 7521. */
   port?: number;
+  /**
+   * Bind host. Defaults to 127.0.0.1. Override to 0.0.0.0 only when running
+   * inside a container whose port is mapped to host loopback (127.0.0.1:7521:7521).
+   * Never bind 0.0.0.0 directly on a host with a public interface.
+   */
+  bindHost?: string;
   /** Audit log instance. Created with default path if omitted. */
   auditLog?: AuditLog;
 }
@@ -114,6 +120,7 @@ async function handleSign(
 /** Start the localhost HTTP signer. Returns the server handle so callers can stop it. */
 export function startSignerServer(config: SignerServerConfig): http.Server {
   const port = config.port ?? 7521;
+  const bindHost = config.bindHost ?? "127.0.0.1";
   const account = privateKeyToAccount(config.privateKey);
   const audit = config.auditLog ?? new AuditLog();
 
@@ -150,6 +157,6 @@ export function startSignerServer(config: SignerServerConfig): http.Server {
     });
   });
 
-  server.listen(port, "127.0.0.1");
+  server.listen(port, bindHost);
   return server;
 }

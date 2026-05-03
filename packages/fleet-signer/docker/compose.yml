@@ -1,0 +1,47 @@
+# Fleet treasury signer — containerized.
+#
+# Run separately from the agent fleet (NOT under the proxy management API).
+# Bind only to host loopback so it is unreachable from the LAN.
+#
+#   cd packages/fleet-signer
+#   docker compose -f docker/compose.yml up -d --build
+#
+# Set FLEET_SIGNER_PASSPHRASE in a .env file next to this compose.yml,
+# OR pass it inline (less safe in shell history):
+#   FLEET_SIGNER_PASSPHRASE=... docker compose -f docker/compose.yml up -d
+#
+# The encrypted key envelope at ~/.fleet-signer/key.enc is bind-mounted
+# READ-ONLY. The audit log at ~/.fleet-signer/audit.log is mounted RW so
+# entries survive container restarts.
+
+services:
+  fleet-signer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: fleet-signer:local
+    container_name: fleet-signer
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7521:7521"
+    volumes:
+      - "${HOME}/.fleet-signer/key.enc:/keystore/key.enc:ro"
+      - "${HOME}/.fleet-signer:/audit:rw"
+    environment:
+      FLEET_SIGNER_PASSPHRASE: "${FLEET_SIGNER_PASSPHRASE:?must set FLEET_SIGNER_PASSPHRASE}"
+      FLEET_SIGNER_KEY_PATH: /keystore/key.enc
+      FLEET_SIGNER_AUDIT_PATH: /audit/audit.log
+      FLEET_SIGNER_BIND_HOST: 0.0.0.0
+      FLEET_SIGNER_PORT: "7521"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7521/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    # Hardening
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp

@@ -15,6 +15,9 @@ import { encryptAndStore, loadAndDecrypt, envelopeExists } from "./storage/encry
 import { startSignerServer } from "./server.js";
 import { AuditLog } from "./audit.js";
 
+const keyPath = process.env.FLEET_SIGNER_KEY_PATH;
+const auditPath = process.env.FLEET_SIGNER_AUDIT_PATH;
+
 /** Read a single line of input from stdin without echoing (passphrase / seed). */
 function readSecret(prompt: string): Promise<string> {
   return new Promise((resolve) => {
@@ -75,7 +78,7 @@ function normalizeKeyInput(input: string): string {
 }
 
 async function cmdSetup(): Promise<void> {
-  if (await envelopeExists()) {
+  if (await envelopeExists(keyPath)) {
     const overwrite = await readLine("An encrypted key already exists at ~/.fleet-signer/key.enc. Overwrite? (yes/no): ");
     if (overwrite.toLowerCase() !== "yes") {
       console.log("Aborted.");
@@ -110,13 +113,13 @@ async function cmdSetup(): Promise<void> {
     process.exit(1);
   }
 
-  await encryptAndStore(`0x${normalizedKey}`, passphrase);
+  await encryptAndStore(`0x${normalizedKey}`, passphrase, keyPath);
   console.log("Encrypted key stored at ~/.fleet-signer/key.enc (mode 0600)");
   console.log("Run `fleet-signer start` to launch the HTTP signer.");
 }
 
 async function cmdStart(): Promise<void> {
-  if (!(await envelopeExists())) {
+  if (!(await envelopeExists(keyPath))) {
     console.error("No encrypted key found at ~/.fleet-signer/key.enc — run `fleet-signer setup` first.");
     process.exit(1);
   }
@@ -126,17 +129,18 @@ async function cmdStart(): Promise<void> {
 
   let privateKey: `0x${string}`;
   try {
-    privateKey = await loadAndDecrypt(passphrase);
+    privateKey = await loadAndDecrypt(passphrase, keyPath);
   } catch (err) {
     console.error(`Decrypt failed: ${err instanceof Error ? err.message : err}`);
     process.exit(1);
   }
 
   const port = parseInt(process.env.FLEET_SIGNER_PORT ?? "7521", 10);
-  const server = startSignerServer({ privateKey, port, auditLog: new AuditLog() });
+  const bindHost = process.env.FLEET_SIGNER_BIND_HOST ?? "127.0.0.1";
+  const server = startSignerServer({ privateKey, port, bindHost, auditLog: new AuditLog(auditPath) });
 
   const account = privateKeyToAccount(privateKey);
-  console.log(`Fleet signer listening on http://127.0.0.1:${port}`);
+  console.log(`Fleet signer listening on http://${bindHost}:${port}`);
   console.log(`Address: ${account.address}`);
   console.log("Whitelist: Phase 1 — Aave V3 supply USDC + ERC20 approve USDC, max $50/tx, $100/day");
   console.log("Audit log: ~/.fleet-signer/audit.log");

@@ -51,6 +51,30 @@ Or pass the passphrase via env (less secure but useful for unattended restart):
 FLEET_SIGNER_PASSPHRASE=... node dist/cli.js start
 ```
 
+## Run in Docker
+
+For restart-resilience (survives terminal close + host reboot), run the
+signer in a container. **Run it separately from the agent fleet** — it must
+NOT be managed by the proxy management API, and the agents must not be able
+to call `docker stop` / swap its image.
+
+```bash
+# After running `node dist/cli.js setup` once on the host,
+# the encrypted envelope at ~/.fleet-signer/key.enc is bind-mounted RO.
+cd packages/fleet-signer
+echo "FLEET_SIGNER_PASSPHRASE=<your-passphrase>" > docker/.env
+docker compose -f docker/compose.yml --env-file docker/.env up -d --build
+```
+
+The container binds to `127.0.0.1:7521` only (port-mapping pins to host
+loopback). Daemon on host hits `http://127.0.0.1:7521`. Agents in other
+containers hit `http://host.docker.internal:7521`.
+
+**Trade-off:** the passphrase now lives in `docker/.env` (readable by anyone
+with that file). The host-execution path keeps it typed-once-per-start with
+no on-disk presence. Pick based on your treasury size — for low balances and
+strict daily caps, container resilience > passphrase exposure.
+
 ## API
 
 ### `GET /health`
