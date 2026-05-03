@@ -125,7 +125,6 @@ registerDispatchHangWatchCommand(program);
 registerExternalImpactCommand(program);
 registerPublishStandupCommand(program);
 registerMergeSweepCommand(program);
-registerMonologueCommand(program);
 
 program.parse();
 // docs PR ci-trigger
