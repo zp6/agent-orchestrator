@@ -1,6 +1,18 @@
 /**
  * Fork-from dispatch payload protocol — canonical spec (agent-reviewer#454)
  *
+ * **NOTE**: This protocol has been extracted into a standalone OSS package:
+ * `@nexus-fleet/agent-session-protocol` (https://github.com/rapartlu/agent-session-protocol)
+ *
+ * For new consumers outside this fleet, import from the npm package:
+ * ```
+ * npm install @nexus-fleet/agent-session-protocol
+ * import { buildForkSpec, parseForkFrom } from '@nexus-fleet/agent-session-protocol';
+ * ```
+ *
+ * This file is maintained for backwards compatibility with in-repo imports.
+ * The canonical source of truth is the external package.
+ *
  * ## Problem
  *
  * The orchestrator dispatcher currently supports two session modes:
