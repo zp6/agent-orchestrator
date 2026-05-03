@@ -1,0 +1,27 @@
+{
+  "name": "@nexus-fleet/fleet-signer",
+  "version": "0.1.0",
+  "description": "Local HTTP signer service for the Nexus fleet treasury wallet. Holds the private key in memory after passphrase decryption; signs only whitelisted transactions; enforces per-tx and daily caps; audits every decision. Issue #1412.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "fleet-signer": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js start",
+    "setup": "node dist/cli.js setup",
+    "test": "vitest run",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
