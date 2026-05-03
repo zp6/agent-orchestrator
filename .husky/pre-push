@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+set -e
+
+echo "[pre-push] tsc --noEmit"
+npx tsc --noEmit
+
+echo "[pre-push] npm test"
+npm test --silent
+
+echo "[pre-push] OK"
