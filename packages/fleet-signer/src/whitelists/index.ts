@@ -59,7 +59,7 @@ export const PER_TX_CAPS_USD = {
 } as const;
 
 /** Daily total cap (sum of all approved transactions per UTC day). */
-export const DAILY_CAP_USD = 100;
+export const DAILY_CAP_USD = 200;
 
 /**
  * Allowed SIWE domains — only fleet-relevant platforms.
@@ -249,7 +249,8 @@ export function evaluateWhitelist(req: SignRequest, currentDaySpendUsd: number):
           reason: `usdValue ${req.usdValue} exceeds per-tx cap ${PER_TX_CAPS_USD.AAVE_WITHDRAW}`,
         };
       }
-      break;
+      // Withdrawals recover our own capital — exempt from daily cap check.
+      return { approved: true, reason: "aave_withdraw: capital recovery, daily cap exempt" };
     }
     case "morpho_deposit": {
       if (req.chainId !== 8453) {

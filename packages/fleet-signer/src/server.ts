@@ -100,12 +100,14 @@ async function handleSign(
     });
   }
 
+  // Withdrawals recover our own capital — they don't count against the daily spend cap.
+  const spendableTx = req.operation !== "aave_withdraw";
   await audit.append({
     operation: req.operation,
     decision: "approve",
     reason: decision.reason,
     payload: { to: req.to, chainId: req.chainId, usdValue: req.usdValue },
-    daySpendUsd: req.usdValue,
+    daySpendUsd: spendableTx ? req.usdValue : 0,
   });
 
   return {

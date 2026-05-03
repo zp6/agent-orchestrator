@@ -96,23 +96,21 @@ export function registerTreasuryCommand(program: Command): void {
       const client = new TreasuryClient();
 
       console.log(chalk.dim("Pre-flight: reading balances..."));
-      const [aaveBalance, morphoBalance] = await Promise.all([
+      const [liquidBalance, aaveBalance, morphoBalance] = await Promise.all([
+        client.treasuryUsdcBalance(),
         client.treasuryAaveUsdcBalance(),
         client.treasuryMorphoUsdcBalance(),
       ]);
+      console.log(`  Liquid USDC:  ${formatUsdc(liquidBalance)} USDC`);
       console.log(`  Aave aUSDC:   ${formatUsdc(aaveBalance)} USDC`);
       console.log(`  Morpho USDC:  ${formatUsdc(morphoBalance)} USDC`);
 
       const amountUnits = opts.amount === "all"
-        ? aaveBalance
+        ? (aaveBalance > 0n ? aaveBalance : liquidBalance)
         : BigInt(Math.round(Number(opts.amount) * 10 ** USDC_DECIMALS));
 
       if (amountUnits <= 0n) {
-        console.error(chalk.red("No Aave balance to migrate"));
-        process.exit(1);
-      }
-      if (amountUnits > aaveBalance) {
-        console.error(chalk.red(`Aave balance insufficient: need ${formatUsdc(amountUnits)}, have ${formatUsdc(aaveBalance)}`));
+        console.error(chalk.red("No balance to migrate"));
         process.exit(1);
       }
 
@@ -122,17 +120,27 @@ export function registerTreasuryCommand(program: Command): void {
         process.exit(1);
       }
 
-      console.log(chalk.cyan(`\nStep 1/3: Aave withdraw ${formatUsdc(amountUnits)} USDC`));
-      const withdrawReceipt = await client.signAndBroadcast({
-        operation: "aave_withdraw",
-        to: AAVE_V3_POOL_BASE,
-        data: client.buildWithdrawCalldata(amountUnits),
-        usdValue: usd,
-      });
-      console.log(chalk.green(`  ✓ withdraw confirmed: ${withdrawReceipt.transactionHash}`));
-      await new Promise((r) => setTimeout(r, 3000));
+      let stepNum = 1;
+      const totalSteps = aaveBalance >= amountUnits ? 3 : 2;
 
-      console.log(chalk.cyan("\nStep 2/3: Approve USDC → Morpho vault"));
+      if (aaveBalance >= amountUnits) {
+        console.log(chalk.cyan(`\nStep ${stepNum++}/${totalSteps}: Aave withdraw ${formatUsdc(amountUnits)} USDC`));
+        const withdrawReceipt = await client.signAndBroadcast({
+          operation: "aave_withdraw",
+          to: AAVE_V3_POOL_BASE,
+          data: client.buildWithdrawCalldata(amountUnits),
+          usdValue: usd,
+        });
+        console.log(chalk.green(`  ✓ withdraw confirmed: ${withdrawReceipt.transactionHash}`));
+        await new Promise((r) => setTimeout(r, 3000));
+      } else if (liquidBalance < amountUnits) {
+        console.error(chalk.red(`Insufficient balance: need ${formatUsdc(amountUnits)}, liquid ${formatUsdc(liquidBalance)}, aave ${formatUsdc(aaveBalance)}`));
+        process.exit(1);
+      } else {
+        console.log(chalk.dim("Using liquid USDC (Aave already withdrawn)"));
+      }
+
+      console.log(chalk.cyan(`\nStep ${stepNum++}/${totalSteps}: Approve USDC → Morpho vault`));
       const approveReceipt = await client.signAndBroadcast({
         operation: "erc20_approve_usdc",
         to: USDC_BASE,
@@ -142,7 +150,7 @@ export function registerTreasuryCommand(program: Command): void {
       console.log(chalk.green(`  ✓ approve confirmed: ${approveReceipt.transactionHash}`));
       await new Promise((r) => setTimeout(r, 3000));
 
-      console.log(chalk.cyan("\nStep 3/3: Morpho deposit"));
+      console.log(chalk.cyan(`\nStep ${stepNum}/${totalSteps}: Morpho deposit`));
       const depositReceipt = await client.signAndBroadcast({
         operation: "morpho_deposit",
         to: MORPHO_STEAKHOUSE_USDC,
