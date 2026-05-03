@@ -11,10 +11,14 @@ export { AuditLog, defaultAuditPath, type AuditEntry } from "./audit.js";
 export {
   evaluateWhitelist,
   BASE_CONTRACTS,
+  POLYGON_CONTRACTS,
   AAVE_V3_SUPPLY_SELECTOR,
   ERC20_APPROVE_SELECTOR,
+  AERODROME_ADD_LIQUIDITY_SELECTOR,
   PER_TX_CAPS_USD,
   DAILY_CAP_USD,
+  SIWE_ALLOWED_DOMAINS,
   type SignRequest,
   type WhitelistDecision,
+  type OperationType,
 } from "./whitelists/index.js";

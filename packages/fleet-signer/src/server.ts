@@ -21,6 +21,7 @@ interface SignRequestBody {
   data: string;
   value: string; // hex or decimal string
   usdValue: number;
+  siweDomain?: string;
 }
 
 interface SignResponseBody {
@@ -50,6 +51,7 @@ async function handleSign(
     data: body.data as Hex,
     value: BigInt(body.value),
     usdValue: body.usdValue,
+    siweDomain: body.siweDomain,
   };
 
   const daySpend = await audit.daySpendUsd();
@@ -65,24 +67,27 @@ async function handleSign(
     return { approved: false, reason: decision.reason };
   }
 
-  // Sign as a legacy/EIP-1559 transaction. The fleet provides the calldata
-  // already; we sign it as-is. nonce + gas are caller responsibility (operator
-  // dApp / fleet daemon estimates and provides), so signer just signs the
-  // structured transaction.
-  const signedTx = await account.signTransaction({
-    chainId: req.chainId,
-    to: req.to,
-    data: req.data,
-    value: req.value,
-    type: "eip1559",
-    // Phase 1: caller is expected to include nonce + gas params in a wrapper.
-    // For minimum viable signer, we sign a deterministic shape the fleet
-    // supplies. Real production would have the signer pull nonce from RPC.
-    nonce: 0,
-    maxFeePerGas: 0n,
-    maxPriorityFeePerGas: 0n,
-    gas: 0n,
-  });
+  let signedTx: Hex;
+
+  if (req.operation === "siwe_sign") {
+    // SIWE: sign a message (EIP-191 personal_sign), not a transaction.
+    // The data field contains the hex-encoded SIWE message.
+    const messageBytes = Buffer.from(req.data.slice(2), "hex");
+    signedTx = await account.signMessage({ message: { raw: messageBytes } });
+  } else {
+    // Transaction signing: EIP-1559. Nonce + gas are caller responsibility.
+    signedTx = await account.signTransaction({
+      chainId: req.chainId,
+      to: req.to,
+      data: req.data,
+      value: req.value,
+      type: "eip1559",
+      nonce: 0,
+      maxFeePerGas: 0n,
+      maxPriorityFeePerGas: 0n,
+      gas: 0n,
+    });
+  }
 
   await audit.append({
     operation: req.operation,
