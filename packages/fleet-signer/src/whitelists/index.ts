@@ -4,6 +4,7 @@
  * Phase 1: Aave V3 supply() + ERC20 approve() on Base.
  * Phase 1.5: Polymarket placeOrder on Polygon, SIWE message signatures,
  *            Aave V3 supply on Polygon, Aerodrome LP on Base.
+ * Phase 2: Aave V3 withdraw, Morpho ERC4626 deposit, FlashArbBot deployment.
  *
  * Anything outside the whitelist is REJECTED with a clear reason and audited.
  * The Operator sees a Telegram alert on rejection so they know the fleet
@@ -45,6 +46,12 @@ export const AAVE_V3_WITHDRAW_SELECTOR = "0x69328dec" as const;
 export const ERC4626_DEPOSIT_SELECTOR = "0x6e553f65" as const;
 
 /**
+ * FlashArbBot bytecode prefix (first 20 bytes) — fingerprints the deployment.
+ * Regenerate if the contract source changes: first 42 chars of compiled bytecode.
+ */
+export const FLASH_ARB_BOT_BYTECODE_PREFIX = "0x60c060405234801561000f575f5ffd5b50604051" as const;
+
+/**
  * Per-transaction USD-equivalent caps.
  * Intentionally low — proves the rail before larger amounts are trusted.
  */
@@ -56,6 +63,7 @@ export const PER_TX_CAPS_USD = {
   AERODROME_ADD_LIQUIDITY: 50,
   AAVE_WITHDRAW: 50,
   MORPHO_DEPOSIT: 50,
+  DEPLOY_FLASH_ARB_BOT: 5,
 } as const;
 
 /** Daily total cap (sum of all approved transactions per UTC day). */
@@ -82,15 +90,16 @@ export type OperationType =
   | "aave_supply_usdc_polygon"
   | "aerodrome_add_liquidity"
   | "aave_withdraw"
-  | "morpho_deposit";
+  | "morpho_deposit"
+  | "deploy_flash_arb_bot";
 
 export interface SignRequest {
   /** Operation type — used to look up whitelist rules. */
   operation: OperationType;
   /** EVM chain id. Base (8453), Polygon (137). */
   chainId: number;
-  /** Target contract address. Unused for SIWE. */
-  to: Address;
+  /** Target contract address. Null for contract deployments. Unused for SIWE. */
+  to: Address | null;
   /** Calldata (or SIWE message for siwe_sign). */
   data: Hex;
   /** Value (wei). Token-only operations expect 0. */
@@ -141,7 +150,7 @@ export function evaluateWhitelist(req: SignRequest, currentDaySpendUsd: number):
       if (req.chainId !== 8453) {
         return { approved: false, reason: `aave_supply_usdc requires chainId 8453 (Base)` };
       }
-      if (req.to.toLowerCase() !== BASE_CONTRACTS.AAVE_V3_POOL.toLowerCase()) {
+      if (req.to?.toLowerCase() !== BASE_CONTRACTS.AAVE_V3_POOL.toLowerCase()) {
         return { approved: false, reason: `to ${req.to} not Aave V3 Pool` };
       }
       if (!req.data.toLowerCase().startsWith(AAVE_V3_SUPPLY_SELECTOR)) {
@@ -156,7 +165,7 @@ export function evaluateWhitelist(req: SignRequest, currentDaySpendUsd: number):
       break;
     }
     case "erc20_approve_usdc": {
-      if (req.to.toLowerCase() !== BASE_CONTRACTS.USDC.toLowerCase()) {
+      if (req.to?.toLowerCase() !== BASE_CONTRACTS.USDC.toLowerCase()) {
         return { approved: false, reason: `to ${req.to} not USDC` };
       }
       if (!req.data.toLowerCase().startsWith(ERC20_APPROVE_SELECTOR)) {
@@ -174,7 +183,7 @@ export function evaluateWhitelist(req: SignRequest, currentDaySpendUsd: number):
       if (req.chainId !== 137) {
         return { approved: false, reason: `polymarket_order requires chainId 137 (Polygon)` };
       }
-      if (req.to.toLowerCase() !== POLYGON_CONTRACTS.POLYMARKET_CTF_EXCHANGE.toLowerCase()) {
+      if (req.to?.toLowerCase() !== POLYGON_CONTRACTS.POLYMARKET_CTF_EXCHANGE.toLowerCase()) {
         return { approved: false, reason: `to ${req.to} not Polymarket CTF Exchange` };
       }
       if (req.usdValue > PER_TX_CAPS_USD.POLYMARKET_ORDER) {
@@ -201,7 +210,7 @@ export function evaluateWhitelist(req: SignRequest, currentDaySpendUsd: number):
       if (req.chainId !== 137) {
         return { approved: false, reason: `aave_supply_usdc_polygon requires chainId 137 (Polygon)` };
       }
-      if (req.to.toLowerCase() !== POLYGON_CONTRACTS.AAVE_V3_POOL.toLowerCase()) {
+      if (req.to?.toLowerCase() !== POLYGON_CONTRACTS.AAVE_V3_POOL.toLowerCase()) {
         return { approved: false, reason: `to ${req.to} not Aave V3 Pool (Polygon)` };
       }
       if (!req.data.toLowerCase().startsWith(AAVE_V3_SUPPLY_SELECTOR)) {
@@ -219,7 +228,7 @@ export function evaluateWhitelist(req: SignRequest, currentDaySpendUsd: number):
       if (req.chainId !== 8453) {
         return { approved: false, reason: `aerodrome_add_liquidity requires chainId 8453 (Base)` };
       }
-      if (req.to.toLowerCase() !== BASE_CONTRACTS.AERODROME_ROUTER.toLowerCase()) {
+      if (req.to?.toLowerCase() !== BASE_CONTRACTS.AERODROME_ROUTER.toLowerCase()) {
         return { approved: false, reason: `to ${req.to} not Aerodrome Router` };
       }
       if (!req.data.toLowerCase().startsWith(AERODROME_ADD_LIQUIDITY_SELECTOR)) {
@@ -237,7 +246,7 @@ export function evaluateWhitelist(req: SignRequest, currentDaySpendUsd: number):
       if (req.chainId !== 8453) {
         return { approved: false, reason: `aave_withdraw requires chainId 8453 (Base)` };
       }
-      if (req.to.toLowerCase() !== BASE_CONTRACTS.AAVE_V3_POOL.toLowerCase()) {
+      if (req.to?.toLowerCase() !== BASE_CONTRACTS.AAVE_V3_POOL.toLowerCase()) {
         return { approved: false, reason: `to ${req.to} not Aave V3 Pool` };
       }
       if (!req.data.toLowerCase().startsWith(AAVE_V3_WITHDRAW_SELECTOR)) {
@@ -256,7 +265,7 @@ export function evaluateWhitelist(req: SignRequest, currentDaySpendUsd: number):
       if (req.chainId !== 8453) {
         return { approved: false, reason: `morpho_deposit requires chainId 8453 (Base)` };
       }
-      if (req.to.toLowerCase() !== BASE_CONTRACTS.MORPHO_STEAKHOUSE_USDC.toLowerCase()) {
+      if (req.to?.toLowerCase() !== BASE_CONTRACTS.MORPHO_STEAKHOUSE_USDC.toLowerCase()) {
         return { approved: false, reason: `to ${req.to} not Morpho Steakhouse USDC vault` };
       }
       if (!req.data.toLowerCase().startsWith(ERC4626_DEPOSIT_SELECTOR)) {
@@ -269,6 +278,25 @@ export function evaluateWhitelist(req: SignRequest, currentDaySpendUsd: number):
         };
       }
       break;
+    }
+    case "deploy_flash_arb_bot": {
+      if (req.chainId !== 8453) {
+        return { approved: false, reason: `deploy_flash_arb_bot requires chainId 8453 (Base)` };
+      }
+      if (req.to !== null) {
+        return { approved: false, reason: `deploy_flash_arb_bot must have to=null (contract deployment)` };
+      }
+      if (!req.data.toLowerCase().startsWith(FLASH_ARB_BOT_BYTECODE_PREFIX.toLowerCase())) {
+        return { approved: false, reason: `data does not match FlashArbBot bytecode prefix` };
+      }
+      if (req.usdValue > PER_TX_CAPS_USD.DEPLOY_FLASH_ARB_BOT) {
+        return {
+          approved: false,
+          reason: `usdValue ${req.usdValue} exceeds per-tx cap ${PER_TX_CAPS_USD.DEPLOY_FLASH_ARB_BOT}`,
+        };
+      }
+      // Deployment is one-time infrastructure — exempt from daily cap.
+      return { approved: true, reason: "deploy_flash_arb_bot: one-time infra, daily cap exempt" };
     }
     default: {
       const exhaustive: never = req.operation;

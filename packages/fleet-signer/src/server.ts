@@ -23,7 +23,7 @@ export interface SignerServerConfig {
 interface SignRequestBody {
   operation: SignRequest["operation"];
   chainId: number;
-  to: string;
+  to: string; // empty string for contract deployments
   data: string;
   value: string; // hex or decimal string
   usdValue: number;
@@ -58,7 +58,7 @@ async function handleSign(
   const req: SignRequest = {
     operation: body.operation,
     chainId: body.chainId,
-    to: body.to as `0x${string}`,
+    to: body.to ? (body.to as `0x${string}`) : null,
     data: body.data as Hex,
     value: BigInt(body.value),
     usdValue: body.usdValue,
@@ -87,21 +87,24 @@ async function handleSign(
     signedTx = await account.signMessage({ message: { raw: messageBytes } });
   } else {
     // Transaction signing: EIP-1559. Nonce + gas are caller responsibility.
-    signedTx = await account.signTransaction({
+    // Contract deployments have to=null; viem expects the field omitted for deployments.
+    const txBase = {
       chainId: req.chainId,
-      to: req.to,
       data: req.data,
       value: req.value,
-      type: "eip1559",
+      type: "eip1559" as const,
       nonce: body.nonce ?? 0,
       maxFeePerGas: body.maxFeePerGas ? BigInt(body.maxFeePerGas) : 0n,
       maxPriorityFeePerGas: body.maxPriorityFeePerGas ? BigInt(body.maxPriorityFeePerGas) : 0n,
       gas: body.gas ? BigInt(body.gas) : 0n,
-    });
+    };
+    signedTx = await account.signTransaction(
+      req.to ? { ...txBase, to: req.to } : txBase,
+    );
   }
 
-  // Withdrawals recover our own capital — they don't count against the daily spend cap.
-  const spendableTx = req.operation !== "aave_withdraw";
+  // Withdrawals and deployments don't count against the daily spend cap.
+  const spendableTx = req.operation !== "aave_withdraw" && req.operation !== "deploy_flash_arb_bot";
   await audit.append({
     operation: req.operation,
     decision: "approve",
@@ -116,7 +119,7 @@ async function handleSign(
     signedTx,
     txParams: {
       from: account.address,
-      to: req.to,
+      ...(req.to ? { to: req.to } : {}),
       data: req.data,
       value: `0x${req.value.toString(16)}`,
       chainId: `0x${req.chainId.toString(16)}`,

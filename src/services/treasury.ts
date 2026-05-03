@@ -1,8 +1,10 @@
 import {
   createPublicClient,
+  encodeAbiParameters,
   encodeFunctionData,
   http,
   parseAbi,
+  parseAbiParameters,
   type Hex,
   type PublicClient,
   type TransactionReceipt,
@@ -125,6 +127,12 @@ export class TreasuryClient {
     });
   }
 
+  /** FlashArbBot deployment calldata: bytecode + ABI-encoded constructor arg. */
+  buildFlashArbBotDeployData(bytecode: Hex): Hex {
+    const encodedArg = encodeAbiParameters(parseAbiParameters("address"), [AAVE_V3_POOL_BASE]);
+    return (bytecode + encodedArg.slice(2)) as Hex;
+  }
+
   /** aUSDC balance in Aave (shares, 1:1 with USDC at current index). */
   async treasuryAaveUsdcBalance(): Promise<bigint> {
     // aBasUSDC token on Base
@@ -158,13 +166,13 @@ export class TreasuryClient {
    * Returns the receipt. Throws on rejection or revert.
    */
   async signAndBroadcast(req: {
-    operation: "aave_supply_usdc" | "erc20_approve_usdc" | "aave_withdraw" | "morpho_deposit";
-    to: `0x${string}`;
+    operation: "aave_supply_usdc" | "erc20_approve_usdc" | "aave_withdraw" | "morpho_deposit" | "deploy_flash_arb_bot";
+    to: `0x${string}` | null;
     data: Hex;
     usdValue: number;
   }): Promise<TransactionReceipt> {
     const [gasEstimate, feeData, nonce] = await Promise.all([
-      this.publicClient.estimateGas({ account: TREASURY_ADDRESS, to: req.to, data: req.data, value: 0n }),
+      this.publicClient.estimateGas({ account: TREASURY_ADDRESS, to: req.to ?? undefined, data: req.data, value: 0n }),
       this.publicClient.estimateFeesPerGas(),
       this.publicClient.getTransactionCount({ address: TREASURY_ADDRESS }),
     ]);

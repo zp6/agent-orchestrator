@@ -1,9 +1,10 @@
 import type { Hex } from "viem";
 
 export interface SignerSignRequest {
-  operation: "aave_supply_usdc" | "erc20_approve_usdc" | "polymarket_place_order" | "siwe_sign" | "aave_withdraw" | "morpho_deposit";
+  operation: "aave_supply_usdc" | "erc20_approve_usdc" | "polymarket_place_order" | "siwe_sign" | "aave_withdraw" | "morpho_deposit" | "deploy_flash_arb_bot";
   chainId: number;
-  to: `0x${string}`;
+  /** Null for contract deployments (deploy_flash_arb_bot). */
+  to: `0x${string}` | null;
   data: Hex;
   value: bigint;
   usdValue: number;
@@ -68,7 +69,7 @@ export class SignerClient {
     const body: Record<string, unknown> = {
       operation: req.operation,
       chainId: req.chainId,
-      to: req.to,
+      to: req.to ?? "",
       data: req.data,
       value: `0x${req.value.toString(16)}`,
       usdValue: req.usdValue,

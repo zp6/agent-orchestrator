@@ -135,7 +135,7 @@ describe("evaluateWhitelist — Polymarket placeOrder (Polygon)", () => {
   });
 
   it("rejects when daily cap exceeded", () => {
-    const d = evaluateWhitelist({ ...validOrder, usdValue: 30 }, 80);
+    const d = evaluateWhitelist({ ...validOrder, usdValue: 30 }, DAILY_CAP_USD - 20);
     expect(d.approved).toBe(false);
     expect(d.reason).toMatch(/daily cap/);
   });

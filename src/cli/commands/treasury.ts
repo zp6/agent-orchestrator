@@ -1,6 +1,13 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import type { Command } from "commander";
 import chalk from "chalk";
+import type { Hex } from "viem";
 import { TreasuryClient, AAVE_V3_POOL_BASE, USDC_BASE, TREASURY_ADDRESS, MORPHO_STEAKHOUSE_USDC, USDC_DECIMALS } from "../../services/treasury.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const PROOF_OF_LIFE_MAX_USD = 50;
 
@@ -160,5 +167,41 @@ export function registerTreasuryCommand(program: Command): void {
       console.log(chalk.green(`  ✓ deposit confirmed: ${depositReceipt.transactionHash}`));
       console.log(`\nBasescan: https://basescan.org/tx/${depositReceipt.transactionHash}`);
       console.log(chalk.green(`\nMigration complete. Capital now earning ~4.5-7.5% APY in Morpho Steakhouse USDC.`));
+    });
+
+  treasury
+    .command("arb-deploy")
+    .description("Deploy FlashArbBot contract to Base (one-time, ~$0.05 gas)")
+    .action(async () => {
+      const artifactPath = join(__dirname, "../../../contracts/FlashArbBot.json");
+      let bytecode: Hex;
+      try {
+        ({ bytecode } = JSON.parse(readFileSync(artifactPath, "utf8")) as { bytecode: Hex });
+      } catch {
+        console.error(chalk.red(`FlashArbBot.json not found at ${artifactPath}`));
+        console.error(chalk.red("Compile first: run the compile script in contracts/"));
+        process.exit(1);
+      }
+
+      const client = new TreasuryClient();
+      const deployData = client.buildFlashArbBotDeployData(bytecode);
+
+      console.log(chalk.dim("Deploying FlashArbBot to Base..."));
+      console.log(`  Aave pool: ${AAVE_V3_POOL_BASE}`);
+      console.log(`  Owner (treasury): ${TREASURY_ADDRESS}`);
+      console.log(`  Bytecode bytes: ${(deployData.length - 2) / 2}`);
+
+      const receipt = await client.signAndBroadcast({
+        operation: "deploy_flash_arb_bot",
+        to: null,
+        data: deployData,
+        usdValue: 0.05,
+      });
+
+      const contractAddress = receipt.contractAddress;
+      console.log(chalk.green(`\n  ✓ FlashArbBot deployed: ${contractAddress}`));
+      console.log(`  Tx: ${receipt.transactionHash}`);
+      console.log(`\nBasescan: https://basescan.org/address/${contractAddress}`);
+      console.log(chalk.cyan(`\nSave this address — set FLASH_ARB_BOT_ADDRESS=${contractAddress} in .env`));
     });
 }
