@@ -1964,6 +1964,7 @@ export class StateStore {
     this.runOSSEngagementMigration();
     this.runMonologueMigration();
     this.runBountyOpportunityMigration();
+    this.runRevenueLeadMigration();
   }
 
   private runPhase2Migration(): void {
@@ -13306,6 +13307,141 @@ export class StateStore {
     return row.cnt;
   }
 
+  // ── Revenue Leads (issue #1313) ──────────────────────────────────────────────
+
+  private runRevenueLeadMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS revenue_leads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_url TEXT UNIQUE,
+        source_text TEXT,
+        title TEXT NOT NULL,
+        description TEXT,
+        buying_pain_signals TEXT,
+        estimated_urgency TEXT,
+        proposed_fix TEXT,
+        price_anchor_usd REAL,
+        proof_link TEXT,
+        dm_brief TEXT,
+        contact_email TEXT,
+        contact_twitter TEXT,
+        status TEXT NOT NULL DEFAULT 'new',
+        score REAL,
+        score_breakdown TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_revenue_leads_status ON revenue_leads(status);
+      CREATE INDEX IF NOT EXISTS idx_revenue_leads_score ON revenue_leads(score DESC);
+    `);
+  }
+
+  addRevenueLeadFromUrl(params: {
+    source_url?: string | null;
+    title: string;
+    description: string;
+    buying_pain_signals?: string[];
+    estimated_urgency?: string;
+    proposed_fix?: string;
+    price_anchor_usd?: number;
+    proof_link?: string;
+    dm_brief?: string;
+    contact_email?: string;
+    contact_twitter?: string;
+    score_breakdown?: Record<string, number>;
+    score?: number;
+  }): RevenueLead {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `INSERT INTO revenue_leads
+         (source_url, title, description, buying_pain_signals, estimated_urgency,
+          proposed_fix, price_anchor_usd, proof_link, dm_brief, contact_email,
+          contact_twitter, score, score_breakdown, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)`,
+      )
+      .run(
+        params.source_url ?? null,
+        params.title,
+        params.description,
+        params.buying_pain_signals ? JSON.stringify(params.buying_pain_signals) : null,
+        params.estimated_urgency ?? null,
+        params.proposed_fix ?? null,
+        params.price_anchor_usd ?? null,
+        params.proof_link ?? null,
+        params.dm_brief ?? null,
+        params.contact_email ?? null,
+        params.contact_twitter ?? null,
+        params.score ?? null,
+        params.score_breakdown ? JSON.stringify(params.score_breakdown) : null,
+        now,
+        now,
+      );
+    return this.getRevenueLead(Number(result.lastInsertRowid))!;
+  }
+
+  getRevenueLead(id: number): RevenueLead | null {
+    const row = this.db
+      .prepare("SELECT * FROM revenue_leads WHERE id = ?")
+      .get(id) as RevenueLeadRow | undefined;
+    return row ? hydrateRevenueLead(row) : null;
+  }
+
+  listRevenueLeads(opts?: {
+    status?: string;
+    minScore?: number;
+    limit?: number;
+    sortBy?: "score" | "created_at";
+  }): RevenueLead[] {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (opts?.status) {
+      conditions.push("status = ?");
+      params.push(opts.status);
+    }
+    if (opts?.minScore !== undefined) {
+      conditions.push("score >= ?");
+      params.push(opts.minScore);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const orderBy = opts?.sortBy === "created_at" ? "created_at DESC" : "score DESC";
+    const limit = opts?.limit ?? 100;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM revenue_leads ${where}
+         ORDER BY (score IS NULL), ${orderBy}
+         LIMIT ?`,
+      )
+      .all(...params, limit) as RevenueLeadRow[];
+    return rows.map(hydrateRevenueLead);
+  }
+
+  updateRevenueLeadScore(
+    id: number,
+    score: number,
+    breakdown: Record<string, number>,
+    urgency: string,
+    brief: string,
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE revenue_leads
+         SET score = ?, score_breakdown = ?, estimated_urgency = ?, dm_brief = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(score, JSON.stringify(breakdown), urgency, brief, new Date().toISOString(), id);
+  }
+
+  updateRevenueLeadStatus(id: number, status: string): void {
+    this.db
+      .prepare("UPDATE revenue_leads SET status = ?, updated_at = ? WHERE id = ?")
+      .run(status, new Date().toISOString(), id);
+  }
+
+  deleteRevenueLead(id: number): void {
+    this.db.prepare("DELETE FROM revenue_leads WHERE id = ?").run(id);
+  }
+
   // ── Bounty Opportunities (issue #1315) ──────────────────────────────────────
 
   private runBountyOpportunityMigration(): void {
@@ -13488,6 +13624,72 @@ function hydrateBountyOpportunity(row: BountyOpportunityRow): BountyOpportunity 
     }
   }
   return { ...row, capabilities };
+}
+
+interface RevenueLeadRow {
+  id: number;
+  source_url: string | null;
+  source_text: string | null;
+  title: string;
+  description: string | null;
+  buying_pain_signals: string | null;
+  estimated_urgency: string | null;
+  proposed_fix: string | null;
+  price_anchor_usd: number | null;
+  proof_link: string | null;
+  dm_brief: string | null;
+  contact_email: string | null;
+  contact_twitter: string | null;
+  status: string;
+  score: number | null;
+  score_breakdown: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RevenueLead {
+  id: number;
+  source_url: string | null;
+  source_text: string | null;
+  title: string;
+  description: string | null;
+  buying_pain_signals: string[];
+  estimated_urgency: string | null;
+  proposed_fix: string | null;
+  price_anchor_usd: number | null;
+  proof_link: string | null;
+  dm_brief: string | null;
+  contact_email: string | null;
+  contact_twitter: string | null;
+  status: string;
+  score: number | null;
+  score_breakdown: Record<string, number>;
+  created_at: string;
+  updated_at: string;
+}
+
+function hydrateRevenueLead(row: RevenueLeadRow): RevenueLead {
+  let buying_pain_signals: string[] = [];
+  if (row.buying_pain_signals) {
+    try {
+      const parsed = JSON.parse(row.buying_pain_signals);
+      if (Array.isArray(parsed)) buying_pain_signals = parsed.map(String);
+    } catch {
+      buying_pain_signals = [];
+    }
+  }
+
+  let score_breakdown: Record<string, number> = {};
+  if (row.score_breakdown) {
+    try {
+      const parsed = JSON.parse(row.score_breakdown);
+      if (typeof parsed === "object") score_breakdown = parsed;
+    } catch {
+      score_breakdown = {};
+    }
+  }
+
+  return { ...row, buying_pain_signals, score_breakdown };
 }
 
 export interface MonologueEntry {

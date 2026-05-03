@@ -60,6 +60,7 @@ import { registerPublishStandupCommand } from "./commands/publish-standup.js";
 import { registerMergeSweepCommand } from "./commands/merge-sweep.js";
 import { registerTreasuryCommand } from "./commands/treasury.js";
 import { registerBountyCommand } from "./commands/bounty.js";
+import { registerRevenueLeadCommand } from "./commands/revenue-leads.js";
 
 const program = new Command();
 
@@ -129,6 +130,7 @@ registerPublishStandupCommand(program);
 registerMergeSweepCommand(program);
 registerTreasuryCommand(program);
 registerBountyCommand(program);
+registerRevenueLeadCommand(program);
 
 program.parse();
 // docs PR ci-trigger
