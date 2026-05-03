@@ -1212,6 +1212,46 @@ export interface AgentHealth {
   auth_status: AgentAuthStatus;
   /** ISO timestamp when the agent entered auth-degraded state, or null. */
   auth_degraded_at: string | null;
+  /**
+   * Circuit-breaker: ISO timestamp until which the agent is suspended.
+   * null means the agent is not suspended (dispatch is allowed).
+   */
+  suspended_until: string | null;
+  /** Human-readable reason for the current suspension, or null. */
+  suspension_reason: string | null;
+}
+
+// ── Incident types ───────────────────────────────────────────────────────────
+
+/** Category of incident recorded for the `/api/incidents` feed. */
+export type IncidentType =
+  | "connection-error-exhausted"
+  | "agent-suspended"
+  | "cascade-detected"
+  | "other";
+
+/** Severity level for an incident entry. */
+export type IncidentSeverity = "low" | "medium" | "high" | "critical";
+
+/** One entry in the public incidents feed. */
+export interface IncidentRecord {
+  id: number;
+  incident_type: IncidentType;
+  agent_name: string | null;
+  error_message: string | null;
+  task_id: string | null;
+  severity: IncidentSeverity;
+  resolved_at: string | null;
+  created_at: string;
+}
+
+/** Parameters for recording a new incident. */
+export interface RecordIncidentParams {
+  incident_type: IncidentType;
+  agent_name?: string | null;
+  error_message?: string | null;
+  task_id?: string | null;
+  severity?: IncidentSeverity;
 }
 
 /**
@@ -5444,6 +5484,34 @@ export class StateStore {
         ALTER TABLE agent_health ADD COLUMN auth_degraded_at TEXT;
       `);
     }
+
+    // Migration: add circuit-breaker columns (issue #1398)
+    if (!colNames.has("suspended_until")) {
+      this.db.exec(`
+        ALTER TABLE agent_health ADD COLUMN suspended_until TEXT;
+        ALTER TABLE agent_health ADD COLUMN suspension_reason TEXT;
+      `);
+    }
+
+    // Incidents table — public feed for /api/incidents (issue #1398)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS incidents (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        incident_type   TEXT NOT NULL,
+        agent_name      TEXT,
+        error_message   TEXT,
+        task_id         TEXT,
+        severity        TEXT NOT NULL DEFAULT 'medium',
+        resolved_at     TEXT,
+        created_at      TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_incidents_created_at
+        ON incidents (created_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_incidents_agent_name
+        ON incidents (agent_name);
+    `);
   }
 
   /**
@@ -5490,6 +5558,8 @@ export class StateStore {
       last_success_at: string | null;
       auth_status: string;
       auth_degraded_at: string | null;
+      suspended_until: string | null;
+      suspension_reason: string | null;
     } | undefined;
 
     if (!row) {
@@ -5502,6 +5572,8 @@ export class StateStore {
         is_healthy: true,
         auth_status: "ok",
         auth_degraded_at: null,
+        suspended_until: null,
+        suspension_reason: null,
       };
     }
 
@@ -5509,7 +5581,119 @@ export class StateStore {
       ...row,
       is_healthy: row.consecutive_failures < 3,
       auth_status: (row.auth_status as AgentAuthStatus) ?? "ok",
+      suspended_until: row.suspended_until ?? null,
+      suspension_reason: row.suspension_reason ?? null,
     };
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Circuit-breaker: suspend / lift agent (issue #1398)
+  // ────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Suspend an agent until the given ISO timestamp.  Dispatches to this agent
+   * will be skipped (circuit open) until the timestamp passes.
+   *
+   * Calling with a past `suspendedUntil` is equivalent to lifting the suspension.
+   */
+  suspendAgent(agentName: string, suspendedUntil: string, reason: string): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO agent_health
+        (agent_name, consecutive_failures, suspended_until, suspension_reason, last_error_at)
+      VALUES (?, 0, ?, ?, ?)
+      ON CONFLICT(agent_name) DO UPDATE SET
+        suspended_until   = ?,
+        suspension_reason = ?
+    `).run(agentName, suspendedUntil, reason, now, suspendedUntil, reason);
+  }
+
+  /**
+   * Lift a circuit-breaker suspension on an agent, allowing dispatch to resume.
+   */
+  liftAgentSuspension(agentName: string): void {
+    this.db.prepare(`
+      UPDATE agent_health
+      SET suspended_until = NULL, suspension_reason = NULL
+      WHERE agent_name = ?
+    `).run(agentName);
+  }
+
+  /**
+   * Return true if the agent is currently suspended (circuit open).
+   */
+  isAgentSuspended(agentName: string): boolean {
+    const health = this.getAgentHealth(agentName);
+    if (!health.suspended_until) return false;
+    return new Date(health.suspended_until) > new Date();
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Incident feed (issue #1398)
+  // ────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Record a new incident into the public incidents feed.
+   */
+  recordIncident(params: RecordIncidentParams): void {
+    this.db.prepare(`
+      INSERT INTO incidents (incident_type, agent_name, error_message, task_id, severity, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      params.incident_type,
+      params.agent_name ?? null,
+      params.error_message ?? null,
+      params.task_id ?? null,
+      params.severity ?? "medium",
+      new Date().toISOString(),
+    );
+  }
+
+  /**
+   * Mark an open incident as resolved.
+   */
+  resolveIncident(incidentId: number): void {
+    this.db.prepare(`
+      UPDATE incidents SET resolved_at = ? WHERE id = ?
+    `).run(new Date().toISOString(), incidentId);
+  }
+
+  /**
+   * Fetch recent incidents for the public /api/incidents feed.
+   *
+   * @param days   Rolling window in days (default 7, max 90).
+   * @param limit  Max rows to return (default 50).
+   * @param agentName  Optional agent filter.
+   * @returns Array of incidents ordered most-recent first.
+   */
+  getIncidents(
+    days = 7,
+    limit = 50,
+    agentName?: string | null,
+  ): IncidentRecord[] {
+    const safeWindow = Math.min(Math.max(days, 1), 90);
+    const safeLimit = Math.min(Math.max(limit, 1), 200);
+    const cutoff = new Date(Date.now() - safeWindow * 86_400_000).toISOString();
+
+    if (agentName) {
+      return this.db.prepare(`
+        SELECT id, incident_type, agent_name, error_message, task_id,
+               severity, resolved_at, created_at
+        FROM incidents
+        WHERE created_at >= ? AND agent_name = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+      `).all(cutoff, agentName, safeLimit) as IncidentRecord[];
+    }
+
+    return this.db.prepare(`
+      SELECT id, incident_type, agent_name, error_message, task_id,
+             severity, resolved_at, created_at
+      FROM incidents
+      WHERE created_at >= ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(cutoff, safeLimit) as IncidentRecord[];
   }
 
   /**
@@ -5573,11 +5757,15 @@ export class StateStore {
       last_success_at: string | null;
       auth_status: string;
       auth_degraded_at: string | null;
+      suspended_until: string | null;
+      suspension_reason: string | null;
     }>;
     return rows.map((row) => ({
       ...row,
       is_healthy: row.consecutive_failures < 3,
       auth_status: row.auth_status as AgentAuthStatus,
+      suspended_until: row.suspended_until ?? null,
+      suspension_reason: row.suspension_reason ?? null,
     }));
   }
 

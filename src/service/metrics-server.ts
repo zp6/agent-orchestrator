@@ -24,6 +24,8 @@
  *   POST /marginal-score-tasks/:id/redispatch         — create a re-dispatch task for a marginal-score task
  *   GET /external-impact-ratio                        — anti-navel-gazing ratio: external vs internal work (issue #1372)
  *   GET /external-impact-ratio?days=7                 — configurable window
+ *   GET /api/incidents                               — circuit-breaker incident log (issue #1398)
+ *   GET /api/incidents?days=30&limit=100&agent=<name>
  *   GET /monologue                                    — prose monologue feed
  *   GET /monologue?agent=<name>&task=<id>&kind=<kind>&limit=50&offset=0
  */
@@ -42,6 +44,7 @@ import {
   type ExternalImpactRatioResult,
   type MonologueKind,
   type MonologueEntry,
+  type IncidentRecord,
 } from "../state/store.js";
 import { createLogger } from "./logger.js";
 
@@ -921,6 +924,39 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /api/incidents (issue #1398) ──────────────────────────────────────
+    // Returns incident records for the rolling window.  Supports filtering by
+    // agent name and limiting the result set.
+    //
+    // Query params:
+    //   days=N         — rolling window in days (default 30, max 90)
+    //   limit=N        — max results (default 100, max 500)
+    //   agent=<name>   — filter to a single agent (default: all)
+    if (url.pathname === "/api/incidents") {
+      try {
+        const rawDays = parseInt(url.searchParams.get("days") ?? "30", 10);
+        const days = isNaN(rawDays) || rawDays < 1 ? 30 : Math.min(rawDays, MAX_WINDOW_DAYS);
+        const rawLimit = parseInt(url.searchParams.get("limit") ?? "100", 10);
+        const limit = isNaN(rawLimit) || rawLimit < 1 ? 100 : Math.min(rawLimit, 500);
+        const agent = url.searchParams.get("agent") || null;
+        const incidents: IncidentRecord[] = store.getIncidents(days, limit, agent);
+        sendJson(res, 200, {
+          days,
+          limit,
+          agent,
+          total: incidents.length,
+          incidents,
+          generated_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        log.warn("Failed to fetch incidents", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to fetch incidents" });
+      }
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -946,6 +982,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
         "POST /marginal-score-tasks/:id/redispatch",
         "/guard-health",
         "/api/persistent-anomalies",
+        "/api/incidents",
       ],
     });
   });

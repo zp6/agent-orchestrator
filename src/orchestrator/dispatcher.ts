@@ -246,6 +246,8 @@ export function selectHealthiestPoolInstance(
       is_healthy: true,
       auth_status: "ok" as const,
       auth_degraded_at: null,
+      suspended_until: null,
+      suspension_reason: null,
     },
   }));
 
@@ -385,6 +387,8 @@ export class Dispatcher {
       is_healthy: true,
       auth_status: "ok",
       auth_degraded_at: null,
+      suspended_until: null,
+      suspension_reason: null,
     };
   }
 
@@ -1685,6 +1689,39 @@ export class Dispatcher {
       content: messageToSend,
     });
 
+    // ── Circuit breaker: skip suspended agents ────────────────────────────
+    if (this.store.isAgentSuspended(agentName)) {
+      const health = this.store.getAgentHealth(agentName);
+      const reason = health?.suspension_reason ?? "suspended";
+      const until = health?.suspended_until ?? "unknown";
+      this.log.warn("Agent suspended — skipping dispatch", {
+        taskId: task.id,
+        agentName,
+        suspendedUntil: until,
+        reason,
+      });
+      this.store.addLog({
+        task_id: task.id,
+        direction: "system",
+        content: `Agent ${agentName} is suspended until ${until}: ${reason}. Task skipped.`,
+      });
+      this.store.updateTask(task.id, {
+        status: "failed",
+        result: `agent-suspended: ${reason}`,
+        next_retry_at: until,
+      });
+      return {
+        taskId: task.id,
+        agentName,
+        response: {
+          content: `Agent ${agentName} is suspended until ${until}: ${reason}.`,
+          model: "",
+          usage: { input_tokens: 0, output_tokens: 0 },
+          stop_reason: "agent-suspended",
+        },
+      };
+    }
+
     // Smart model routing: pick cheapest model that can handle this task
     const provider = this.config.agents[agentName]?.provider ?? "claude";
     const isRevision = message.includes("[revision]") || message.includes("[PR feedback]");
@@ -1952,6 +1989,24 @@ export class Dispatcher {
           retry_count: newRetryCount,
           next_retry_at: nextRetryAt,
         });
+
+        // ── Circuit breaker: suspend agent on exhaustion ───────────────────
+        if (!willRetry) {
+          const suspendedUntil = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+          this.store.suspendAgent(agentName, suspendedUntil, `Connection errors exhausted: ${errorMsg}`);
+          this.store.recordIncident({
+            incident_type: "connection-error-exhausted",
+            agent_name: agentName,
+            error_message: errorMsg,
+            task_id: task.id,
+            severity: "high",
+          });
+          this.log.error("Agent suspended after connection-error exhaustion", {
+            agentName,
+            suspendedUntil,
+            taskId: task.id,
+          });
+        }
       } else {
         // Logic errors are not transient — failing immediately without retry
         // prevents wasting agent tokens re-running a task that will fail the
