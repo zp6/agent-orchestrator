@@ -27,6 +27,9 @@ export const CCTP_TOKEN_MESSENGER_BASE = "0x1682Ae6375C4E4A97e4B583BC394c861A46D
 export const CCTP_MESSAGE_TRANSMITTER_POLYGON = "0x0a992d191DEeC32aFe36203Ad87D7d289a738F81" as const;
 export const CCTP_POLYGON_DOMAIN = 7 as const;
 export const POLYMARKET_CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as const;
+export const LIFI_DIAMOND_BASE = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE" as const;
+// Native MATIC token address on Polygon (used as Li.fi toToken for gas refuel)
+export const POLYGON_NATIVE_MATIC = "0x0000000000000000000000000000000000001010" as const;
 
 const ERC20_ABI = parseAbi([
   "function approve(address spender, uint256 amount) returns (bool)",
@@ -41,6 +44,7 @@ const AAVE_POOL_ABI = parseAbi([
 
 const ERC4626_ABI = parseAbi([
   "function deposit(uint256 assets, address receiver) returns (uint256 shares)",
+  "function redeem(uint256 shares, address receiver, address owner) returns (uint256 assets)",
   "function balanceOf(address account) view returns (uint256)",
   "function convertToAssets(uint256 shares) view returns (uint256)",
 ]);
@@ -125,6 +129,15 @@ export class TreasuryClient {
     });
   }
 
+  /** ERC20 approve calldata for USDC → any spender on Base. */
+  buildApproveCalldataForSpender(spender: `0x${string}`, amount: bigint): Hex {
+    return encodeFunctionData({
+      abi: ERC20_ABI,
+      functionName: "approve",
+      args: [spender, amount],
+    });
+  }
+
   /** ERC20 approve calldata for USDC → CCTP TokenMessenger on Base. */
   buildCctpApproveCalldata(amount: bigint): Hex {
     return encodeFunctionData({
@@ -149,6 +162,15 @@ export class TreasuryClient {
       abi: AAVE_POOL_ABI,
       functionName: "withdraw",
       args: [USDC_BASE, amount, TREASURY_ADDRESS],
+    });
+  }
+
+  /** ERC4626 redeem() calldata — withdraw all Morpho shares back to USDC, receiver+owner=treasury. */
+  buildMorphoRedeemCalldata(shares: bigint): Hex {
+    return encodeFunctionData({
+      abi: ERC4626_ABI,
+      functionName: "redeem",
+      args: [shares, TREASURY_ADDRESS, TREASURY_ADDRESS],
     });
   }
 
@@ -280,6 +302,55 @@ export class TreasuryClient {
     throw new Error(`CCTP attestation not ready after ${maxAttempts} attempts`);
   }
 
+  /**
+   * Fetch a Li.fi cross-chain bridge quote.
+   * Returns the transaction calldata to execute on Base.
+   * toToken: USDC address on Polygon OR POLYGON_NATIVE_MATIC for gas refuel.
+   */
+  async fetchLifiBridgeQuote(opts: {
+    fromAmountUsdc: number;
+    toToken: string;
+  }): Promise<{ to: `0x${string}`; data: Hex; estimatedOutput: bigint; toolName: string }> {
+    const fromAmount = BigInt(Math.round(opts.fromAmountUsdc * 1_000_000)).toString();
+    const url = `https://li.quest/v1/quote?fromChain=8453&toChain=137` +
+      `&fromToken=${USDC_BASE}&toToken=${opts.toToken}` +
+      `&fromAmount=${fromAmount}` +
+      `&fromAddress=${TREASURY_ADDRESS}&toAddress=${TREASURY_ADDRESS}`;
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Li.fi quote failed ${resp.status}: ${text}`);
+    }
+    const data = await resp.json() as {
+      tool?: string;
+      transactionRequest?: { to: string; data: string; value: string };
+      estimate?: { toAmount: string };
+      message?: string;
+    };
+    if (data.message) throw new Error(`Li.fi quote error: ${data.message}`);
+    const tx = data.transactionRequest;
+    if (!tx?.to || !tx?.data) throw new Error("Li.fi quote returned no transaction");
+    if (tx.to.toLowerCase() !== LIFI_DIAMOND_BASE.toLowerCase()) {
+      throw new Error(`Li.fi quote to unexpected address: ${tx.to}`);
+    }
+    return {
+      to: tx.to as `0x${string}`,
+      data: tx.data as Hex,
+      estimatedOutput: BigInt(data.estimate?.toAmount ?? "0"),
+      toolName: data.tool ?? "unknown",
+    };
+  }
+
+  /** Morpho share balance of the treasury. */
+  async treasuryMorphoShares(): Promise<bigint> {
+    return (await this.publicClient.readContract({
+      address: MORPHO_STEAKHOUSE_USDC,
+      abi: ERC4626_ABI,
+      functionName: "balanceOf",
+      args: [TREASURY_ADDRESS],
+    })) as bigint;
+  }
+
   private async hashCctpMessage(message: Hex): Promise<string> {
     const { keccak256 } = await import("viem");
     return keccak256(message);
@@ -327,7 +398,7 @@ export class TreasuryClient {
    * Returns the receipt. Throws on rejection or revert.
    */
   async signAndBroadcast(req: {
-    operation: "aave_supply_usdc" | "erc20_approve_usdc" | "aave_withdraw" | "morpho_deposit" | "deploy_flash_arb_bot" | "flash_arb_execute" | "bridge_usdc_to_polygon";
+    operation: "aave_supply_usdc" | "erc20_approve_usdc" | "aave_withdraw" | "morpho_deposit" | "deploy_flash_arb_bot" | "flash_arb_execute" | "bridge_usdc_to_polygon" | "morpho_withdraw" | "lifi_bridge";
     to: `0x${string}` | null;
     data: Hex;
     usdValue: number;

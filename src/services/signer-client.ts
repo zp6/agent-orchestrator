@@ -1,7 +1,7 @@
 import type { Hex } from "viem";
 
 export interface SignerSignRequest {
-  operation: "aave_supply_usdc" | "erc20_approve_usdc" | "polymarket_place_order" | "siwe_sign" | "aave_withdraw" | "morpho_deposit" | "deploy_flash_arb_bot" | "flash_arb_execute" | "bridge_usdc_to_polygon" | "erc20_approve_usdc_polygon" | "cctp_receive_message";
+  operation: "aave_supply_usdc" | "erc20_approve_usdc" | "polymarket_place_order" | "siwe_sign" | "aave_withdraw" | "morpho_deposit" | "deploy_flash_arb_bot" | "flash_arb_execute" | "bridge_usdc_to_polygon" | "erc20_approve_usdc_polygon" | "cctp_receive_message" | "morpho_withdraw" | "lifi_bridge";
   chainId: number;
   /** Null for contract deployments (deploy_flash_arb_bot). */
   to: `0x${string}` | null;

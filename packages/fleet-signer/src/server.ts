@@ -257,7 +257,7 @@ async function handleSign(
     );
   }
 
-  const nonSpendingOps = new Set(["aave_withdraw", "deploy_flash_arb_bot", "flash_arb_execute", "bridge_usdc_to_polygon", "cctp_receive_message"]);
+  const nonSpendingOps = new Set(["aave_withdraw", "deploy_flash_arb_bot", "flash_arb_execute", "bridge_usdc_to_polygon", "cctp_receive_message", "morpho_withdraw", "lifi_bridge"]);
   await audit.append({
     operation: req.operation,
     decision: "approve",

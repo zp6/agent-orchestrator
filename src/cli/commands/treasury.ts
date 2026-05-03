@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import type { Command } from "commander";
 import chalk from "chalk";
 import type { Hex } from "viem";
-import { TreasuryClient, AAVE_V3_POOL_BASE, USDC_BASE, USDC_POLYGON, TREASURY_ADDRESS, MORPHO_STEAKHOUSE_USDC, USDC_DECIMALS, CCTP_TOKEN_MESSENGER_BASE, CCTP_MESSAGE_TRANSMITTER_POLYGON, POLYMARKET_CTF_EXCHANGE } from "../../services/treasury.js";
+import { TreasuryClient, AAVE_V3_POOL_BASE, USDC_BASE, USDC_POLYGON, TREASURY_ADDRESS, MORPHO_STEAKHOUSE_USDC, USDC_DECIMALS, CCTP_TOKEN_MESSENGER_BASE, CCTP_MESSAGE_TRANSMITTER_POLYGON, POLYMARKET_CTF_EXCHANGE, LIFI_DIAMOND_BASE, POLYGON_NATIVE_MATIC } from "../../services/treasury.js";
 import { PolymarketClient } from "../../services/polymarket-client.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -204,6 +204,125 @@ export function registerTreasuryCommand(program: Command): void {
       console.log(`  Tx: ${receipt.transactionHash}`);
       console.log(`\nBasescan: https://basescan.org/address/${contractAddress}`);
       console.log(chalk.cyan(`\nSave this address — set FLASH_ARB_BOT_ADDRESS=${contractAddress} in .env`));
+    });
+
+  treasury
+    .command("polymarket-fund")
+    .description("Withdraw from Morpho, seed MATIC on Polygon, bridge USDC to Polygon — fully autonomous via Li.fi")
+    .option("--amount <usd>", "Total USDC to move to Polygon (default: 32)", "32")
+    .option("--gas-seed <usd>", "Amount of USDC to convert to MATIC for Polygon gas (default: 2)", "2")
+    .action(async (opts: { amount: string; gasSeed: string }) => {
+      const totalUsd = Number(opts.amount);
+      const gasSeedUsd = Number(opts.gasSeed);
+      if (!Number.isFinite(totalUsd) || totalUsd <= 0 || totalUsd > 50) {
+        console.error(chalk.red("--amount must be 0–50")); process.exit(1);
+      }
+      if (!Number.isFinite(gasSeedUsd) || gasSeedUsd <= 0 || gasSeedUsd >= totalUsd) {
+        console.error(chalk.red("--gas-seed must be positive and less than --amount")); process.exit(1);
+      }
+
+      const client = new TreasuryClient();
+      const totalUnits = BigInt(Math.round(totalUsd * 10 ** USDC_DECIMALS));
+      const gasSeedUnits = BigInt(Math.round(gasSeedUsd * 10 ** USDC_DECIMALS));
+      const bridgeUnits = totalUnits - gasSeedUnits;
+      const bridgeUsd = totalUsd - gasSeedUsd;
+
+      console.log(chalk.bold("\nPolymarket Fund — autonomous Li.fi path"));
+      console.log(`  Total: $${totalUsd}  |  Gas seed: $${gasSeedUsd} → MATIC  |  USDC bridge: $${bridgeUsd}`);
+      console.log(chalk.dim("(Li.fi auto-delivers on Polygon — no MATIC needed to receive)\n"));
+
+      // Step 1: withdraw from Morpho
+      console.log(chalk.dim("Pre-flight: reading Morpho balance..."));
+      const [morphoShares, morphoUsdc, liquidUsdc] = await Promise.all([
+        client.treasuryMorphoShares(),
+        client.treasuryMorphoUsdcBalance(),
+        client.treasuryUsdcBalance(),
+      ]);
+      console.log(`  Morpho: ${formatUsdc(morphoUsdc)} USDC (${morphoShares} shares)`);
+      console.log(`  Liquid: ${formatUsdc(liquidUsdc)} USDC`);
+
+      let liquidAfterWithdraw = liquidUsdc;
+      if (liquidUsdc < totalUnits) {
+        const shortfall = totalUnits - liquidUsdc;
+        if (morphoUsdc < shortfall) {
+          console.error(chalk.red(`Insufficient funds: need $${totalUsd}, have $${Number(liquidUsdc + morphoUsdc) / 1e6}`));
+          process.exit(1);
+        }
+        // Redeem enough shares to cover the shortfall (redeem proportional shares)
+        const sharesToRedeem = (morphoShares * shortfall) / morphoUsdc + 1n;
+        console.log(chalk.cyan(`\nStep 1/5: Redeem ${formatUsdc(shortfall)} USDC from Morpho`));
+        const redeemReceipt = await client.signAndBroadcast({
+          operation: "morpho_withdraw",
+          to: MORPHO_STEAKHOUSE_USDC,
+          data: client.buildMorphoRedeemCalldata(sharesToRedeem),
+          usdValue: Number(shortfall) / 1e6,
+        });
+        console.log(chalk.green(`  ✓ redeemed: ${redeemReceipt.transactionHash}`));
+        await new Promise(r => setTimeout(r, 4000));
+        liquidAfterWithdraw = await client.treasuryUsdcBalance();
+        console.log(`  Liquid USDC now: ${formatUsdc(liquidAfterWithdraw)}`);
+      } else {
+        console.log(chalk.dim("Step 1/5: Sufficient liquid USDC, skipping Morpho redeem"));
+      }
+
+      if (liquidAfterWithdraw < totalUnits) {
+        console.error(chalk.red(`Still insufficient after redeem: ${formatUsdc(liquidAfterWithdraw)}`));
+        process.exit(1);
+      }
+
+      // Step 2: Approve Li.fi for gas seed
+      console.log(chalk.cyan(`\nStep 2/5: Approve USDC $${gasSeedUsd} → Li.fi Diamond (gas seed)`));
+      const approveGas = await client.signAndBroadcast({
+        operation: "erc20_approve_usdc",
+        to: USDC_BASE,
+        data: client.buildApproveCalldataForSpender(LIFI_DIAMOND_BASE, gasSeedUnits),
+        usdValue: gasSeedUsd,
+      });
+      console.log(chalk.green(`  ✓ approve: ${approveGas.transactionHash}`));
+      await new Promise(r => setTimeout(r, 3000));
+
+      // Step 3: Bridge USDC → MATIC on Polygon (gas seed)
+      console.log(chalk.cyan(`\nStep 3/5: Bridge $${gasSeedUsd} USDC → MATIC on Polygon (via Li.fi)`));
+      const maticQuote = await client.fetchLifiBridgeQuote({ fromAmountUsdc: gasSeedUsd, toToken: POLYGON_NATIVE_MATIC });
+      const maticReceived = Number(maticQuote.estimatedOutput) / 1e18;
+      console.log(`  Bridge: ${maticQuote.toolName} | ~${maticReceived.toFixed(2)} MATIC to ${TREASURY_ADDRESS}`);
+      const maticBridgeReceipt = await client.signAndBroadcast({
+        operation: "lifi_bridge",
+        to: LIFI_DIAMOND_BASE,
+        data: maticQuote.data,
+        usdValue: gasSeedUsd,
+      });
+      console.log(chalk.green(`  ✓ MATIC bridge submitted: ${maticBridgeReceipt.transactionHash}`));
+      console.log(chalk.dim(`  Li.fi auto-delivers MATIC to Polygon (no manual claim needed)`));
+      await new Promise(r => setTimeout(r, 4000));
+
+      // Step 4: Approve Li.fi for USDC bridge
+      console.log(chalk.cyan(`\nStep 4/5: Approve USDC $${bridgeUsd} → Li.fi Diamond (USDC bridge)`));
+      const approveUsdc = await client.signAndBroadcast({
+        operation: "erc20_approve_usdc",
+        to: USDC_BASE,
+        data: client.buildApproveCalldataForSpender(LIFI_DIAMOND_BASE, bridgeUnits),
+        usdValue: bridgeUsd,
+      });
+      console.log(chalk.green(`  ✓ approve: ${approveUsdc.transactionHash}`));
+      await new Promise(r => setTimeout(r, 3000));
+
+      // Step 5: Bridge USDC → USDC on Polygon
+      console.log(chalk.cyan(`\nStep 5/5: Bridge $${bridgeUsd} USDC Base → USDC Polygon (via Li.fi)`));
+      const usdcQuote = await client.fetchLifiBridgeQuote({ fromAmountUsdc: bridgeUsd, toToken: USDC_POLYGON });
+      const usdcReceived = Number(usdcQuote.estimatedOutput) / 1e6;
+      console.log(`  Bridge: ${usdcQuote.toolName} | ~$${usdcReceived.toFixed(2)} USDC to ${TREASURY_ADDRESS}`);
+      const usdcBridgeReceipt = await client.signAndBroadcast({
+        operation: "lifi_bridge",
+        to: LIFI_DIAMOND_BASE,
+        data: usdcQuote.data,
+        usdValue: bridgeUsd,
+      });
+      console.log(chalk.green(`  ✓ USDC bridge submitted: ${usdcBridgeReceipt.transactionHash}`));
+
+      console.log(chalk.bold.green(`\n✓ Polymarket funding complete!`));
+      console.log(`  ~${maticReceived.toFixed(2)} MATIC + ~$${usdcReceived.toFixed(2)} USDC landing on Polygon (Li.fi delivers in ~1–5 min)`);
+      console.log(chalk.cyan(`\nNext: orch treasury polymarket-bet --market <slug> --side no --amount 25 --price 0.54`));
     });
 
   treasury

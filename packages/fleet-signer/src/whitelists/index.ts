@@ -55,6 +55,12 @@ export const AAVE_V3_WITHDRAW_SELECTOR = "0x69328dec" as const;
 /** ERC4626 deposit(uint256 assets, address receiver) selector. */
 export const ERC4626_DEPOSIT_SELECTOR = "0x6e553f65" as const;
 
+/** ERC4626 redeem(uint256 shares, address receiver, address owner) selector. */
+export const ERC4626_REDEEM_SELECTOR = "0xba087652" as const;
+
+/** Li.fi Diamond router on Base — handles cross-chain swaps/bridges. */
+export const LIFI_DIAMOND_BASE = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE" as Address;
+
 /**
  * FlashArbBot bytecode prefix (first 20 bytes) — fingerprints the deployment.
  * Regenerate if the contract source changes: first 42 chars of compiled bytecode.
@@ -81,6 +87,8 @@ export const PER_TX_CAPS_USD = {
   BRIDGE_USDC_TO_POLYGON: 50,
   ERC20_APPROVE_USDC_POLYGON: 50,
   CCTP_RECEIVE_MESSAGE: 0, // gas-only on Polygon; no capital moved
+  MORPHO_WITHDRAW: 50,
+  LIFI_BRIDGE: 50,
 } as const;
 
 /** Daily total cap (sum of all approved transactions per UTC day). */
@@ -114,7 +122,9 @@ export type OperationType =
   | "flash_arb_execute"
   | "bridge_usdc_to_polygon"
   | "erc20_approve_usdc_polygon"
-  | "cctp_receive_message";
+  | "cctp_receive_message"
+  | "morpho_withdraw"
+  | "lifi_bridge";
 
 export interface SignRequest {
   /** Operation type — used to look up whitelist rules. */
@@ -383,6 +393,35 @@ export function evaluateWhitelist(req: SignRequest, currentDaySpendUsd: number):
       }
       // Gas-only, no capital moved — exempt from daily cap.
       return { approved: true, reason: "cctp_receive_message: gas-only relay, daily cap exempt" };
+    }
+    case "morpho_withdraw": {
+      if (req.chainId !== 8453) {
+        return { approved: false, reason: `morpho_withdraw requires chainId 8453 (Base)` };
+      }
+      if (req.to?.toLowerCase() !== BASE_CONTRACTS.MORPHO_STEAKHOUSE_USDC.toLowerCase()) {
+        return { approved: false, reason: `to ${req.to} not Morpho Steakhouse USDC vault` };
+      }
+      if (!req.data.toLowerCase().startsWith(ERC4626_REDEEM_SELECTOR)) {
+        return { approved: false, reason: `data selector not redeem()` };
+      }
+      if (req.usdValue > PER_TX_CAPS_USD.MORPHO_WITHDRAW) {
+        return { approved: false, reason: `usdValue ${req.usdValue} exceeds per-tx cap ${PER_TX_CAPS_USD.MORPHO_WITHDRAW}` };
+      }
+      // Redeeming our own capital — exempt from daily cap.
+      return { approved: true, reason: "morpho_withdraw: capital recovery, daily cap exempt" };
+    }
+    case "lifi_bridge": {
+      if (req.chainId !== 8453) {
+        return { approved: false, reason: `lifi_bridge requires chainId 8453 (Base)` };
+      }
+      if (req.to?.toLowerCase() !== LIFI_DIAMOND_BASE.toLowerCase()) {
+        return { approved: false, reason: `to ${req.to} not Li.fi Diamond router` };
+      }
+      if (req.usdValue > PER_TX_CAPS_USD.LIFI_BRIDGE) {
+        return { approved: false, reason: `usdValue ${req.usdValue} exceeds per-tx cap ${PER_TX_CAPS_USD.LIFI_BRIDGE}` };
+      }
+      // Capital movement to another chain — exempt from daily cap.
+      return { approved: true, reason: "lifi_bridge: cross-chain capital movement, daily cap exempt" };
     }
     default: {
       const exhaustive: never = req.operation;
