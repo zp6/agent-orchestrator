@@ -4,7 +4,7 @@
  * Phase 1: Aave V3 supply() + ERC20 approve() on Base.
  * Phase 1.5: Polymarket placeOrder on Polygon, SIWE message signatures,
  *            Aave V3 supply on Polygon, Aerodrome LP on Base.
- * Phase 2: Aave V3 withdraw, Morpho ERC4626 deposit, FlashArbBot deployment.
+ * Phase 2: Aave V3 withdraw, Morpho ERC4626 deposit, FlashArbBot deployment + execution.
  *
  * Anything outside the whitelist is REJECTED with a clear reason and audited.
  * The Operator sees a Telegram alert on rejection so they know the fleet
@@ -51,6 +51,9 @@ export const ERC4626_DEPOSIT_SELECTOR = "0x6e553f65" as const;
  */
 export const FLASH_ARB_BOT_BYTECODE_PREFIX = "0x60c060405234801561000f575f5ffd5b50604051" as const;
 
+/** FlashArbBot.executeArb(address,uint256,bytes) selector. */
+export const FLASH_ARB_EXECUTE_SELECTOR = "0x349879d2" as const;
+
 /**
  * Per-transaction USD-equivalent caps.
  * Intentionally low — proves the rail before larger amounts are trusted.
@@ -64,6 +67,7 @@ export const PER_TX_CAPS_USD = {
   AAVE_WITHDRAW: 50,
   MORPHO_DEPOSIT: 50,
   DEPLOY_FLASH_ARB_BOT: 5,
+  FLASH_ARB_EXECUTE: 2, // gas-only, no capital at risk (flash loan reverts if unprofitable)
 } as const;
 
 /** Daily total cap (sum of all approved transactions per UTC day). */
@@ -91,7 +95,8 @@ export type OperationType =
   | "aerodrome_add_liquidity"
   | "aave_withdraw"
   | "morpho_deposit"
-  | "deploy_flash_arb_bot";
+  | "deploy_flash_arb_bot"
+  | "flash_arb_execute";
 
 export interface SignRequest {
   /** Operation type — used to look up whitelist rules. */
@@ -297,6 +302,25 @@ export function evaluateWhitelist(req: SignRequest, currentDaySpendUsd: number):
       }
       // Deployment is one-time infrastructure — exempt from daily cap.
       return { approved: true, reason: "deploy_flash_arb_bot: one-time infra, daily cap exempt" };
+    }
+    case "flash_arb_execute": {
+      if (req.chainId !== 8453) {
+        return { approved: false, reason: `flash_arb_execute requires chainId 8453 (Base)` };
+      }
+      if (!req.to) {
+        return { approved: false, reason: `flash_arb_execute requires non-null to (FlashArbBot address)` };
+      }
+      if (!req.data.toLowerCase().startsWith(FLASH_ARB_EXECUTE_SELECTOR)) {
+        return { approved: false, reason: `data selector not executeArb()` };
+      }
+      if (req.usdValue > PER_TX_CAPS_USD.FLASH_ARB_EXECUTE) {
+        return {
+          approved: false,
+          reason: `usdValue ${req.usdValue} exceeds per-tx cap ${PER_TX_CAPS_USD.FLASH_ARB_EXECUTE}`,
+        };
+      }
+      // Flash arb is gas-only cost — no capital at risk. Exempt from daily cap.
+      return { approved: true, reason: "flash_arb_execute: zero-capital arb, daily cap exempt" };
     }
     default: {
       const exhaustive: never = req.operation;

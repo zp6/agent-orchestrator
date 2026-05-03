@@ -166,7 +166,7 @@ export class TreasuryClient {
    * Returns the receipt. Throws on rejection or revert.
    */
   async signAndBroadcast(req: {
-    operation: "aave_supply_usdc" | "erc20_approve_usdc" | "aave_withdraw" | "morpho_deposit" | "deploy_flash_arb_bot";
+    operation: "aave_supply_usdc" | "erc20_approve_usdc" | "aave_withdraw" | "morpho_deposit" | "deploy_flash_arb_bot" | "flash_arb_execute";
     to: `0x${string}` | null;
     data: Hex;
     usdValue: number;
