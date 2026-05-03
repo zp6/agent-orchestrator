@@ -58,6 +58,7 @@ import { registerDispatchHangWatchCommand } from "./commands/dispatch-hang-watch
 import { registerExternalImpactCommand } from "./commands/external-impact.js";
 import { registerPublishStandupCommand } from "./commands/publish-standup.js";
 import { registerMergeSweepCommand } from "./commands/merge-sweep.js";
+import { registerTreasuryCommand } from "./commands/treasury.js";
 
 const program = new Command();
 
@@ -125,6 +126,7 @@ registerDispatchHangWatchCommand(program);
 registerExternalImpactCommand(program);
 registerPublishStandupCommand(program);
 registerMergeSweepCommand(program);
+registerTreasuryCommand(program);
 
 program.parse();
 // docs PR ci-trigger
