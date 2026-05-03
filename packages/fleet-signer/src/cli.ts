@@ -124,7 +124,10 @@ async function cmdStart(): Promise<void> {
     process.exit(1);
   }
 
-  const passphraseEnv = process.env.FLEET_SIGNER_PASSPHRASE;
+  const passphraseEnv = process.env.FLEET_SIGNER_PASSPHRASE
+    ?? (process.env.FLEET_SIGNER_PASSPHRASE_FILE
+      ? (await import("node:fs")).readFileSync(process.env.FLEET_SIGNER_PASSPHRASE_FILE, "utf8").trim()
+      : undefined);
   const passphrase = passphraseEnv ?? (await readSecret("Passphrase: "));
 
   let privateKey: `0x${string}`;
