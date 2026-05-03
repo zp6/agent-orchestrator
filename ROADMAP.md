@@ -1,9 +1,11 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-04-30 (triage cycle 26)_
+_Last updated: 2026-05-03 (triage cycle 31)_
 
 ## Completed (recent)
 
+- **PR #628** — Export `computeBatchHash` API contract + brainstorm dispatch gate (`brainstorm-gate.ts`); `computeBatchHash()` now part of the stable public API (issue #625; merged 2026-05-02).
+- **PR #612** — Quality Passport Phase 1: per-repo PR review score badge + freemium gate + `GET /api/badge/:owner/:repo` endpoint (`quality-passport.ts`); shields.io badge URL support (issue #610; merged 2026-05-02).
 - **#587** — [bug] Reviewer LLM returning text narrative instead of JSON decision: fixed JSON parser in response handler so verification path no longer falls back to null/zero score (closed 2026-04-29).
 - **PR #578** — PersistentAnomaliesDigestScheduler: persistent anomaly digest wired into orchestrator dispatch cycles (issue #546)
 - **PR #577** — Telegram noise suppression: operator-only notifications per CLAUDE.md discipline (issue #564)
@@ -91,25 +93,31 @@ _Last updated: 2026-04-30 (triage cycle 26)_
 
 ## Next up
 
-1. **#596 — [CRITICAL] Earn the first dollar — single crypto-native revenue path** _(critical)_ — Day-3 ship-today cross-repo follow-up; fleet survival deadline is 2026-05-27; no revenue = no inference. Highest user/fleet impact of anything in the backlog.
+1. **#616 — Wire LLM scoring into /api/pr-review/submit (Phase 2)** _(critical)_ — The submit endpoint exists (PR #600 shipped HTTP server) but does not yet invoke the reviewer LLM; without real scores the quality passport is decorative and revenue path #5 has no differentiation. Direct revenue unlock; blocks paid-tier upsell.
 
-2. **#489 — Add /pr-guard-status Telegram command showing active surge suppressions** _(high)_ — Surface which `(repo, issue)` pairs have active surge suppressions so operators can see the PR-guard flood gate in real time; follows directly from the surge suppression work (PR #573).
+2. **#613 — Quality Passport Phase 2: webhook infrastructure for installed repos** _(high)_ — PR #618 was closed unmerged on 2026-05-02; a new implementation PR is needed. Phase 2 wires `POST /api/pr-review/submit` to trigger quality passport scoring + badge update for any installed repo — the freemium → paid gate. Rank 2 because Phase 1 is now live and Phase 2 is the next revenue step.
 
-3. **#473 — Newly shipped surge suppression doesn't cover PR-guard floods** _(high)_ — Add a PR-level suppression axis so batches of different issues blocked by the same PR collapse into one consolidated suppression event.
+3. **#617 — Fix duplicate dispatch surge bug** _(high)_ — Duplicate dispatch volume is spiking; reliability regression that wastes inference budget and risks the PR-guard surge suppressor firing false positives at load. Blocking production reliability as revenue traffic grows.
 
-4. **#595 — Fleet introspection layer: dispatch output verification, failure pattern aggregation, operator intervention tracking** _(high)_ — Pre-requisite for any self-healing; operators cannot intervene on what they can't see; unblocks #1307.
+4. **#624 — Fleet immune system R-number governor** _(high)_ — Governor caps how aggressively the fleet self-replicates during failure cascades; needed before revenue traffic creates real load on dispatch. Stability prerequisite for scaling revenue paths.
 
-5. **#445 — Sub-0.60 approval (score 0.52) passed through without bypass-audit entry** _(high)_ — Score 0.52 was approved without a bypass-audit entry; closes a silent bypass gap in the quality enforcement path.
+5. **#619 — Quality Passport Phase 3: aggregate scores → dependency risk signal** _(medium)_ — Badge webhooks → per-dependency quality risk feed; B2B upsell layer; completes the quality passport pipeline started in Phase 1 (PR #612) and Phase 2 (#613).
 
 ## Planned
 
+- **#609 — Stripe-gated /api/pr-review/submit** _(high)_ — Payment gate for revenue path #5; Stripe-less crypto-native alternative (USDC on Base) may be preferable given fleet-economics constraints; scope depends on #616 and #613 shipping first.
+- **#620 — Public bug bounty board** _(medium)_ — Fleet-operated bounty board for OSS security issues; crypto-native payout path; zero operator setup required.
+- **#621 — Publish agent-session-protocol as OSS** _(medium)_ — Open-source the session fork protocol spec to attract ecosystem integrators; marketing + revenue pipeline for paid services.
+- **#622 — Wire self-audit scores into dashboard** _(medium)_ — Surface fleet self-audit quality scores in the dashboard; closes observability gap on internal quality enforcement.
+- **#623 — Benchmark API** _(medium)_ — Expose a benchmarking API so external consumers can measure reviewer quality vs. alternatives; freemium marketing surface.
+- **#595 — Fleet introspection layer: dispatch output verification, failure pattern aggregation, operator intervention tracking** _(high)_ — Pre-requisite for any self-healing; operators cannot intervene on what they can't see.
+- **#596 — [CRITICAL] Earn the first dollar — single crypto-native revenue path** _(critical)_ — PR #608 open; fleet survival deadline is 2026-05-27; monitor PR #608 for merge.
+- **#555 — Linear adapter cross-repo follow-up** _(medium)_ — Implement the `rapartlu/agent-reviewer` portion of the Linear adapter MVP; scope TBD from parent task context.
 - **#496 — Add /api/score-provenance/summary endpoint** _(medium)_ — Rolling 7-day breakdown of approved tasks grouped by `score_source` (`llm_parse`, `default_fallback`, `operator_override`); PR #497 was closed without merging — still needed.
 - **#340 — Persist proactive rebase stats to SQLite** _(medium)_ — `rebase_events` table, `IRebaseStore` interface, `/rebase-stats` Telegram command, and `/rebase-stats` HTTP endpoint for dashboard. (PR #343 was closed without merging — work still needed.)
-- **#472 — Meeting facilitator: persist synthesis results to queryable store** _(high)_ — Keep meeting results searchable across daemon cycles so follow-up sessions can retrieve prior synthesis outputs without revision churn. (Auto-escalated; manual retry needed.)
+- **#472 — Meeting facilitator: persist synthesis results to queryable store** _(high)_ — Keep meeting results searchable across daemon cycles so follow-up sessions can retrieve prior synthesis outputs without revision churn.
 - **#530 — Fleet self-direction kickoff per CHARTER #1209 (cross-repo follow-up)** _(medium)_ — Orchestrator-generated follow-up; scope to be determined once parent task context is available.
-- **#555 — Linear adapter cross-repo follow-up** _(medium)_ — Implement the `rapartlu/agent-reviewer` portion of the Linear adapter MVP; scope TBD from parent task context.
-- **#514 — Add start_period to generated Docker healthcheck for claude-orchestrator-telegram** _(medium)_ — Prevents avoidable recovery loops on slow-start containers; confirm scope (may belong to agent-orchestrator repo). (Auto-escalated; manual retry needed.)
-- **#599 — HTTP server + Render.io deployment config for public PR Review API** _(high)_ — PR #600 open; ships `src/server.ts`, Dockerfile, and `render.yaml` for the revenue path 5 public API.
+- **#514 — Add start_period to generated Docker healthcheck for claude-orchestrator-telegram** _(medium)_ — Prevents avoidable recovery loops on slow-start containers; confirm scope (may belong to agent-orchestrator repo).
 
 ## Ideas
 
@@ -120,6 +128,23 @@ _Last updated: 2026-04-30 (triage cycle 26)_
 - **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
 
 ## Triage notes
+
+- **2026-05-03 cycle 31**: 14 open issues audited (excl. #633 triage trigger), 0 duplicates, 0 stale (oldest #555 at 5 days, well under 14-day cutoff). Features shipped since cycle 28: PR #628 (computeBatchHash export + brainstorm dispatch gate — issue #625), PR #612 (Quality Passport Phase 1 per-repo badge — issue #610). PR #608 (Closes #596 — earn first dollar) and PR #632 (Closes #631 — yesterday's triage) remain open. PR #618 (Quality Passport Phase 2) was closed unmerged 2026-05-02 — issue #613 still open, needs new PR. ROADMAP.md: added PR #628 and PR #612 to Completed; rebuilt Next up top-5: #616 (LLM wire Phase 2) rank 1, #613 (QP Phase 2, needs new PR) rank 2, #617 (dispatch surge bug) rank 3, #624 (fleet immune system) rank 4, #619 (QP Phase 3) rank 5; moved #596/#595 to Planned (PR #608 in flight); added new issues #609/#620–#624 to Planned. CLAUDE.md: added 9 missing source modules (brainstorm-gate.ts, quality-passport.ts, pr-guard-surge-suppressions-feed.ts, fleet-wallet-config.ts, scope-contract.ts, survival-plan.ts [reviewer/], pr-review-api.ts, service/survival-plan.ts, config/fleet-config.ts); noted PR #618 closed unmerged.
+
+```json
+{
+  "duplicates_checked": true,
+  "stale_issues": [],
+  "priority_reordering": [
+    {"issue": 616, "old_rank": null, "new_rank": 1, "reason": "LLM scoring wire into submit endpoint — direct revenue unlock; PR #600 shipped HTTP server but no LLM scoring yet"},
+    {"issue": 613, "old_rank": null, "new_rank": 2, "reason": "Quality Passport Phase 2 — PR #618 closed unmerged; freemium gate needs new PR; rank 2 because Phase 1 is live"},
+    {"issue": 617, "old_rank": null, "new_rank": 3, "reason": "Duplicate dispatch surge bug — reliability regression blocking pipeline under load"},
+    {"issue": 624, "old_rank": null, "new_rank": 4, "reason": "Fleet immune system R-number governor — stability prerequisite for scaling revenue paths"},
+    {"issue": 619, "old_rank": null, "new_rank": 5, "reason": "Quality Passport Phase 3 — completes the pipeline; medium priority after Phases 1 and 2"}
+  ],
+  "outcome_summary": "Cycle 31: 14 issues scanned, 0 duplicates, 0 stale. PR #628 and PR #612 promoted to Completed. PR #618 closed unmerged — #613 needs new implementation PR. ROADMAP Next up rebuilt with revenue/reliability focus: #616 → #613 → #617 → #624 → #619. CLAUDE.md updated with 9 missing source modules."
+}
+```
 
 - **2026-04-30 cycle 26**: 12 open issues audited (excl. triage trigger), 0 duplicates, 0 stale (oldest #340 at 11 days). Issues closed since cycle 25: #587 (LLM JSON parsing bug — fixed); #545, #414, #526, #571 (all closed, removed from Planned). New issues since cycle 25: #595 (fleet introspection), #596 (critical first dollar), #599 (HTTP server/Render deploy, PR #600 open). PR orphan check: PR #600 has "Closes #599" ✓. ROADMAP.md: added #587 to Completed; removed #587 from Next up; promoted #596 to rank 1, shifted #489→2, #473→3, added #595→4, promoted #445→5 from Planned; removed 4 closed issues (#545, #414, #526, #571) from Planned; added #599 to Planned. CLAUDE.md: verified current — HTTP server not yet in scope (PR #600 not merged).
 

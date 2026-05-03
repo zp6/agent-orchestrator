@@ -128,6 +128,12 @@ When this container is used for LLM PR reviews:
 - Hard scope contract enforcement: `pr-scope-checker.ts` deterministic bundling/multi-issue detection runs before any LLM review round; rejects PRs that close multiple issues or touch files outside the declared scope (`pr-scope-checker.ts`; PR #560)
 - OKR-aware supervisor prompt: anti-navel-gazing rule injected into supervisor reasoning; `pattern_risk` signal flags tasks whose scope is internal quality-system work with no user-facing OKR impact (PR #562)
 - Day-7 survival plan checkpoint: survival-status tracker records per-agent Day-7 milestone state; `/survival-status` Telegram command surfaces current checkpoint status for operator review (PR #569)
+- Brainstorm dispatch gate: two-part pre-dispatch gate before brainstorm task creation — (1) fleet-state hash match check and (2) 24h recency guard; `computeBatchHash()` exported as stable public API; prevents redundant blue-sky sessions when fleet state hasn't changed (`brainstorm-gate.ts`; PR #628)
+- Quality Passport (Phase 1): per-repo PR review score badge; rolling quality scores tracked per external repo; shields.io badge URL generator; freemium gate (10 free reviews/month, then paid tiers); `GET /api/badge/:owner/:repo` REST endpoint; `GET /api/quality-passport/info` public capability docs; `postQualityPassportComment()` for manual Phase 1 experiment. **Note: Phase 2 (webhook infrastructure for `POST /api/pr-review/submit`) was planned in PR #618 which was closed unmerged on 2026-05-02 — issue #613 still open and needs a new implementation PR.** (`quality-passport.ts`; PR #612)
+- PR guard surge suppressions feed: `getPRGuardSurgeSuppressionsFeedPayload()` REST payload builder returning all currently active 2-hour dispatch suppression entries; enables dashboard and operator CLI to inspect which `(repo, issue)` pairs are suppressed without direct DB access (`pr-guard-surge-suppressions-feed.ts`; issue #468)
+- Fleet wallet config: `getFleetWalletConfigPayload()` REST payload builder for `GET /api/fleet-config`; single source of truth for fleet wallet address (Base network, USDC/DAI/ERC-20); `FLEET_WALLET_ADDRESS` env-var override; used by any fleet agent to surface payment info without repeating env-var logic (`fleet-wallet-config.ts`)
+- Scope-contract preflight: `checkScopeContract()` parses hard dispatch constraints from orchestrator prompts (exact file count, max line count, forbidden paths) and validates PR diffs against them before any LLM review round; returns `ScopeContractViolationType` + violation details (`scope-contract.ts`)
+- Public PR Review API: `getPRReviewApiInfo()` + `handlePRReviewSubmission()` for `GET /api/pr-review/info` and `POST /api/pr-review/submit`; exposes fleet PR review capability as a paid external service (Basic $0.10 / Deep $0.50 per PR); USDC/DAI payment on Base network; freemium-to-paid tier gate (`pr-review-api.ts`)
 
 **Out of scope (belongs to orchestrator-core):**
 - Daemon loop, state store, dispatching infrastructure
@@ -150,6 +156,7 @@ src/
     llm-client.ts                   — Anthropic SDK wrapper; prompt-caching support
     multi-provider-client.ts        — `IReviewerLLMClient` interface; Anthropic + OpenAI-compatible provider adapters (Deepseek, Grok); `getReviewerProvider()` / `getReviewerModel()` env-driven factory (issue orchestrator#1211)
   config/
+    fleet-config.ts                 — fleet-wide configuration constants: wallet address (Base network, 0x468EC325…), `REVIEWER_PORT`, `FLEET_WALLET_ADDRESS` env-var override; single source of truth for fleet identity surfaced by all public-facing modules
     security-allowlist.ts           — shared example/template file patterns (synced with agent-proxy)
   reviewer/
     pr-reviewer.ts                  — PR review: LLM eval, approve/request-changes/escalate
@@ -222,6 +229,13 @@ src/
     quality-summary.ts              — `IQualitySummaryStore`; `getQualitySummaryReport()`; `QualitySummaryDigestScheduler` for daily Telegram digest; `/quality-summary` command formatter (issue #490)
     marginal-approvals-feed.ts      — `getMarginalApprovalsFeed()` REST payload builder; `getMarginalApprovalsTrend()` trend endpoint; per-agent coaching prompt; `/marginal-approvals` Telegram command (issues #502, #504)
     preexisting-failure-tracker.ts  — `PreexistingFailureTracker`; `staging_preexisting_skips` table; `insertPreexistingSkip()` / `getPreexistingSkipsInWindow()`; consolidated Telegram alert at ≥3 distinct PRs for same `(repo, pattern)` pair in 7-day window; 24h dedup cooldown (issue #453)
+    brainstorm-gate.ts              — two-part pre-dispatch gate for brainstorm tasks: fleet-state hash match check + 24h recency guard; `computeBatchHash()` exported as stable API; prevents redundant blue-sky sessions (issue #625; PR #628)
+    quality-passport.ts             — Quality Passport Phase 1: per-repo rolling score tracking; shields.io badge URL generation; freemium gate (10 free/month); `GET /api/badge/:owner/:repo`; `GET /api/quality-passport/info`; `postQualityPassportComment()`; `ensureQualityPassportTables()` startup migration. Phase 2 (webhook infrastructure) planned in PR #618 which was closed unmerged — issue #613 still open (issue #610; PR #612)
+    pr-guard-surge-suppressions-feed.ts — `getPRGuardSurgeSuppressionsFeedPayload()` payload builder for `GET /api/pr-guard-surge-suppressions`; returns all active 2-hour dispatch suppression entries from `pr_guard_surge_suppressions` table for operator/dashboard visibility (issue #468)
+    fleet-wallet-config.ts          — `getFleetWalletConfigPayload()` REST payload for `GET /api/fleet-config`; surfaces fleet wallet address and network for public-facing endpoints; `FLEET_WALLET_ADDRESS` env-var override; zero-dependency helper importable by any fleet agent
+    scope-contract.ts               — `checkScopeContract()` parses hard dispatch constraints from orchestrator prompts (exact-file-count, max-line-count, forbidden-paths) and validates PR diffs before LLM review; returns `ScopeContractViolationType` + `ScopeContractCheckResult`
+    survival-plan.ts                — `SurvivalPlanReviewer`: per-repo Day-7/14/30 milestone tracking; `evaluateSurvivalCheckpoint()` deterministic gate; `formatSurvivalStatusForTelegram()` for `/survival-status` payload (reviewer-layer wrapper around `src/service/survival-plan.ts`)
+    pr-review-api.ts                — Public PR Review API: `getPRReviewApiInfo()` + `handlePRReviewSubmission()` for `GET /api/pr-review/info` + `POST /api/pr-review/submit`; paid external service (Basic $0.10 / Deep $0.50 per PR); USDC/DAI payment on Base network; freemium-to-paid gate (revenue path #5)
     reviewer-pool.ts                — `REVIEWER_POOL_NAME`, `KNOWN_POOL_MEMBERS`; pool membership declaration and `getPoolMemberId()` helper for multi-provider reviewer fleet (issue orchestrator#1211)
     stale-improvements-feed.ts      — lists improvement-detector issues ≥N hours old with no open/merged PR; evidence count for priority sorting; powers `/stale-improvements` Telegram command (issue #440)
     synthesis-watchdog.ts           — `synthesis_watchlist` SQLite table; `registerSynthesisIntake()` / `recordSynthesisComplete()` / `checkWatchlist()`; 24h threshold alert + re-attempt when synthesis missing after facilitator outage (issue #553)
@@ -229,6 +243,7 @@ src/
     orchestrator-adapter.ts         — createReviewerInstances() adapter for orchestrator import
   service/
     logger.ts                       — structured logger
+    survival-plan.ts                — 30-day fleet survival tracker (issue #1267): env-var-driven revenue-path URL configuration; Day-7/14/30 checkpoint evaluation; `system_flags` SQLite persistence with `survival:` prefix; Telegram escalation if Day-7 checkpoint missed; `/survival-status` payload builder
   state/
     store.ts                        — SQLite state.db read/write helpers
     types.ts                        — shared TypeScript interfaces and type aliases
