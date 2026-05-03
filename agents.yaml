@@ -174,23 +174,42 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
-  codex-agent-orchestrator:
-    dir: "claude-agent-orchestrator"
-    repo: "git@github.com:rapartlu/agent-orchestrator.git"
-    provider: "openai"
-    model: "gpt-4.1"
-    pool: "orchestrator"
-    description: "Core orchestration infrastructure (Codex). Parallel throughput for orchestrator pool."
-    capabilities: ["typescript", "orchestration", "sqlite"]
-    github: "rapartlu/agent-orchestrator"
-    owns_topics: ["orchestrator", "daemon", "routing", "dispatcher", "planner", "deployer", "state", "triggers", "sync"]
-    docker:
-      port: 3480
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "fresh"
 
-  # ── Reviewer ────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# CODEX POOL — DECOMMISSIONED 2026-05-03
+#
+# OpenAI/codex subscription is rate-limit-exhausted until 2026-05-05 07:15 UTC.
+# All codex agents are commented out below to prevent the daemon's deployer
+# from auto-starting them and to remove them from the dispatch model router's
+# pool.
+#
+# To re-enable after the rate limit resets:
+#   1. Uncomment the codex-* blocks below
+#   2. Run `node dist/cli/index.js agents sync` to re-register with the proxy
+#   3. Restart daemon if needed
+#
+# Tracked in rapartlu/agent-orchestrator#1420 (model router exhausted-provider
+# handling) — once that lands, codex can be left enabled and routing will
+# avoid it automatically when rate-limited.
+# ──────────────────────────────────────────────────────────────────────────────
+  # === DECOMMISSIONED 2026-05-03 — see banner above ===
+  # codex-agent-orchestrator:
+  # dir: "claude-agent-orchestrator"
+  # repo: "git@github.com:rapartlu/agent-orchestrator.git"
+  # provider: "openai"
+  # model: "gpt-4.1"
+  # pool: "orchestrator"
+  # description: "Core orchestration infrastructure (Codex). Parallel throughput for orchestrator pool."
+  # capabilities: ["typescript", "orchestration", "sqlite"]
+  # github: "rapartlu/agent-orchestrator"
+  # owns_topics: ["orchestrator", "daemon", "routing", "dispatcher", "planner", "deployer", "state", "triggers", "sync"]
+  # docker:
+  # port: 3480
+  # api_key: "cheese"
+  # permissions: "bypassPermissions"
+  # session: "fresh"
+
+  # # ── Reviewer ────────────────────────────────────────────────────
   claude-orchestrator-reviewer:
     dir: "claude-orchestrator-reviewer"
     repo: "git@github.com:rapartlu/agent-reviewer.git"
@@ -210,23 +229,24 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
-  codex-orchestrator-reviewer:
-    dir: "claude-orchestrator-reviewer"
-    repo: "git@github.com:rapartlu/agent-reviewer.git"
-    provider: "claude"
-    model: "claude-haiku-4-5-20251001"
-    pool: "reviewer"
-    description: "PR reviewer, verifier, supervisor (Claude Haiku). Parallel throughput for reviewer pool."
-    capabilities: ["typescript", "llm", "review", "verification"]
-    github: "rapartlu/agent-reviewer"
-    owns_topics: ["review", "verification", "supervisor", "improvement", "escalation", "telegram", "quality"]
-    docker:
-      port: 3481
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "fresh"
+  # === DECOMMISSIONED 2026-05-03 — see banner above ===
+  # codex-orchestrator-reviewer:
+  # dir: "claude-orchestrator-reviewer"
+  # repo: "git@github.com:rapartlu/agent-reviewer.git"
+  # provider: "claude"
+  # model: "claude-haiku-4-5-20251001"
+  # pool: "reviewer"
+  # description: "PR reviewer, verifier, supervisor (Claude Haiku). Parallel throughput for reviewer pool."
+  # capabilities: ["typescript", "llm", "review", "verification"]
+  # github: "rapartlu/agent-reviewer"
+  # owns_topics: ["review", "verification", "supervisor", "improvement", "escalation", "telegram", "quality"]
+  # docker:
+  # port: 3481
+  # api_key: "cheese"
+  # permissions: "bypassPermissions"
+  # session: "fresh"
 
-  # ── Dashboard ───────────────────────────────────────────────────
+  # # ── Dashboard ───────────────────────────────────────────────────
   claude-orchestrator-dashboard:
     dir: "claude-orchestrator-dashboard"
     repo: "git@github.com:rapartlu/agent-dashboard.git"
@@ -245,23 +265,24 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
-  codex-orchestrator-dashboard:
-    dir: "claude-orchestrator-dashboard"
-    repo: "git@github.com:rapartlu/agent-dashboard.git"
-    provider: "openai"
-    model: "gpt-5.4-mini"
-    pool: "dashboard"
-    description: "Dashboard, CLI commands, observability UI (Codex). Parallel throughput for dashboard pool."
-    capabilities: ["typescript", "html", "css", "express", "dashboard"]
-    github: "rapartlu/agent-dashboard"
-    owns_topics: ["dashboard", "cli", "status", "health", "metrics", "activity", "ui", "escalation-ui"]
-    docker:
-      port: 3482
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "fresh"
+  # === DECOMMISSIONED 2026-05-03 — see banner above ===
+  # codex-orchestrator-dashboard:
+  # dir: "claude-orchestrator-dashboard"
+  # repo: "git@github.com:rapartlu/agent-dashboard.git"
+  # provider: "openai"
+  # model: "gpt-5.4-mini"
+  # pool: "dashboard"
+  # description: "Dashboard, CLI commands, observability UI (Codex). Parallel throughput for dashboard pool."
+  # capabilities: ["typescript", "html", "css", "express", "dashboard"]
+  # github: "rapartlu/agent-dashboard"
+  # owns_topics: ["dashboard", "cli", "status", "health", "metrics", "activity", "ui", "escalation-ui"]
+  # docker:
+  # port: 3482
+  # api_key: "cheese"
+  # permissions: "bypassPermissions"
+  # session: "fresh"
 
-  # ── Telegram ────────────────────────────────────────────────────
+  # # ── Telegram ────────────────────────────────────────────────────
   claude-orchestrator-telegram:
     dir: "claude-agent-orchestrator"
     provider: "claude"
@@ -295,24 +316,25 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
-  codex-research-agent:
-    dir: "claude-research-agent"
-    repo: "git@github.com:rapartlu/research-agent.git"
-    provider: "openai"
-    model: "gpt-4.1"
-    pool: "research"
-    description: "Research agent (Codex). Parallel throughput for research pool."
-    capabilities: ["research", "web-search", "documentation", "analysis"]
-    capability_tags: ["research-only"]
-    github: "rapartlu/research-agent"
-    owns_topics: ["research", "investigation", "comparison", "evaluation", "exploration", "temporal", "architecture"]
-    docker:
-      port: 3483
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "fresh"
+  # === DECOMMISSIONED 2026-05-03 — see banner above ===
+  # codex-research-agent:
+  # dir: "claude-research-agent"
+  # repo: "git@github.com:rapartlu/research-agent.git"
+  # provider: "openai"
+  # model: "gpt-4.1"
+  # pool: "research"
+  # description: "Research agent (Codex). Parallel throughput for research pool."
+  # capabilities: ["research", "web-search", "documentation", "analysis"]
+  # capability_tags: ["research-only"]
+  # github: "rapartlu/research-agent"
+  # owns_topics: ["research", "investigation", "comparison", "evaluation", "exploration", "temporal", "architecture"]
+  # docker:
+  # port: 3483
+  # api_key: "cheese"
+  # permissions: "bypassPermissions"
+  # session: "fresh"
 
-  # ── Proxy ───────────────────────────────────────────────────────
+  # # ── Proxy ───────────────────────────────────────────────────────
   claude-proxy:
     dir: "claude-proxy"
     repo: "git@github.com:rapartlu/agent-proxy.git"
@@ -331,23 +353,24 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
-  codex-proxy:
-    dir: "claude-proxy"
-    repo: "git@github.com:rapartlu/agent-proxy.git"
-    provider: "openai"
-    model: "gpt-5.4-mini"
-    pool: "proxy"
-    description: "Proxy server (Codex). Parallel throughput for proxy pool."
-    capabilities: ["typescript", "docker", "proxy", "api", "infrastructure"]
-    github: "rapartlu/agent-proxy"
-    owns_topics: ["proxy", "docker", "container", "infrastructure", "auth", "ssh"]
-    docker:
-      port: 3484
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "fresh"
+  # === DECOMMISSIONED 2026-05-03 — see banner above ===
+  # codex-proxy:
+  # dir: "claude-proxy"
+  # repo: "git@github.com:rapartlu/agent-proxy.git"
+  # provider: "openai"
+  # model: "gpt-5.4-mini"
+  # pool: "proxy"
+  # description: "Proxy server (Codex). Parallel throughput for proxy pool."
+  # capabilities: ["typescript", "docker", "proxy", "api", "infrastructure"]
+  # github: "rapartlu/agent-proxy"
+  # owns_topics: ["proxy", "docker", "container", "infrastructure", "auth", "ssh"]
+  # docker:
+  # port: 3484
+  # api_key: "cheese"
+  # permissions: "bypassPermissions"
+  # session: "fresh"
 
-  # ── Meeting Facilitator ────────────────────────────────────────
+  # # ── Meeting Facilitator ────────────────────────────────────────
   meeting-facilitator-agent:
     dir: "meeting-facilitator-agent"
     repo: "git@github.com:rapartlu/meeting-facilitator-agent.git"
