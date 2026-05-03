@@ -1963,6 +1963,7 @@ export class StateStore {
     this.runGuardDuplicateSuppressionsMigration();
     this.runOSSEngagementMigration();
     this.runMonologueMigration();
+    this.runBountyOpportunityMigration();
   }
 
   private runPhase2Migration(): void {
@@ -13304,6 +13305,189 @@ export class StateStore {
       .get(...params) as { cnt: number };
     return row.cnt;
   }
+
+  // ── Bounty Opportunities (issue #1315) ──────────────────────────────────────
+
+  private runBountyOpportunityMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS bounty_opportunities (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_url TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        platform TEXT,
+        scope TEXT,
+        payout_amount_usd REAL,
+        payout_currency TEXT,
+        payout_terms TEXT,
+        deadline TEXT,
+        capabilities TEXT,
+        status TEXT NOT NULL DEFAULT 'open',
+        score REAL,
+        score_rationale TEXT,
+        brief TEXT,
+        notes TEXT,
+        added_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_bounty_status ON bounty_opportunities(status);
+      CREATE INDEX IF NOT EXISTS idx_bounty_score ON bounty_opportunities(score DESC);
+      CREATE INDEX IF NOT EXISTS idx_bounty_deadline ON bounty_opportunities(deadline);
+    `);
+  }
+
+  addBountyOpportunity(params: {
+    source_url: string;
+    title: string;
+    platform?: string;
+    scope?: string;
+    payout_amount_usd?: number;
+    payout_currency?: string;
+    payout_terms?: string;
+    deadline?: string;
+    capabilities?: string[];
+    notes?: string;
+  }): BountyOpportunity {
+    const now = new Date().toISOString();
+    const existing = this.db
+      .prepare("SELECT id FROM bounty_opportunities WHERE source_url = ?")
+      .get(params.source_url) as { id: number } | undefined;
+    if (existing) {
+      throw new Error(`Bounty already tracked for ${params.source_url} (id #${existing.id})`);
+    }
+    const result = this.db
+      .prepare(
+        `INSERT INTO bounty_opportunities
+         (source_url, title, platform, scope, payout_amount_usd, payout_currency,
+          payout_terms, deadline, capabilities, status, added_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+      )
+      .run(
+        params.source_url,
+        params.title,
+        params.platform ?? null,
+        params.scope ?? null,
+        params.payout_amount_usd ?? null,
+        params.payout_currency ?? null,
+        params.payout_terms ?? null,
+        params.deadline ?? null,
+        params.capabilities ? JSON.stringify(params.capabilities) : null,
+        now,
+        now,
+      );
+    if (params.notes) {
+      this.db
+        .prepare("UPDATE bounty_opportunities SET notes = ? WHERE id = ?")
+        .run(params.notes, result.lastInsertRowid);
+    }
+    return this.getBountyOpportunity(Number(result.lastInsertRowid))!;
+  }
+
+  getBountyOpportunity(id: number): BountyOpportunity | null {
+    const row = this.db
+      .prepare("SELECT * FROM bounty_opportunities WHERE id = ?")
+      .get(id) as BountyOpportunityRow | undefined;
+    return row ? hydrateBountyOpportunity(row) : null;
+  }
+
+  listBountyOpportunities(opts?: {
+    status?: string;
+    limit?: number;
+  }): BountyOpportunity[] {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (opts?.status) {
+      conditions.push("status = ?");
+      params.push(opts.status);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limit = opts?.limit ?? 100;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM bounty_opportunities ${where}
+         ORDER BY (score IS NULL), score DESC, added_at DESC
+         LIMIT ?`,
+      )
+      .all(...params, limit) as BountyOpportunityRow[];
+    return rows.map(hydrateBountyOpportunity);
+  }
+
+  updateBountyOpportunityScore(
+    id: number,
+    score: number,
+    rationale: string,
+    brief: string,
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE bounty_opportunities
+         SET score = ?, score_rationale = ?, brief = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(score, rationale, brief, new Date().toISOString(), id);
+  }
+
+  updateBountyOpportunityStatus(id: number, status: string): void {
+    this.db
+      .prepare("UPDATE bounty_opportunities SET status = ?, updated_at = ? WHERE id = ?")
+      .run(status, new Date().toISOString(), id);
+  }
+
+  deleteBountyOpportunity(id: number): void {
+    this.db.prepare("DELETE FROM bounty_opportunities WHERE id = ?").run(id);
+  }
+}
+
+interface BountyOpportunityRow {
+  id: number;
+  source_url: string;
+  title: string;
+  platform: string | null;
+  scope: string | null;
+  payout_amount_usd: number | null;
+  payout_currency: string | null;
+  payout_terms: string | null;
+  deadline: string | null;
+  capabilities: string | null;
+  status: string;
+  score: number | null;
+  score_rationale: string | null;
+  brief: string | null;
+  notes: string | null;
+  added_at: string;
+  updated_at: string;
+}
+
+export interface BountyOpportunity {
+  id: number;
+  source_url: string;
+  title: string;
+  platform: string | null;
+  scope: string | null;
+  payout_amount_usd: number | null;
+  payout_currency: string | null;
+  payout_terms: string | null;
+  deadline: string | null;
+  capabilities: string[];
+  status: string;
+  score: number | null;
+  score_rationale: string | null;
+  brief: string | null;
+  notes: string | null;
+  added_at: string;
+  updated_at: string;
+}
+
+function hydrateBountyOpportunity(row: BountyOpportunityRow): BountyOpportunity {
+  let capabilities: string[] = [];
+  if (row.capabilities) {
+    try {
+      const parsed = JSON.parse(row.capabilities);
+      if (Array.isArray(parsed)) capabilities = parsed.map(String);
+    } catch {
+      capabilities = [];
+    }
+  }
+  return { ...row, capabilities };
 }
 
 export interface MonologueEntry {
