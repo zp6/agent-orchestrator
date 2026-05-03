@@ -1,7 +1,7 @@
 {
   "name": "claude-orchestrator-reviewer",
   "version": "0.1.0",
-  "description": "Quality and oversight layer for the Claude Agent Orchestrator — PR review, task verification, supervision, and improvement detection.",
+  "description": "Quality and oversight layer for the Claude Agent Orchestrator \u2014 PR review, task verification, supervision, and improvement detection.",
   "type": "module",
   "scripts": {
     "build": "tsc && node scripts/copy-schema-contract.mjs",
@@ -44,6 +44,7 @@
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.0",
+    "husky": "^9.0.0"
   }
 }
