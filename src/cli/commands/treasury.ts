@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { TreasuryClient, AAVE_V3_POOL_BASE, USDC_BASE, TREASURY_ADDRESS, USDC_DECIMALS } from "../../services/treasury.js";
 
-const PROOF_OF_LIFE_MAX_USD = 5;
+const PROOF_OF_LIFE_MAX_USD = 50;
 
 function formatUsdc(units: bigint): string {
   const divisor = 10n ** BigInt(USDC_DECIMALS);
@@ -64,12 +64,14 @@ export function registerTreasuryCommand(program: Command): void {
       if (!opts.skipApprove && allowance < amountUnits) {
         console.log(chalk.cyan("\nStep 1/2: ERC20 approve USDC → Aave V3 Pool"));
         const approveReceipt = await client.signAndBroadcast({
-          operation: "erc20_approve",
+          operation: "erc20_approve_usdc",
           to: USDC_BASE,
           data: client.buildApproveCalldata(amountUnits),
           usdValue: usd,
         });
         console.log(chalk.green(`  ✓ approve confirmed: ${approveReceipt.transactionHash}`));
+        // Brief wait for RPC nodes to sync the new allowance before estimating supply gas
+        await new Promise((r) => setTimeout(r, 3000));
       } else {
         console.log(chalk.dim("Skipping approve (allowance already sufficient)"));
       }

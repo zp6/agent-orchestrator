@@ -95,11 +95,19 @@ export class TreasuryClient {
    * Returns the receipt. Throws on rejection or revert.
    */
   async signAndBroadcast(req: {
-    operation: "aave_supply_usdc" | "erc20_approve";
+    operation: "aave_supply_usdc" | "erc20_approve_usdc";
     to: `0x${string}`;
     data: Hex;
     usdValue: number;
   }): Promise<TransactionReceipt> {
+    const [gasEstimate, feeData, nonce] = await Promise.all([
+      this.publicClient.estimateGas({ account: TREASURY_ADDRESS, to: req.to, data: req.data, value: 0n }),
+      this.publicClient.estimateFeesPerGas(),
+      this.publicClient.getTransactionCount({ address: TREASURY_ADDRESS }),
+    ]);
+    // Add 20% gas buffer to avoid out-of-gas on Aave's multi-step supply
+    const gas = (gasEstimate * 120n) / 100n;
+
     const signed = await this.signer.sign({
       operation: req.operation,
       chainId: BASE_CHAIN_ID,
@@ -107,6 +115,10 @@ export class TreasuryClient {
       data: req.data,
       value: 0n,
       usdValue: req.usdValue,
+      nonce,
+      gas,
+      maxFeePerGas: feeData.maxFeePerGas ?? 1_000_000n,
+      maxPriorityFeePerGas: feeData.maxPriorityFeePerGas ?? 100_000n,
     });
 
     const txHash = await this.publicClient.sendRawTransaction({ serializedTransaction: signed.signedTx });

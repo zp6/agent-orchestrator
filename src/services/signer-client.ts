@@ -1,13 +1,17 @@
 import type { Hex } from "viem";
 
 export interface SignerSignRequest {
-  operation: "aave_supply_usdc" | "erc20_approve" | "polymarket_place_order" | "siwe_sign";
+  operation: "aave_supply_usdc" | "erc20_approve_usdc" | "polymarket_place_order" | "siwe_sign";
   chainId: number;
   to: `0x${string}`;
   data: Hex;
   value: bigint;
   usdValue: number;
   siweDomain?: string;
+  nonce?: number;
+  gas?: bigint;
+  maxFeePerGas?: bigint;
+  maxPriorityFeePerGas?: bigint;
 }
 
 export interface SignerSignApproved {
@@ -61,7 +65,7 @@ export class SignerClient {
   }
 
   async sign(req: SignerSignRequest): Promise<SignerSignApproved> {
-    const body = {
+    const body: Record<string, unknown> = {
       operation: req.operation,
       chainId: req.chainId,
       to: req.to,
@@ -70,6 +74,10 @@ export class SignerClient {
       usdValue: req.usdValue,
       siweDomain: req.siweDomain,
     };
+    if (req.nonce !== undefined) body.nonce = req.nonce;
+    if (req.gas !== undefined) body.gas = `0x${req.gas.toString(16)}`;
+    if (req.maxFeePerGas !== undefined) body.maxFeePerGas = `0x${req.maxFeePerGas.toString(16)}`;
+    if (req.maxPriorityFeePerGas !== undefined) body.maxPriorityFeePerGas = `0x${req.maxPriorityFeePerGas.toString(16)}`;
 
     const res = (await this.request("POST", "/sign", body)) as SignerSignResponse;
     if (!res.approved) {

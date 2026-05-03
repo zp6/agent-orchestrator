@@ -28,6 +28,11 @@ interface SignRequestBody {
   value: string; // hex or decimal string
   usdValue: number;
   siweDomain?: string;
+  // Gas params — caller is responsible for estimating these before signing.
+  nonce?: number;
+  gas?: string;          // hex string e.g. "0x15f90"
+  maxFeePerGas?: string; // hex string
+  maxPriorityFeePerGas?: string; // hex string
 }
 
 interface SignResponseBody {
@@ -88,10 +93,10 @@ async function handleSign(
       data: req.data,
       value: req.value,
       type: "eip1559",
-      nonce: 0,
-      maxFeePerGas: 0n,
-      maxPriorityFeePerGas: 0n,
-      gas: 0n,
+      nonce: body.nonce ?? 0,
+      maxFeePerGas: body.maxFeePerGas ? BigInt(body.maxFeePerGas) : 0n,
+      maxPriorityFeePerGas: body.maxPriorityFeePerGas ? BigInt(body.maxPriorityFeePerGas) : 0n,
+      gas: body.gas ? BigInt(body.gas) : 0n,
     });
   }
 
