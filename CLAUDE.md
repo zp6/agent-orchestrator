@@ -288,6 +288,36 @@ Common `orch` commands:
 - `orch memory` - semantic task memory digest
 - `orch anomalies` - anomaly and drift surfaces
 
+## Treasury Operations
+
+The fleet-signer provides a whitelist-gated signing service for on-chain treasury operations.
+The orchestrator daemon interacts with it via `FleetSignerClient` (`src/client/fleet-signer-client.ts`).
+
+### Sign → Broadcast flow
+
+1. **Construct** — The daemon builds calldata for the desired operation (Aave supply, Polymarket order, SIWE auth, etc.)
+2. **Sign** — `FleetSignerClient` POSTs to the signer at `SIGNER_URL` (default `http://127.0.0.1:7521/sign`)
+3. **Evaluate** — The signer checks whitelist rules: contract address, function selector, chain ID, per-tx cap ($50), daily cap ($100)
+4. **Return** — If approved: signed transaction returned. If rejected: reason returned + Telegram alert to operator
+5. **Broadcast** — The daemon broadcasts the signed tx via RPC. The signer never broadcasts (separation of concerns)
+
+### Supported operations (Phase 1.5)
+
+- `signAaveSupply(amount)` — Aave V3 supply USDC on Base
+- `signErc20Approve(spender, amount)` — ERC20 approve USDC on Base
+- `signPolymarketOrder(calldata, usdValue)` — Polymarket CLOB order on Polygon
+- `signSiwe(domain, message)` — SIWE message signature (Mirror, Hypersub, Paragraph, Farcaster)
+- `signAaveSupplyPolygon(amount)` — Aave V3 supply USDC on Polygon
+- `signAerodromeLp(calldata, amount)` — Aerodrome USDC/USDbC LP on Base
+
+### Safety guarantees
+
+- Per-tx cap: $50 USD equivalent (all operations except SIWE)
+- Daily cap: $100 USD combined across all operations
+- SIWE restricted to fleet-relevant domains only (mirror.xyz, hypersub.xyz, paragraph.xyz, warpcast.com, farcaster.xyz)
+- Every decision (approve/reject/error) appended to `~/.fleet-signer/audit.log`
+- Operator receives immediate Telegram alert on any rejection or signer-down event
+
 ## Scope
 
 ### In scope

@@ -85,6 +85,56 @@ Send USDC, DAI, or other ERC-20 tokens directly to the wallet address above via 
 
 ---
 
+## Signer activation status
+
+The fleet-signer service manages private key signing for on-chain operations.
+It runs at `localhost:7521` and enforces per-tx and daily USD caps.
+
+| Property | Value |
+|----------|-------|
+| **Service URL** | `http://127.0.0.1:7521` (env: `SIGNER_URL`) |
+| **Health endpoint** | `GET /health` — returns `{ status, address }` |
+| **Sign endpoint** | `POST /sign` — whitelist-gated signing |
+| **Audit log** | `~/.fleet-signer/audit.log` (append-only JSONL) |
+| **Per-tx cap** | $50 USD equivalent |
+| **Daily cap** | $100 USD equivalent (all operations combined) |
+
+### Supported operations (Phase 1.5)
+
+| Operation | Chain | Contract | Cap |
+|-----------|-------|----------|-----|
+| `aave_supply_usdc` | Base (8453) | Aave V3 Pool | $50/tx |
+| `erc20_approve_usdc` | Base (8453) | USDC | $50/tx |
+| `polymarket_order` | Polygon (137) | CTF Exchange | $50/tx |
+| `siwe_sign` | Any | N/A (message) | No cap |
+| `aave_supply_usdc_polygon` | Polygon (137) | Aave V3 Pool | $50/tx |
+| `aerodrome_add_liquidity` | Base (8453) | Aerodrome Router | $50/tx |
+
+### Sign → Broadcast flow
+
+1. Fleet daemon constructs calldata for the desired operation
+2. Daemon calls `FleetSignerClient.signXxx()` which POSTs to `/sign`
+3. Signer evaluates whitelist rules (contract, selector, chain, caps)
+4. If approved: signs transaction, appends to audit log, returns signed tx
+5. If rejected: logs rejection, alerts operator via Telegram, returns reason
+6. Daemon broadcasts signed tx via RPC (signer never broadcasts)
+
+### Checking signer status
+
+```bash
+curl http://127.0.0.1:7521/health
+# {"status":"ok","address":"0x..."}
+```
+
+Or via the fleet-signer client:
+```typescript
+import { FleetSignerClient } from "./src/client/fleet-signer-client.js";
+const client = new FleetSignerClient();
+const reachable = await client.isReachable();
+```
+
+---
+
 ## Live service endpoints
 
 | Service | URL | Status |
