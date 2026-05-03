@@ -292,31 +292,94 @@ Common `orch` commands:
 
 The fleet-signer provides a whitelist-gated signing service for on-chain treasury operations.
 The orchestrator daemon interacts with it via `FleetSignerClient` (`src/client/fleet-signer-client.ts`).
+The CLI interacts via `TreasuryClient` (`src/services/treasury.ts`) + `SignerClient` (`src/services/signer-client.ts`).
+
+### Current capital state (as of 2026-05-03)
+
+- **$48 USDC** in Morpho Steakhouse USDC vault on Base (earning ~4.5–7.5% APY)
+  - Vault: `0xbeeF010f9cb27031ad51e3333f9aF9C6B1228183` (ERC4626)
+  - Migration tx: `0x7d113a7f8afd91c894177dc516dafdff1baf520683ddc8bfbe0015da14785190`
+- **~$0 ETH** — may need a small top-up for future gas (Base gas is ~$0.01/tx)
+- Treasury wallet: `0x468EC325f3797F5968dEcC757FA0B960Bd0f78Ef` (Base L2)
+- Fleet signer: `http://127.0.0.1:7521` — must be running locally; passphrase in `FLEET_SIGNER_PASSPHRASE`
 
 ### Sign → Broadcast flow
 
 1. **Construct** — The daemon builds calldata for the desired operation (Aave supply, Polymarket order, SIWE auth, etc.)
 2. **Sign** — `FleetSignerClient` POSTs to the signer at `SIGNER_URL` (default `http://127.0.0.1:7521/sign`)
-3. **Evaluate** — The signer checks whitelist rules: contract address, function selector, chain ID, per-tx cap ($50), daily cap ($100)
+3. **Evaluate** — The signer checks whitelist rules: contract address, function selector, chain ID, per-tx cap ($50), daily cap ($200)
 4. **Return** — If approved: signed transaction returned. If rejected: reason returned + Telegram alert to operator
 5. **Broadcast** — The daemon broadcasts the signed tx via RPC. The signer never broadcasts (separation of concerns)
 
-### Supported operations (Phase 1.5)
+### Supported operations (Phase 2)
 
-- `signAaveSupply(amount)` — Aave V3 supply USDC on Base
-- `signErc20Approve(spender, amount)` — ERC20 approve USDC on Base
-- `signPolymarketOrder(calldata, usdValue)` — Polymarket CLOB order on Polygon
-- `signSiwe(domain, message)` — SIWE message signature (Mirror, Hypersub, Paragraph, Farcaster)
-- `signAaveSupplyPolygon(amount)` — Aave V3 supply USDC on Polygon
-- `signAerodromeLp(calldata, amount)` — Aerodrome USDC/USDbC LP on Base
+**Base (chainId 8453):**
+- `aave_supply_usdc` — Aave V3 supply USDC on Base
+- `erc20_approve_usdc` — ERC20 approve USDC to any spender on Base (Aave, Morpho, etc.)
+- `aave_withdraw` — Aave V3 withdraw USDC on Base (**exempt from daily cap** — capital recovery)
+- `morpho_deposit` — Deposit to Morpho Steakhouse USDC vault on Base (`0xbeeF010f9cb27031ad51e3333f9aF9C6B1228183`)
+- `aerodrome_add_liquidity` — Aerodrome USDC/USDbC LP on Base
+- `siwe_sign` — SIWE message signature (Mirror, Hypersub, Paragraph, Farcaster, Warpcast)
+
+**Polygon (chainId 137):**
+- `polymarket_order` — Polymarket CLOB order (CTF Exchange `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`)
+- `aave_supply_usdc_polygon` — Aave V3 supply USDC on Polygon
+
+### CLI treasury commands
+
+```bash
+orch treasury balance              # liquid USDC + Aave allowance
+orch treasury aave-supply --amount <usd>   # supply USDC to Aave (max $50)
+orch treasury morpho-migrate --amount <usd|all>  # migrate Aave → Morpho Steakhouse vault
+```
 
 ### Safety guarantees
 
-- Per-tx cap: $50 USD equivalent (all operations except SIWE)
-- Daily cap: $100 USD combined across all operations
-- SIWE restricted to fleet-relevant domains only (mirror.xyz, hypersub.xyz, paragraph.xyz, warpcast.com, farcaster.xyz)
+- Per-tx cap: $50 USD equivalent (all operations except SIWE and aave_withdraw)
+- Daily cap: $200 USD combined (aave_withdraw is exempt — it's capital recovery, not spend)
+- SIWE restricted to: mirror.xyz, hypersub.xyz, paragraph.xyz, warpcast.com, farcaster.xyz
 - Every decision (approve/reject/error) appended to `~/.fleet-signer/audit.log`
-- Operator receives immediate Telegram alert on any rejection or signer-down event
+- Operator receives Telegram alert on any rejection or signer-down event
+
+### Running the fleet-signer
+
+The fleet-signer is a Docker container that must be running for any treasury operation:
+
+```bash
+docker run -d --name fleet-signer \
+  -p 127.0.0.1:7521:7521 \
+  -e FLEET_SIGNER_PASSPHRASE="<passphrase>" \
+  -v "$HOME/.fleet-signer/key.enc:/keystore/key.enc:ro" \
+  -v "$HOME/.fleet-signer/audit.log:/audit/audit.log" \
+  fleet-signer:local
+```
+
+To rebuild after whitelist changes: `cd packages/fleet-signer && docker build -t fleet-signer:local -f docker/Dockerfile .`
+
+### Active revenue opportunities (as of 2026-05-03)
+
+**Polymarket — researched, ready to execute when Polygon USDC is available:**
+- "Gemini 3.5 released by June 30?" — **bet NO at 47¢** (fleet estimate: 35–40% YES)
+  - Gemini 3.5 doesn't exist; Google versioning goes 3.0→3.1→3.2; specific name required
+  - Gemini 4 or 3.2 released at Google I/O (May 19-20) would NOT resolve YES
+  - Condition ID: fetch from gamma-api.polymarket.com events?slug=gemini-3pt5-released-by
+- "Best AI model end of May?" — Anthropic at 81¢ is accurate but margin is thin (4 Elo over Gemini 3.1 Pro); Google I/O is May 19 which is 12 days before resolution
+- **Blocker**: treasury USDC is on Base, Polymarket CLOB requires USDC on Polygon — needs bridge infrastructure
+
+**Morpho yield (active):**
+- $48 USDC earning 4.5–7.5% APY in Morpho Steakhouse USDC vault
+- Withdraw via `orch treasury morpho-migrate` in reverse (add `morpho_withdraw` operation if needed)
+
+**Immunefi bug bounties — no KYC, crypto payout:**
+- Sky/MakerDAO: no KYC, DAI payout, $10M ceiling — `https://immunefi.com/bug-bounty/sky/information/`
+- Ethena: USDC payout, $3M ceiling — `https://immunefi.com/bug-bounty/ethena/information/`
+- ENS: USDC payout, $250k ceiling — `https://immunefi.com/bug-bounty/ens/information/`
+- Note: this is legitimate sanctioned security research — Immunefi programs explicitly authorize it
+
+**Flash loan arb (not yet built):**
+- `solc` is installed locally — can compile a flash loan arb contract
+- Deploy on Base for ~$0.05; zero capital at risk per trade
+- Needs: contract writing + `deploy_contract` operation added to fleet signer
 
 ## Scope
 
