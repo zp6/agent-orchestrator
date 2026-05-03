@@ -2530,7 +2530,7 @@ describe("Dispatcher — pool failover routing integration", () => {
     store = new StateStore(":memory:");
   });
 
-  it("routes to healthy pool member when primary is unhealthy", async () => {
+  it("honours explicit --agent as a hard pin (no pool rebalancing)", async () => {
     // Mark primary reviewer as unhealthy (3 consecutive failures)
     store.recordAgentFailure("reviewer", "503 Failed to spawn claude CLI");
     store.recordAgentFailure("reviewer", "503 Failed to spawn claude CLI");
@@ -2542,9 +2542,38 @@ describe("Dispatcher — pool failover routing integration", () => {
       usage: { input_tokens: 10, output_tokens: 20 },
     });
 
+    // Explicit --agent is a hard operator directive — pool rebalancing must
+    // NOT redirect to a healthier sibling.  The intent is "this exact agent",
+    // not "any agent in this pool".  (Fixes #1420 Bug 1.)
     const result = await dispatcher.dispatch("review this PR", {
       agentName: "reviewer",
       source: "manual",
+    });
+
+    expect(result.agentName).toBe("reviewer");
+  });
+
+  it("auto-routing rebalances within pool to healthy member when primary is unhealthy", async () => {
+    // Mark primary reviewer as unhealthy (3 consecutive failures)
+    store.recordAgentFailure("reviewer", "503 Failed to spawn claude CLI");
+    store.recordAgentFailure("reviewer", "503 Failed to spawn claude CLI");
+    store.recordAgentFailure("reviewer", "503 Failed to spawn claude CLI");
+
+    const dispatcher = new Dispatcher(makePoolConfig(), store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    // Override the router mock so auto-routing returns "reviewer" (the pool entry point)
+    mockRoute.mockReturnValueOnce([{ agentName: "reviewer", confidence: 0.9, reason: "topic match" }]);
+    mockRouteWithFallback.mockResolvedValueOnce([{ agentName: "reviewer", confidence: 0.9, reason: "topic match" }]);
+
+    // Without explicit agentName, auto-routing selects the pool then
+    // rebalancing picks the healthiest member (reviewer-2 or reviewer-3).
+    const result = await dispatcher.dispatch("review this PR", {
+      source: "manual",
+      // no agentName — let auto-routing pick the pool
     });
 
     // Should have been routed to reviewer-2 or reviewer-3 (both healthy)
@@ -2593,7 +2622,7 @@ describe("Dispatcher — pool failover routing integration", () => {
     expect(health.last_error_message).toContain("ECONNREFUSED");
   });
 
-  it("routes around all unhealthy instances to the least-recently-failed", async () => {
+  it("auto-routing selects least-recently-failed when all pool instances are unhealthy", async () => {
     // Make all 3 reviewers unhealthy, but with different failure counts/times
     for (let i = 0; i < 5; i++) store.recordAgentFailure("reviewer", "503 error");
     for (let i = 0; i < 3; i++) store.recordAgentFailure("reviewer-2", "503 error");
@@ -2605,13 +2634,40 @@ describe("Dispatcher — pool failover routing integration", () => {
       usage: { input_tokens: 10, output_tokens: 20 },
     });
 
+    // Override the router mock so auto-routing returns "reviewer" (the pool entry point)
+    mockRoute.mockReturnValueOnce([{ agentName: "reviewer", confidence: 0.9, reason: "topic match" }]);
+    mockRouteWithFallback.mockResolvedValueOnce([{ agentName: "reviewer", confidence: 0.9, reason: "topic match" }]);
+
+    // Without explicit agentName, auto-routing + rebalancing picks the
+    // least-unhealthy pool member (reviewer-2 has fewest failures).
+    const result = await dispatcher.dispatch("review this PR", {
+      source: "manual",
+      // no agentName — let auto-routing pick the pool
+    });
+
+    // reviewer-2 has fewest failures (3), should be selected
+    expect(result.agentName).toBe("reviewer-2");
+  });
+
+  it("explicit --agent bypasses pool rebalancing even when all instances are unhealthy", async () => {
+    // Make all 3 reviewers unhealthy
+    for (let i = 0; i < 5; i++) store.recordAgentFailure("reviewer", "503 error");
+    for (let i = 0; i < 3; i++) store.recordAgentFailure("reviewer-2", "503 error");
+    for (let i = 0; i < 4; i++) store.recordAgentFailure("reviewer-3", "503 error");
+
+    const dispatcher = new Dispatcher(makePoolConfig(), store);
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    // Explicit pin must be honoured — routes to reviewer regardless of health.
     const result = await dispatcher.dispatch("review this PR", {
       agentName: "reviewer",
       source: "manual",
     });
 
-    // reviewer-2 has fewest failures (3), should be selected
-    expect(result.agentName).toBe("reviewer-2");
+    expect(result.agentName).toBe("reviewer");
   });
 
   it("records failure for retryTask and updates agent health", async () => {
@@ -2668,6 +2724,53 @@ describe("Dispatcher — pool failover routing integration", () => {
     const health = store.getAgentHealth(routedAgent);
     expect(health.consecutive_failures).toBe(0);
     expect(health.is_healthy).toBe(true);
+  });
+
+  it("defers retryTask without consuming a retry slot when provider is exhausted (#1420 Bug 2)", async () => {
+    const dispatcher = new Dispatcher(makePoolConfig(), store);
+
+    // Dispatch a task to reviewer so we have a real task record
+    mockSend.mockResolvedValueOnce({
+      content: "done",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+    const result = await dispatcher.dispatch("review this PR", {
+      agentName: "reviewer",
+      source: "manual",
+    });
+    const task = store.getTask(result.taskId)!;
+
+    // Manually set the task up as if it had previously failed and is due for retry
+    const initialRetryCount = 1;
+    const resetAt = new Date(Date.now() + 30 * 60 * 1000); // 30 min from now
+    store.updateTask(task.id, {
+      status: "failed",
+      retry_count: initialRetryCount,
+      next_retry_at: new Date().toISOString(),
+    });
+
+    // Simulate provider being exhausted (as would happen after a rate-limit failure)
+    // Import provider-state functions to manipulate state in this test
+    const { markProviderExhausted, markProviderAvailable } = await import("../service/provider-state.js");
+    markProviderExhausted("claude", "rate limit hit", resetAt);
+
+    try {
+      // retryTask should detect exhausted provider and defer without sending
+      await dispatcher.retryTask(store.getTask(task.id)!);
+
+      // The agent's send should NOT have been called
+      // (mockSend call count should still be 1 from the initial dispatch)
+      expect(mockSend).toHaveBeenCalledTimes(1);
+
+      // The task should be deferred (next_retry_at set to resetAt), not consumed
+      const updatedTask = store.getTask(task.id)!;
+      expect(updatedTask.status).toBe("failed");
+      expect(updatedTask.retry_count).toBe(initialRetryCount); // unchanged — slot not consumed
+      expect(updatedTask.next_retry_at).not.toBeNull();
+    } finally {
+      // Clean up provider state so other tests aren't affected
+      markProviderAvailable("claude");
+    }
   });
 });
 

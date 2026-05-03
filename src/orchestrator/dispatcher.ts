@@ -28,6 +28,7 @@ import {
   markProviderAvailable,
   isProviderAvailable,
   parseResetTime,
+  getProviderStates,
 } from "../service/provider-state.js";
 import { routeModel } from "./model-router.js";
 import { detectAndCreateFollowUps, formatFollowUpNote } from "./cross-repo-tracker.js";
@@ -859,7 +860,12 @@ export class Dispatcher {
 
     const effectiveMembers = poolMembers;
 
-    if (effectiveMembers.length > 1) {
+    // Pool rebalancing: only pick the healthiest pool member when the agent
+    // was NOT explicitly pinned by --agent / options.agentName.  An explicit
+    // pin is an operator/script directive and must be honoured as-is — the
+    // model router may still choose the model, but it must not redirect to a
+    // different agent within the pool.  (Fixes #1420 Bug 1.)
+    if (effectiveMembers.length > 1 && !options?.agentName) {
       const healthRecords = this.store.getAgentHealthBatch(effectiveMembers);
       const selected = selectHealthiestPoolInstance(
         effectiveMembers,
@@ -2296,6 +2302,36 @@ export class Dispatcher {
           reportEscalation(this.config, this.store.getTask(task.id) ?? task, escalationLimit);
           return;
         }
+      }
+    }
+
+    // Pre-retry provider availability check (fixes #1420 Bug 2): the retry path
+    // calls this.client.send() directly without going through pool resolution,
+    // so it doesn't benefit from the isProviderAvailable filter in dispatch().
+    // If the agent's provider is still exhausted, defer the retry until after
+    // resetAt without consuming a retry slot.
+    {
+      const retryProvider = this.config.agents[agentName]?.provider ?? "claude";
+      if (!isProviderAvailable(retryProvider)) {
+        const providerStates = getProviderStates();
+        const providerState = providerStates.get(retryProvider);
+        const deferUntil = providerState?.resetAt?.toISOString()
+          ?? new Date(Date.now() + 5 * 60 * 1000).toISOString();
+        this.log.warn("Retry deferred: provider still exhausted", {
+          taskId: task.id,
+          agentName,
+          provider: retryProvider,
+          deferUntil,
+        });
+        this.store.addLog({
+          task_id: task.id,
+          direction: "system",
+          content: `Retry deferred: provider "${retryProvider}" is rate-limited until ${deferUntil}. Will retry after reset.`,
+        });
+        // Restore next_retry_at without incrementing retry_count so this
+        // deferred cycle is transparent — only real attempts consume budget.
+        this.store.updateTask(task.id, { next_retry_at: deferUntil });
+        return;
       }
     }
 
