@@ -174,6 +174,29 @@ This rule retires automatically when `revenue_log.mrr_usd >= 1000`.
 - Do not add CI workflows, changelog automation, or other meta-tooling unless explicitly asked.
 - Before creating a new issue, check if it already exists: `gh issue list --state open` and `gh pr list --state merged -L 20`.
 
+## Local Validation Discipline — pre-push hook is the gate
+
+The remote CI `test` requirement was dropped on 2026-05-03 because Actions runner queue was blocking PR throughput. **The replacement is local validation before every push.** Branch protection no longer enforces; the fleet's discipline does.
+
+**Every push from every agent must succeed in:**
+
+```
+npx tsc --noEmit && npm test
+```
+
+Implemented as a `.husky/pre-push` hook in every fleet repo (see #1408). The hook runs automatically on `git push`. If either step fails, the push is refused; the agent must fix or reduce scope before retrying.
+
+**Agent obligations:**
+
+- After cloning a fleet repo, ensure `npm install` ran (it triggers `prepare` → `husky install`)
+- On every `git push`, expect the hook to gate the operation
+- On hook failure, capture the diagnostic, report task failed, and do NOT bypass with `--no-verify` unless explicitly directed by the operator
+- If the hook is missing in a repo, add it (per #1408 spec) before pushing other work
+
+**Operator escalation:** if a repo's hook is repeatedly bypassed or main breaks because of a missed hook, that's a charter Article IV transparency violation and a P0.
+
+This replaces what the remote CI gate used to enforce. The fleet promises broken code doesn't reach `origin/main`; the hook makes that promise mechanical.
+
 ## Overview
 
 `claude-orchestrator-reviewer` is a TypeScript package plus CLI for the orchestrator fleet.
