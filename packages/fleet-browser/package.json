@@ -1,0 +1,26 @@
+{
+  "name": "@nexus-fleet/fleet-browser",
+  "version": "0.1.0",
+  "description": "Playwright-based headless browser with injected window.ethereum provider routed through the fleet-signer service. Issue #1429.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "fleet-browser": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js test",
+    "test": "vitest run",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
