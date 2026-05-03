@@ -361,7 +361,8 @@ describe("MemoryDigestScheduler", () => {
     const scheduler = new MemoryDigestScheduler(store, notifier, { digestHourUtc: 9 });
     const sent = await scheduler.maybeFireDigest();
     expect(sent).toBe(true);
-    expect(sends.length).toBe(1);
+    // #564 noise suppression: digest is logged but not dispatched to Telegram.
+    expect(sends.length).toBe(0);
   });
 
   it("does not fire when current UTC hour does not match", async () => {
@@ -398,9 +399,9 @@ describe("MemoryDigestScheduler", () => {
 
     const first = await scheduler.maybeFireDigest();
     expect(first).toBe(true);
-    // NOISE SUPPRESSION (#564): Memory digests no longer send to Telegram
-    // Verify state change (system flag set for first day)
-    const flagDay1 = store.getSystemFlag("last_memory_digest_sent");
+    // #564 noise suppression: no Telegram send, but flag is persisted.
+    // The flag key is "semantic_memory_digest_last_sent".
+    const flagDay1 = store.getSystemFlag("semantic_memory_digest_last_sent");
     expect(flagDay1).toBe("2025-06-15");
 
     // Advance to next day 09:00 UTC
@@ -408,7 +409,7 @@ describe("MemoryDigestScheduler", () => {
     const second = await scheduler.maybeFireDigest();
     expect(second).toBe(true);
     // Verify state changed to second day
-    const flagDay2 = store.getSystemFlag("last_memory_digest_sent");
+    const flagDay2 = store.getSystemFlag("semantic_memory_digest_last_sent");
     expect(flagDay2).toBe("2025-06-16");
   });
 

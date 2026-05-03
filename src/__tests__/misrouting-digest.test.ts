@@ -519,9 +519,10 @@ describe("MisroutingDigestScheduler", () => {
     const scheduler = new MisroutingDigestScheduler(store, notifier, config, { digestHourUtc: 9 });
 
     const sent = await scheduler.maybeFireDigest();
+    // #564 noise suppression: digest is logged but not dispatched to Telegram.
+    // The flag must still be set so the scheduler deduplicates correctly.
     expect(sent).toBe(true);
-    expect(notifier.messages).toHaveLength(1);
-    expect(notifier.messages[0]).toContain("Reviewer Misrouting Digest");
+    expect(notifier.messages).toHaveLength(0);
     expect(store.flags.get(FLAG_LAST_MISROUTING_DIGEST_SENT)).toBe("2026-04-20");
   });
 
@@ -588,8 +589,9 @@ describe("MisroutingDigestScheduler", () => {
     const scheduler = new MisroutingDigestScheduler(store, notifier, config);
 
     const sent = await scheduler.maybeFireDigest();
-    expect(sent).toBe(false);
-    // Should not mark as sent on failure
-    expect(store.flags.has(FLAG_LAST_MISROUTING_DIGEST_SENT)).toBe(false);
+    // #564 noise suppression: notifier.send is never called so it never throws.
+    // The digest is logged and the flag is marked (returns true).
+    expect(sent).toBe(true);
+    expect(store.flags.has(FLAG_LAST_MISROUTING_DIGEST_SENT)).toBe(true);
   });
 });

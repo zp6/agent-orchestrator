@@ -133,12 +133,20 @@ describe("FK integrity", () => {
     // Re-enable FK enforcement (mirrors what PRAGMA foreign_keys=ON at startup does).
     fixture.db.pragma("foreign_keys = ON");
 
-    const alerts: string[] = [];
-    fixture.store.runStartupIntegrityCheck({ send: (msg) => alerts.push(msg) });
+    const consoleLogs: string[] = [];
+    const origError = console.error;
+    console.error = (msg: string) => consoleLogs.push(msg);
+    try {
+      const alerts: string[] = [];
+      fixture.store.runStartupIntegrityCheck({ send: (msg) => alerts.push(msg) });
 
-    // At least one alert must mention foreign_key_check.
-    expect(alerts.length).toBeGreaterThan(0);
-    expect(alerts.some((m) => /foreign_key_check/i.test(m))).toBe(true);
+      // #564 noise suppression: FK violations are now logged to console.error,
+      // not dispatched via notifier.send. Alerts array stays empty.
+      expect(alerts).toHaveLength(0);
+      expect(consoleLogs.some((m) => /foreign_key_check/i.test(m))).toBe(true);
+    } finally {
+      console.error = origError;
+    }
   });
 
   it("runStartupIntegrityCheck logs OK to console and sends no alerts on clean db", () => {

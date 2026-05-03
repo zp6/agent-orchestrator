@@ -1,9 +1,11 @@
 # Roadmap — claude-orchestrator-reviewer
 
-_Last updated: 2026-05-03 (triage cycle 31)_
+_Last updated: 2026-05-03 (triage cycle 34)_
 
 ## Completed (recent)
 
+- **PR #641** — Pre-push validation hook: prevents unsigned/unsigned-author commits from ship via git-hook integration (issue #1408; merged 2026-05-03).
+- **PR #634** — Backlog triage cycle 31: 14 issues audited, 0 duplicates, 0 stale; ROADMAP/CLAUDE.md synced; 9 missing modules documented (merged 2026-05-03).
 - **PR #628** — Export `computeBatchHash` API contract + brainstorm dispatch gate (`brainstorm-gate.ts`); `computeBatchHash()` now part of the stable public API (issue #625; merged 2026-05-02).
 - **PR #612** — Quality Passport Phase 1: per-repo PR review score badge + freemium gate + `GET /api/badge/:owner/:repo` endpoint (`quality-passport.ts`); shields.io badge URL support (issue #610; merged 2026-05-02).
 - **#587** — [bug] Reviewer LLM returning text narrative instead of JSON decision: fixed JSON parser in response handler so verification path no longer falls back to null/zero score (closed 2026-04-29).
@@ -107,11 +109,8 @@ _Last updated: 2026-05-03 (triage cycle 31)_
 
 - **#609 — Stripe-gated /api/pr-review/submit** _(high)_ — Payment gate for revenue path #5; Stripe-less crypto-native alternative (USDC on Base) may be preferable given fleet-economics constraints; scope depends on #616 and #613 shipping first.
 - **#620 — Public bug bounty board** _(medium)_ — Fleet-operated bounty board for OSS security issues; crypto-native payout path; zero operator setup required.
-- **#621 — Publish agent-session-protocol as OSS** _(medium)_ — Open-source the session fork protocol spec to attract ecosystem integrators; marketing + revenue pipeline for paid services.
 - **#622 — Wire self-audit scores into dashboard** _(medium)_ — Surface fleet self-audit quality scores in the dashboard; closes observability gap on internal quality enforcement.
-- **#623 — Benchmark API** _(medium)_ — Expose a benchmarking API so external consumers can measure reviewer quality vs. alternatives; freemium marketing surface.
 - **#595 — Fleet introspection layer: dispatch output verification, failure pattern aggregation, operator intervention tracking** _(high)_ — Pre-requisite for any self-healing; operators cannot intervene on what they can't see.
-- **#596 — [CRITICAL] Earn the first dollar — single crypto-native revenue path** _(critical)_ — PR #608 open; fleet survival deadline is 2026-05-27; monitor PR #608 for merge.
 - **#555 — Linear adapter cross-repo follow-up** _(medium)_ — Implement the `rapartlu/agent-reviewer` portion of the Linear adapter MVP; scope TBD from parent task context.
 - **#496 — Add /api/score-provenance/summary endpoint** _(medium)_ — Rolling 7-day breakdown of approved tasks grouped by `score_source` (`llm_parse`, `default_fallback`, `operator_override`); PR #497 was closed without merging — still needed.
 - **#340 — Persist proactive rebase stats to SQLite** _(medium)_ — `rebase_events` table, `IRebaseStore` interface, `/rebase-stats` Telegram command, and `/rebase-stats` HTTP endpoint for dashboard. (PR #343 was closed without merging — work still needed.)
@@ -128,6 +127,17 @@ _Last updated: 2026-05-03 (triage cycle 31)_
 - **Review score history trending**: Persist `VerificationResult` scores over time so the improvement detector can spot regression trends across deploys.
 
 ## Triage notes
+
+- **2026-05-03 cycle 34**: 13 open issues audited (excl. triage triggers #637, #635), 0 duplicates, 0 stale (oldest #555 at 6 days, well under 14-day cutoff). Closed duplicate triage PRs #636 (cycle 32) and #639 (cycle 33) — both redundant. Closed orphaned PR #608 (issue #596 already auto-closed by PR #634 merge). PRs merged since cycle 31: #641 (pre-push validation hook, issue #1408). ROADMAP.md: moved #641 to Completed, removed #596/#621/#623 from Planned (shipped/closed). No duplicate issues. No stale issues. No orphan PRs remaining. Top-5 unchanged: #616 → #613 → #617 → #624 → #619. CLAUDE.md verified current — no drift detected.
+
+```json
+{
+  "duplicates_checked": true,
+  "stale_issues": [],
+  "priority_reordering": [],
+  "outcome_summary": "Cycle 34 triage: 13 open issues audited, 0 duplicates, 0 stale. Closed redundant triage PRs #636 and #639, orphaned PR #608. ROADMAP.md updated: PR #641 added to Completed; #596/#621/#623 removed from Planned. Top-5 Next up unchanged (#616, #613, #617, #624, #619). CLAUDE.md verified current."
+}
+```
 
 - **2026-05-03 cycle 31**: 14 open issues audited (excl. #633 triage trigger), 0 duplicates, 0 stale (oldest #555 at 5 days, well under 14-day cutoff). Features shipped since cycle 28: PR #628 (computeBatchHash export + brainstorm dispatch gate — issue #625), PR #612 (Quality Passport Phase 1 per-repo badge — issue #610). PR #608 (Closes #596 — earn first dollar) and PR #632 (Closes #631 — yesterday's triage) remain open. PR #618 (Quality Passport Phase 2) was closed unmerged 2026-05-02 — issue #613 still open, needs new PR. ROADMAP.md: added PR #628 and PR #612 to Completed; rebuilt Next up top-5: #616 (LLM wire Phase 2) rank 1, #613 (QP Phase 2, needs new PR) rank 2, #617 (dispatch surge bug) rank 3, #624 (fleet immune system) rank 4, #619 (QP Phase 3) rank 5; moved #596/#595 to Planned (PR #608 in flight); added new issues #609/#620–#624 to Planned. CLAUDE.md: added 9 missing source modules (brainstorm-gate.ts, quality-passport.ts, pr-guard-surge-suppressions-feed.ts, fleet-wallet-config.ts, scope-contract.ts, survival-plan.ts [reviewer/], pr-review-api.ts, service/survival-plan.ts, config/fleet-config.ts); noted PR #618 closed unmerged.
 

@@ -201,15 +201,11 @@ describe("ConflictRecoveryAlertMonitor", () => {
     const first = await monitor.checkAndAlert(now);
     const second = await monitor.checkAndAlert(now + 60 * 60 * 1000);
 
+    // #564 noise suppression: alert is logged but not dispatched to Telegram.
+    // Return values still signal first=processed, second=deduplicated.
     expect(first).toBe(true);
     expect(second).toBe(false);
-    expect(notifier.send).toHaveBeenCalledOnce();
-
-    const [message] = (notifier.send as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [string];
-    expect(message).toContain("High conflict recovery rate");
-    expect(message).toContain("agent-a");
-    expect(message).toContain("owner/repo-a");
-    expect(message).toContain("33%");
+    expect(notifier.send).not.toHaveBeenCalled();
   });
 
   it("returns a structured preview for manual formatting", () => {

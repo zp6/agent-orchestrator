@@ -267,10 +267,10 @@ describe("checkAndEscalateDay7", () => {
     const store = makeStore();
     await checkAndEscalateDay7(store);
     expect(spy).toHaveBeenCalledOnce();
-    const [title, , severity, key] = spy.mock.calls[0] as [string, string, string, string];
+    // notifyOperator signature: (title, body, urgency) — no key parameter.
+    const [title, , severity] = spy.mock.calls[0] as [string, string, string];
     expect(title).toContain("Day-7");
-    expect(severity).toBe("warning");
-    expect(key).toBe("survival:day7-checkpoint-missed");
+    expect(severity).toBe("high");
   });
 
   it("records day7EscalatedAt flag after escalation", async () => {

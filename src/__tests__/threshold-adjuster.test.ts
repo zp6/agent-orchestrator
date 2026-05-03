@@ -357,12 +357,8 @@ describe("ThresholdAdjuster.checkLowMergeRateAlerts", () => {
 
     // Second cycle — same data still bad
     await adjuster.checkLowMergeRateAlerts("claude-reviewer", "implementation");
-    expect(notifyOperator).toHaveBeenCalledOnce();
-
-    const [title, body, urgency] = notifyOperator.mock.calls[0];
-    expect(title).toContain("Low merge rate");
-    expect(body).toContain("60.0%");
-    expect(urgency).toBe("medium");
+    // #564 noise suppression: alert is logged but not dispatched to Telegram.
+    expect(notifyOperator).not.toHaveBeenCalled();
   });
 
   it("resets counter when bucket recovers above 0.70", async () => {

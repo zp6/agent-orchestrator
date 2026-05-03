@@ -189,7 +189,8 @@ describe("quality summary digest", () => {
     await expect(scheduler.maybeFireDigest()).resolves.toBe(true);
     await expect(scheduler.maybeFireDigest()).resolves.toBe(false);
     expect(store.getQualitySummaryReport).toHaveBeenCalledTimes(1);
-    expect(notifier.send).toHaveBeenCalledTimes(1);
+    // #564 noise suppression: digest is logged but not dispatched to Telegram.
+    expect(notifier.send).not.toHaveBeenCalled();
     expect(flags.get(FLAG_LAST_QUALITY_SUMMARY_SENT)).toBe("2026-04-25");
   });
 });

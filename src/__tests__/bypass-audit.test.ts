@@ -197,8 +197,9 @@ describe("BypassAuditScheduler", () => {
     const scheduler = new BypassAuditScheduler(store, notifier);
 
     const result = await scheduler.checkAndSend(Date.now());
+    // #564 noise suppression: digest is logged, not sent to Telegram.
     expect(result).toBe(true);
-    expect(notifier.send).toHaveBeenCalledOnce();
+    expect(notifier.send).not.toHaveBeenCalled();
   });
 
   it("does NOT send on second call within the same day (dedup)", async () => {
@@ -207,11 +208,13 @@ describe("BypassAuditScheduler", () => {
     const scheduler = new BypassAuditScheduler(store, notifier);
 
     const now = Date.now();
-    await scheduler.checkAndSend(now);
+    const result1 = await scheduler.checkAndSend(now);
     const result2 = await scheduler.checkAndSend(now + 60_000); // 1 min later, same day
 
+    // #564 noise suppression: send never called but dedup still works via date key.
+    expect(result1).toBe(true);
     expect(result2).toBe(false);
-    expect(notifier.send).toHaveBeenCalledOnce(); // only once total
+    expect(notifier.send).not.toHaveBeenCalled();
   });
 
   it("sends again on the next calendar day", async () => {
@@ -222,11 +225,13 @@ describe("BypassAuditScheduler", () => {
     const day1 = new Date("2026-04-21T10:00:00Z").getTime();
     const day2 = new Date("2026-04-22T10:00:00Z").getTime();
 
-    await scheduler.checkAndSend(day1);
+    const result1 = await scheduler.checkAndSend(day1);
     const result2 = await scheduler.checkAndSend(day2);
 
+    // #564 noise suppression: send suppressed but both days return true (processed).
+    expect(result1).toBe(true);
     expect(result2).toBe(true);
-    expect(notifier.send).toHaveBeenCalledTimes(2);
+    expect(notifier.send).not.toHaveBeenCalled();
   });
 
   it("returns false without sending when notifier is undefined", async () => {
@@ -243,7 +248,10 @@ describe("BypassAuditScheduler", () => {
     const store = makeStore([makeTask()]);
     const scheduler = new BypassAuditScheduler(store, notifier);
 
-    await expect(scheduler.checkAndSend(Date.now())).resolves.toBe(false);
+    // #564 noise suppression: notifier.send is never called so it never rejects.
+    // checkAndSend returns true (digest processed via log).
+    await expect(scheduler.checkAndSend(Date.now())).resolves.toBe(true);
+    expect(notifier.send).not.toHaveBeenCalled();
   });
 
   it("appends dashboard URL when dashboardUrl option is set and count > 0", async () => {
@@ -253,10 +261,11 @@ describe("BypassAuditScheduler", () => {
       dashboardUrl: "https://dash.example.com",
     });
 
-    await scheduler.checkAndSend(Date.now());
-
-    const sentText: string = notifier.send.mock.calls[0][0];
-    expect(sentText).toContain("https://dash.example.com/bypass-audit");
+    const result = await scheduler.checkAndSend(Date.now());
+    // #564 noise suppression: send is suppressed; dashboard URL appended to internal
+    // text buffer but not dispatched. Verify the run succeeded.
+    expect(result).toBe(true);
+    expect(notifier.send).not.toHaveBeenCalled();
   });
 
   it("does NOT append dashboard URL when count is 0", async () => {
@@ -266,10 +275,10 @@ describe("BypassAuditScheduler", () => {
       dashboardUrl: "https://dash.example.com",
     });
 
-    await scheduler.checkAndSend(Date.now());
-
-    const sentText: string = notifier.send.mock.calls[0][0];
-    expect(sentText).not.toContain("https://dash.example.com");
+    // #564 noise suppression: send is suppressed. Result is true (processed).
+    const result = await scheduler.checkAndSend(Date.now());
+    expect(result).toBe(true);
+    expect(notifier.send).not.toHaveBeenCalled();
   });
 });
 

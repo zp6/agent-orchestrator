@@ -827,11 +827,10 @@ describe("QualitySystemHealthMonitor — checkAndAlert", () => {
       alertThreshold: 0.30,
       cycleTaskLimit: 10,
     });
+    // #564 noise suppression: alert is logged but not dispatched to Telegram.
     const sent = await monitor.checkAndAlert();
     expect(sent).toBe(true);
-    expect(notifier.send).toHaveBeenCalledOnce();
-    const message = (notifier.send as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(message.toLowerCase()).toContain("bypass rate");
+    expect(notifier.send).not.toHaveBeenCalled();
   });
 
   it("deduplicates alerts in the same 2-hour cycle window", async () => {
@@ -845,13 +844,14 @@ describe("QualitySystemHealthMonitor — checkAndAlert", () => {
     });
 
     // Both calls with the same nowMs (same cycle window)
+    // #564 noise suppression: send is logged but not dispatched to Telegram.
     const nowMs = Date.now();
     const sent1 = await monitor.checkAndAlert(nowMs);
     const sent2 = await monitor.checkAndAlert(nowMs);
 
     expect(sent1).toBe(true);
     expect(sent2).toBe(false);
-    expect(notifier.send).toHaveBeenCalledOnce();
+    expect(notifier.send).not.toHaveBeenCalled();
   });
 
   it("sends a second alert in a different 2-hour cycle window", async () => {
@@ -867,10 +867,13 @@ describe("QualitySystemHealthMonitor — checkAndAlert", () => {
     const t1 = Date.now();
     const t2 = t1 + 3 * 60 * 60 * 1000; // 3 hours later — different 2-hour bucket
 
-    await monitor.checkAndAlert(t1);
-    await monitor.checkAndAlert(t2);
+    const r1 = await monitor.checkAndAlert(t1);
+    const r2 = await monitor.checkAndAlert(t2);
 
-    expect(notifier.send).toHaveBeenCalledTimes(2);
+    // #564 noise suppression: send is suppressed; both calls return true (processed).
+    expect(r1).toBe(true);
+    expect(r2).toBe(true);
+    expect(notifier.send).not.toHaveBeenCalled();
   });
 
   it("returns false and does not throw when notifier is undefined", async () => {
@@ -900,7 +903,9 @@ describe("QualitySystemHealthMonitor — checkAndAlert", () => {
       alertThreshold: 0.10,
       cycleTaskLimit: 5,
     });
-    await expect(monitor.checkAndAlert()).resolves.toBe(false);
+    // #564 noise suppression: notifier.send is never called so it never rejects.
+    // checkAndAlert returns true (alert processed via log) not false.
+    await expect(monitor.checkAndAlert()).resolves.toBe(true);
   });
 
   it("includes dashboardUrl in alert message when configured", async () => {
@@ -913,10 +918,11 @@ describe("QualitySystemHealthMonitor — checkAndAlert", () => {
       cycleTaskLimit: 5,
       dashboardUrl: "https://dashboard.example.com",
     });
-    await monitor.checkAndAlert();
-
-    const message = (notifier.send as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(message).toContain("dashboard.example.com");
+    const sent = await monitor.checkAndAlert();
+    // #564 noise suppression: notifier.send is never called.
+    // dashboardUrl is still assembled in the alert body (logged internally).
+    expect(sent).toBe(true);
+    expect(notifier.send).not.toHaveBeenCalled();
   });
 
   it("does not alert when store has no verified tasks", async () => {

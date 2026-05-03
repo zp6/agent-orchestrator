@@ -289,34 +289,32 @@ describe("PreDispatchCapabilityEnforcer", () => {
   // ── Telegram alerting ────────────────────────────────────────────────
 
   it("sends a Telegram alert when enforcement fires", async () => {
-    await enforcer.check(
+    const result = await enforcer.check(
       makeRequest({
         task_title: "implement auth module",
         task_type: "implementation",
         source_ref: "rapartlu/agent-orchestrator#123",
       }),
     );
-    expect(notifier.notifyOperator).toHaveBeenCalledOnce();
-    const [title, body, urgency] = notifier.notifyOperator.mock.calls[0];
-    expect(title).toContain("routing boundary");
-    expect(body).toContain("claude-orchestrator-reviewer");
-    expect(body).toContain("claude-agent-orchestrator");
-    expect(urgency).toBe("high");
+    // #564 noise suppression: notifyOperator is never called, but alert_sent is still
+    // set to true (sendRerouteAlert logged the alert and returned normally).
+    expect(notifier.notifyOperator).not.toHaveBeenCalled();
+    expect(result.alert_sent).toBe(true);
+    expect(result.allowed).toBe(false);
   });
 
   it("alert body contains original routing and corrected routing", async () => {
-    await enforcer.check(
+    const result = await enforcer.check(
       makeRequest({
         task_title: "build new feature X",
         task_type: "implementation",
         source_ref: "rapartlu/agent-dashboard#400",
       }),
     );
-    const body = notifier.notifyOperator.mock.calls[0][1] as string;
-    expect(body).toContain("Original routing");
-    expect(body).toContain(REVIEWER_AGENT_NAME);
-    expect(body).toContain("Corrected routing");
-    expect(body).toContain("claude-orchestrator-dashboard");
+    // #564 noise suppression: alert is logged (not dispatched), routing decision intact.
+    expect(notifier.notifyOperator).not.toHaveBeenCalled();
+    expect(result.allowed).toBe(false);
+    expect(result.reroute_to).toBe("claude-orchestrator-dashboard");
   });
 
   it("does not send alert when notifier is absent", async () => {
@@ -357,10 +355,12 @@ describe("PreDispatchCapabilityEnforcer", () => {
         source_ref: "rapartlu/agent-orchestrator#500",
       }),
     );
-    // Enforcement decision still correct even if alert failed
+    // #564 noise suppression: notifyOperator is never called so it never throws.
+    // sendRerouteAlert returns normally → alert_sent = true; routing decision correct.
     expect(result.allowed).toBe(false);
-    expect(result.alert_sent).toBe(false);
+    expect(result.alert_sent).toBe(true);
     expect(result.reroute_to).toBe("claude-agent-orchestrator");
+    expect(notifier.notifyOperator).not.toHaveBeenCalled();
   });
 
   // ── The four tasks from the issue evidence ───────────────────────────

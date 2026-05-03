@@ -2,15 +2,20 @@
  * Public PR Review API — lightweight HTTP server
  * (issue #599 / agent-proxy#504 / orchestrator#1302)
  *
- * Serves the reviewer's PR Review API and fleet config endpoints so they can
- * be deployed as a standalone public service on Render.io, Railway, or any
- * Docker-compatible host.
+ * Serves the reviewer's PR Review API, fleet config, and Bug Bounty Board
+ * endpoints so they can be deployed as a standalone public service on
+ * Render.io, Railway, or any Docker-compatible host.
  *
  * Endpoints:
- *   GET  /           — revenue landing page (docs/revenue-landing.html)
- *   GET  /health     — liveness probe: { status: "ok", uptime_s, version }
- *   GET  /api/fleet-config — fleet wallet address + revenue URLs
- *   GET  /api/pr-review/info — PR Review API pricing and payment details
+ *   GET  /                      — revenue landing page (docs/revenue-landing.html)
+ *   GET  /health                — liveness probe: { status: "ok", uptime_s, version }
+ *   GET  /api/fleet-config      — fleet wallet address + revenue URLs
+ *   GET  /api/pr-review/info    — PR Review API pricing and payment details
+ *   GET  /api/bounty/info       — Bug Bounty Board: programme overview
+ *   GET  /api/bounty/prs        — Bug Bounty Board: list eligible merged PRs
+ *   POST /api/bounty/report     — Bug Bounty Board: submit a bug report
+ *   GET  /api/bounty/leaderboard — Bug Bounty Board: top external hunters
+ *   GET  /api/bounty/report/:id — Bug Bounty Board: report status
  *
  * Configuration (env vars):
  *   PORT                    — HTTP port (default: 3474)
@@ -20,6 +25,7 @@
  *   FLEET_POLAR_URL
  *   FLEET_ALGORA_URL
  *   FLEET_GITCOIN_URL
+ *   ANTHROPIC_API_KEY       — required for LLM bug-report validation
  *
  * Start:
  *   npm run build && npm start
@@ -29,10 +35,28 @@ import * as http from "node:http";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
+import {
+  BUG_BOUNTY_MIGRATION_SQL,
+  getBountyBoardInfo,
+  getBountyBoardPayload,
+  getBountyLeaderboardPayload,
+  getBountyReport,
+  submitBountyReport,
+  validateBountyReportRequest,
+  parseBountyReportIdFromPath,
+} from "./reviewer/bug-bounty-board.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const START_TIME = Date.now();
 const PORT = parseInt(process.env.PORT ?? "3474", 10);
+
+// ── Bounty board store (in-process SQLite) ────────────────────────────────────
+
+const BOUNTY_DB_PATH = process.env.BOUNTY_DB_PATH ?? "bounty.db";
+const bountyDb = new Database(BOUNTY_DB_PATH);
+bountyDb.pragma("journal_mode = WAL");
+bountyDb.exec(BUG_BOUNTY_MIGRATION_SQL);
 
 // ── Fleet config (reads from env, no external deps needed) ───────────────────
 
@@ -172,10 +196,45 @@ function handleRequest(
   if (method === "OPTIONS") {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
     });
     res.end();
+    return;
+  }
+
+  // Strip query string
+  const pathname = url.split("?")[0];
+
+  // ── POST /api/bounty/report ────────────────────────────────────────────────
+  if (method === "POST" && pathname === "/api/bounty/report") {
+    let rawBody = "";
+    req.on("data", (chunk) => { rawBody += chunk.toString(); });
+    req.on("end", () => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rawBody);
+      } catch {
+        respond(res, 400, JSON.stringify({ error: "Invalid JSON body" }));
+        return;
+      }
+      const validationError = validateBountyReportRequest(parsed);
+      if (validationError) {
+        respond(res, 422, JSON.stringify({ error: validationError }));
+        return;
+      }
+      submitBountyReport(bountyDb, parsed as Parameters<typeof submitBountyReport>[1])
+        .then(({ report, error }) => {
+          if (error) {
+            respond(res, 404, JSON.stringify({ error }));
+          } else {
+            respond(res, 200, JSON.stringify(report, null, 2));
+          }
+        })
+        .catch((err: Error) => {
+          respond(res, 500, JSON.stringify({ error: err.message }));
+        });
+    });
     return;
   }
 
@@ -184,8 +243,7 @@ function handleRequest(
     return;
   }
 
-  // Strip query string
-  const pathname = url.split("?")[0];
+  // ── GET routes ────────────────────────────────────────────────────────────
 
   switch (pathname) {
     case "/":
@@ -225,8 +283,37 @@ function handleRequest(
       break;
     }
 
-    default:
+    // ── Bug Bounty Board endpoints ───────────────────────────────────────────
+
+    case "/api/bounty/info": {
+      respond(res, 200, JSON.stringify(getBountyBoardInfo(), null, 2));
+      break;
+    }
+
+    case "/api/bounty/prs": {
+      respond(res, 200, JSON.stringify(getBountyBoardPayload(bountyDb), null, 2));
+      break;
+    }
+
+    case "/api/bounty/leaderboard": {
+      respond(res, 200, JSON.stringify(getBountyLeaderboardPayload(bountyDb), null, 2));
+      break;
+    }
+
+    default: {
+      // Dynamic routes: /api/bounty/report/:id
+      const reportId = parseBountyReportIdFromPath(pathname);
+      if (reportId) {
+        const report = getBountyReport(bountyDb, reportId);
+        if (report) {
+          respond(res, 200, JSON.stringify(report, null, 2));
+        } else {
+          respond(res, 404, JSON.stringify({ error: "Report not found", id: reportId }));
+        }
+        break;
+      }
       respond(res, 404, JSON.stringify({ error: "Not Found", path: pathname }));
+    }
   }
 }
 
@@ -239,10 +326,15 @@ server.listen(PORT, () => {
   console.log(`[pr-review-api] listening on port ${PORT}`);
   console.log(`[pr-review-api] wallet: ${wallet ?? "(not configured — set FLEET_WALLET_ADDRESS)"}`);
   console.log("[pr-review-api] endpoints:");
-  console.log(`  GET http://0.0.0.0:${PORT}/health`);
-  console.log(`  GET http://0.0.0.0:${PORT}/api/pr-review/info`);
-  console.log(`  GET http://0.0.0.0:${PORT}/api/fleet-config`);
-  console.log(`  GET http://0.0.0.0:${PORT}/          (revenue landing page)`);
+  console.log(`  GET  http://0.0.0.0:${PORT}/health`);
+  console.log(`  GET  http://0.0.0.0:${PORT}/api/pr-review/info`);
+  console.log(`  GET  http://0.0.0.0:${PORT}/api/fleet-config`);
+  console.log(`  GET  http://0.0.0.0:${PORT}/api/bounty/info`);
+  console.log(`  GET  http://0.0.0.0:${PORT}/api/bounty/prs`);
+  console.log(`  POST http://0.0.0.0:${PORT}/api/bounty/report`);
+  console.log(`  GET  http://0.0.0.0:${PORT}/api/bounty/leaderboard`);
+  console.log(`  GET  http://0.0.0.0:${PORT}/api/bounty/report/:id`);
+  console.log(`  GET  http://0.0.0.0:${PORT}/          (revenue landing page)`);
 });
 
 server.on("error", (err) => {

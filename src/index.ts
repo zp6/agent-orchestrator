@@ -1542,3 +1542,40 @@ export type {
   BrainstormGateReason,
   BrainstormGatePayload,
 } from "./reviewer/brainstorm-gate.js";
+
+// Bug Bounty Board — crowdsourced defect detection for fleet-merged PRs (issue #620).
+// External devs earn $5 review credits by finding real bugs in merged PRs.
+// Endpoints: GET /api/bounty/info | /prs | /leaderboard | /report/:id
+//            POST /api/bounty/report
+export {
+  BUG_BOUNTY_MIGRATION_SQL,
+  BOUNTY_CREDIT_VALUE_CENTS,
+  BOUNTY_PR_WINDOW,
+  BOUNTY_CONFIRM_THRESHOLD,
+  BOUNTY_REJECT_THRESHOLD,
+  BOUNTY_DIFF_EXCERPT_MAX,
+  COUPON_CODE_PREFIX,
+  getBountyBoardInfo,
+  getBountyBoardPayload,
+  getBountyLeaderboardPayload,
+  getBountyReport,
+  generateCouponCode,
+  validateBountyReportRequest,
+  submitBountyReport,
+  registerBountyPR,
+  parseBountyReportIdFromPath,
+  evaluateBountyReport,
+} from "./reviewer/bug-bounty-board.js";
+export type {
+  BountyReportStatus,
+  BountyEligiblePR,
+  BountyReport,
+  BountyHunterStats,
+  BountyVerdictResult,
+  BountyReportRequest,
+  BountyBoardPayload,
+  BountyLeaderboardPayload,
+  BountyBoardInfo,
+  RegisterBountyPROptions,
+  IBountyBoardStore,
+} from "./reviewer/bug-bounty-board.js";

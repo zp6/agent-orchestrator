@@ -61,16 +61,10 @@ describe("QualityAnomalySpikeDetector", () => {
 
     const sent = await detector.checkAndAlert();
 
+    // #564 noise suppression: send is logged but not dispatched to Telegram.
+    // Return value still signals "alert was processed".
     expect(sent).toBe(true);
-    expect(notifier.send).toHaveBeenCalledOnce();
-
-    const [message] = (notifier.send as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [string];
-    expect(message).toContain("Quality anomaly spike detected");
-    expect(message).toContain("3 anomalies");
-    expect(message).toContain("agent-a");
-    expect(message).toContain("agent-b");
-    expect(message).toContain("quality anomaly feed");
-    expect(message).toContain("https://dashboard.example.com/quality-anomalies");
+    expect(notifier.send).not.toHaveBeenCalled();
   });
 
   it("ignores anomalies older than the rolling window", async () => {
@@ -107,9 +101,10 @@ describe("QualityAnomalySpikeDetector", () => {
     const first = await detector.checkAndAlert(now);
     const second = await detector.checkAndAlert(now + 10 * 60 * 1000);
 
+    // #564 noise suppression: send is suppressed; only return values matter for dedup checks.
     expect(first).toBe(true);
     expect(second).toBe(false);
-    expect(notifier.send).toHaveBeenCalledOnce();
+    expect(notifier.send).not.toHaveBeenCalled();
   });
 
   it("does not alert when the threshold is not reached", async () => {
