@@ -34,10 +34,12 @@ describe("LinearClient", () => {
       ok: true,
       json: async () => ({
         data: {
-          team: {
-            issues: {
-              nodes: [mockIssue],
-            },
+          teams: {
+            nodes: [{
+              issues: {
+                nodes: [mockIssue],
+              },
+            }],
           },
         },
       }),
@@ -55,7 +57,9 @@ describe("LinearClient", () => {
 
     const callArgs = mockFetch.mock.calls[0];
     const body = JSON.parse(callArgs[1].body as string);
-    expect(body.query).toContain('team(key: "NEX")');
+    // Linear's `team` field requires `id`; team-key lookup uses `teams(filter:)`.
+    expect(body.query).toContain('teams(filter: { key: { eq: "NEX" } })');
+    expect(body.query).not.toContain('team(key:');
 
     expect(result).toEqual([mockIssue]);
   });
@@ -65,8 +69,8 @@ describe("LinearClient", () => {
       ok: true,
       json: async () => ({
         data: {
-          team: {
-            issues: { nodes: [] },
+          teams: {
+            nodes: [{ issues: { nodes: [] } }],
           },
         },
       }),
@@ -84,8 +88,8 @@ describe("LinearClient", () => {
       ok: true,
       json: async () => ({
         data: {
-          team: {
-            issues: { nodes: [] },
+          teams: {
+            nodes: [{ issues: { nodes: [] } }],
           },
         },
       }),
@@ -103,9 +107,25 @@ describe("LinearClient", () => {
       ok: true,
       json: async () => ({
         data: {
-          team: {
-            issues: { nodes: [] },
+          teams: {
+            nodes: [{ issues: { nodes: [] } }],
           },
+        },
+      }),
+    });
+
+    const result = await client.listIssues();
+    expect(result).toEqual([]);
+  });
+
+  it("returns empty array when no team matches the configured key", async () => {
+    // Defensive: if the team filter returns no nodes (e.g., wrong key, deleted team),
+    // listIssues should return [] rather than throw.
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: {
+          teams: { nodes: [] },
         },
       }),
     });

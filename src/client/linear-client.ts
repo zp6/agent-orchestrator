@@ -37,10 +37,12 @@ interface GraphQLResponse<T> {
 }
 
 interface ListIssuesResponse {
-  team: {
-    issues: {
-      nodes: LinearIssue[];
-    };
+  teams: {
+    nodes: Array<{
+      issues: {
+        nodes: LinearIssue[];
+      };
+    }>;
   };
 }
 
@@ -63,21 +65,25 @@ export class LinearClient {
    * @returns Array of issues matching the criteria
    */
   async listIssues(stateName?: string): Promise<LinearIssue[]> {
-    const stateFilter = stateName ? `filter: { state: { name: { eq: "${stateName}" } } }` : "";
+    // Linear's GraphQL `team` field requires `id`, not `key`. To look up by team
+    // key (e.g., "NEX"), use the `teams(filter:)` collection query instead.
+    const issuesFilter = stateName ? `(filter: { state: { name: { eq: "${stateName}" } } })` : "";
 
     const query = `
       query {
-        team(key: "${this.teamKey}") {
-          issues(${stateFilter}) {
-            nodes {
-              id
-              identifier
-              title
-              description
-              state {
-                name
+        teams(filter: { key: { eq: "${this.teamKey}" } }) {
+          nodes {
+            issues${issuesFilter} {
+              nodes {
+                id
+                identifier
+                title
+                description
+                state {
+                  name
+                }
+                updatedAt
               }
-              updatedAt
             }
           }
         }
@@ -103,6 +109,8 @@ export class LinearClient {
       throw new Error(`GraphQL errors: ${json.errors.map((e) => e.message).join("; ")}`);
     }
 
-    return json.data?.team.issues.nodes ?? [];
+    // teams(filter:) returns a collection; with a unique key filter we expect
+    // at most one team. If empty, return [] rather than throwing.
+    return json.data?.teams.nodes[0]?.issues.nodes ?? [];
   }
 }
