@@ -7,6 +7,8 @@ export default defineConfig({
       "dist",
       // Exclude sub-package node_modules (e.g. packages/fleet-signer/node_modules)
       "packages/*/node_modules/**",
+      // Exclude agent worktrees checked out under .claude/
+      ".claude/worktrees/**",
     ],
   },
 });
