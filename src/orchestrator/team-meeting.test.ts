@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { extractFallbackActionItems } from "./team-meeting.js";
+import { extractFallbackActionItems, formatPriorRounds } from "./team-meeting.js";
 import type { MeetingRound } from "./team-meeting.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -28,6 +28,72 @@ function makeRound(roundNumber: number, entries: Array<{ agentName: string; resp
     })),
   };
 }
+
+// ── formatPriorRounds ─────────────────────────────────────────────────────
+
+describe("formatPriorRounds", () => {
+  it("returns empty string for empty rounds array", () => {
+    expect(formatPriorRounds([])).toBe("");
+  });
+
+  it("returns empty string when the only round has all-null responses (issue #1462)", () => {
+    // This is the bug: previously returned "## Round 1\n" (truthy empty section)
+    // which caused Round 2 to show an empty ## Round 1 header with no content.
+    const rounds = [
+      makeRound(1, [
+        { agentName: "agent-a", response: null },
+        { agentName: "agent-b", response: null },
+      ]),
+    ];
+    expect(formatPriorRounds(rounds)).toBe("");
+  });
+
+  it("includes round section when at least one agent responded", () => {
+    const rounds = [
+      makeRound(1, [
+        { agentName: "agent-a", response: "Here is my round 1 response." },
+        { agentName: "agent-b", response: null },
+      ]),
+    ];
+    const result = formatPriorRounds(rounds);
+    expect(result).toContain("## Round 1");
+    expect(result).toContain("**agent-a**");
+    expect(result).not.toContain("agent-b");
+  });
+
+  it("skips rounds with no responses but includes rounds that have responses", () => {
+    // Round 1: all failed → skip. Round 2: has responses → include.
+    const rounds = [
+      makeRound(1, [{ agentName: "agent-a", response: null }]),
+      makeRound(2, [{ agentName: "agent-b", response: "Round 2 response." }]),
+    ];
+    const result = formatPriorRounds(rounds);
+    expect(result).not.toContain("## Round 1");
+    expect(result).toContain("## Round 2");
+    expect(result).toContain("**agent-b**");
+  });
+
+  it("formats two rounds with responses correctly (separator between them)", () => {
+    const rounds = [
+      makeRound(1, [{ agentName: "agent-a", response: "Round 1 by A." }]),
+      makeRound(2, [{ agentName: "agent-b", response: "Round 2 by B." }]),
+    ];
+    const result = formatPriorRounds(rounds);
+    expect(result).toContain("## Round 1");
+    expect(result).toContain("## Round 2");
+    expect(result).toContain("---"); // separator between rounds
+  });
+
+  it("does NOT emit a round header with empty body (regression for issue #1462)", () => {
+    const rounds = [
+      makeRound(1, [{ agentName: "agent-a", response: null }]),
+    ];
+    const result = formatPriorRounds(rounds);
+    // Must not have a header with no content following it
+    expect(result).not.toMatch(/## Round \d+\s*$/);
+    expect(result).toBe("");
+  });
+});
 
 // ── extractFallbackActionItems ─────────────────────────────────────────────
 

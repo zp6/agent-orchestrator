@@ -308,16 +308,27 @@ async function queryAgent(
   }
 }
 
-function formatPriorRounds(rounds: MeetingRound[]): string {
+/** @internal exported for unit testing */
+export function formatPriorRounds(rounds: MeetingRound[]): string {
   if (rounds.length === 0) return "";
 
-  return rounds.map((r) => {
-    const entries = r.entries
-      .filter((e) => e.response)
-      .map((e) => `**${e.agentName}**: ${e.response}`)
-      .join("\n\n");
-    return `## Round ${r.roundNumber}\n${entries}`;
-  }).join("\n\n---\n\n");
+  // Build only rounds that have at least one real response. Rounds where all
+  // agents failed (connection errors, null responses) are skipped entirely so
+  // the subsequent round doesn't receive an empty "## Round N\n" header with
+  // no content — which was causing issue #1462 (empty Round 1 transcript
+  // section in Round 2 blue-sky prompts).
+  const formatted = rounds
+    .map((r) => {
+      const entries = r.entries
+        .filter((e) => e.response)
+        .map((e) => `**${e.agentName}**: ${e.response}`)
+        .join("\n\n");
+      if (!entries) return null; // Skip rounds with no real responses
+      return `## Round ${r.roundNumber}\n${entries}`;
+    })
+    .filter((s): s is string => s !== null);
+
+  return formatted.join("\n\n---\n\n");
 }
 
 async function runRound(
