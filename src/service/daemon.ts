@@ -1305,7 +1305,7 @@ export class Daemon {
       this.log.info("Agent sync: registering missing agents", {
         actions: needsWork.map((a) => `${a.type} ${a.agentName}`),
       });
-      const result = await executeSync(this.config, management, actions);
+      const result = await executeSync(this.config, management, actions, { removeUnknown: true });
       if (result.errors.length > 0) {
         this.log.error("Agent sync errors", { errors: result.errors });
       }
