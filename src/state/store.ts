@@ -1299,7 +1299,7 @@ export interface Signal {
   id: number;
   /** Which agent wrote this signal. */
   agent: string;
-  /** Semantic type, e.g. 'pattern_risk', 'decision_need', 'failure_pattern'. */
+  /** Semantic type, e.g. 'failure_antibody', 'connection_error_fix', 'meeting_priority_outcome'. */
   signal_type: string;
   /** Discriminator key within the type, e.g. 'auth-schema-change'. */
   key: string;

@@ -12,7 +12,7 @@ export function registerSignalsCommand(program: Command): void {
   signals
     .command("list")
     .description("List active (non-expired) stigmergy signals")
-    .option("--type <type>", "Filter by signal_type (e.g. pattern_risk)")
+    .option("--type <type>", "Filter by signal_type (e.g. failure_antibody)")
     .option("--repo <repo>", "Filter by repo (e.g. rapartlu/agent-orchestrator)")
     .option("--file-glob <glob>", "Filter by file_glob pattern")
     .option("--limit <n>", "Maximum number of signals to show", "50")
