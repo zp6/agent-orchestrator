@@ -372,6 +372,23 @@ function fireAndForget(
         failureCode: result.validation?.failureCode,
         failureReason: result.validation?.failureReason,
       });
+      // Mark this sourceRef as processed even on the no-taskId path. Without
+      // this, deterministic-skip dispatches (validation failure, scope rejection,
+      // "nothing to do" agent responses) leave the sourceRef unmarked, causing
+      // the same trigger to re-fire on every poll cycle until the hour bucket
+      // rolls over. The synthetic taskId encodes the skip reason for diagnostics.
+      // See issue #1467.
+      const syntheticTaskId = `skipped:${result.validation?.failureCode ?? "no-task"}:${Date.now()}`;
+      try {
+        store.markProcessed(options.source, options.sourceRef, syntheticTaskId);
+      } catch (markErr) {
+        // markProcessed uses INSERT OR IGNORE, so this should never throw, but
+        // defensively swallow to keep the no-task return path side-effect-free.
+        log.warn("Failed to mark no-task dispatch as processed", {
+          sourceRef: options.sourceRef,
+          error: markErr instanceof Error ? markErr.message : String(markErr),
+        });
+      }
       return;
     }
     // Attach the task ID to both the claim record and the in-flight reservation

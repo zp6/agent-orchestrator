@@ -1291,6 +1291,44 @@ describe("dispatchLinearChecks", () => {
     await dispatchLinearChecks(config, mockStore, mockDispatcher);
     expect(mockDispatcher.dispatch).toHaveBeenCalledTimes(1);
   });
+
+  it("marks sourceRef as processed even when dispatch returns no taskId (issue #1467)", async () => {
+    // Reproduce the dispatcher loop: when the dispatch settles without
+    // creating a task (validation failure, agent rejection, "nothing to do"),
+    // the sourceRef must still be marked processed — otherwise the same
+    // hour-bucketed sourceRef re-fires on every poll cycle.
+    (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      taskId: null,
+      agentName: "linear-agent",
+      validation: { failureCode: "test-skip-reason" },
+    });
+
+    await dispatchLinearChecks(config, mockStore, mockDispatcher);
+    // Fire-and-forget — wait for the promise chain to settle
+    await new Promise((r) => setTimeout(r, 0));
+
+    const markCalls = (mockStore.markProcessed as ReturnType<typeof vi.fn>).mock.calls;
+    expect(markCalls.length).toBeGreaterThanOrEqual(1);
+    const [source, sourceRef, taskId] = markCalls[0];
+    expect(source).toBe("linear");
+    expect(sourceRef).toMatch(/^linear-check:linear-agent:/);
+    expect(taskId).toMatch(/^skipped:test-skip-reason:\d+$/);
+  });
+
+  it("uses 'no-task' fallback in synthetic taskId when validation failureCode is absent", async () => {
+    (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      taskId: null,
+      agentName: "linear-agent",
+      // no validation block
+    });
+
+    await dispatchLinearChecks(config, mockStore, mockDispatcher);
+    await new Promise((r) => setTimeout(r, 0));
+
+    const markCalls = (mockStore.markProcessed as ReturnType<typeof vi.fn>).mock.calls;
+    expect(markCalls.length).toBeGreaterThanOrEqual(1);
+    expect(markCalls[0][2]).toMatch(/^skipped:no-task:\d+$/);
+  });
 });
 
 describe("dispatchSlackChecks", () => {
