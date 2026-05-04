@@ -8,6 +8,28 @@ import { scoreIssuePriority } from "../orchestrator/priority-scorer.js";
 import { sendTelegramAlert } from "../service/telegram.js";
 import { queryPRGuardCooldown, DEFAULT_REVIEWER_URL } from "../client/pr-guard-cooldown-client.js";
 import { checkMergeStall } from "./merge-stall-guard.js";
+import { validateLinearCredential } from "../client/linear-credential-validator.js";
+
+/**
+ * Module-level dedupe flag: once we've logged a warning that the Linear
+ * credential is invalid, suppress further per-cycle warnings to avoid log
+ * spam. Reset when the process restarts (i.e. once the operator updates
+ * `~/.claude-orchestrator/.env` and the daemon is restarted).
+ *
+ * Issue #1487: dispatchLinearChecks fires hourly even when LINEAR_API_KEY
+ * is missing/placeholder. The guard short-circuits dispatch but still
+ * needs an audit log; one log per process is enough.
+ */
+let linearCredentialWarningEmitted = false;
+
+/**
+ * Test-only hook: reset the warning-emitted flag so each test that exercises
+ * the credential guard sees a fresh "first warning" path. Not exported in
+ * the package public API — only used by `trigger-dispatcher.test.ts`.
+ */
+export function _resetLinearCredentialWarningForTests(): void {
+  linearCredentialWarningEmitted = false;
+}
 
 /**
  * Default TTL for issue claims: 2 hours (matches agents.yaml stale_timeout_ms conventions).
@@ -1579,6 +1601,31 @@ export async function dispatchLinearChecks(
   registeredAgents?: Set<string>,
 ): Promise<TriggerResult> {
   const result: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
+
+  // Issue #1487: credential gate. Without a valid LINEAR_API_KEY no agent
+  // can complete a Linear check, so dispatching at all just burns LLM
+  // tokens on guaranteed failures (~24/agent/day at hourly cadence).
+  // Short-circuit here, count linear-configured agents as skipped, and
+  // emit one process-lifetime warning so the cause is visible.
+  const credentialCheck = validateLinearCredential();
+  if (!credentialCheck.valid) {
+    const linearAgents = Object.entries(config.agents).filter(
+      ([agentName, agent]) =>
+        agent.linear && (!registeredAgents || registeredAgents.has(agentName)),
+    );
+    result.skipped = linearAgents.length;
+    if (!linearCredentialWarningEmitted) {
+      const logger = createLogger("linear-trigger");
+      logger.warn(
+        `dispatch skipped — ${credentialCheck.errorMessage}. ` +
+          `${linearAgents.length} linear-configured agent(s) unaffected. ` +
+          `This warning is suppressed for the remainder of this process. ` +
+          `Fix: update LINEAR_API_KEY in ~/.claude-orchestrator/.env and restart the daemon.`,
+      );
+      linearCredentialWarningEmitted = true;
+    }
+    return result;
+  }
 
   for (const [agentName, agent] of Object.entries(config.agents)) {
     if (!agent.linear) continue;

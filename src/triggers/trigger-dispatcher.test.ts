@@ -1,8 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { dispatchGitHubIssues, dispatchIdleAgentBacklog, dispatchLinearChecks, dispatchSlackChecks, buildExistingPRReviewChecklist, routeBlockingPRToQueue, GUARD_FLOOD_GATE_WINDOW_MS, PR_GUARD_SURGE_THRESHOLD, prGuardSurgeAlertSentAt } from "./trigger-dispatcher.js";
+import { dispatchGitHubIssues, dispatchIdleAgentBacklog, dispatchLinearChecks, dispatchSlackChecks, buildExistingPRReviewChecklist, routeBlockingPRToQueue, GUARD_FLOOD_GATE_WINDOW_MS, PR_GUARD_SURGE_THRESHOLD, prGuardSurgeAlertSentAt, _resetLinearCredentialWarningForTests } from "./trigger-dispatcher.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { StateStore } from "../state/store.js";
+
+// Mock Linear credential validator (issue #1487): default = valid so existing
+// tests behave as before. Tests for the new guard override this to return invalid.
+vi.mock("../client/linear-credential-validator.js", () => ({
+  validateLinearCredential: vi.fn().mockReturnValue({
+    valid: true,
+    apiKey: "lin_api_test_real_value",
+    errorMessage: null,
+    suggestions: [],
+  }),
+}));
 
 vi.mock("./github.js", () => ({
   fetchOpenIssues: vi.fn(),
@@ -1350,6 +1361,72 @@ describe("dispatchLinearChecks", () => {
     expect(source).toBe("linear");
     expect(sourceRef).toMatch(/^linear-check:linear-agent:/);
     expect(taskId).toMatch(/^dispatch-error:Connection error\.?:\d+$/);
+  });
+
+  describe("credential guard (issue #1487)", () => {
+    // Reset the module-level "warning emitted" flag before each test so each
+    // case starts from a clean state and exercises the first-warning path.
+    beforeEach(() => {
+      _resetLinearCredentialWarningForTests();
+    });
+
+    it("skips dispatch entirely when LINEAR_API_KEY is missing", async () => {
+      const validator = await import("../client/linear-credential-validator.js");
+      vi.mocked(validator.validateLinearCredential).mockReturnValueOnce({
+        valid: false,
+        apiKey: null,
+        errorMessage: "LINEAR_API_KEY not found in ~/.claude-orchestrator/.env",
+        suggestions: ["..."],
+      });
+
+      const result = await dispatchLinearChecks(config, mockStore, mockDispatcher);
+
+      expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+      // One linear-configured agent in the test config -> one skip
+      expect(result.skipped).toBe(1);
+    });
+
+    it("skips dispatch entirely when LINEAR_API_KEY is a placeholder", async () => {
+      const validator = await import("../client/linear-credential-validator.js");
+      vi.mocked(validator.validateLinearCredential).mockReturnValueOnce({
+        valid: false,
+        apiKey: null,
+        errorMessage: 'LINEAR_API_KEY is a placeholder: "lin_api_..."',
+        suggestions: ["..."],
+      });
+
+      const result = await dispatchLinearChecks(config, mockStore, mockDispatcher);
+
+      expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+      expect(result.skipped).toBe(1);
+    });
+
+    it("only counts registered linear-configured agents in skipped tally", async () => {
+      const validator = await import("../client/linear-credential-validator.js");
+      vi.mocked(validator.validateLinearCredential).mockReturnValueOnce({
+        valid: false,
+        apiKey: null,
+        errorMessage: "missing",
+        suggestions: [],
+      });
+
+      // Restrict registered agents to exclude the linear-agent — should yield 0 skipped
+      const registered = new Set<string>(["my-agent", "slack-agent"]);
+      const result = await dispatchLinearChecks(config, mockStore, mockDispatcher, registered);
+
+      expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+      expect(result.skipped).toBe(0);
+    });
+
+    it("preserves normal dispatch behavior when credential is valid", async () => {
+      // Default mock returns valid — verify the guard does not block a real dispatch.
+      const result = await dispatchLinearChecks(config, mockStore, mockDispatcher);
+
+      expect(mockDispatcher.dispatch).toHaveBeenCalledTimes(1);
+      expect(result.dispatched).toBe(1);
+    });
   });
 });
 
