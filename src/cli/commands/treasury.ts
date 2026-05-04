@@ -474,12 +474,11 @@ export function registerTreasuryCommand(program: Command): void {
         ? nativeBalance
         : BigInt(Math.round(Number(opts.amount) * 10 ** USDC_DECIMALS));
 
-      if (swapAmount === 0n) {
-        console.log(chalk.yellow("\nNo native USDC to swap."));
-        return;
-      }
-
       const usd = Number(swapAmount) / 10 ** USDC_DECIMALS;
+
+      if (swapAmount === 0n) {
+        console.log(chalk.yellow("\nNo native USDC to swap — skipping Steps 1 & 2."));
+      } else {
       console.log(chalk.cyan(`\nStep 1/3: Approve native USDC → Uniswap V3 Router ($${usd.toFixed(2)})`));
       const approveSwapReceipt = await client.signAndBroadcastPolygon({
         operation: "erc20_approve_usdc_polygon",
@@ -499,6 +498,7 @@ export function registerTreasuryCommand(program: Command): void {
       });
       console.log(chalk.green(`  ✓ swap: ${swapReceipt.transactionHash}`));
       await new Promise(r => setTimeout(r, 3000));
+      } // end if swapAmount > 0
 
       console.log(chalk.cyan(`\nStep 3/3: Approve USDC.e (max) → Polymarket CTF Exchange`));
       const maxUint256 = 2n ** 256n - 1n;

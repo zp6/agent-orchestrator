@@ -28,6 +28,8 @@ export const POLYGON_CONTRACTS = {
   POLYMARKET_CTF_EXCHANGE: "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as Address,
   AAVE_V3_POOL: "0x794a61358D6845594F94dc1DB02A252b5b4814aD" as Address,
   USDC: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" as Address,
+  USDC_E: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" as Address,
+  UNISWAP_V3_ROUTER: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45" as Address,
   CCTP_MESSAGE_TRANSMITTER: "0x0a992d191DEeC32aFe36203Ad87D7d289a738F81" as Address,
 } as const;
 
@@ -70,6 +72,9 @@ export const FLASH_ARB_BOT_BYTECODE_PREFIX = "0x60c060405234801561000f575f5ffd5b
 /** FlashArbBot.executeArb(address,uint256,bytes) selector. */
 export const FLASH_ARB_EXECUTE_SELECTOR = "0x349879d2" as const;
 
+/** Uniswap V3 SwapRouter02 exactInputSingle((tokenIn,tokenOut,fee,recipient,amountIn,amountOutMin,sqrtPriceLimitX96)) selector. */
+export const UNISWAP_V3_EXACT_INPUT_SINGLE_SELECTOR = "0x04e45aaf" as const;
+
 /**
  * Per-transaction USD-equivalent caps.
  * Intentionally low — proves the rail before larger amounts are trusted.
@@ -89,6 +94,8 @@ export const PER_TX_CAPS_USD = {
   CCTP_RECEIVE_MESSAGE: 0, // gas-only on Polygon; no capital moved
   MORPHO_WITHDRAW: 50,
   LIFI_BRIDGE: 50,
+  UNISWAP_V3_SWAP_POLYGON: 50,
+  ERC20_APPROVE_USDCE_POLYGON: 0, // gas-only approve; no capital moved
 } as const;
 
 /** Daily total cap (sum of all approved transactions per UTC day). */
@@ -124,7 +131,9 @@ export type OperationType =
   | "erc20_approve_usdc_polygon"
   | "cctp_receive_message"
   | "morpho_withdraw"
-  | "lifi_bridge";
+  | "lifi_bridge"
+  | "uniswap_v3_swap_polygon"
+  | "erc20_approve_usdce_polygon";
 
 export interface SignRequest {
   /** Operation type — used to look up whitelist rules. */
@@ -422,6 +431,40 @@ export function evaluateWhitelist(req: SignRequest, currentDaySpendUsd: number):
       }
       // Capital movement to another chain — exempt from daily cap.
       return { approved: true, reason: "lifi_bridge: cross-chain capital movement, daily cap exempt" };
+    }
+    case "uniswap_v3_swap_polygon": {
+      if (req.chainId !== 137) {
+        return { approved: false, reason: `uniswap_v3_swap_polygon requires chainId 137 (Polygon)` };
+      }
+      if (req.to?.toLowerCase() !== POLYGON_CONTRACTS.UNISWAP_V3_ROUTER.toLowerCase()) {
+        return { approved: false, reason: `to ${req.to} not Uniswap V3 SwapRouter02 (Polygon)` };
+      }
+      if (!req.data.toLowerCase().startsWith(UNISWAP_V3_EXACT_INPUT_SINGLE_SELECTOR)) {
+        return { approved: false, reason: `data selector not exactInputSingle()` };
+      }
+      if (req.usdValue > PER_TX_CAPS_USD.UNISWAP_V3_SWAP_POLYGON) {
+        return { approved: false, reason: `usdValue ${req.usdValue} exceeds per-tx cap ${PER_TX_CAPS_USD.UNISWAP_V3_SWAP_POLYGON}` };
+      }
+      break;
+    }
+    case "erc20_approve_usdce_polygon": {
+      if (req.chainId !== 137) {
+        return { approved: false, reason: `erc20_approve_usdce_polygon requires chainId 137 (Polygon)` };
+      }
+      if (req.to?.toLowerCase() !== POLYGON_CONTRACTS.USDC_E.toLowerCase()) {
+        return { approved: false, reason: `to ${req.to} not USDC.e (Polygon)` };
+      }
+      if (!req.data.toLowerCase().startsWith(ERC20_APPROVE_SELECTOR)) {
+        return { approved: false, reason: `data selector not approve()` };
+      }
+      // Decode spender from approve(address,uint256) calldata: bytes 10–74, take last 40 hex chars
+      const spenderAddr = ("0x" + req.data.slice(10, 74).slice(24)).toLowerCase();
+      const allowedSpenders = new Set([POLYGON_CONTRACTS.POLYMARKET_CTF_EXCHANGE.toLowerCase()]);
+      if (!allowedSpenders.has(spenderAddr)) {
+        return { approved: false, reason: `spender ${spenderAddr} not a whitelisted Polymarket exchange` };
+      }
+      // usdValue is 0 for approve (gas only), cap is intentionally 0
+      break;
     }
     default: {
       const exhaustive: never = req.operation;

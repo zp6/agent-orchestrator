@@ -42,20 +42,25 @@ export class PolymarketClient {
     const markets = await resp.json() as Array<{
       conditionId: string;
       question: string;
-      tokens: Array<{ token_id: string; outcome: string; price: string }>;
+      clobTokenIds: string; // JSON-encoded string array: ["yesId", "noId"]
+      outcomes: string;     // JSON-encoded string array: ["Yes", "No"]
+      outcomePrices: string; // JSON-encoded string array: ["0.64", "0.36"]
     }>;
     if (!markets.length) throw new Error(`No market found for slug: ${slug}`);
     const m = markets[0];
-    const yes = m.tokens.find(t => t.outcome.toLowerCase() === "yes");
-    const no = m.tokens.find(t => t.outcome.toLowerCase() === "no");
-    if (!yes || !no) throw new Error("Could not find YES/NO tokens in market");
+    const tokenIds: string[] = typeof m.clobTokenIds === "string" ? JSON.parse(m.clobTokenIds) : m.clobTokenIds;
+    const outcomes: string[] = typeof m.outcomes === "string" ? JSON.parse(m.outcomes) : m.outcomes;
+    const prices: string[] = typeof m.outcomePrices === "string" ? JSON.parse(m.outcomePrices) : m.outcomePrices;
+    const yesIdx = outcomes.findIndex(o => o.toLowerCase() === "yes");
+    const noIdx = outcomes.findIndex(o => o.toLowerCase() === "no");
+    if (yesIdx === -1 || noIdx === -1) throw new Error("Could not find YES/NO outcomes in market");
     return {
       conditionId: m.conditionId,
       question: m.question,
-      yesTokenId: yes.token_id,
-      noTokenId: no.token_id,
-      yesPrice: parseFloat(yes.price),
-      noPrice: parseFloat(no.price),
+      yesTokenId: tokenIds[yesIdx],
+      noTokenId: tokenIds[noIdx],
+      yesPrice: parseFloat(prices[yesIdx]),
+      noPrice: parseFloat(prices[noIdx]),
     };
   }
 
@@ -67,12 +72,22 @@ export class PolymarketClient {
     const timestamp = String(Math.floor(Date.now() / 1000));
     const nonce = 0;
 
-    const { signature } = await this.signer.signPolymarketAuth(timestamp, nonce);
+    const { signature, address } = await this.signer.signPolymarketAuth(timestamp, nonce);
 
+    // CLOB API uses POLY_* headers for auth (not request body)
     const resp = await fetch(`${CLOB_API}/auth/api-key`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ signature, timestamp, nonce, address: walletAddress }),
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://polymarket.com",
+        "Referer": "https://polymarket.com/",
+        "POLY_ADDRESS": address,
+        "POLY_SIGNATURE": signature,
+        "POLY_TIMESTAMP": timestamp,
+        "POLY_NONCE": String(nonce),
+      },
     });
     if (!resp.ok) {
       const text = await resp.text();
