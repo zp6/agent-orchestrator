@@ -30,6 +30,8 @@ export const POLYMARKET_CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B898
 export const LIFI_DIAMOND_BASE = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE" as const;
 // Native MATIC token address on Polygon (used as Li.fi toToken for gas refuel)
 export const POLYGON_NATIVE_MATIC = "0x0000000000000000000000000000000000001010" as const;
+export const USDC_E_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" as const;
+export const UNISWAP_V3_ROUTER_POLYGON = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45" as const;
 
 const ERC20_ABI = parseAbi([
   "function approve(address spender, uint256 amount) returns (bool)",
@@ -55,6 +57,10 @@ const CCTP_TOKEN_MESSENGER_ABI = parseAbi([
 
 const CCTP_MESSAGE_TRANSMITTER_ABI = parseAbi([
   "function receiveMessage(bytes message, bytes attestation) returns (bool success)",
+]);
+
+const UNISWAP_V3_ROUTER_ABI = parseAbi([
+  "function exactInputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) payable returns (uint256 amountOut)",
 ]);
 
 const ERC20_ABI_POLYGON = parseAbi([
@@ -265,6 +271,26 @@ export class TreasuryClient {
     });
   }
 
+  /** ERC20 approve USDC.e → spender on Polygon. */
+  buildPolygonUsdcEApproveCalldata(spender: `0x${string}`, amount: bigint): Hex {
+    return encodeFunctionData({ abi: ERC20_ABI_POLYGON, functionName: "approve", args: [spender, amount] });
+  }
+
+  /** Uniswap V3 exactInputSingle calldata: native USDC → USDC.e on Polygon (0.01% pool). */
+  buildUniswapSwapUsdcToUsdceCalldata(amountIn: bigint): Hex {
+    const amountOutMinimum = (amountIn * 995n) / 1000n;
+    return encodeFunctionData({
+      abi: UNISWAP_V3_ROUTER_ABI,
+      functionName: "exactInputSingle",
+      args: [{ tokenIn: USDC_POLYGON, tokenOut: USDC_E_POLYGON, fee: 100, recipient: TREASURY_ADDRESS, amountIn, amountOutMinimum, sqrtPriceLimitX96: 0n }],
+    });
+  }
+
+  /** USDC.e balance of the treasury on Polygon. */
+  async treasuryPolygonUsdcEBalance(): Promise<bigint> {
+    return (await this.polygonClient.readContract({ address: USDC_E_POLYGON, abi: ERC20_ABI_POLYGON, functionName: "balanceOf", args: [TREASURY_ADDRESS] })) as bigint;
+  }
+
   /**
    * Poll Circle's CCTP attestation API until the attestation is ready.
    * Returns { message, attestation } for use in receiveMessage on Polygon.
@@ -360,7 +386,7 @@ export class TreasuryClient {
    * Sign + broadcast a single operation on Polygon, wait for 1 confirmation.
    */
   async signAndBroadcastPolygon(req: {
-    operation: "erc20_approve_usdc_polygon" | "cctp_receive_message";
+    operation: "erc20_approve_usdc_polygon" | "cctp_receive_message" | "uniswap_v3_swap_polygon" | "erc20_approve_usdce_polygon";
     to: `0x${string}`;
     data: Hex;
     usdValue: number;

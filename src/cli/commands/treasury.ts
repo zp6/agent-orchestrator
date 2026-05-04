@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import type { Command } from "commander";
 import chalk from "chalk";
 import type { Hex } from "viem";
-import { TreasuryClient, AAVE_V3_POOL_BASE, USDC_BASE, USDC_POLYGON, TREASURY_ADDRESS, MORPHO_STEAKHOUSE_USDC, USDC_DECIMALS, CCTP_TOKEN_MESSENGER_BASE, CCTP_MESSAGE_TRANSMITTER_POLYGON, POLYMARKET_CTF_EXCHANGE, LIFI_DIAMOND_BASE, POLYGON_NATIVE_MATIC } from "../../services/treasury.js";
+import { TreasuryClient, AAVE_V3_POOL_BASE, USDC_BASE, USDC_POLYGON, TREASURY_ADDRESS, MORPHO_STEAKHOUSE_USDC, USDC_DECIMALS, CCTP_TOKEN_MESSENGER_BASE, CCTP_MESSAGE_TRANSMITTER_POLYGON, POLYMARKET_CTF_EXCHANGE, LIFI_DIAMOND_BASE, POLYGON_NATIVE_MATIC, USDC_E_POLYGON, UNISWAP_V3_ROUTER_POLYGON } from "../../services/treasury.js";
 import { PolymarketClient } from "../../services/polymarket-client.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -453,5 +453,65 @@ export function registerTreasuryCommand(program: Command): void {
       console.log(`  Bet:    $${usd} ${side.toUpperCase()} @ ${(price * 100).toFixed(1)}¢`);
       console.log(`  Expected payout if correct: $${(usd / price).toFixed(2)}`);
       console.log(`\nPolymarket: https://polymarket.com/event/${opts.market}`);
+    });
+
+  treasury
+    .command("polymarket-prep")
+    .description("Swap native USDC → USDC.e on Polygon and approve USDC.e to Polymarket CTF Exchange")
+    .option("--amount <usd>", "USDC amount to swap (default: all native USDC balance)", "all")
+    .action(async (opts: { amount: string }) => {
+      const client = new TreasuryClient();
+      console.log(chalk.bold("\nPolymarket Prep — swap native USDC → USDC.e + approve CTF Exchange\n"));
+
+      const [nativeBalance, usdcEBalance] = await Promise.all([
+        client.treasuryPolygonUsdcBalance(),
+        client.treasuryPolygonUsdcEBalance(),
+      ]);
+      console.log(`  Native USDC (0x3c49):  ${formatUsdc(nativeBalance)} USDC`);
+      console.log(`  USDC.e    (0x2791):    ${formatUsdc(usdcEBalance)} USDC.e`);
+
+      const swapAmount = opts.amount === "all"
+        ? nativeBalance
+        : BigInt(Math.round(Number(opts.amount) * 10 ** USDC_DECIMALS));
+
+      if (swapAmount === 0n) {
+        console.log(chalk.yellow("\nNo native USDC to swap."));
+        return;
+      }
+
+      const usd = Number(swapAmount) / 10 ** USDC_DECIMALS;
+      console.log(chalk.cyan(`\nStep 1/3: Approve native USDC → Uniswap V3 Router ($${usd.toFixed(2)})`));
+      const approveSwapReceipt = await client.signAndBroadcastPolygon({
+        operation: "erc20_approve_usdc_polygon",
+        to: USDC_POLYGON,
+        data: client.buildPolygonUsdcApproveCalldata(UNISWAP_V3_ROUTER_POLYGON, swapAmount),
+        usdValue: 0,
+      });
+      console.log(chalk.green(`  ✓ approve: ${approveSwapReceipt.transactionHash}`));
+      await new Promise(r => setTimeout(r, 3000));
+
+      console.log(chalk.cyan(`\nStep 2/3: Swap native USDC → USDC.e via Uniswap V3`));
+      const swapReceipt = await client.signAndBroadcastPolygon({
+        operation: "uniswap_v3_swap_polygon",
+        to: UNISWAP_V3_ROUTER_POLYGON,
+        data: client.buildUniswapSwapUsdcToUsdceCalldata(swapAmount),
+        usdValue: usd,
+      });
+      console.log(chalk.green(`  ✓ swap: ${swapReceipt.transactionHash}`));
+      await new Promise(r => setTimeout(r, 3000));
+
+      console.log(chalk.cyan(`\nStep 3/3: Approve USDC.e (max) → Polymarket CTF Exchange`));
+      const maxUint256 = 2n ** 256n - 1n;
+      const approveCtfReceipt = await client.signAndBroadcastPolygon({
+        operation: "erc20_approve_usdce_polygon",
+        to: USDC_E_POLYGON,
+        data: client.buildPolygonUsdcEApproveCalldata(POLYMARKET_CTF_EXCHANGE, maxUint256),
+        usdValue: 0,
+      });
+      console.log(chalk.green(`  ✓ CTF approve: ${approveCtfReceipt.transactionHash}`));
+
+      const newUsdcE = await client.treasuryPolygonUsdcEBalance();
+      console.log(chalk.bold.green(`\n✓ Prep complete! USDC.e balance: ${formatUsdc(newUsdcE)}`));
+      console.log(chalk.cyan(`\nNext: orch treasury polymarket-bet --market <slug> --side no --amount 25 --price 0.47`));
     });
 }
