@@ -467,6 +467,9 @@ export class Dispatcher {
     force = false,
   ): FailureRerouteDecision | null {
     if (!sourceRef) return null;
+    // Periodic checks (linear-check:*, slack-check:*) fail due to infrastructure,
+    // not agent capability — rerouting doesn't help and generates Telegram noise.
+    if (/^(linear|slack)-check:/.test(sourceRef)) return null;
 
     const failedAttempts = this.store.countFailuresForSourceRefByAgent(sourceRef, agentName);
     if (!force && failedAttempts < FAILURE_REROUTE_THRESHOLD) return null;
