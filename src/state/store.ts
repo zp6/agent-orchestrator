@@ -1965,6 +1965,7 @@ export class StateStore {
     this.runMonologueMigration();
     this.runBountyOpportunityMigration();
     this.runRevenueLeadMigration();
+    this.runDMOutreachMigration();
   }
 
   private runPhase2Migration(): void {
@@ -13440,6 +13441,142 @@ export class StateStore {
 
   deleteRevenueLead(id: number): void {
     this.db.prepare("DELETE FROM revenue_leads WHERE id = ?").run(id);
+  }
+
+  // ── DM Outreach Tracking (issue #1447) ─────────────────────────────────────
+
+  private runDMOutreachMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS dm_outreach_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        lead_id INTEGER NOT NULL,
+        platform TEXT NOT NULL,
+        recipient TEXT NOT NULL,
+        template_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        sent_at TEXT,
+        response_status TEXT,
+        response_received_at TEXT,
+        notes TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(lead_id) REFERENCES revenue_leads(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_dm_outreach_lead_id ON dm_outreach_attempts(lead_id);
+      CREATE INDEX IF NOT EXISTS idx_dm_outreach_status ON dm_outreach_attempts(status);
+      CREATE INDEX IF NOT EXISTS idx_dm_outreach_platform ON dm_outreach_attempts(platform);
+    `);
+  }
+
+  recordDMOutreachAttempt(params: {
+    leadId: number;
+    platform: string;
+    recipient: string;
+    templateJson: string;
+    status?: string;
+  }): number {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `INSERT INTO dm_outreach_attempts
+         (lead_id, platform, recipient, template_json, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        params.leadId,
+        params.platform,
+        params.recipient,
+        params.templateJson,
+        params.status ?? 'pending',
+        now,
+        now,
+      );
+    return Number(result.lastInsertRowid);
+  }
+
+  updateDMOutreachStatus(
+    id: number,
+    status: string,
+    responseStatus?: string,
+    notes?: string,
+  ): void {
+    const now = new Date().toISOString();
+    const updateFields: string[] = ["status = ?"];
+    const params: unknown[] = [status];
+
+    if (responseStatus) {
+      updateFields.push("response_status = ?");
+      params.push(responseStatus);
+      updateFields.push("response_received_at = ?");
+      params.push(now);
+    }
+
+    if (notes) {
+      updateFields.push("notes = ?");
+      params.push(notes);
+    }
+
+    updateFields.push("updated_at = ?");
+    params.push(now);
+
+    this.db
+      .prepare(
+        `UPDATE dm_outreach_attempts SET ${updateFields.join(", ")} WHERE id = ?`,
+      )
+      .run(...params, id);
+  }
+
+  listDMOutreachAttempts(opts?: {
+    leadId?: number;
+    platform?: string;
+    status?: string;
+    limit?: number;
+  }): Array<{ id: number; leadId: number; platform: string; recipient: string; status: string; sentAt: string | null; responseStatus: string | null }> {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (opts?.leadId) {
+      conditions.push("lead_id = ?");
+      params.push(opts.leadId);
+    }
+    if (opts?.platform) {
+      conditions.push("platform = ?");
+      params.push(opts.platform);
+    }
+    if (opts?.status) {
+      conditions.push("status = ?");
+      params.push(opts.status);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limit = opts?.limit ?? 100;
+
+    const rows = this.db
+      .prepare(
+        `SELECT id, lead_id, platform, recipient, status, sent_at, response_status
+         FROM dm_outreach_attempts ${where}
+         ORDER BY created_at DESC
+         LIMIT ?`,
+      )
+      .all(...params, limit) as Array<{
+        id: number;
+        lead_id: number;
+        platform: string;
+        recipient: string;
+        status: string;
+        sent_at: string | null;
+        response_status: string | null;
+      }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      leadId: row.lead_id,
+      platform: row.platform,
+      recipient: row.recipient,
+      status: row.status,
+      sentAt: row.sent_at,
+      responseStatus: row.response_status,
+    }));
   }
 
   // ── Bounty Opportunities (issue #1315) ──────────────────────────────────────
