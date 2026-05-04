@@ -133,4 +133,107 @@ describe("LinearClient", () => {
     const result = await client.listIssues();
     expect(result).toEqual([]);
   });
+
+  // ── getIssue ──────────────────────────────────────────────────────────────
+
+  it("getIssue fetches a single issue by id", async () => {
+    const mockIssue: LinearIssue = {
+      id: "issue-abc",
+      identifier: "NEX-42",
+      title: "Fix the thing",
+      description: "Details here",
+      state: { name: "In Progress" },
+      updatedAt: "2026-05-04T00:00:00Z",
+    };
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { issue: mockIssue } }),
+    });
+
+    const result = await client.getIssue("issue-abc");
+    expect(result).toEqual(mockIssue);
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
+    expect(body.query).toContain('issue(id: "issue-abc")');
+    expect(body.query).toContain("identifier");
+  });
+
+  it("getIssue returns null when issue is not found", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: { issue: null } }),
+    });
+
+    const result = await client.getIssue("nonexistent");
+    expect(result).toBeNull();
+  });
+
+  it("getIssue throws on HTTP error", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 404, statusText: "Not Found" });
+    await expect(client.getIssue("issue-abc")).rejects.toThrow("Linear API error: 404");
+  });
+
+  // ── commentOnIssue ────────────────────────────────────────────────────────
+
+  it("commentOnIssue posts commentCreate mutation with issueId and body", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { commentCreate: { success: true, comment: { id: "comment-1" } } },
+      }),
+    });
+
+    await client.commentOnIssue("issue-abc", "Work complete. PR #1473 open.");
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
+    expect(body.query).toContain("commentCreate");
+    expect(body.query).toContain('"issue-abc"');
+    expect(body.query).toContain("Work complete");
+  });
+
+  it("commentOnIssue sends correct auth header", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { commentCreate: { success: true, comment: { id: "c1" } } },
+      }),
+    });
+
+    await client.commentOnIssue("issue-abc", "done");
+    expect(mockFetch.mock.calls[0][1].headers.Authorization).toBe("lin_api_test123");
+  });
+
+  it("commentOnIssue throws when success is false", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: { commentCreate: { success: false, comment: null } },
+      }),
+    });
+
+    await expect(client.commentOnIssue("issue-abc", "test")).rejects.toThrow(
+      "commentCreate returned success: false",
+    );
+  });
+
+  it("commentOnIssue throws on GraphQL errors", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        errors: [{ message: "Not authorized" }],
+      }),
+    });
+
+    await expect(client.commentOnIssue("issue-abc", "test")).rejects.toThrow(
+      "GraphQL errors: Not authorized",
+    );
+  });
+
+  it("commentOnIssue throws on HTTP error", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 401, statusText: "Unauthorized" });
+    await expect(client.commentOnIssue("issue-abc", "test")).rejects.toThrow(
+      "Linear API error: 401",
+    );
+  });
 });

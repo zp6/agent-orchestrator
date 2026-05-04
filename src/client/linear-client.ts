@@ -1,12 +1,11 @@
 /**
- * Minimal Linear API client — issue #1223 part 1/N.
+ * Minimal Linear API client — issue #1223 parts 1 & 2.
  *
  * Wraps Linear's GraphQL API for the Nexus team (NEX). Authentication uses a
  * personal API key passed in the Authorization header (no `Bearer` prefix —
  * that is Linear's convention).
  *
- * This part exposes only `listIssues`. Subsequent parts will add `getIssue`,
- * `commentOnIssue`, `updateIssueStatus`, and `createIssue`.
+ * Methods: listIssues, getIssue, commentOnIssue.
  */
 
 const LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
@@ -43,6 +42,17 @@ interface ListIssuesResponse {
         nodes: LinearIssue[];
       };
     }>;
+  };
+}
+
+interface GetIssueResponse {
+  issue: LinearIssue | null;
+}
+
+interface CreateCommentResponse {
+  commentCreate: {
+    success: boolean;
+    comment: { id: string } | null;
   };
 }
 
@@ -112,5 +122,75 @@ export class LinearClient {
     // teams(filter:) returns a collection; with a unique key filter we expect
     // at most one team. If empty, return [] rather than throwing.
     return json.data?.teams.nodes[0]?.issues.nodes ?? [];
+  }
+
+  /**
+   * Fetch a single issue by its Linear UUID.
+   * Returns null if the issue is not found or the response is empty.
+   */
+  async getIssue(issueId: string): Promise<LinearIssue | null> {
+    const query = `
+      query {
+        issue(id: "${issueId}") {
+          id
+          identifier
+          title
+          description
+          state { name }
+          updatedAt
+        }
+      }
+    `;
+
+    const response = await this.fetchImpl(this.endpoint, {
+      method: "POST",
+      headers: { "Authorization": this.apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Linear API error: ${response.status} ${response.statusText}`);
+    }
+
+    const json = (await response.json()) as GraphQLResponse<GetIssueResponse>;
+    if (json.errors?.length) {
+      throw new Error(`GraphQL errors: ${json.errors.map((e) => e.message).join("; ")}`);
+    }
+
+    return json.data?.issue ?? null;
+  }
+
+  /**
+   * Post a comment on a Linear issue.
+   * Throws if the API call fails or the mutation returns success: false.
+   */
+  async commentOnIssue(issueId: string, body: string): Promise<void> {
+    const mutation = `
+      mutation {
+        commentCreate(input: { issueId: "${issueId}", body: ${JSON.stringify(body)} }) {
+          success
+          comment { id }
+        }
+      }
+    `;
+
+    const response = await this.fetchImpl(this.endpoint, {
+      method: "POST",
+      headers: { "Authorization": this.apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ query: mutation }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Linear API error: ${response.status} ${response.statusText}`);
+    }
+
+    const json = (await response.json()) as GraphQLResponse<CreateCommentResponse>;
+    if (json.errors?.length) {
+      throw new Error(`GraphQL errors: ${json.errors.map((e) => e.message).join("; ")}`);
+    }
+
+    if (!json.data?.commentCreate.success) {
+      throw new Error(`commentCreate returned success: false for issue ${issueId}`);
+    }
   }
 }
