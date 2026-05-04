@@ -59,6 +59,7 @@ import {
   formatDisciplineRefreshBlock,
   storeDisciplineContextSnapshot,
 } from "./discipline-context.js";
+import { detectScopeDecline } from "./scope-decline-detector.js";
 
 /**
  * Walk the parent_task_id chain upward from `taskId` (or a parent task id) and
@@ -463,11 +464,12 @@ export class Dispatcher {
     sourceRef: string | undefined,
     agentName: string,
     taskType: TaskType,
+    force = false,
   ): FailureRerouteDecision | null {
     if (!sourceRef) return null;
 
     const failedAttempts = this.store.countFailuresForSourceRefByAgent(sourceRef, agentName);
-    if (failedAttempts < FAILURE_REROUTE_THRESHOLD) return null;
+    if (!force && failedAttempts < FAILURE_REROUTE_THRESHOLD) return null;
 
     const substitute = this.pickBestRerouteCandidate(agentName, taskType);
     if (!substitute) {
@@ -1892,6 +1894,63 @@ export class Dispatcher {
         }
       }
 
+      // Scope-decline guard (#1443): if the agent explicitly declined on scope
+      // grounds, treat the task as failed and force-reroute immediately — do not
+      // wait for the 3-failure threshold. A scope decline is not a transient
+      // error; retrying against the same agent will produce the same decline.
+      const scopeDeclineCheck = detectScopeDecline(finalResult);
+      if (scopeDeclineCheck.declined) {
+        this.log.warn("Scope decline detected in agent response — marking failed and force-rerouting", {
+          taskId: task.id,
+          agentName,
+          signal: scopeDeclineCheck.signal,
+        });
+        this.store.addLog({
+          task_id: task.id,
+          direction: "system",
+          content: `Scope decline detected (signal: ${scopeDeclineCheck.signal ?? "unknown"}). Force-rerouting without waiting for failure threshold.`,
+        });
+        this.store.updateTask(task.id, {
+          status: "failed",
+          result: finalResult,
+        });
+        this.store.addSupervisorDecision({
+          action: "dispatch",
+          agent_name: agentName,
+          reason: "scope-decline-auto-detected",
+          message: `Agent ${agentName} declined on scope grounds (signal: ${scopeDeclineCheck.signal ?? "unknown"}).`,
+          rationale: "Scope decline is not a transient error. Force-rerouting to avoid wasting further dispatch cycles on the same routing mismatch.",
+          outcome: "failed",
+          task_id: task.id,
+        });
+        const forcedReroute = this.maybeGetFailureRerouteDecision(
+          task.source_ref ?? undefined,
+          agentName,
+          taskType,
+          /* force */ true,
+        );
+        if (forcedReroute) {
+          const rerouted = await this.dispatch(
+            this.buildFailureRerouteHeader(forcedReroute) + message,
+            {
+              agentName: forcedReroute.toAgent,
+              source: task.source as TaskSource,
+              sourceRef: task.source_ref ?? undefined,
+              title: `[scope-decline-reroute] ${task.title}`,
+              taskType,
+              skipDuplicateCheck: true,
+            },
+          );
+          await this.recordFailureReroute(forcedReroute, message, rerouted.taskId);
+        } else {
+          this.log.warn("Scope decline: no substitute agent available for reroute", {
+            taskId: task.id,
+            agentName,
+          });
+        }
+        return { taskId: task.id, agentName, response };
+      }
+
       this.store.updateTask(task.id, {
         status: "done",
         result: finalResult,
@@ -2293,6 +2352,62 @@ export class Dispatcher {
     }
 
     const taskType = task.task_type ?? "implementation";
+
+    // Scope-decline fast-path (#1443): if the most recent prior attempt for this
+    // source_ref was an explicit scope decline, skip retrying the same agent and
+    // force-reroute immediately. A scope decline is deterministic — retrying the
+    // same agent will produce the same decline and waste dispatch budget.
+    if (task.source_ref) {
+      const priorAttempts = this.store.getPriorAttempts(task.source_ref);
+      if (priorAttempts.length > 0) {
+        const mostRecent = priorAttempts[priorAttempts.length - 1];
+        const retryDeclineCheck = detectScopeDecline(mostRecent.result);
+        if (retryDeclineCheck.declined) {
+          this.log.warn("Prior attempt was a scope decline — skipping retry, force-rerouting", {
+            taskId: task.id,
+            agentName,
+            signal: retryDeclineCheck.signal,
+            priorTaskId: mostRecent.id,
+          });
+          this.store.addLog({
+            task_id: task.id,
+            direction: "system",
+            content: `Prior attempt (${mostRecent.id}) was a scope decline (signal: ${retryDeclineCheck.signal ?? "unknown"}). Skipping retry — force-rerouting to a different agent.`,
+          });
+          this.store.updateTask(task.id, { next_retry_at: null });
+          const forcedReroute = this.maybeGetFailureRerouteDecision(
+            task.source_ref,
+            agentName,
+            taskType,
+            /* force */ true,
+          );
+          if (forcedReroute) {
+            const reroutedMessage = this.buildFailureRerouteHeader(forcedReroute) + (task.description ?? task.title);
+            try {
+              const rerouted = await this.dispatch(reroutedMessage, {
+                agentName: forcedReroute.toAgent,
+                source: task.source,
+                sourceRef: task.source_ref ?? undefined,
+                title: `[scope-decline-reroute] ${task.title}`,
+                taskType,
+                skipDuplicateCheck: true,
+              });
+              await this.recordFailureReroute(forcedReroute, reroutedMessage, rerouted.taskId);
+            } catch (err) {
+              await this.recordFailureReroute(forcedReroute, (task.description ?? task.title));
+              throw err;
+            }
+          } else {
+            this.log.warn("Scope decline (retry path): no substitute agent available for reroute", {
+              taskId: task.id,
+              agentName,
+            });
+          }
+          return;
+        }
+      }
+    }
+
     const failureReroute = this.maybeGetFailureRerouteDecision(task.source_ref ?? undefined, agentName, taskType);
     if (failureReroute) {
       const reroutedMessage = this.buildFailureRerouteHeader(failureReroute) + (task.description ?? task.title);
@@ -2462,6 +2577,62 @@ export class Dispatcher {
         "reflection",
         `The retry succeeded. I am persisting the result and clearing any pending retry state.`,
       );
+
+      // Scope-decline guard on retry response (#1443): the agent may have
+      // responded to the retry with another scope decline. Treat it as failed
+      // and force-reroute rather than marking it done.
+      const retryResponseDeclineCheck = detectScopeDecline(response.content);
+      if (retryResponseDeclineCheck.declined) {
+        this.log.warn("Scope decline detected in retry response — marking failed and force-rerouting", {
+          taskId: task.id,
+          agentName,
+          signal: retryResponseDeclineCheck.signal,
+        });
+        this.store.addLog({
+          task_id: task.id,
+          direction: "system",
+          content: `Scope decline in retry response (signal: ${retryResponseDeclineCheck.signal ?? "unknown"}). Force-rerouting.`,
+        });
+        this.store.updateTask(task.id, {
+          status: "failed",
+          result: response.content,
+          next_retry_at: null,
+        });
+        this.store.addSupervisorDecision({
+          action: "dispatch",
+          agent_name: agentName,
+          reason: "scope-decline-auto-detected",
+          message: `Agent ${agentName} declined on scope grounds in retry response (signal: ${retryResponseDeclineCheck.signal ?? "unknown"}).`,
+          rationale: "Scope decline on retry — same agent, same decline. Force-rerouting.",
+          outcome: "failed",
+          task_id: task.id,
+        });
+        const forcedReroute = this.maybeGetFailureRerouteDecision(
+          task.source_ref ?? undefined,
+          agentName,
+          taskType,
+          /* force */ true,
+        );
+        if (forcedReroute) {
+          const reroutedMessage = this.buildFailureRerouteHeader(forcedReroute) + (task.description ?? task.title);
+          try {
+            const rerouted = await this.dispatch(reroutedMessage, {
+              agentName: forcedReroute.toAgent,
+              source: task.source,
+              sourceRef: task.source_ref ?? undefined,
+              title: `[scope-decline-reroute] ${task.title}`,
+              taskType,
+              skipDuplicateCheck: true,
+            });
+            await this.recordFailureReroute(forcedReroute, reroutedMessage, rerouted.taskId);
+          } catch (rerouteErr) {
+            await this.recordFailureReroute(forcedReroute, reroutedMessage);
+            throw rerouteErr;
+          }
+        }
+        return;
+      }
+
       this.store.updateTask(task.id, {
         status: "done",
         result: response.content,
