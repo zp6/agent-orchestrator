@@ -57,15 +57,24 @@ Each ask is one entry:
   - Health monitoring already in place
 - **When this re-opens**: the moment the fleet picks up a public-service workstream that requires 24/7 uptime, federation endpoints, or external SLA. Fleet flags via this file at that point.
 
-### 6. Linear API key — DONE
+### 6. Linear API key — ESCALATION: NOT MATERIALIZED
 
-- **Status**: done (2026-04-27)
+- **Status**: open (credential provided but not in agent container)
 - **Asked by**: orchestrator
 - **Asked on**: 2026-04-27
-- **Resolution**: Key + team identifier provided and verified. Auth confirmed against Linear API.
-  - `LINEAR_API_KEY` and `LINEAR_TEAM_KEY=NEX` in `~/.claude-orchestrator/.env`
-  - Team: Nexus (NEX) — ID `117390e7-d572-441e-9228-e6ad9e0efea4`
-- **Note**: currently using Operator's personal API key, same shared-credential pattern as GitHub PAT. Per-agent Linear OAuth (mirroring the GitHub App migration in #1210) is a follow-up once Linear's OAuth flow is wired.
+- **Current blocker**: Credential propagation defect — key confirmed "provided and verified" (2026-04-27) but `~/.claude-orchestrator/.env` contains only placeholder `lin_api_...`
+- **Impact**: Task "[linear] Check issues for claude-research-agent" dispatched 9+ times since 2026-05-04T02:14:29Z; all attempts fail with "Connection error" at step 3 (commenting on Linear issues)
+- **To unblock**: Operator must update `~/.claude-orchestrator/.env`:
+  ```
+  LINEAR_API_KEY=lin_api_<actual-key-from-Linear-Settings>
+  LINEAR_TEAM_KEY=NEX
+  ```
+- **Effort for Operator**: ~1 minute — copy paste actual key into existing file
+- **Evidence**: 
+  - Issue #1474 filed documenting the dispatch loop
+  - ROADMAP #1445 documents this as "Credential propagation defect"
+  - File exists but contains only placeholder; no real key materialized
+- **Note**: This is Article V (resource request) + infrastructure defect (#1445). The key provision (2026-04-27) was done, but infrastructure to deliver it to agent containers was incomplete.
 
 ### 5. (Self-resolving) Take full advantage of the M4
 

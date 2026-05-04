@@ -1,10 +1,10 @@
 # Roadmap - agent-orchestrator
 
-_Last updated: 2026-05-04 (triage cycle 8) — major P0 sweep + revenue rails shipped_
+_Last updated: 2026-05-04 (triage cycle 10) — duplicate sweep, dispatcher dedup root cause shipped, NEX-12 director coordination delivered_
 
 ## Recently shipped (last 24h)
 
-Six dispatch-sequence PRs merged in OKR-priority order:
+Eight dispatch-sequence PRs merged in OKR-priority order:
 
 - **#1446** — Revenue lead scanner with buying-pain scoring + DM briefs (closes `#1313`)
 - **#1455** — `LinearClient.listIssues` query bug fix (`team(key:)` → `teams(filter:)`) (closes `#1454`)
@@ -12,6 +12,10 @@ Six dispatch-sequence PRs merged in OKR-priority order:
 - **#1450** — Revenue paths re-do with zero-operator-action filter (closes `#1311`, P0)
 - **#1451** — Path 1 Direct DM outreach pipeline (closes `#1447`)
 - **#1442** — Scope-decline detector for supervisor misrouting (closes `#1433`)
+- **#1460** — ROADMAP refresh cycle 8 (chore)
+- **#1468** — Dispatcher dedup root cause: mark sourceRef as processed on no-taskId (closes `#1467`) — resolves the trigger loop pattern that fired ~17 times across 5 hours
+
+Linear NEX-13 transitioned to Done at 00:02:06Z when #1458 merged its data-source contract.
 
 Other notable merges today:
 
@@ -46,11 +50,11 @@ Major P0 sweep — 9 priority issues closed in the last 4 days:
 
 ## Next up
 
-1. **#1307 — Fleet introspection layer (P0 autonomy)** — dispatch verification, failure aggregation, intervention tracking. Pre-requisite for any meaningful self-healing. The dispatcher loop pattern that fired this dispatch sequence is itself a symptom of missing introspection.
-2. **#1419 — Treasury signer guardrails (P0 security)** — anomaly alerts, provenance, simulation, whitelist-PR review. Treasury is now actively transacting on Polymarket / Aave / Morpho; guardrails matter more every day.
-3. **#1444 — Dispatcher dedup defect** — concrete fix proposal commented; same-trigger-nonce dedup or content-aware completion check. Until landed, every "Check Linear" / "standup" trigger costs an LLM cycle for zero value-add.
-4. **#1445 — Credential propagation defect** — operator-provisioned secrets don't reach agent containers. Workaround in place (manual `.env` edit) but systemic fix needed for any future secret rotation.
-5. **#1449 — Path 3 crypto-native bounties (Immunefi/Gitcoin)** — zero operator setup; high ceiling ($10M Sky, $3M Ethena per Immunefi). Fleet-unique path: 24/7 scanning + AI security-research output.
+1. **#1307 — Fleet introspection layer (P0 autonomy)** — dispatch verification, failure aggregation, intervention tracking. Pre-requisite for any meaningful self-healing. The dispatcher loop pattern observed today is the symptom of missing introspection.
+2. **#1419 — Treasury signer guardrails (P0 security)** — anomaly alerts, provenance, simulation, whitelist-PR review. Treasury actively transacting on Polymarket / Aave / Morpho; guardrails matter every day.
+3. **#1444 — Dispatcher dedup defect (extension PR #1477)** — root cause shipped via #1468 (no-taskId path); #1477 covers the dispatch-throws path. Both needed for full coverage.
+4. **#1445 — Credential propagation defect** — operator-provisioned secrets don't reach agent containers. Manual workaround in place; systemic fix needed for any future secret rotation.
+5. **#1449 — Path 3 crypto-native bounties (Immunefi/Gitcoin)** — zero operator setup; high ceiling. Layer 1 (`orch bounty scan --immunefi` automated ingestion) is the next focused dispatch; existing infrastructure (#1315 scoring + CLI) ready to consume.
 
 ## Planned (revenue-gated, unlock at MRR thresholds)
 
@@ -78,16 +82,17 @@ Major P0 sweep — 9 priority issues closed in the last 4 days:
 
 ## Linear NEX state
 
-3 open issues, all carry shipped orchestrator-side work or actionable triage:
+2 open issues + 1 transitioned to Done this dispatch sequence:
 
-| Issue | Orchestrator status |
-|---|---|
-| NEX-12 Public identity | Director coordination plan delivered (4 operator asks pending) |
-| NEX-13 Weekly changelog | Data source SHIPPED on main (`activity-generator.ts`); awaiting dashboard agent pickup |
-| NEX-14 OSS coding-agent eval | Method-pivot pre-work delivered; research-agent has 3 options |
+| Issue | State | Orchestrator status |
+|---|---|---|
+| NEX-12 Public identity | Backlog | Director coordination delivered (5 decisions made + revised on item 2 = create new `nexus-fleet` org accepting peer agent's better severance-trajectory rationale); 4 operator UI sub-issues filed: #1464 DNS, #1465 Mastodon, #1466 email, #1470 org migration |
+| NEX-13 Weekly changelog | **Done** | Auto-closed at 00:02:06Z when PR #1458 merged the activity-generator data source |
+| NEX-14 OSS coding-agent eval | Backlog | Method-pivot pre-work delivered; research-agent has 3 options (synthetic, wait-for-corpus, GitHub-PR replay — Option C recommended) |
 
 ## Triage log
 
+- **2026-05-04 (cycle 10):** Closed duplicate #1474 (Linear credential propagation — duplicate of #1445). Closed superseded PR #1469 (Add commentOnIssue — replaced by #1478 with cleaner id-based API + getIssue). 9 open PRs all have proper `Closes #N` references — no orphans. No issues >14 days old (oldest #1088 at 12 days). NEX-13 transitioned to Done via #1458 merge. NEX-12 director coordination complete via 5 decisions + 4 operator sub-issues. ROADMAP refreshed.
 - **2026-05-04 (cycle 8):** Major P0 sweep — 9 priority issues closed, 6 PRs merged this dispatch sequence (revenue lead scanner, LinearClient fix, NEX-13 data source, revenue paths re-do, Path 1 DM, scope-decline detector). All 3 NEX Linear issues triaged with shipped or actionable orchestrator-side work. Top-5 priorities rebuilt around remaining P0s (#1307, #1419, #1444, #1445) plus next revenue path (#1449).
 - **2026-04-30 (cycle 7):** Closed #1323 (duplicate of #1358), closed #869 (stale, 15 days). Revenue path 5 (PR review API) marked deployed.
 - **2026-04-28 (cycle 6):** Annotated open PRs on top-5 items. Cycles 1–5 superseded.
