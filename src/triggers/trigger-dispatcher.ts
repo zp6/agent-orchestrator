@@ -433,6 +433,27 @@ function fireAndForget(
     // gives the fastest possible recovery on dispatch failures.
     store.removeInFlightReservation(options.source, options.sourceRef);
     log.error("Fire-and-forget dispatch failed", { agentName: options.agentName ?? options.sourceRef, sourceRef: options.sourceRef, error: err instanceof Error ? err.message : String(err) });
+
+    // Mark the sourceRef as processed even on dispatch error (#1444).
+    // Without this, a connection error during dispatcher.dispatch() leaves the
+    // sourceRef unmarked so the next poll cycle fires the same task again with
+    // an identical nonce/sourceRef — producing a tight "nonce dedup" loop.
+    // The synthetic taskId encodes the error type for diagnostics.
+    // GitHub source refs are excluded: a connection error on a GitHub issue
+    // should allow the issue to be retried on the next poll (the issue is still
+    // open). Linear and Slack source refs are time-bucketed, so a failed
+    // dispatch within the same bucket should not fire again this cycle.
+    if (options.source !== "github") {
+      const syntheticTaskId = `dispatch-error:${err instanceof Error ? err.message.slice(0, 40) : "unknown"}:${Date.now()}`;
+      try {
+        store.markProcessed(options.source, options.sourceRef, syntheticTaskId);
+      } catch (markErr) {
+        log.warn("Failed to mark dispatch-error sourceRef as processed", {
+          sourceRef: options.sourceRef,
+          error: markErr instanceof Error ? markErr.message : String(markErr),
+        });
+      }
+    }
   });
 }
 

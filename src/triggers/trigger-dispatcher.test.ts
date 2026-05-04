@@ -1329,6 +1329,28 @@ describe("dispatchLinearChecks", () => {
     expect(markCalls.length).toBeGreaterThanOrEqual(1);
     expect(markCalls[0][2]).toMatch(/^skipped:no-task:\d+$/);
   });
+
+  it("marks sourceRef as processed when dispatch throws a connection error (issue #1444)", async () => {
+    // Reproduce the nonce-dedup loop: dispatcher.dispatch() throws "Connection
+    // error." The catch block previously did NOT call markProcessed, so the
+    // same hour-bucketed sourceRef re-fired on every poll cycle.
+    (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("Connection error."),
+    );
+    // Also mock the store methods accessed in the catch block
+    (mockStore as unknown as Record<string, unknown>).releaseIssueClaim = vi.fn();
+
+    await dispatchLinearChecks(config, mockStore, mockDispatcher);
+    // Fire-and-forget — wait for the rejected promise chain to settle
+    await new Promise((r) => setTimeout(r, 0));
+
+    const markCalls = (mockStore.markProcessed as ReturnType<typeof vi.fn>).mock.calls;
+    expect(markCalls.length).toBeGreaterThanOrEqual(1);
+    const [source, sourceRef, taskId] = markCalls[0];
+    expect(source).toBe("linear");
+    expect(sourceRef).toMatch(/^linear-check:linear-agent:/);
+    expect(taskId).toMatch(/^dispatch-error:Connection error\.?:\d+$/);
+  });
 });
 
 describe("dispatchSlackChecks", () => {
