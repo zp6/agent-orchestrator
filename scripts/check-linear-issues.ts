@@ -17,6 +17,7 @@ import { promises as fs } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { LinearClient, type LinearIssue } from "../src/client/linear-client.js";
+import { validateLinearCredential } from "../src/client/linear-credential-validator.js";
 
 interface IssueReview {
   identifier: string;
@@ -25,27 +26,6 @@ interface IssueReview {
   description: string | null;
   canAddress: boolean;
   notes: string;
-}
-
-async function loadEnv(): Promise<Record<string, string>> {
-  const envPath = join(homedir(), ".claude-orchestrator", ".env");
-  try {
-    const content = await fs.readFile(envPath, "utf-8");
-    const env: Record<string, string> = {};
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const [key, ...valueParts] = trimmed.split("=");
-      env[key] = valueParts.join("=");
-    }
-    return env;
-  } catch (err) {
-    throw new Error(`Failed to load .env from ${envPath}: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
-function isPlaceholder(value: string | undefined): boolean {
-  return !value || value.includes("...") || value === "lin_api_...";
 }
 
 function reviewIssue(issue: LinearIssue): IssueReview {
@@ -82,26 +62,18 @@ function reviewIssue(issue: LinearIssue): IssueReview {
 async function main() {
   console.log("🔍 Checking Linear issues for claude-agent-orchestrator in NEX team...\n");
 
-  // Load environment
-  let apiKey: string;
-  try {
-    const env = await loadEnv();
-    apiKey = env.LINEAR_API_KEY || "";
-  } catch (err) {
-    console.error(`❌ Error loading credentials: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
-  }
+  // Validate LINEAR_API_KEY credential
+  const validation = validateLinearCredential();
 
-  // Check for placeholder
-  if (isPlaceholder(apiKey)) {
-    console.error("⚠️  LINEAR_API_KEY is not configured (placeholder detected)\n");
-    console.error("To complete this task:");
-    console.error("1. Get your Linear API key from Linear → Settings → API");
-    console.error("2. Update ~/.claude-orchestrator/.env:");
-    console.error("   LINEAR_API_KEY=lin_api_<your-actual-key>");
-    console.error("3. Re-run: npx tsx scripts/check-linear-issues.ts\n");
+  if (!validation.valid) {
+    console.error(`❌ ${validation.errorMessage}\n`);
+    console.error("📋 To unblock:");
+    validation.suggestions.forEach((suggestion) => {
+      console.error(`   ${suggestion}`);
+    });
+    console.error("");
 
-    console.log("📋 When configured, this script will:");
+    console.log("ℹ️  When configured, this script will:");
     console.log("   1. Query Linear's NEX team for open issues");
     console.log("   2. Review each issue's scope and state");
     console.log("   3. Identify which issues can be addressed by the orchestrator");
@@ -109,6 +81,8 @@ async function main() {
 
     process.exit(1);
   }
+
+  const apiKey = validation.apiKey!;
 
   // Create client and query issues
   const client = new LinearClient({ apiKey, teamKey: "NEX" });
