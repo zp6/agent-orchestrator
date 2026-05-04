@@ -1,7 +1,7 @@
 proxy:
   url: "http://localhost:3457"
   manager_url: "http://localhost:3400"
-  timeout_ms: 900000
+  timeout_ms: 3600000
   ssh_key: "~/.ssh/claude-proxy-agents"
   # gh_token loaded from GH_TOKEN env var at runtime
 
@@ -169,7 +169,7 @@ agents:
     # Housekeeping fires at cycle modulo 0 → first slot in each 5h window (~:00)
     housekeeping_offset_cycles: 0
     docker:
-      port: 3472
+      port: 3476
       api_key: "cheese"
       permissions: "bypassPermissions"
       session: "fresh"
@@ -260,7 +260,7 @@ agents:
     # Housekeeping fires at cycle modulo 20 → third slot in each 5h window (~:100min offset)
     housekeeping_offset_cycles: 20
     docker:
-      port: 3473
+      port: 3475
       api_key: "cheese"
       permissions: "bypassPermissions"
       session: "fresh"
@@ -388,62 +388,5 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
-  # ── Grok meeting voice ─────────────────────────────────────────
-  grok-meeting-voice:
-    dir: "grok-meeting-voice"
-    provider: "grok"
-    model: "grok-4"
-    description: "Non-voting standup participant (Grok). Provides viewpoints from a materially different model lineage. Article VI cognitive diversity."
-    capabilities: ["facilitation", "standup", "synthesis"]
-    owns_topics: ["standup", "meeting-voice"]
-    allowed_types: ["facilitation"]
-    docker:
-      port: 3486
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "fresh"
-
-  # ── Deepseek background ────────────────────────────────────────
-  deepseek-background:
-    dir: "deepseek-background"
-    provider: "deepseek"
-    model: "deepseek-chat"
-    description: "Cheap background workloads (Deepseek V3): embeddings, semantic memory reindex, fuzzing. Volume tier."
-    capabilities: ["embeddings", "semantic-memory", "background", "fuzzing", "analysis"]
-    owns_topics: ["embeddings", "semantic-memory", "reindex", "fuzzing", "background"]
-    docker:
-      port: 3487
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "fresh"
-
-  # ── Deepseek reasoning reviewer ────────────────────────────────
-  deepseek-reasoning:
-    dir: "claude-orchestrator-reviewer"
-    repo: "git@github.com:rapartlu/agent-reviewer.git"
-    provider: "claude"
-    model: "claude-haiku-4-5-20251001"
-    pool: "reviewer"
-    description: "Third voice in the reviewer pool (Claude Haiku). Independent review throughput."
-    capabilities: ["typescript", "llm", "review", "verification", "reasoning"]
-    github: "rapartlu/agent-reviewer"
-    owns_topics: ["review", "verification", "reasoning"]
-    docker:
-      port: 3488
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "fresh"
-
-  # ── Gemini synthesis ───────────────────────────────────────────
-  gemini-synth:
-    dir: "gemini-synth"
-    provider: "gemini"
-    model: "gemini-2.5-pro"
-    description: "Long-context whole-repo review and standup synthesis (Gemini 2.5 Pro). Article VI cognitive diversity."
-    capabilities: ["synthesis", "long-context", "review", "standup", "analysis"]
-    owns_topics: ["synthesis", "standup-synthesis", "long-context-review", "whole-repo"]
-    docker:
-      port: 3489
-      api_key: "cheese"
-      permissions: "bypassPermissions"
-      session: "fresh"
+  # grok-meeting-voice, deepseek-background, deepseek-reasoning, gemini-synth
+  # removed 2026-05-03 — culled non-core agents to reduce noise/resource use

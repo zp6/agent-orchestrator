@@ -10,7 +10,11 @@ describe("loadConfig", () => {
   it("loads and parses agents.yaml", () => {
     const config = loadConfig(configPath);
     expect(config.proxy.url).toMatch(/^http:\/\/(localhost|host\.docker\.internal):3457$/);
-    expect(config.proxy.timeout_ms).toBe(900000);
+    // Proxy timeout was raised to 60 min (3600000ms) on this branch's
+    // c392584 ("cull non-core agents + increase proxy timeout to 60 min")
+    // to accommodate longer-running agent tasks. The test was not updated
+    // alongside the config change, causing the branch's CI to fail.
+    expect(config.proxy.timeout_ms).toBe(3600000);
     expect(config.base_dir).toBeTruthy();
     expect(Object.keys(config.agents).length).toBeGreaterThanOrEqual(2);
   });
