@@ -1228,7 +1228,54 @@ export class Daemon {
         commits,
       });
 
-      execSync("git pull --ff-only origin main", { cwd: repoDir, stdio: "pipe" });
+      try {
+        execSync("git pull --ff-only origin main", { cwd: repoDir, stdio: "pipe" });
+      } catch (pullErr) {
+        // Issue #1492: detect branch divergence from main (typically caused by
+        // a squash-merge that left the daemon's checkout pointing at a feature
+        // branch whose original commits are no longer reachable from origin/main).
+        // Without this branch, the outer catch logs a generic warning and the
+        // daemon continues on stale code, never picking up shipped fixes.
+        let ahead = "0";
+        try {
+          ahead = execSync("git rev-list origin/main..HEAD --count", {
+            cwd: repoDir,
+            stdio: "pipe",
+          })
+            .toString()
+            .trim();
+        } catch {
+          // If even rev-list fails, fall through to the original error path
+          // — there's nothing actionable we can say.
+        }
+        if (Number(ahead) > 0) {
+          this.log.warn(
+            "Self-update: ff-only pull refused — branch is divergent from origin/main (likely squash-merge)",
+            {
+              ahead: Number(ahead),
+              behindBy: Number(behind),
+              repoDir,
+              remediation:
+                "Run `git fetch origin && git reset --hard origin/main && npm run build` then restart the daemon",
+              gitError: pullErr instanceof Error ? pullErr.message : String(pullErr),
+            },
+          );
+          await notifyOperator(
+            "Daemon selfUpdate: branch divergent from main",
+            `Daemon checkout has ${ahead} commit(s) ahead of origin/main and ${behind} behind; ff-only pull refused. ` +
+              `Likely cause: the daemon's branch was squash-merged into main, so local HEAD is no longer reachable from main. ` +
+              `Manual recovery (in ${repoDir}): \`git fetch origin && git reset --hard origin/main && npm run build\` ` +
+              `then restart the daemon.`,
+            "warning",
+          );
+          // Don't proceed to rebuild on stale tree; let the next cycle try again
+          // after the operator resolves the divergence.
+          return;
+        }
+        // Non-divergent failure (e.g. local uncommitted changes, network error
+        // mid-pull) — let the outer catch handle the original error.
+        throw pullErr;
+      }
       execSync("npm run build", { cwd: repoDir, stdio: "pipe" });
 
       const afterHash = getCurrentCommitHash();
