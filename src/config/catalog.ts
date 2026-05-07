@@ -87,6 +87,14 @@ export const CONFIG_CATALOG: readonly ConfigEntry[] = [
     description: "GitHub token. Resolved from: config > secrets > GH_TOKEN env > .env > gh CLI.",
     category: "proxy",
   },
+  {
+    key: "proxy.linear_api_key",
+    source: "agents.yaml",
+    type: "string",
+    default: "(auto-resolved, optional)",
+    description: "Linear API key pushed to agent containers via proxy sync. Resolved from: config > secrets > LINEAR_API_KEY env > .env. Optional — agents work without it but cannot query Linear.",
+    category: "proxy",
+  },
 
   // ── Daemon ─────────────────────────────────────────────────────────────────
   {

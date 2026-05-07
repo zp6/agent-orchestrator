@@ -296,6 +296,14 @@ export interface ProxyConfig {
   timeout_ms: number;
   ssh_key?: string;
   gh_token?: string;
+  /**
+   * Linear API key. When set, the orchestrator pushes it to every agent
+   * container via the proxy sync the same way `gh_token` is pushed today.
+   * Resolved from (in order): agents.yaml proxy.linear_api_key →
+   * /run/secrets/<agent>_linear_api_key → LINEAR_API_KEY env var →
+   * ~/.claude-orchestrator/.env. See issue #1500.
+   */
+  linear_api_key?: string;
 }
 
 /**
@@ -883,6 +891,38 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
   // Keep downstream gh CLI checks aligned with config-loaded auth.
   if (parsed.proxy.gh_token) {
     process.env.GH_TOKEN = parsed.proxy.gh_token;
+  }
+
+  // Resolve LINEAR_API_KEY (issue #1500):
+  //   1. agents.yaml proxy.linear_api_key (already in parsed)
+  //   2. Docker/OrbStack secrets (/run/secrets/<agent>_linear_api_key)
+  //   3. LINEAR_API_KEY env var
+  //   4. ~/.claude-orchestrator/.env file
+  if (!parsed.proxy.linear_api_key) {
+    parsed.proxy.linear_api_key = readSecret("linear_api_key");
+  }
+  if (!parsed.proxy.linear_api_key && process.env.LINEAR_API_KEY) {
+    parsed.proxy.linear_api_key = process.env.LINEAR_API_KEY;
+  }
+  if (!parsed.proxy.linear_api_key) {
+    const envPath = resolve(process.env.HOME ?? "", ".claude-orchestrator", ".env");
+    try {
+      const envContent = readFileSync(envPath, "utf-8");
+      const match = envContent.match(/^LINEAR_API_KEY=(.+)$/m);
+      if (match?.[1]) {
+        const value = match[1].trim();
+        // Skip placeholder values (per ~/.claude-orchestrator/.env conventions)
+        if (value && !value.startsWith("lin_api_...") && value !== "lin_api_") {
+          parsed.proxy.linear_api_key = value;
+        }
+      }
+    } catch {
+      // .env file doesn't exist
+    }
+  }
+  // Mirror back to process.env so in-process consumers (validator, scripts) see it.
+  if (parsed.proxy.linear_api_key) {
+    process.env.LINEAR_API_KEY = parsed.proxy.linear_api_key;
   }
 
   return parsed;

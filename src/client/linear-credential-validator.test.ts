@@ -50,13 +50,73 @@ function setupFsMocks(opts: {
 }
 
 describe("linear-credential-validator", () => {
+  let savedLinearEnvVar: string | undefined;
+
   beforeEach(() => {
     vi.clearAllMocks();
     delete process.env.AGENT_NAME;
+    // Isolate the new env-var lookup path (#1500) from any ambient value so
+    // each test deterministically exercises the source it intends to.
+    savedLinearEnvVar = process.env.LINEAR_API_KEY;
+    delete process.env.LINEAR_API_KEY;
   });
 
   afterEach(() => {
     vi.clearAllMocks();
+    if (savedLinearEnvVar === undefined) {
+      delete process.env.LINEAR_API_KEY;
+    } else {
+      process.env.LINEAR_API_KEY = savedLinearEnvVar;
+    }
+  });
+
+  describe("validateLinearCredential — env-var path (issue #1500)", () => {
+    it("returns valid=true with source=env-var when LINEAR_API_KEY is set in process.env", () => {
+      // env-file and mount both empty so only the new env-var path can succeed.
+      setupFsMocks({ envContent: null, mountContent: null });
+      process.env.LINEAR_API_KEY = VALID_KEY;
+
+      const result = validateLinearCredential();
+
+      expect(result.valid).toBe(true);
+      expect(result.apiKey).toBe(VALID_KEY);
+      expect(result.source).toBe("env-var");
+    });
+
+    it("env-var takes precedence over env-file when both have valid keys", () => {
+      // Both sources have valid keys but with different values to prove which one wins.
+      const mountKey = "lin_api_from_mount_should_lose_to_env_var";
+      setupFsMocks({ envContent: `LINEAR_API_KEY=${VALID_KEY}`, mountContent: mountKey });
+      process.env.LINEAR_API_KEY = "lin_api_from_env_var_takes_precedence";
+
+      const result = validateLinearCredential();
+
+      expect(result.valid).toBe(true);
+      expect(result.apiKey).toBe("lin_api_from_env_var_takes_precedence");
+      expect(result.source).toBe("env-var");
+    });
+
+    it("falls through to env-file when env-var holds a placeholder", () => {
+      setupFsMocks({ envContent: `LINEAR_API_KEY=${VALID_KEY}` });
+      process.env.LINEAR_API_KEY = "lin_api_...";
+
+      const result = validateLinearCredential();
+
+      expect(result.valid).toBe(true);
+      expect(result.apiKey).toBe(VALID_KEY);
+      expect(result.source).toBe("env-file");
+    });
+
+    it("falls through to mount when env-var has invalid format and env-file is missing", () => {
+      setupFsMocks({ envContent: null, mountContent: VALID_KEY });
+      process.env.LINEAR_API_KEY = "wrong_prefix_xxx";
+
+      const result = validateLinearCredential();
+
+      expect(result.valid).toBe(true);
+      expect(result.apiKey).toBe(VALID_KEY);
+      expect(result.source).toBe("secrets-mount");
+    });
   });
 
   describe("validateLinearCredential — env-file path (existing behavior)", () => {

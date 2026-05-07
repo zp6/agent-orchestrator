@@ -4,14 +4,19 @@
  * Validates that LINEAR_API_KEY is configured before attempting to use the Linear API.
  * Provides actionable feedback to the Operator when credentials are missing or invalid.
  *
- * Lookup order (issue #1490):
- *   1. `~/.claude-orchestrator/.env` — operator-host path; works when the daemon
- *      runs on the operator's machine and reads from $HOME.
- *   2. `/run/secrets/<agent>_linear_api_key` — container-friendly path; works
- *      when the agent runs inside docker / k8s with mounted secrets, alongside
- *      the existing `<agent>_gh_token` and `<agent>_oauth_token` mounts.
+ * Lookup order (issue #1490, extended in #1500):
+ *   1. `process.env.LINEAR_API_KEY` — set by `loadConfig` (#1500) after it
+ *      resolves the key from any of yaml/secrets/env/.env. Checking the
+ *      live env var first means the validator agrees with whatever the
+ *      orchestrator-side resolver decided was authoritative.
+ *   2. `~/.claude-orchestrator/.env` — operator-host path; works when the
+ *      daemon runs on the operator's machine and reads from $HOME.
+ *   3. `/run/secrets/<agent>_linear_api_key` — container-friendly path;
+ *      works when the agent runs inside docker / k8s with mounted secrets,
+ *      alongside the existing `<agent>_gh_token` and `<agent>_oauth_token`
+ *      mounts.
  *
- * The first source that yields a valid key wins. Both sources go through
+ * The first source that yields a valid key wins. All sources go through
  * the same placeholder / format checks so the validator never returns a
  * "valid but unusable" result.
  */
@@ -29,7 +34,7 @@ export interface CredentialValidationResult {
    * Where the validated key was sourced from (or null when invalid).
    * Useful for audit logs and for debugging cross-environment differences.
    */
-  source?: "env-file" | "secrets-mount" | null;
+  source?: "env-var" | "env-file" | "secrets-mount" | null;
 }
 
 interface LookupResult {
@@ -39,6 +44,22 @@ interface LookupResult {
   pathDescription: string;
   /** Underlying read error, if the path was attempted but unreadable. */
   errorMessage: string | null;
+}
+
+/**
+ * Read LINEAR_API_KEY from `process.env`. This is set by `loadConfig`
+ * (issue #1500) once it resolves the key from any of the upstream sources,
+ * so checking it first means the validator's view agrees with the
+ * orchestrator-side resolver. Per #1500, the schema loader actively
+ * mirrors the resolved key back to `process.env.LINEAR_API_KEY`.
+ */
+function readKeyFromProcessEnv(): LookupResult {
+  const value = process.env.LINEAR_API_KEY ?? null;
+  return {
+    value,
+    pathDescription: "process.env.LINEAR_API_KEY",
+    errorMessage: null,
+  };
 }
 
 /**
@@ -138,6 +159,20 @@ function classifyCandidateKey(
  * - source: which path produced the validated key, or null when invalid
  */
 export function validateLinearCredential(): CredentialValidationResult {
+  // 1. process.env.LINEAR_API_KEY — set by loadConfig per #1500.
+  const envVarLookup = readKeyFromProcessEnv();
+  const envVarClassification = classifyCandidateKey(envVarLookup.value);
+  if (envVarClassification.ok) {
+    return {
+      valid: true,
+      apiKey: envVarClassification.apiKey,
+      errorMessage: null,
+      suggestions: [],
+      source: "env-var",
+    };
+  }
+
+  // 2. ~/.claude-orchestrator/.env (KEY=VALUE format).
   const envLookup = readKeyFromEnvFile();
   const envClassification = classifyCandidateKey(envLookup.value);
   if (envClassification.ok) {
@@ -150,6 +185,7 @@ export function validateLinearCredential(): CredentialValidationResult {
     };
   }
 
+  // 3. /run/secrets/<agent>_linear_api_key.
   const mountLookup = readKeyFromSecretsMount();
   const mountClassification = classifyCandidateKey(mountLookup.value);
   if (mountClassification.ok) {
@@ -165,6 +201,11 @@ export function validateLinearCredential(): CredentialValidationResult {
   // Build a forensic-quality failure message that names every attempted path
   // so operators see the full picture in one log line.
   const reasons: string[] = [];
+  // Only mention process.env when it had a value that failed classification —
+  // an unset env var isn't useful audit content.
+  if (envVarLookup.value !== null) {
+    reasons.push(`${envVarLookup.pathDescription}: ${envVarClassification.reason}`);
+  }
   if (envLookup.errorMessage) {
     reasons.push(`${envLookup.pathDescription}: ${envLookup.errorMessage}`);
   } else {

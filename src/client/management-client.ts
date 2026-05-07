@@ -14,6 +14,13 @@ export interface ProxyAgentConfig {
   sessionId?: string;
   sshKey?: string;
   ghToken?: string;
+  /**
+   * Linear API key pushed from orchestrator host → proxy → agent container.
+   * Mirrors the ghToken mechanism. The proxy is responsible for materializing
+   * this as `/run/secrets/<agent>_linear_api_key` (or equivalent env) inside
+   * the container. See orchestrator issue #1500 + proxy issue #558.
+   */
+  linearApiKey?: string;
   provider?: string;
   packages?: string[];
   allowedTools?: string;

@@ -95,6 +95,130 @@ describe("loadConfig", () => {
       }
     }
   });
+
+  it("mirrors proxy.linear_api_key into process.env.LINEAR_API_KEY (issue #1500)", () => {
+    const previous = process.env.LINEAR_API_KEY;
+    const tmp = mkdtempSync(join(tmpdir(), "orch-config-"));
+    const configPath = join(tmp, "agents.yaml");
+
+    writeFileSync(
+      configPath,
+      [
+        "proxy:",
+        "  url: http://localhost:3457",
+        "  timeout_ms: 900000",
+        "  linear_api_key: lin_api_test_from_config",
+        "base_dir: /tmp",
+        "orchestrator_dir: /tmp/orchestrator",
+        "agents:",
+        "  test-agent:",
+        "    dir: test-agent",
+        "    description: test",
+        "    capabilities: [typescript]",
+        "    owns_topics: [test]",
+        "    docker:",
+        "      port: 3472",
+      ].join("\n"),
+    );
+
+    try {
+      delete process.env.LINEAR_API_KEY;
+      const config = loadConfig(configPath);
+      expect(config.proxy.linear_api_key).toBe("lin_api_test_from_config");
+      expect(process.env.LINEAR_API_KEY).toBe("lin_api_test_from_config");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+      if (previous === undefined) {
+        delete process.env.LINEAR_API_KEY;
+      } else {
+        process.env.LINEAR_API_KEY = previous;
+      }
+    }
+  });
+
+  it("falls back to LINEAR_API_KEY env var when not in config (issue #1500)", () => {
+    const previousEnv = process.env.LINEAR_API_KEY;
+    const tmp = mkdtempSync(join(tmpdir(), "orch-config-"));
+    const configPath = join(tmp, "agents.yaml");
+
+    writeFileSync(
+      configPath,
+      [
+        "proxy:",
+        "  url: http://localhost:3457",
+        "  timeout_ms: 900000",
+        "base_dir: /tmp",
+        "orchestrator_dir: /tmp/orchestrator",
+        "agents:",
+        "  test-agent:",
+        "    dir: test-agent",
+        "    description: test",
+        "    capabilities: [typescript]",
+        "    owns_topics: [test]",
+        "    docker:",
+        "      port: 3472",
+      ].join("\n"),
+    );
+
+    try {
+      process.env.LINEAR_API_KEY = "lin_api_from_env";
+      const config = loadConfig(configPath);
+      expect(config.proxy.linear_api_key).toBe("lin_api_from_env");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+      if (previousEnv === undefined) {
+        delete process.env.LINEAR_API_KEY;
+      } else {
+        process.env.LINEAR_API_KEY = previousEnv;
+      }
+    }
+  });
+
+  it("does not set linear_api_key when no source is available (issue #1500)", () => {
+    const previousEnv = process.env.LINEAR_API_KEY;
+    const previousHome = process.env.HOME;
+    const tmp = mkdtempSync(join(tmpdir(), "orch-config-"));
+    const configPath = join(tmp, "agents.yaml");
+
+    writeFileSync(
+      configPath,
+      [
+        "proxy:",
+        "  url: http://localhost:3457",
+        "  timeout_ms: 900000",
+        "base_dir: /tmp",
+        "orchestrator_dir: /tmp/orchestrator",
+        "agents:",
+        "  test-agent:",
+        "    dir: test-agent",
+        "    description: test",
+        "    capabilities: [typescript]",
+        "    owns_topics: [test]",
+        "    docker:",
+        "      port: 3472",
+      ].join("\n"),
+    );
+
+    try {
+      delete process.env.LINEAR_API_KEY;
+      // Point HOME at a tmp dir with no .env so the .env-file path also misses.
+      process.env.HOME = tmp;
+      const config = loadConfig(configPath);
+      expect(config.proxy.linear_api_key).toBeUndefined();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+      if (previousEnv === undefined) {
+        delete process.env.LINEAR_API_KEY;
+      } else {
+        process.env.LINEAR_API_KEY = previousEnv;
+      }
+      if (previousHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = previousHome;
+      }
+    }
+  });
 });
 
 describe("github field validation", () => {
