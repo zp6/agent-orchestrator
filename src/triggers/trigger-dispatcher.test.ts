@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { dispatchGitHubIssues, dispatchIdleAgentBacklog, dispatchLinearChecks, dispatchSlackChecks, buildExistingPRReviewChecklist, routeBlockingPRToQueue, GUARD_FLOOD_GATE_WINDOW_MS, PR_GUARD_SURGE_THRESHOLD, prGuardSurgeAlertSentAt, _resetLinearCredentialWarningForTests } from "./trigger-dispatcher.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
@@ -1426,6 +1426,87 @@ describe("dispatchLinearChecks", () => {
 
       expect(mockDispatcher.dispatch).toHaveBeenCalledTimes(1);
       expect(result.dispatched).toBe(1);
+    });
+  });
+
+  describe("LINEAR_DISPATCH_DISABLED kill switch (issue #1499)", () => {
+    let savedDisabled: string | undefined;
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      _resetLinearCredentialWarningForTests();
+      savedDisabled = process.env.LINEAR_DISPATCH_DISABLED;
+      delete process.env.LINEAR_DISPATCH_DISABLED;
+    });
+
+    afterEach(() => {
+      if (savedDisabled === undefined) {
+        delete process.env.LINEAR_DISPATCH_DISABLED;
+      } else {
+        process.env.LINEAR_DISPATCH_DISABLED = savedDisabled;
+      }
+    });
+
+    it("short-circuits dispatch when LINEAR_DISPATCH_DISABLED=1", async () => {
+      process.env.LINEAR_DISPATCH_DISABLED = "1";
+
+      const result = await dispatchLinearChecks(config, mockStore, mockDispatcher);
+
+      expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+      expect(result.skipped).toBe(1); // one linear-configured agent in test config
+    });
+
+    it("short-circuits dispatch for any truthy value (true/yes/on)", async () => {
+      for (const truthy of ["true", "yes", "on", "TRUE", "Yes"]) {
+        process.env.LINEAR_DISPATCH_DISABLED = truthy;
+        vi.clearAllMocks();
+        const result = await dispatchLinearChecks(config, mockStore, mockDispatcher);
+        expect(mockDispatcher.dispatch, `dispatch should be skipped for value=${truthy}`).not.toHaveBeenCalled();
+        expect(result.dispatched, `dispatched should be 0 for value=${truthy}`).toBe(0);
+      }
+    });
+
+    it("does NOT short-circuit when LINEAR_DISPATCH_DISABLED is falsy (0/false/no/off/empty)", async () => {
+      for (const falsy of ["0", "false", "no", "off", "FALSE", "  "]) {
+        process.env.LINEAR_DISPATCH_DISABLED = falsy;
+        vi.clearAllMocks();
+        const result = await dispatchLinearChecks(config, mockStore, mockDispatcher);
+        // With default valid credential mock, dispatch should still fire normally.
+        expect(mockDispatcher.dispatch, `dispatch should fire for value="${falsy}"`).toHaveBeenCalled();
+        expect(result.dispatched, `dispatched should be 1 for value="${falsy}"`).toBe(1);
+      }
+    });
+
+    it("does NOT short-circuit when LINEAR_DISPATCH_DISABLED is unset", async () => {
+      delete process.env.LINEAR_DISPATCH_DISABLED;
+
+      const result = await dispatchLinearChecks(config, mockStore, mockDispatcher);
+
+      expect(mockDispatcher.dispatch).toHaveBeenCalled();
+      expect(result.dispatched).toBe(1);
+    });
+
+    it("kill switch fires before the credential gate (no validator call needed)", async () => {
+      process.env.LINEAR_DISPATCH_DISABLED = "1";
+      const validator = await import("../client/linear-credential-validator.js");
+      const validatorSpy = vi.mocked(validator.validateLinearCredential);
+      validatorSpy.mockClear();
+
+      await dispatchLinearChecks(config, mockStore, mockDispatcher);
+
+      // Kill switch should short-circuit BEFORE the credential gate is consulted.
+      expect(validatorSpy).not.toHaveBeenCalled();
+    });
+
+    it("only counts registered linear-configured agents in skipped tally", async () => {
+      process.env.LINEAR_DISPATCH_DISABLED = "1";
+      const registered = new Set<string>(["my-agent", "slack-agent"]); // excludes linear-agent
+
+      const result = await dispatchLinearChecks(config, mockStore, mockDispatcher, registered);
+
+      expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+      expect(result.skipped).toBe(0);
     });
   });
 });

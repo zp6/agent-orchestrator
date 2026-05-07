@@ -23,12 +23,38 @@ import { validateLinearCredential } from "../client/linear-credential-validator.
 let linearCredentialWarningEmitted = false;
 
 /**
+ * Issue #1499: Operator-facing kill switch for the linear-check trigger.
+ *
+ * When `LINEAR_DISPATCH_DISABLED` is truthy in the daemon's environment,
+ * `dispatchLinearChecks` short-circuits before evaluating the credential
+ * gate, the in-flight guard, or any per-agent loop. This is intended for
+ * "fix in flight" windows — e.g. while the credential propagation chain
+ * (#1496 / #1500 / agent-proxy#558) is being deployed — to prevent agents
+ * from being dispatched into a guaranteed-failure-loop.
+ *
+ * One log line per daemon process; no Telegram noise (operator already
+ * knows because they set the flag).
+ *
+ * Truthy values: any non-empty string except "0", "false", "no", "off"
+ * (case-insensitive).
+ */
+let linearDispatchDisabledLogged = false;
+
+function isLinearDispatchDisabled(): boolean {
+  const raw = process.env.LINEAR_DISPATCH_DISABLED;
+  if (!raw) return false;
+  const normalized = raw.trim().toLowerCase();
+  return !["", "0", "false", "no", "off"].includes(normalized);
+}
+
+/**
  * Test-only hook: reset the warning-emitted flag so each test that exercises
  * the credential guard sees a fresh "first warning" path. Not exported in
  * the package public API — only used by `trigger-dispatcher.test.ts`.
  */
 export function _resetLinearCredentialWarningForTests(): void {
   linearCredentialWarningEmitted = false;
+  linearDispatchDisabledLogged = false;
 }
 
 /**
@@ -1601,6 +1627,30 @@ export async function dispatchLinearChecks(
   registeredAgents?: Set<string>,
 ): Promise<TriggerResult> {
   const result: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
+
+  // Issue #1499: operator kill switch. When the credential propagation
+  // pipeline (#1496 / #1500 / agent-proxy#558) is being landed, the
+  // daemon-side credential gate may pass while agent containers still
+  // lack the secret — guaranteeing dispatch failures and verifier
+  // rejection loops. The operator can flip LINEAR_DISPATCH_DISABLED=1
+  // to suppress dispatch entirely until the pipeline is verified.
+  if (isLinearDispatchDisabled()) {
+    const linearAgents = Object.entries(config.agents).filter(
+      ([agentName, agent]) =>
+        agent.linear && (!registeredAgents || registeredAgents.has(agentName)),
+    );
+    result.skipped = linearAgents.length;
+    if (!linearDispatchDisabledLogged) {
+      const logger = createLogger("linear-trigger");
+      logger.warn(
+        `dispatch suppressed by LINEAR_DISPATCH_DISABLED kill switch. ` +
+          `${linearAgents.length} linear-configured agent(s) skipped this cycle. ` +
+          `Unset the env var and restart the daemon to re-enable.`,
+      );
+      linearDispatchDisabledLogged = true;
+    }
+    return result;
+  }
 
   // Issue #1487: credential gate. Without a valid LINEAR_API_KEY no agent
   // can complete a Linear check, so dispatching at all just burns LLM
