@@ -185,6 +185,9 @@ function detectUnownedTopics(
     "revision", "triage", "periodic", "backlog", "bootstrap",
     "detected", "proposed", "suggested", "recommended", "resolved",
     "verify", "validate", "confirm", "complete", "completed",
+    // Pervasive fleet/charter vocabulary that leaks into every task
+    // and should never trigger a new-agent proposal on its own.
+    "fleet", "failure", "phase", "prose",
   ]);
 
   for (const task of recentTasks) {
