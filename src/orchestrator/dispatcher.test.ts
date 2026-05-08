@@ -1824,7 +1824,10 @@ describe("Dispatcher.retryTask", () => {
 
     expect(mockSend).not.toHaveBeenCalled();
     const updated = store.getTask(task.id)!;
-    expect(updated.status).toBe("failed");
+    // Per #1522: tasks targeting deleted agents are marked superseded
+    // (a structural state-change), not failed.
+    expect(updated.status).toBe("superseded");
+    expect(updated.result).toMatch(/agent-removed/);
     expect(updated.next_retry_at).toBeNull();
   });
 });

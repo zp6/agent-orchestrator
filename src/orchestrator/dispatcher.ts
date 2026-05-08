@@ -2286,10 +2286,14 @@ export class Dispatcher {
     }
 
     if (!this.config.agents[agentName]) {
-      this.log.warn("Cannot retry task: unknown agent", { taskId: task.id, agentName });
+      // Agent was removed from agents.yaml after this task was created.
+      // Mark as superseded rather than failed: this is a structural state-change,
+      // not an actual task failure, and shouldn't pollute failure metrics or
+      // burn retry attempts. Closes #1522.
+      this.log.warn("Retry skipped: target agent no longer registered", { taskId: task.id, agentName });
       this.store.updateTask(task.id, {
-        status: "failed",
-        result: `Cannot retry: unknown agent "${agentName}"`,
+        status: "superseded",
+        result: `agent-removed: agent "${agentName}" no longer registered in agents.yaml`,
         next_retry_at: null,
       });
       return;
