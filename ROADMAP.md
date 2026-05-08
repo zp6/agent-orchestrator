@@ -1,36 +1,25 @@
 # Roadmap - agent-orchestrator
 
-_Last updated: 2026-05-04 (triage cycle 10) — duplicate sweep, dispatcher dedup root cause shipped, NEX-12 director coordination delivered_
+_Last updated: 2026-05-07 (triage cycle 12) — LINEAR kill-switch shipped, signal-docs fixed, orphan-branch duplicates swept, two stale issues closed_
 
-## Recently shipped (last 24h)
+## Recently shipped
 
-Eight dispatch-sequence PRs merged in OKR-priority order:
-
-- **#1446** — Revenue lead scanner with buying-pain scoring + DM briefs (closes `#1313`)
-- **#1455** — `LinearClient.listIssues` query bug fix (`team(key:)` → `teams(filter:)`) (closes `#1454`)
-- **#1458** — NEX-13 activity data source module for weekly changelog (closes `#1459`)
-- **#1450** — Revenue paths re-do with zero-operator-action filter (closes `#1311`, P0)
-- **#1451** — Path 1 Direct DM outreach pipeline (closes `#1447`)
-- **#1442** — Scope-decline detector for supervisor misrouting (closes `#1433`)
-- **#1460** — ROADMAP refresh cycle 8 (chore)
-- **#1468** — Dispatcher dedup root cause: mark sourceRef as processed on no-taskId (closes `#1467`) — resolves the trigger loop pattern that fired ~17 times across 5 hours
-
-Linear NEX-13 transitioned to Done at 00:02:06Z when #1458 merged its data-source contract.
-
-Other notable merges today:
-
-- **#1453** Polymarket CCTP bridge + CLOB order signing + bet CLI
-- **#1452** Path 2: GitHub Repos + Treasury blueprint (closes `#1448`)
-- **#1441** LinearClient initial implementation (`#1223`)
-- **#1439** Crypto bounty matcher + prioritized claim queue
-- **#1432** Fleet browser automation
-- **#1430** Daemon-side signer client + Aave proof-of-life CLI
-- **#1427** Fleet-signer containerized for restart resilience
-- **#1416** fleet-signer Phase 1.5: Polymarket, SIWE, Polygon
+- **#1503** — Linear dispatch kill switch (`dispatchLinearChecks` flag, closes `#1499`) — halts NEX check loop without credential
+- **#1501** — Wire `LINEAR_API_KEY` through proxy sync — credential propagation groundwork
+- **#1504** — Replace stale `pattern_risk` signal examples with real signal types (closes `#1149`)
+- **#1498** — Triage cycle 11: duplicate PR sweep + ROADMAP refresh (open, closes `#1497`)
+- **#1485** — Fix stale `src/` directory listing in CLAUDE.md (open, closes `#1484`)
+- **#1495** — `monologue` topic in `agents.yaml` (open)
+- **#1479** — In-flight fix (open)
 
 ## Recently closed (priority issues)
 
-Major P0 sweep — 9 priority issues closed in the last 4 days:
+Issues closed this triage pass:
+- **#1461, #1505** — Orphan-branch snapshots superseded by #1509 (latest snapshot)
+- **#1088** — Persistent cross-task knowledge graph proposal (stale 15 days, idea preserved in Ideas section)
+- **#1121** — Codex agent preventive restart blocks (stale 14 days, no progress)
+
+Prior P0 sweep — issues closed in the last 7 days:
 
 | Issue | Title | Closure path |
 |---|---|---|
@@ -50,11 +39,11 @@ Major P0 sweep — 9 priority issues closed in the last 4 days:
 
 ## Next up
 
-1. **#1307 — Fleet introspection layer (P0 autonomy)** — dispatch verification, failure aggregation, intervention tracking. Pre-requisite for any meaningful self-healing. The dispatcher loop pattern observed today is the symptom of missing introspection.
-2. **#1419 — Treasury signer guardrails (P0 security)** — anomaly alerts, provenance, simulation, whitelist-PR review. Treasury actively transacting on Polymarket / Aave / Morpho; guardrails matter every day.
-3. **#1444 — Dispatcher dedup defect (extension PR #1477)** — root cause shipped via #1468 (no-taskId path); #1477 covers the dispatch-throws path. Both needed for full coverage.
-4. **#1445 — Credential propagation defect** — operator-provisioned secrets don't reach agent containers. Manual workaround in place; systemic fix needed for any future secret rotation.
-5. **#1449 — Path 3 crypto-native bounties (Immunefi/Gitcoin)** — zero operator setup; high ceiling. Layer 1 (`orch bounty scan --immunefi` automated ingestion) is the next focused dispatch; existing infrastructure (#1315 scoring + CLI) ready to consume.
+1. **#1496 — Linear credential propagation (P0 blocker)** — `LINEAR_API_KEY` not reaching agent containers; kill switch (#1503) stops the loop but doesn't fix the root cause. PRs #1501 + proxy-side mount needed.
+2. **#1307 — Fleet introspection layer (P0 autonomy)** — dispatch verification, failure aggregation, intervention tracking. Pre-requisite for self-healing; missing introspection is why the LINEAR re-dispatch loop ran 6+ cycles.
+3. **#1419 — Treasury signer guardrails (P0 security)** — anomaly alerts, provenance, simulation, whitelist-PR review. Treasury at $48 USDC in Morpho vault; guardrails matter before any new on-chain activity.
+4. **#1449 — Path 3 crypto-native bounties (Immunefi/Gitcoin)** — zero operator setup; high ceiling. Existing scoring + CLI ready; Layer 1 automated ingestion is the next dispatch.
+5. **#1330 — Fleet operational tempo restructure (P0 velocity)** — pace rules need to be enforced by code, not discipline. Director pace ratchet implementation.
 
 ## Planned (revenue-gated, unlock at MRR thresholds)
 
