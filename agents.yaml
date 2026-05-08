@@ -20,7 +20,7 @@ providers:
     TREASURY_WALLET_ADDRESS: "0x468EC325f3797F5968dEcC757FA0B960Bd0f78Ef"
 
   claude:
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-7"
     limits:
       hourly: 1000000       # ~1M tokens/hour
       daily: 5000000        # ~5M tokens/day
@@ -157,7 +157,7 @@ agents:
     dir: "claude-agent-orchestrator"
     repo: "git@github.com:rapartlu/agent-orchestrator.git"
     provider: "claude"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-7"
     pool: "orchestrator"
     description: "Core orchestration infrastructure (Claude). Daemon, state store, dispatching, triggers."
     capabilities: ["typescript", "orchestration", "sqlite"]
@@ -301,7 +301,7 @@ agents:
     dir: "claude-research-agent"
     repo: "git@github.com:rapartlu/research-agent.git"
     provider: "claude"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-7"
     pool: "research"
     description: "Research agent: web search, doc analysis, technology evaluation (Claude)."
     capabilities: ["research", "web-search", "documentation", "analysis"]
@@ -339,7 +339,7 @@ agents:
     dir: "claude-proxy"
     repo: "git@github.com:rapartlu/agent-proxy.git"
     provider: "claude"
-    model: "claude-opus-4-6"
+    model: "claude-opus-4-7"
     pool: "proxy"
     description: "Proxy server: CLI sessions, container management (Claude)."
     capabilities: ["typescript", "docker", "proxy", "api", "infrastructure"]
