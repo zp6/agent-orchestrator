@@ -28,6 +28,8 @@
  *   GET /api/incidents?days=30&limit=100&agent=<name>
  *   GET /monologue                                    — prose monologue feed
  *   GET /monologue?agent=<name>&task=<id>&kind=<kind>&limit=50&offset=0
+ *   POST /api/fingerprint/check                       — check if a (kind, fingerprint) pair was seen before (issue #1494)
+ *   POST /api/fingerprint/record                      — record a (kind, fingerprint) pair with TTL (issue #1494)
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
@@ -45,6 +47,8 @@ import {
   type MonologueKind,
   type MonologueEntry,
   type IncidentRecord,
+  type FingerprintCheckResult,
+  type FingerprintRecordResult,
 } from "../state/store.js";
 import { createLogger } from "./logger.js";
 
@@ -355,6 +359,35 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
+/**
+ * Read and parse a JSON body from an IncomingMessage.
+ * Rejects if the body is not valid JSON or exceeds 64 KB.
+ */
+function readJsonBody<T = unknown>(req: IncomingMessage): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const MAX_BYTES = 64 * 1024;
+    req.on("data", (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > MAX_BYTES) {
+        reject(new Error("Request body too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      try {
+        const raw = Buffer.concat(chunks).toString("utf-8");
+        resolve(JSON.parse(raw) as T);
+      } catch {
+        reject(new Error("Invalid JSON body"));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
 function parseWindowDays(req: IncomingMessage): number {
   const url = new URL(req.url ?? "/", "http://localhost");
   const raw = url.searchParams.get("days");
@@ -408,10 +441,13 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
-    // POST is allowed only for the redispatch action on marginal-score-tasks
+    // POST is allowed for the redispatch action and fingerprint endpoints.
     const isRedispatch =
       req.method === "POST" && /^\/marginal-score-tasks\/[^/]+\/redispatch$/.test(url.pathname);
-    if (req.method !== "GET" && !isRedispatch) {
+    const isFingerprintPost =
+      req.method === "POST" &&
+      (url.pathname === "/api/fingerprint/check" || url.pathname === "/api/fingerprint/record");
+    if (req.method !== "GET" && !isRedispatch && !isFingerprintPost) {
       sendJson(res, 405, { error: "Method not allowed" });
       return;
     }
@@ -957,6 +993,58 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── POST /api/fingerprint/check (issue #1494) ─────────────────────────────
+    // Check whether a (kind, fingerprint) pair has been seen and not expired.
+    // Body: { kind: string, fingerprint: string }
+    // Response: { seen: boolean, first_seen_at?: string, key?: string }
+    if (isFingerprintPost && url.pathname === "/api/fingerprint/check") {
+      void (async () => {
+        try {
+          const body = await readJsonBody<{ kind?: unknown; fingerprint?: unknown }>(req);
+          if (typeof body.kind !== "string" || typeof body.fingerprint !== "string") {
+            sendJson(res, 400, { error: "kind and fingerprint are required strings" });
+            return;
+          }
+          const result: FingerprintCheckResult = store.checkFingerprint(body.kind, body.fingerprint);
+          sendJson(res, 200, result);
+        } catch (err) {
+          log.warn("Failed to check fingerprint", { error: err instanceof Error ? err.message : String(err) });
+          sendJson(res, 500, { error: "Failed to check fingerprint" });
+        }
+      })();
+      return;
+    }
+
+    // ── POST /api/fingerprint/record (issue #1494) ────────────────────────────
+    // Record a (kind, fingerprint) pair with a TTL.
+    // Body: { kind: string, fingerprint: string, key?: string, ttl_hours?: number }
+    // Response: { recorded: boolean }
+    if (isFingerprintPost && url.pathname === "/api/fingerprint/record") {
+      void (async () => {
+        try {
+          const body = await readJsonBody<{
+            kind?: unknown;
+            fingerprint?: unknown;
+            key?: unknown;
+            ttl_hours?: unknown;
+          }>(req);
+          if (typeof body.kind !== "string" || typeof body.fingerprint !== "string") {
+            sendJson(res, 400, { error: "kind and fingerprint are required strings" });
+            return;
+          }
+          const key = typeof body.key === "string" ? body.key : null;
+          const rawTtl = typeof body.ttl_hours === "number" ? body.ttl_hours : 24;
+          const ttl_hours = Math.max(0.0167, Math.min(rawTtl, 8760)); // clamp: 1 min – 1 year
+          const result: FingerprintRecordResult = store.recordFingerprint(body.kind, body.fingerprint, key, ttl_hours);
+          sendJson(res, 200, result);
+        } catch (err) {
+          log.warn("Failed to record fingerprint", { error: err instanceof Error ? err.message : String(err) });
+          sendJson(res, 500, { error: "Failed to record fingerprint" });
+        }
+      })();
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -983,6 +1071,8 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
         "/guard-health",
         "/api/persistent-anomalies",
         "/api/incidents",
+        "POST /api/fingerprint/check",
+        "POST /api/fingerprint/record",
       ],
     });
   });

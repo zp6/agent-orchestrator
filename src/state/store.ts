@@ -1966,6 +1966,7 @@ export class StateStore {
     this.runBountyOpportunityMigration();
     this.runRevenueLeadMigration();
     this.runDMOutreachMigration();
+    this.runFingerprintMigration();
   }
 
   private runPhase2Migration(): void {
@@ -13708,6 +13709,110 @@ export class StateStore {
   deleteBountyOpportunity(id: number): void {
     this.db.prepare("DELETE FROM bounty_opportunities WHERE id = ?").run(id);
   }
+
+  // ── Idempotency Fingerprint Store (issue #1494) ────────────────────────────
+  //
+  // A shared deduplication layer that any fleet agent can query before
+  // dispatching work. Fingerprints are opaque strings — each agent generates
+  // them using its own logic. The store records and checks by (kind, fingerprint)
+  // pairs and enforces per-record TTLs.
+  //
+  // Kinds: "meeting" | "dispatch" | "task" | string (extensible)
+
+  private runFingerprintMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS idempotency_fingerprints (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind         TEXT NOT NULL,
+        fingerprint  TEXT NOT NULL,
+        key          TEXT,
+        first_seen   TEXT NOT NULL,
+        expires_at   TEXT NOT NULL,
+        UNIQUE(kind, fingerprint)
+      );
+      CREATE INDEX IF NOT EXISTS idx_fingerprints_kind_fp
+        ON idempotency_fingerprints(kind, fingerprint);
+      CREATE INDEX IF NOT EXISTS idx_fingerprints_expires
+        ON idempotency_fingerprints(expires_at);
+    `);
+  }
+
+  /**
+   * Check whether a (kind, fingerprint) pair has been seen before and has not
+   * expired. Returns `{ seen: true, first_seen_at, key }` when a live record
+   * exists, `{ seen: false }` otherwise.
+   *
+   * Automatically prunes expired records as a side-effect (opportunistic GC).
+   */
+  checkFingerprint(kind: string, fingerprint: string): { seen: boolean; first_seen_at?: string; key?: string | null } {
+    this.runFingerprintMigration();
+    const now = new Date().toISOString();
+    // Prune expired entries opportunistically to keep the table lean.
+    this.db.prepare(`DELETE FROM idempotency_fingerprints WHERE expires_at <= ?`).run(now);
+
+    const row = this.db
+      .prepare(
+        `SELECT first_seen, key FROM idempotency_fingerprints
+         WHERE kind = ? AND fingerprint = ? AND expires_at > ?`,
+      )
+      .get(kind, fingerprint, now) as { first_seen: string; key: string | null } | undefined;
+
+    if (!row) return { seen: false };
+    return { seen: true, first_seen_at: row.first_seen, key: row.key };
+  }
+
+  /**
+   * Record a (kind, fingerprint) pair. If the record already exists it is
+   * refreshed with the new TTL (upsert semantics). Returns `{ recorded: true }`
+   * when the insertion was new, `{ recorded: false }` when the fingerprint was
+   * already present (but the TTL is still refreshed).
+   */
+  recordFingerprint(
+    kind: string,
+    fingerprint: string,
+    key: string | null,
+    ttl_hours: number,
+  ): { recorded: boolean } {
+    this.runFingerprintMigration();
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + ttl_hours * 3_600_000).toISOString();
+    const firstSeen = now.toISOString();
+
+    // INSERT OR IGNORE gives changes=1 for a new row, 0 for a conflict.
+    // ON CONFLICT DO UPDATE SET always reports changes=1 for both paths, so we
+    // use the two-statement pattern to reliably distinguish insert vs refresh.
+    const inserted = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO idempotency_fingerprints (kind, fingerprint, key, first_seen, expires_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(kind, fingerprint, key ?? null, firstSeen, expiresAt);
+
+    if (inserted.changes === 0) {
+      // Row already existed — refresh TTL only, do NOT overwrite first_seen.
+      this.db
+        .prepare(
+          `UPDATE idempotency_fingerprints SET expires_at = ? WHERE kind = ? AND fingerprint = ?`,
+        )
+        .run(expiresAt, kind, fingerprint);
+    }
+
+    // recorded=true means a new fingerprint was stored for the first time.
+    return { recorded: inserted.changes === 1 };
+  }
+
+  /**
+   * Prune all expired fingerprint records.
+   * Called periodically by the daemon to keep the table compact.
+   * Returns the number of rows deleted.
+   */
+  pruneExpiredFingerprints(): number {
+    this.runFingerprintMigration();
+    const result = this.db
+      .prepare(`DELETE FROM idempotency_fingerprints WHERE expires_at <= ?`)
+      .run(new Date().toISOString());
+    return result.changes;
+  }
 }
 
 interface BountyOpportunityRow {
@@ -13894,4 +13999,18 @@ function buildFts5Query(text: string): string | null {
   // FTS5 query: terms joined with OR for broad matching
   // Wrap each term in quotes to prevent FTS5 syntax interpretation
   return terms.map((t) => `"${t}"`).join(" OR ");
+}
+
+// ── Idempotency fingerprint types (issue #1494) ──────────────────────────────
+
+/** Result of checkFingerprint() */
+export interface FingerprintCheckResult {
+  seen: boolean;
+  first_seen_at?: string;
+  key?: string | null;
+}
+
+/** Result of recordFingerprint() */
+export interface FingerprintRecordResult {
+  recorded: boolean;
 }
