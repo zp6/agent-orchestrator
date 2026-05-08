@@ -1,3 +1,4 @@
+import "@anthropic-ai/sdk/shims/web";
 import { writePid } from "./pid.js";
 import { Daemon } from "./daemon.js";
 
