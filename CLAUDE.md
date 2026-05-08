@@ -222,16 +222,15 @@ scripts/copy-schema-contract.mjs  # Copies schema-contract.json into dist during
 src/
   index.ts                # Public package entrypoint; re-exports the stable API surface
   cli/                    # `orch` Commander CLI and subcommands
-  client/                 # Orchestrator-facing clients (LLM, Linear, reviewer, management, proxy)
-  triggers/               # Trigger polling / dispatch helpers and dedupe guards
-  reviewer/               # Core PR review, verification, routing, and quality-guard modules
-  orchestrator/           # Cross-repo coordination, capability, conflict, and memory helpers
-  service/                # Runtime services (daemon, Telegram, metrics, logging, health, PID)
+  client/                 # Orchestrator-facing clients (LLM, Linear, fleet-signer, reviewer, management, proxy, standup-action)
+  config/                 # Schema registry, validator, and catalog for triage/task schemas
+  orchestrator/           # Reviewer, verifier, supervisor, capability, conflict, memory, and cross-repo coordination
+  service/                # Runtime services (daemon, Telegram long-poll handler, metrics, logging, health, PID)
+  services/               # Treasury, signer client, and Polymarket client (revenue-path helpers)
   state/                  # SQLite-backed persistence layer and shared types
-  telegram/               # Long-poll Telegram command handler
-  integration/            # One-call orchestrator adapter for bootstrapping reviewer modules
-  utils/                  # Shared helpers used across reviewer/orchestrator modules
-  util/                   # Shared utilities such as ULID generation
+  triggers/               # Trigger polling / dispatch helpers and dedupe guards
+  utils/                  # Shared helpers used across orchestrator and client modules
+  worker/                 # Cloudflare Worker serving the Hire-the-Fleet landing page
 ```
 
 ## Key Design Decisions
