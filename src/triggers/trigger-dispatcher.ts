@@ -376,7 +376,7 @@ function fireAndForget(
      * staying with the source repo's agent.
      */
     sourceRepo?: string;
-    source: "github" | "linear" | "slack";
+    source: "github" | "linear" | "slack" | "revenue-executor";
     sourceRef: string;
     title: string;
     prevalidated?: boolean;

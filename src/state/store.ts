@@ -199,7 +199,7 @@ export interface FailureInterceptionStats {
   prevention_rate: number;
 }
 
-export type TaskSource = "github" | "linear" | "slack" | "manual" | "pr-feedback" | "marginal-redispatch";
+export type TaskSource = "github" | "linear" | "slack" | "manual" | "pr-feedback" | "marginal-redispatch" | "revenue-executor";
 /**
  * Identifies the kind of work a task represents.
  * Built-in types: "implementation" | "research" | "facilitation".
