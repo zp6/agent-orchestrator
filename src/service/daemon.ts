@@ -358,6 +358,23 @@ export class Daemon {
    */
   private duplicateIdDetector = new DuplicateIdDetector();
 
+  /**
+   * Tracks agents currently being deployed by redeployStale.
+   * Guards against overlapping deploy calls when a cycle times out and the next
+   * cycle starts before the prior redeployStale completes — without this, both
+   * cycles would trigger `docker compose up --build` for the same agent,
+   * producing orphan compose processes that hold the working-tree open and block
+   * concurrent git operations. Issue #1517.
+   */
+  private inFlightDeploys = new Set<string>();
+
+  /**
+   * Telemetry: total count of individual agent deploys skipped because a prior
+   * deploy for the same agent was still in progress. Surfaced in logs for
+   * observability. Issue #1517.
+   */
+  private deploySkippedCount = 0;
+
   constructor(configPath?: string, pollIntervalMs?: number) {
     this.configPath = configPath;
     this.config = loadConfig(configPath);
@@ -3377,8 +3394,39 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
       }
       if (idle.length === 0) return;
 
-      console.log(`[${time}] Redeploying ${idle.length} agent(s): ${idle.join(", ")}${busy.length > 0 ? ` (deferred: ${busy.join(", ")})` : ""}`);
-      const results = await this.deployer.redeployStale(new Set(idle));
+      // Guard against overlapping deploy calls caused by a timed-out cycle.
+      // When the 20-min watchdog abandons a cycle that was mid-deploy, the next
+      // cycle must not re-trigger `docker compose up --build` for the same agent.
+      // Duplicate triggers produce orphan compose processes that hold the
+      // working-tree open and block concurrent git operations (issue #1517).
+      const inFlight = idle.filter((name) => this.inFlightDeploys.has(name));
+      const deployable = idle.filter((name) => !this.inFlightDeploys.has(name));
+
+      if (inFlight.length > 0) {
+        this.deploySkippedCount += inFlight.length;
+        this.log.warn("redeployStale: skipping in-flight agents to prevent orphan compose processes", {
+          inFlight,
+          skippedTotal: this.deploySkippedCount,
+        });
+      }
+
+      if (deployable.length === 0) return;
+
+      // Mark as in-flight *before* calling the deployer so any concurrent cycle
+      // that starts during the await sees the lock immediately.
+      for (const name of deployable) this.inFlightDeploys.add(name);
+
+      console.log(`[${time}] Redeploying ${deployable.length} agent(s): ${deployable.join(", ")}${busy.length > 0 ? ` (deferred: ${busy.join(", ")})` : ""}${inFlight.length > 0 ? ` (in-flight, skipped: ${inFlight.join(", ")})` : ""}`);
+
+      let results: Awaited<ReturnType<typeof this.deployer.redeployStale>>;
+      try {
+        results = await this.deployer.redeployStale(new Set(deployable));
+      } finally {
+        // Always release the lock, even if redeployStale throws or is abandoned
+        // by a cycle hard-timeout, so a future cycle can retry.
+        for (const name of deployable) this.inFlightDeploys.delete(name);
+      }
+
       for (const r of results) {
         if (r.action === "redeployed") {
           console.log(`  ${r.agentName}: redeployed`);
