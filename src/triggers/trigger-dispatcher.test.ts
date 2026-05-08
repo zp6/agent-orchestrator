@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { dispatchGitHubIssues, dispatchIdleAgentBacklog, dispatchLinearChecks, dispatchSlackChecks, buildExistingPRReviewChecklist, routeBlockingPRToQueue, GUARD_FLOOD_GATE_WINDOW_MS, PR_GUARD_SURGE_THRESHOLD, prGuardSurgeAlertSentAt, _resetLinearCredentialWarningForTests } from "./trigger-dispatcher.js";
+import { dispatchGitHubIssues, dispatchIdleAgentBacklog, dispatchLinearChecks, dispatchRevenueExecutor, dispatchSlackChecks, buildExistingPRReviewChecklist, routeBlockingPRToQueue, GUARD_FLOOD_GATE_WINDOW_MS, PR_GUARD_SURGE_THRESHOLD, prGuardSurgeAlertSentAt, _resetLinearCredentialWarningForTests } from "./trigger-dispatcher.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type { Dispatcher } from "../orchestrator/dispatcher.js";
 import type { StateStore } from "../state/store.js";
@@ -3739,3 +3739,130 @@ describe("PR guard surge alert (issue #1082)", () => {
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
   });
 });
+
+describe("dispatchRevenueExecutor", () => {
+  let mockStore: StateStore;
+  let mockDispatcher: Dispatcher;
+  const ORIGINAL_ENV = process.env.REVENUE_EXECUTOR_ENABLED;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStore = {
+      isProcessed: vi.fn().mockReturnValue(false),
+      markProcessed: vi.fn(),
+      listTasks: vi.fn().mockReturnValue([]),
+      hasActiveTask: vi.fn().mockReturnValue(false),
+      isAgentAuthDegraded: vi.fn().mockReturnValue(false),
+      isSourceRefPriorityBoosted: vi.fn().mockReturnValue(false),
+      clearSourceRefPriority: vi.fn(),
+      removeInFlightReservation: vi.fn(),
+      listBountyOpportunities: vi.fn().mockReturnValue([
+        {
+          id: 1,
+          source_url: "https://github.com/example/repo/issues/42",
+          title: "Improve foo bar",
+          payout_amount_usd: 500,
+          payout_currency: "USD",
+          status: "open",
+          score: 30,
+          score_rationale: "good fit",
+          notes: null,
+          added_at: "2026-05-08T00:00:00Z",
+          updated_at: "2026-05-08T00:00:00Z",
+        },
+        {
+          id: 2,
+          source_url: "https://github.com/example/repo/issues/43",
+          title: "Smaller task",
+          payout_amount_usd: 100,
+          payout_currency: "USD",
+          status: "open",
+          score: 20,
+          score_rationale: "ok",
+          notes: null,
+          added_at: "2026-05-08T00:00:00Z",
+          updated_at: "2026-05-08T00:00:00Z",
+        },
+      ]),
+    } as unknown as StateStore;
+    mockDispatcher = {
+      dispatch: vi
+        .fn()
+        .mockResolvedValue({ taskId: "task-1", agentName: "claude-agent-orchestrator", response: { content: "done" } }),
+    } as unknown as Dispatcher;
+  });
+
+  afterEach(() => {
+    if (ORIGINAL_ENV === undefined) delete process.env.REVENUE_EXECUTOR_ENABLED;
+    else process.env.REVENUE_EXECUTOR_ENABLED = ORIGINAL_ENV;
+  });
+
+  it("skips when REVENUE_EXECUTOR_ENABLED is not set (default off)", async () => {
+    delete process.env.REVENUE_EXECUTOR_ENABLED;
+    const result = await dispatchRevenueExecutor(config, mockStore, mockDispatcher);
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("skips when REVENUE_EXECUTOR_ENABLED is set to anything other than 'true'", async () => {
+    process.env.REVENUE_EXECUTOR_ENABLED = "false";
+    const result = await dispatchRevenueExecutor(config, mockStore, mockDispatcher);
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("dispatches to orchestrator with the highest-scored bounty when enabled", async () => {
+    process.env.REVENUE_EXECUTOR_ENABLED = "true";
+    const result = await dispatchRevenueExecutor(config, mockStore, mockDispatcher);
+    expect(result.dispatched).toBe(1);
+    expect(mockDispatcher.dispatch).toHaveBeenCalledWith(
+      expect.stringContaining("Revenue executor"),
+      expect.objectContaining({ agentName: "claude-agent-orchestrator", source: "revenue-executor" }),
+    );
+    // The dispatch message should mention the top opportunity (id=1, highest score)
+    const call = (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[0]).toContain("#1");
+  });
+
+  it("uses a daily-bucketed sourceRef so the same day doesn't double-dispatch", async () => {
+    process.env.REVENUE_EXECUTOR_ENABLED = "true";
+    await dispatchRevenueExecutor(config, mockStore, mockDispatcher);
+    const call = (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const today = new Date().toISOString().slice(0, 10);
+    expect(call[1]).toEqual(
+      expect.objectContaining({ sourceRef: `revenue-executor:${today}` }),
+    );
+  });
+
+  it("skips when already processed for today (daily idempotency)", async () => {
+    process.env.REVENUE_EXECUTOR_ENABLED = "true";
+    (mockStore.isProcessed as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    const result = await dispatchRevenueExecutor(config, mockStore, mockDispatcher);
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("skips when the bounty queue is empty", async () => {
+    process.env.REVENUE_EXECUTOR_ENABLED = "true";
+    (mockStore.listBountyOpportunities as ReturnType<typeof vi.fn>).mockReturnValue([]);
+    const result = await dispatchRevenueExecutor(config, mockStore, mockDispatcher);
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("skips when all bounties have null scores (waiting for the matcher to score them)", async () => {
+    process.env.REVENUE_EXECUTOR_ENABLED = "true";
+    (mockStore.listBountyOpportunities as ReturnType<typeof vi.fn>).mockReturnValue([
+      { id: 1, title: "unscored", score: null, status: "open", source_url: "", payout_amount_usd: 100 },
+    ]);
+    const result = await dispatchRevenueExecutor(config, mockStore, mockDispatcher);
+    expect(result.dispatched).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+});
+

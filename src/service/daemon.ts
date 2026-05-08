@@ -18,6 +18,7 @@ import {
   dispatchGitHubIssues,
   dispatchIdleAgentBacklog,
   dispatchLinearChecks,
+  dispatchRevenueExecutor,
   dispatchSlackChecks,
   type TriggerResult,
 } from "../triggers/trigger-dispatcher.js";
@@ -2015,6 +2016,7 @@ export class Daemon {
         ),
         dispatchLinearChecks(this.config, this.store, this.dispatcher, registeredAgents),
         dispatchSlackChecks(this.config, this.store, this.dispatcher, registeredAgents),
+        dispatchRevenueExecutor(this.config, this.store, this.dispatcher, registeredAgents),
       ]);
 
       const totals: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
