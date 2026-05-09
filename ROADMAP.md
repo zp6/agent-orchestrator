@@ -70,6 +70,7 @@ Prior P0 sweep — issues closed in the last 7 days:
 - **Persistent cross-task knowledge graph** (#1088) — RAG injection for task memory; complements the just-merged `activity-generator`.
 - **Autonomous fleet self-scaling** (#1010) — dynamic agent slot allocation based on queue depth and budget headroom.
 - **State.db task corpus growth** — currently 0 rows in `tasks` / `task_logs` / `verification_outcome_logs` in this container; daemon-side write paths exist but aren't exercised here. Audit needed before any task-corpus-dependent feature (e.g., NEX-14 benchmark replay) can ship.
+- **Pub/sub message broker for inter-agent dispatch** (#1535) — replace direct daemon→agent calls with a broker (SQLite MVP → Redis/NATS at scale); enables cross-agent communication and decouples orchestrator from agent availability. Tier D ($10k/mo). Operator directive 2026-05-09.
 
 ## Linear NEX state
 
