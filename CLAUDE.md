@@ -290,6 +290,7 @@ Common `orch` commands:
 - `orch bounty` - crypto-native bounty queue management (Immunefi/Gitcoin)
 - `orch revenue-leads` - revenue lead matcher output inspection
 - `orch dm-outreach` - outbound DM outreach generation and tracking
+- `orch goals-snapshot` - snapshot current KR values into docs/goals-progress.yaml; `--capture-baseline` also updates goals.yaml baseline section; `--json` for machine-readable output
 
 ## Treasury Operations
 

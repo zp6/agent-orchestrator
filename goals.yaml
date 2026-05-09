@@ -5,11 +5,13 @@
 
 quarter: 2026-Q3
 
-# May 2026 baseline — captured before Q3 begins. Populate via Day-1 snapshot task.
+# May 2026 baseline — captured 2026-05-09 via `orch goals-snapshot --capture-baseline`.
+# failure_rate will populate on first live-fleet run (local state.db empty at capture time).
+# avg_cost_per_task_usd remains null until cost-per-task data source is wired.
 baseline:
-  tasks_per_week: null       # to be filled by baseline snapshot issue
-  failure_rate: null         # to be filled by baseline snapshot issue
-  avg_cost_per_task_usd: null  # to be filled by baseline snapshot issue
+  tasks_per_week: 0         # captured 2026-05-09 via orch goals-snapshot (live fleet: re-run to update)
+  failure_rate: null        # run `orch goals-snapshot --capture-baseline` on live fleet to populate
+  avg_cost_per_task_usd: null  # no data source yet — file issue to wire token-spend → cost-per-task
 
 goals:
   - id: external-oss-impact
