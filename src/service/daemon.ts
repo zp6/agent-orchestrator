@@ -119,6 +119,70 @@ function getCurrentCommitHash(): string {
 }
 
 /**
+ * Returns true if the working tree at `repoDir` has any modifications,
+ * untracked files, or staged changes — anything that would block a
+ * `git pull --ff-only`. Issue #1540.
+ */
+export function isWorkingTreeDirty(repoDir: string): boolean {
+  try {
+    const out = execSync("git status --porcelain", {
+      cwd: repoDir,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+      .toString()
+      .trim();
+    return out.length > 0;
+  } catch {
+    // If git status itself fails, treat as not-dirty: we'll let the
+    // pull attempt itself produce the actionable error.
+    return false;
+  }
+}
+
+/**
+ * Stashes any working-tree modifications at `repoDir` so a clean
+ * `git pull --ff-only` can succeed. Returns true iff a stash was actually
+ * created. Issue #1540.
+ */
+export function stashWorkingTree(repoDir: string): boolean {
+  if (!isWorkingTreeDirty(repoDir)) return false;
+  execSync("git stash push --include-untracked --message 'selfUpdate auto-stash'", {
+    cwd: repoDir,
+    stdio: "pipe",
+  });
+  return true;
+}
+
+/**
+ * Pops the most recent stash at `repoDir`. Returns the conflict-file list
+ * (empty on clean pop) plus an optional error message describing why pop
+ * failed. selfUpdate uses this to surface stash-pop conflicts to the operator
+ * instead of letting them silently jam the working tree. Issue #1540.
+ */
+export function popStash(repoDir: string): { conflicted: string[]; error?: string } {
+  try {
+    execSync("git stash pop", { cwd: repoDir, stdio: "pipe" });
+    return { conflicted: [] };
+  } catch (err) {
+    let conflicted: string[] = [];
+    try {
+      const out = execSync("git diff --name-only --diff-filter=U", {
+        cwd: repoDir,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+        .toString()
+        .trim();
+      conflicted = out ? out.split("\n") : [];
+    } catch {
+      // Best-effort: leave conflicted as []
+    }
+    return { conflicted, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
  * Maximum time a single poll cycle is allowed to run before the watchdog
  * kills it and moves on to the next cycle. Prevents a hung LLM call or
  * Docker operation from deadlocking the entire daemon for hours.
@@ -1249,6 +1313,13 @@ export class Daemon {
         commits,
       });
 
+      // Issue #1540: operator-side working-tree edits (e.g. agents.yaml linear
+      // teams overrides, or the daemon's own .orchestrator-deploy-sha mutation)
+      // would otherwise abort `git pull --ff-only` with "local changes would be
+      // overwritten by merge", silently freezing the daemon at an old commit.
+      // Stash pre-pull, pop post-pull, surface conflicts to operator.
+      const hadStash = stashWorkingTree(repoDir);
+
       try {
         execSync("git pull --ff-only origin main", { cwd: repoDir, stdio: "pipe" });
       } catch (pullErr) {
@@ -1289,14 +1360,54 @@ export class Daemon {
               `then restart the daemon.`,
             "warning",
           );
+          // Restore stashed working-tree before bailing so the next cycle
+          // doesn't see an "extra" stash entry from this aborted attempt.
+          if (hadStash) {
+            const popResult = popStash(repoDir);
+            if (popResult.error || popResult.conflicted.length > 0) {
+              this.log.warn("Self-update: stash restore failed after divergent-branch abort", popResult);
+            }
+          }
           // Don't proceed to rebuild on stale tree; let the next cycle try again
           // after the operator resolves the divergence.
           return;
         }
-        // Non-divergent failure (e.g. local uncommitted changes, network error
-        // mid-pull) — let the outer catch handle the original error.
+        // Non-divergent failure (e.g. network error mid-pull). Restore the
+        // stash before re-throwing so the outer catch sees a clean tree.
+        if (hadStash) {
+          const popResult = popStash(repoDir);
+          if (popResult.error || popResult.conflicted.length > 0) {
+            this.log.warn("Self-update: stash restore failed after pull error", popResult);
+          }
+        }
         throw pullErr;
       }
+
+      // Pull succeeded. Restore stashed working-tree edits. If the upstream
+      // changes touched the same files, surface the conflict to the operator —
+      // the daemon keeps running on the new code, but the working tree retains
+      // conflict markers until the operator resolves them.
+      if (hadStash) {
+        const popResult = popStash(repoDir);
+        if (popResult.conflicted.length > 0) {
+          this.log.warn(
+            "Self-update: stash pop produced conflicts — local edits and upstream changes both touched the same files",
+            { conflicted: popResult.conflicted },
+          );
+          await notifyOperator(
+            "Daemon selfUpdate: stash-pop conflict — operator review needed",
+            `Self-update pulled origin/main successfully but conflicts arose when restoring stashed working-tree edits. ` +
+              `Conflicted file(s): ${popResult.conflicted.join(", ")}. ` +
+              `The daemon will continue running on the new code; conflict markers remain in the working tree at ${repoDir} until you resolve them.`,
+            "warning",
+          );
+        } else if (popResult.error) {
+          this.log.warn("Self-update: stash pop failed without surfaced conflicts", {
+            error: popResult.error,
+          });
+        }
+      }
+
       execSync("npm run build", { cwd: repoDir, stdio: "pipe" });
 
       const afterHash = getCurrentCommitHash();

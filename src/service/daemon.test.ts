@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { extractClosedIssueNumbers, extractCrossRepoIssueRefs, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING, IDLE_RECLAIM_THRESHOLD_CYCLES, ORPHAN_PR_CHECK_EVERY_N_CYCLES, extractChecklistText, buildConsolidatedFeedbackMessage, buildFeedbackPreDeclarationChecklist, resolveConversationIdForPR, extractFlaggedFilesFromChecklist, buildDiffContextForFeedback, buildAuditChecklist } from "./daemon.js";
+import { execSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { extractClosedIssueNumbers, extractCrossRepoIssueRefs, prBodyHasIssueRef, shouldVerifyTask, buildHousekeepingMessage, needsRoadmapBootstrap, buildRoadmapBootstrapMessage, isPRAlreadyMerged, computeTimeoutRetry, TIMEOUT_MAX_RETRIES, TIMEOUT_RETRY_DELAY_MS, PR_FEEDBACK_CEILING, IDLE_RECLAIM_THRESHOLD_CYCLES, ORPHAN_PR_CHECK_EVERY_N_CYCLES, extractChecklistText, buildConsolidatedFeedbackMessage, buildFeedbackPreDeclarationChecklist, resolveConversationIdForPR, extractFlaggedFilesFromChecklist, buildDiffContextForFeedback, buildAuditChecklist, isWorkingTreeDirty, stashWorkingTree, popStash } from "./daemon.js";
 import { TIMEOUT_RETRY_MAX, TIMEOUT_RETRY_BACKOFF_MS } from "../orchestrator/dispatcher.js";
 import { StateStore } from "../state/store.js";
 
@@ -1039,5 +1043,147 @@ describe("resolveConversationIdForPR", () => {
 
     const conversationId = resolveConversationIdForPR(store, "owner/repo", "Closes #7");
     expect(conversationId).toBeUndefined();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// selfUpdate stash/pop helpers (issue #1540)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("selfUpdate stash/pop helpers", () => {
+  let repoDir: string;
+  const git = (cmd: string, opts: { allowFail?: boolean } = {}) => {
+    try {
+      return execSync(`git ${cmd}`, { cwd: repoDir, stdio: ["ignore", "pipe", "pipe"] })
+        .toString()
+        .trim();
+    } catch (err) {
+      if (opts.allowFail) return "";
+      throw err;
+    }
+  };
+
+  beforeEach(() => {
+    repoDir = mkdtempSync(join(tmpdir(), "selfupdate-test-"));
+    git("init -q -b main");
+    git("config user.email 'test@example.com'");
+    git("config user.name 'Test'");
+    writeFileSync(join(repoDir, "tracked.txt"), "initial\n");
+    git("add tracked.txt");
+    git("-c commit.gpgsign=false commit -q -m initial");
+  });
+
+  afterEach(() => {
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  describe("isWorkingTreeDirty", () => {
+    it("returns false on a clean tree", () => {
+      expect(isWorkingTreeDirty(repoDir)).toBe(false);
+    });
+
+    it("returns true when a tracked file is modified", () => {
+      writeFileSync(join(repoDir, "tracked.txt"), "modified\n");
+      expect(isWorkingTreeDirty(repoDir)).toBe(true);
+    });
+
+    it("returns true when an untracked file is present", () => {
+      writeFileSync(join(repoDir, "untracked.txt"), "new file\n");
+      expect(isWorkingTreeDirty(repoDir)).toBe(true);
+    });
+
+    it("returns false when the path is not a git repo", () => {
+      const notRepo = mkdtempSync(join(tmpdir(), "not-a-repo-"));
+      try {
+        expect(isWorkingTreeDirty(notRepo)).toBe(false);
+      } finally {
+        rmSync(notRepo, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("stashWorkingTree", () => {
+    it("returns false on a clean tree (no stash created)", () => {
+      expect(stashWorkingTree(repoDir)).toBe(false);
+      expect(git("stash list")).toBe("");
+    });
+
+    it("stashes a modified tracked file and returns true", () => {
+      writeFileSync(join(repoDir, "tracked.txt"), "modified\n");
+      expect(stashWorkingTree(repoDir)).toBe(true);
+      // Tree should now be clean (file restored to HEAD content)
+      expect(readFileSync(join(repoDir, "tracked.txt"), "utf-8")).toBe("initial\n");
+      // And there should be a stash entry tagged with our message
+      expect(git("stash list")).toContain("selfUpdate auto-stash");
+    });
+
+    it("stashes untracked files when working tree contains only untracked files", () => {
+      writeFileSync(join(repoDir, "untracked.txt"), "new file\n");
+      expect(stashWorkingTree(repoDir)).toBe(true);
+      expect(git("stash list")).toContain("selfUpdate auto-stash");
+    });
+  });
+
+  describe("popStash", () => {
+    it("returns clean result on a successful pop", () => {
+      writeFileSync(join(repoDir, "tracked.txt"), "modified\n");
+      stashWorkingTree(repoDir);
+      // Make sure the stash exists; tree is clean
+      expect(git("stash list")).toContain("selfUpdate auto-stash");
+      const result = popStash(repoDir);
+      expect(result.conflicted).toEqual([]);
+      expect(result.error).toBeUndefined();
+      // Modification was restored
+      expect(readFileSync(join(repoDir, "tracked.txt"), "utf-8")).toBe("modified\n");
+      // Stash entry is gone
+      expect(git("stash list")).toBe("");
+    });
+
+    it("surfaces conflicted files when pop produces a merge conflict", () => {
+      // Operator edit: modify tracked.txt
+      writeFileSync(join(repoDir, "tracked.txt"), "operator-edit\n");
+      stashWorkingTree(repoDir);
+
+      // Simulate an upstream change to the same file (the "git pull" effect):
+      // a new commit on main that touches tracked.txt with conflicting content.
+      writeFileSync(join(repoDir, "tracked.txt"), "upstream-change\n");
+      git("add tracked.txt");
+      git("-c commit.gpgsign=false commit -q -m upstream");
+
+      // Now pop the stash — this should conflict.
+      const result = popStash(repoDir);
+      expect(result.conflicted).toContain("tracked.txt");
+      expect(result.error).toBeDefined();
+    });
+
+    it("returns an error message but empty conflict list when stash is empty", () => {
+      const result = popStash(repoDir);
+      expect(result.error).toBeDefined();
+      expect(result.conflicted).toEqual([]);
+    });
+  });
+
+  describe("integration: dirty-tree → stash → pull-equivalent → pop", () => {
+    it("acceptance scenario: operator edit survives a clean upstream advance", () => {
+      // Operator edits a file that doesn't conflict with upstream changes
+      writeFileSync(join(repoDir, "operator-edit.txt"), "operator local config\n");
+
+      const hadStash = stashWorkingTree(repoDir);
+      expect(hadStash).toBe(true);
+      expect(isWorkingTreeDirty(repoDir)).toBe(false);
+
+      // Simulate `git pull` advancing main with an unrelated change
+      writeFileSync(join(repoDir, "upstream-feature.txt"), "new feature from origin\n");
+      git("add upstream-feature.txt");
+      git("-c commit.gpgsign=false commit -q -m 'upstream advance'");
+
+      // Pop should succeed — the operator's untracked file doesn't conflict.
+      const popResult = popStash(repoDir);
+      expect(popResult.conflicted).toEqual([]);
+      expect(popResult.error).toBeUndefined();
+      // Both the upstream feature AND the operator's edit are now in the tree
+      expect(readFileSync(join(repoDir, "upstream-feature.txt"), "utf-8")).toBe("new feature from origin\n");
+      expect(readFileSync(join(repoDir, "operator-edit.txt"), "utf-8")).toBe("operator local config\n");
+    });
   });
 });
