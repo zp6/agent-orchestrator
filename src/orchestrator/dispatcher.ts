@@ -192,10 +192,19 @@ export function isConnectionError(err: unknown): boolean {
     return true;
   }
 
-  // HTTP 5xx status codes from the Anthropic SDK / proxy
+  // HTTP 5xx status codes from the Anthropic SDK / proxy.
+  //
+  // IMPORTANT: Anthropic quota-exhaustion errors also arrive as HTTP 500 with
+  // api_error type (e.g. "You're out of extra usage · resets 1pm (UTC)").
+  // These are NOT infrastructure connection failures — they are rate-limit
+  // errors and must be handled by the isRateLimitError path (which marks the
+  // provider exhausted and schedules a reset).  Retrying them as connection
+  // errors wastes retry slots and never fixes the underlying quota problem.
   if (err instanceof Error && "status" in err) {
     const status = (err as Error & { status?: unknown }).status;
     if (typeof status === "number" && status >= 500 && status < 600) {
+      // Exclude quota/rate-limit 500s from the connection-error bucket.
+      if (isRateLimitError(err)) return false;
       return true;
     }
   }
@@ -2691,6 +2700,23 @@ export class Dispatcher {
 
       // Record failure for pool failover routing
       this.store.recordAgentFailure(agentName, errorMsg);
+
+      // Rate limit / quota exhaustion: mark provider exhausted so pool
+      // selection skips it until the reset window passes.  This mirrors the
+      // same check in the initial dispatch failure handler and must also run
+      // here so that quota errors encountered during a retry don't get
+      // silently swallowed into the connection-error retry loop.
+      if (isRateLimitError(err)) {
+        const provider = this.config.agents[agentName]?.provider ?? "claude";
+        const resetAt = parseResetTime(err);
+        markProviderExhausted(provider, errorMsg, resetAt ?? undefined);
+        this.log.warn("Rate limit detected during retry — provider marked exhausted", {
+          taskId: task.id,
+          agentName,
+          provider,
+          resetAt: resetAt?.toISOString(),
+        });
+      }
 
       if (isConnectionError(err)) {
         // Connection error during retry — apply connection-specific backoff policy.

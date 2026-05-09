@@ -12630,6 +12630,46 @@ export class StateStore {
   }
 
   /**
+   * Return failed tasks whose result starts with a connection-error prefix.
+   * Used by `orch connection-errors` (issue #1521) to diagnose the 37%
+   * connection-error failure bucket.
+   *
+   * @param daysBack  Look-back window in days (default 7)
+   * @param limit     Max rows to return (default 2000)
+   */
+  getConnectionErrorFailures(
+    daysBack = 7,
+    limit = 2000,
+  ): Array<{
+    task_id: string;
+    agent_name: string | null;
+    result: string | null;
+    created_at: string;
+  }> {
+    const cutoff = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
+    return this.db
+      .prepare(
+        `SELECT id AS task_id, agent_name, result, created_at
+         FROM tasks
+         WHERE status = 'failed'
+           AND created_at >= ?
+           AND (
+             result LIKE 'connection-error%'
+             OR result LIKE 'Connection error%'
+             OR result LIKE 'connection error%'
+           )
+         ORDER BY created_at DESC
+         LIMIT ?`,
+      )
+      .all(cutoff, limit) as Array<{
+        task_id: string;
+        agent_name: string | null;
+        result: string | null;
+        created_at: string;
+      }>;
+  }
+
+  /**
    * Return tasks with quality scores in the marginal range (minScore ≤ score < maxScore).
    * Includes per-day trend data and per-agent breakdown for dashboard panels.
    *

@@ -90,6 +90,12 @@ export function isProviderAvailable(provider: string): boolean {
 
 /**
  * Detect if an error is a rate limit response.
+ *
+ * Covers both standard 429 rate limits and Anthropic's "extra usage" quota
+ * exhaustion errors which arrive as HTTP 500 api_error responses with the
+ * message "You're out of extra usage · resets Xpm (UTC)".  These must be
+ * caught here so they are NOT mis-classified as connection errors (which
+ * would waste retry attempts against an already-exhausted provider).
  */
 export function isRateLimitError(err: unknown): boolean {
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
@@ -101,13 +107,18 @@ export function isRateLimitError(err: unknown): boolean {
     msg.includes("usage limit") ||
     msg.includes("quota") ||
     msg.includes("too many requests") ||
-    msg.includes("overloaded")
+    msg.includes("overloaded") ||
+    // Anthropic "extra usage" quota exhaustion (HTTP 500 api_error)
+    // e.g. "You're out of extra usage · resets 1pm (UTC)"
+    msg.includes("out of extra usage") ||
+    msg.includes("extra usage") ||
+    msg.includes("out of daily")
   );
 }
 
 /**
  * Try to extract a reset time from an error message.
- * Looks for patterns like "resets at 5pm", "retry after 60", etc.
+ * Looks for patterns like "resets at 5pm", "retry after 60", "resets 1pm (UTC)", etc.
  */
 export function parseResetTime(err: unknown): Date | null {
   const msg = err instanceof Error ? err.message : String(err);
@@ -127,6 +138,27 @@ export function parseResetTime(err: unknown): Date | null {
       const parsed = new Date(cleaned);
       if (!isNaN(parsed.getTime())) return parsed;
     } catch { /* fall through */ }
+  }
+
+  // Anthropic "extra usage" quota format: "resets 1pm (UTC)" or "resets 11:30am (UTC)"
+  // Also handles: "resets at 1pm", "resets at 11:30am (UTC)"
+  const resetsHourMatch = msg.match(/resets(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(utc\))?/i);
+  if (resetsHourMatch) {
+    let hours = parseInt(resetsHourMatch[1], 10);
+    const minutes = parseInt(resetsHourMatch[2] ?? "0", 10);
+    const ampm = resetsHourMatch[3].toLowerCase();
+    if (ampm === "pm" && hours !== 12) hours += 12;
+    if (ampm === "am" && hours === 12) hours = 0;
+
+    const now = new Date();
+    const resetAt = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hours, minutes, 0),
+    );
+    // If the reset time has already passed today (UTC), use tomorrow
+    if (resetAt <= now) {
+      resetAt.setUTCDate(resetAt.getUTCDate() + 1);
+    }
+    return resetAt;
   }
 
   // Fallback: assume 5 minute cooldown

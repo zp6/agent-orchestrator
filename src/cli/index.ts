@@ -62,6 +62,7 @@ import { registerTreasuryCommand } from "./commands/treasury.js";
 import { registerBountyCommand } from "./commands/bounty.js";
 import { registerRevenueLeadCommand } from "./commands/revenue-leads.js";
 import { registerDMOutreachCommand } from "./commands/dm-outreach.js";
+import { registerConnectionErrorsCommand } from "./commands/connection-errors.js";
 
 const program = new Command();
 
@@ -133,6 +134,7 @@ registerTreasuryCommand(program);
 registerBountyCommand(program);
 registerRevenueLeadCommand(program);
 registerDMOutreachCommand(program);
+registerConnectionErrorsCommand(program);
 
 program.parse();
 // docs PR ci-trigger

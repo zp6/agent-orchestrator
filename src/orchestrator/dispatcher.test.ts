@@ -315,6 +315,31 @@ describe("isConnectionError", () => {
   it("recognises generic 'failed to spawn' message as retryable", () => {
     expect(isConnectionError(new Error("failed to spawn codex CLI: some reason"))).toBe(true);
   });
+
+  // ── Quota/rate-limit 500s must NOT be classified as connection errors ──────
+  // Anthropic's "extra usage" quota exhaustion arrives as HTTP 500 api_error.
+  // These should be handled by isRateLimitError, not retried as connection errors.
+
+  it("returns false for HTTP 500 quota-exhaustion error (issue #1521 fix)", () => {
+    const err = Object.assign(
+      new Error(`500 {"type":"error","error":{"type":"api_error","message":"You're out of extra usage · resets 1pm (UTC)"}}`),
+      { status: 500 },
+    );
+    expect(isConnectionError(err)).toBe(false);
+  });
+
+  it("returns false for 'extra usage' in a generic 500 message (issue #1521 fix)", () => {
+    const err = Object.assign(
+      new Error("extra usage exhausted for this period"),
+      { status: 500 },
+    );
+    expect(isConnectionError(err)).toBe(false);
+  });
+
+  it("returns true for a genuine 500 without rate-limit indicators", () => {
+    const err = Object.assign(new Error("Internal Server Error"), { status: 500 });
+    expect(isConnectionError(err)).toBe(true);
+  });
 });
 
 // ────────────────────────────────────────────────────────────────────────────
