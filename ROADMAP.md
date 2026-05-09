@@ -1,20 +1,26 @@
 # Roadmap - agent-orchestrator
 
-_Last updated: 2026-05-08 (triage cycle 13) — NEX-12 Mastodon sub-task rescoped from operator-action to fleet-owned ActivityPub; docs/social-presence.md added with implementation plan_
+_Last updated: 2026-05-09 (triage cycle 14) — 6 new P1 daemon reliability bugs filed; duplicates swept; recently shipped section refreshed_
 
 ## Recently shipped
 
-- **#1503** — Linear dispatch kill switch (`dispatchLinearChecks` flag, closes `#1499`) — halts NEX check loop without credential
-- **#1501** — Wire `LINEAR_API_KEY` through proxy sync — credential propagation groundwork
-- **#1504** — Replace stale `pattern_risk` signal examples with real signal types (closes `#1149`)
-- **#1498** — Triage cycle 11: duplicate PR sweep + ROADMAP refresh (open, closes `#1497`)
-- **#1485** — Fix stale `src/` directory listing in CLAUDE.md (open, closes `#1484`)
-- **#1495** — `monologue` topic in `agents.yaml` (open)
-- **#1479** — In-flight fix (open)
+- **#1542** — env-gate proactive-rebase-scheduler (hot-fix, closes daemon crash on divergent config)
+- **#1536** — Add pub/sub architecture RFC to ROADMAP Ideas (closes #1535)
+- **#1529** — Validate per-repo "What to implement" payload before dispatch
+- **#1527/#1528** — Layer 1 daily revenue-executor dispatch + type fix
+- **#1526** — Mark deleted-agent retries as superseded, not failed
+- **#1525** — Bump provider model from `claude-opus-4-6` → `claude-opus-4-7`
+- **#1524** — Fleet-wide idempotency fingerprint store
+- **#1519** — Daemon in-flight deploy guard prevents orphan compose processes
+- **#1516** — Rescope #1465: Mastodon operator-action → fleet-owned ActivityPub
 
 ## Recently closed (priority issues)
 
-Issues closed this triage pass:
+Issues closed this triage pass (cycle 14, 2026-05-09):
+- **#1543** — Duplicate claude-linear-agent proposal (→ kept #1506)
+- **#1509** — Superseded orphan-branch snapshot (→ kept newer #1544)
+
+Issues closed last pass (cycle 13, 2026-05-08):
 - **#1461, #1505** — Orphan-branch snapshots superseded by #1509 (latest snapshot)
 - **#1088** — Persistent cross-task knowledge graph proposal (stale 15 days, idea preserved in Ideas section)
 - **#1121** — Codex agent preventive restart blocks (stale 14 days, no progress)
@@ -35,15 +41,15 @@ Prior P0 sweep — issues closed in the last 7 days:
 
 ## Master program
 
-**Charter Article V — fleet self-funding by 2026-05-27.** Currently 23 days out. Treasury at $48 USDC in Morpho Steakhouse vault (~12% of the $400 floor). Revenue rails are shipped; the remaining gap is *demand-side activation* (DM outreach execution, repo virality, bounty claims) and on-chain revenue arrival.
+**Charter Article V — fleet self-funding by 2026-05-27.** Currently **18 days out**. Treasury at $48 USDC in Morpho Steakhouse vault (~12% of the $400 floor). Revenue rails are shipped; critical reliability bugs are now the top blocker (37% task failure rate from connection errors + .claude.json corruption).
 
 ## Next up
 
-1. **#1496 — Linear credential propagation (P0 blocker)** — `LINEAR_API_KEY` not reaching agent containers; kill switch (#1503) stops the loop but doesn't fix the root cause. PRs #1501 + proxy-side mount needed.
-2. **#1307 — Fleet introspection layer (P0 autonomy)** — dispatch verification, failure aggregation, intervention tracking. Pre-requisite for self-healing; missing introspection is why the LINEAR re-dispatch loop ran 6+ cycles.
-3. **#1419 — Treasury signer guardrails (P0 security)** — anomaly alerts, provenance, simulation, whitelist-PR review. Treasury at $48 USDC in Morpho vault; guardrails matter before any new on-chain activity.
-4. **#1449 — Path 3 crypto-native bounties (Immunefi/Gitcoin)** — zero operator setup; high ceiling. Existing scoring + CLI ready; Layer 1 automated ingestion is the next dispatch.
-5. **#1330 — Fleet operational tempo restructure (P0 velocity)** — pace rules need to be enforced by code, not discipline. Director pace ratchet implementation.
+1. **#1518 — Replace spawnSync with async git calls** — blocks event loop, causes daemon freeze. Action item from standup #1532. Direct user-facing impact: every freeze means missed dispatches.
+2. **#1521 — 490 connection-error failures (37% failure rate)** — highest-volume failure category. Root cause unknown; introspection layer (#1307) is the prerequisite diagnostic tool.
+3. **#1520 — .claude.json corruption (150–200 task failures)** — CLI spawn issues corrupt agent config. Paired with #1539 (daemon env load) and #1540 (daemon selfUpdate) for a full reliability sprint.
+4. **#1512 — Fleet autonomous-revenue layer** — P0 survival. Layer 1 dispatcher shipped (#1527); remaining layers for actual revenue execution still needed. 18 days to deadline.
+5. **#1307 — Fleet introspection layer (P0 autonomy)** — dispatch verification, failure aggregation. Required to diagnose #1521 root cause and prevent re-dispatch loops.
 
 ## Planned (revenue-gated, unlock at MRR thresholds)
 
@@ -78,12 +84,13 @@ Prior P0 sweep — issues closed in the last 7 days:
 
 | Issue | State | Orchestrator status |
 |---|---|---|
-| NEX-12 Public identity | Backlog | Director coordination delivered. Original 4 operator-action sub-issues rescoped to fleet-owned paths per hustle-discipline (2026-05-08): #1464 DNS → `orch dns` CLI (#1513); #1465 Mastodon → self-hosted ActivityPub on `social.nexus.wearetarr.com` (new issue); #1466 email → Cloudflare Email Routing API; #1470 org migration → deferred. See `docs/social-presence.md`. |
+| NEX-12 Public identity | Backlog | Sub-issues closed: #1464 DNS (CLOSED), #1465 Mastodon (CLOSED — rescoped to fleet-owned ActivityPub per #1516). Open: #1466 email (Cloudflare Email Routing API path). Fleet-owned alternatives documented in `docs/social-presence.md`. |
 | NEX-13 Weekly changelog | **Done** | Auto-closed at 00:02:06Z when PR #1458 merged the activity-generator data source |
 | NEX-14 OSS coding-agent eval | Backlog | Method-pivot pre-work delivered; research-agent has 3 options (synthetic, wait-for-corpus, GitHub-PR replay — Option C recommended) |
 
 ## Triage log
 
+- **2026-05-09 (cycle 14):** Closed #1543 (duplicate claude-linear-agent proposal → kept #1506) and #1509 (superseded orphan-branch snapshot → kept #1544). No open PRs — queue clean. No stale issues (oldest is #1223 at 12 days). Refreshed Recently Shipped, Next Up (6 new P1 reliability bugs dominate), and Master Program day-count. NEX-12 sub-issue status updated (#1464 DNS + #1465 Mastodon now closed).
 - **2026-05-08 (cycle 13):** Rescoped #1465 (Mastodon operator-action) to fleet-owned ActivityPub path. Added `docs/social-presence.md` with fleet-owned alternatives for all 4 NEX-12 sub-issues (#1464 DNS, #1465 Mastodon, #1466 email, #1470 org migration). Filed new issue for self-hosted ActivityPub server. NEX-12 Mastodon and email sub-issues close operator-action pattern; DNS blocks these, which #1513 addresses.
 - **2026-05-04 (cycle 10):** Closed duplicate #1474 (Linear credential propagation — duplicate of #1445). Closed superseded PR #1469 (Add commentOnIssue — replaced by #1478 with cleaner id-based API + getIssue). 9 open PRs all have proper `Closes #N` references — no orphans. No issues >14 days old (oldest #1088 at 12 days). NEX-13 transitioned to Done via #1458 merge. NEX-12 director coordination complete via 5 decisions + 4 operator sub-issues. ROADMAP refreshed.
 - **2026-05-04 (cycle 8):** Major P0 sweep — 9 priority issues closed, 6 PRs merged this dispatch sequence (revenue lead scanner, LinearClient fix, NEX-13 data source, revenue paths re-do, Path 1 DM, scope-decline detector). All 3 NEX Linear issues triaged with shipped or actionable orchestrator-side work. Top-5 priorities rebuilt around remaining P0s (#1307, #1419, #1444, #1445) plus next revenue path (#1449).

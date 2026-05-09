@@ -224,7 +224,7 @@ src/
   cli/                    # `orch` Commander CLI and subcommands
   client/                 # Orchestrator-facing clients (LLM, Linear, fleet-signer, reviewer, management, proxy, standup-action)
   config/                 # Schema registry, validator, and catalog for triage/task schemas
-  orchestrator/           # Reviewer, verifier, supervisor, capability, conflict, memory, and cross-repo coordination
+  orchestrator/           # Reviewer, verifier, supervisor, capability, conflict, memory, cross-repo coordination, and revenue-path helpers (bounty matching, DM outreach, activity generation, scope decline detection)
   service/                # Runtime services (daemon, Telegram long-poll handler, metrics, logging, health, PID)
   services/               # Treasury, signer client, and Polymarket client (revenue-path helpers)
   state/                  # SQLite-backed persistence layer and shared types
@@ -286,6 +286,10 @@ Common `orch` commands:
 - `orch quality-summary` - rolling approval-quality summary
 - `orch memory` - semantic task memory digest
 - `orch anomalies` - anomaly and drift surfaces
+- `orch treasury` - treasury balance and on-chain operations (supply, withdraw, morpho-migrate)
+- `orch bounty` - crypto-native bounty queue management (Immunefi/Gitcoin)
+- `orch revenue-leads` - revenue lead matcher output inspection
+- `orch dm-outreach` - outbound DM outreach generation and tracking
 
 ## Treasury Operations
 
