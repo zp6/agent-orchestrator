@@ -46,11 +46,14 @@ vi.mock("../service/notify.js", () => ({
   notifyOperator: vi.fn().mockResolvedValue(undefined),
 }));
 
-// Mock issue-state-bridge — the dispatcher now uses cachedValidateForDispatch
-// instead of direct isIssueOpen/findExistingPRsForIssue calls.
+// Mock issue-state-bridge — the dispatcher uses cachedValidateForDispatch for
+// the primary dispatch path and liveValidateForDispatch for the retry path
+// (issue #1563: retry guard must bypass the cache to detect issues closed
+// without a PR, which would otherwise be invisible for up to 60 s).
 // Default: no skip reason (issue is open, no PRs). Individual tests override.
 vi.mock("../triggers/issue-state-bridge.js", () => ({
   cachedValidateForDispatch: vi.fn().mockReturnValue(null),
+  liveValidateForDispatch: vi.fn().mockReturnValue(null),
   cachedIsIssueOpen: vi.fn().mockReturnValue(true),
   cachedGetIssueState: vi.fn().mockReturnValue({
     state: "open",
@@ -100,8 +103,9 @@ const mockIsIssueOpen = vi.mocked(isIssueOpen);
 const mockFindExistingPRsForIssue = vi.mocked(findExistingPRsForIssue);
 const mockCountOpenPRs = vi.mocked(countOpenPRs);
 
-import { cachedValidateForDispatch } from "../triggers/issue-state-bridge.js";
+import { cachedValidateForDispatch, liveValidateForDispatch } from "../triggers/issue-state-bridge.js";
 const mockCachedValidateForDispatch = vi.mocked(cachedValidateForDispatch);
+const mockLiveValidateForDispatch = vi.mocked(liveValidateForDispatch);
 
 import { runGitHubPreDispatchValidation } from "./pre-dispatch-validator.js";
 const mockRunGitHubPreDispatchValidation = vi.mocked(runGitHubPreDispatchValidation);
@@ -1236,6 +1240,107 @@ describe("Dispatcher.retryTask — GH auth pre-flight", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
+// retryTask() — closed-issue guard (issue #1563)
+// Verifies that liveValidateForDispatch (not cachedValidateForDispatch) is used
+// in the retry path so a stale cache entry cannot cause a re-dispatch for an
+// issue that was closed (without a PR) during a prior attempt.
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("Dispatcher.retryTask — closed-issue guard (issue #1563)", () => {
+  let store: StateStore;
+  let dispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+    dispatcher = new Dispatcher(makeConfig(), store);
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+    // Default: live fetch says issue is open (no skip reason).
+    mockLiveValidateForDispatch.mockReturnValue(null);
+  });
+
+  const makeGithubConnectionErrorTask = (retryCount = 1) => {
+    const task = store.createTask({
+      title: "github task",
+      description: "fix the issue",
+      source: "github",
+      source_ref: "owner/repo#567",
+      agent_name: "test-agent",
+    });
+    store.updateTask(task.id, {
+      status: "failed",
+      result: "Connection error: proxy unreachable",
+      retry_count: retryCount,
+      next_retry_at: new Date(Date.now() - 1000).toISOString(),
+    });
+    return store.getTask(task.id)!;
+  };
+
+  it("cancels retry and marks task done+approved when issue is closed without PR (live check)", async () => {
+    // Simulate: stale cache says "open" but live fetch detects closure.
+    mockCachedValidateForDispatch.mockReturnValue(null); // stale cache: open
+    mockLiveValidateForDispatch.mockReturnValue("issue owner/repo#567 is closed");
+
+    const task = makeGithubConnectionErrorTask(1);
+    await dispatcher.retryTask(task);
+
+    // Must NOT dispatch to agent
+    expect(mockSend).not.toHaveBeenCalled();
+
+    const updated = store.getTask(task.id)!;
+    // Task should be marked done (not failed) — this was a valid external completion
+    expect(updated.status).toBe("done");
+    expect(updated.result).toBe("issue-closed-without-pr");
+    expect(updated.verification_status).toBe("approved");
+    expect(updated.quality_score).toBe(1.0);
+    expect(updated.next_retry_at).toBeNull();
+  });
+
+  it("uses liveValidateForDispatch (not cachedValidateForDispatch) in the retry guard", async () => {
+    // Scenario from #1563: the cache (populated 30s ago) still says the issue is
+    // open. The live fetch sees it is closed. The retry must honour the live check.
+    mockCachedValidateForDispatch.mockReturnValue(null);
+    mockLiveValidateForDispatch.mockReturnValue("issue owner/repo#567 is closed");
+
+    const task = makeGithubConnectionErrorTask(1);
+    await dispatcher.retryTask(task);
+
+    // liveValidateForDispatch must have been called, cachedValidateForDispatch must NOT
+    expect(mockLiveValidateForDispatch).toHaveBeenCalledWith("owner/repo", 567);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it("cancels retry and marks task failed when issue has an open PR (not closed)", async () => {
+    mockLiveValidateForDispatch.mockReturnValue("issue owner/repo#567 already has an open PR");
+
+    const task = makeGithubConnectionErrorTask(1);
+    await dispatcher.retryTask(task);
+
+    expect(mockSend).not.toHaveBeenCalled();
+    const updated = store.getTask(task.id)!;
+    // Open-PR case is not a valid external completion — keep as failed
+    expect(updated.status).toBe("failed");
+    expect(updated.result).toContain("Resolved externally");
+    expect(updated.next_retry_at).toBeNull();
+  });
+
+  it("proceeds with retry when live check confirms issue is still open", async () => {
+    mockLiveValidateForDispatch.mockReturnValue(null); // issue still open
+    mockSend.mockResolvedValueOnce({
+      content: "fix applied",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    const task = makeGithubConnectionErrorTask(1);
+    await dispatcher.retryTask(task);
+
+    expect(mockLiveValidateForDispatch).toHaveBeenCalledWith("owner/repo", 567);
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(store.getTask(task.id)!.status).toBe("done");
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
 // dispatch() — closed-issue guard (issue #444)
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -1495,7 +1600,7 @@ describe("Dispatcher.retryTask — closed-issue guard (issue #431)", () => {
     dispatcher = new Dispatcher(makeConfig(), store);
   });
 
-  it("skips retry and marks resolved-externally when source issue is closed", async () => {
+  it("skips retry and marks done+approved when source issue is closed (no PR)", async () => {
     const task = store.createTask({
       title: "Fix bug",
       description: "Fix the bug",
@@ -1510,18 +1615,19 @@ describe("Dispatcher.retryTask — closed-issue guard (issue #431)", () => {
       next_retry_at: new Date(Date.now() - 1000).toISOString(),
     });
 
-    // Issue is now closed (via cached validation)
-    mockCachedValidateForDispatch.mockReturnValueOnce("issue owner/repo#99 is closed");
+    // Live check shows issue is closed (bypasses stale cache — issue #1563)
+    mockLiveValidateForDispatch.mockReturnValueOnce("issue owner/repo#99 is closed");
 
     await dispatcher.retryTask(store.getTask(task.id)!);
 
     // Should NOT have called send
     expect(mockSend).not.toHaveBeenCalled();
 
-    // Task should be failed with resolved-externally message
+    // Issue-closed-without-PR is a valid external completion — mark done+approved
     const updated = store.getTask(task.id)!;
-    expect(updated.status).toBe("failed");
-    expect(updated.result).toContain("Resolved externally");
+    expect(updated.status).toBe("done");
+    expect(updated.result).toBe("issue-closed-without-pr");
+    expect(updated.verification_status).toBe("approved");
     expect(updated.next_retry_at).toBeNull();
   });
 
@@ -1554,7 +1660,7 @@ describe("Dispatcher.retryTask — closed-issue guard (issue #431)", () => {
       next_retry_at: new Date(Date.now() - 1000).toISOString(),
     });
 
-    mockCachedValidateForDispatch.mockReturnValueOnce(`issue ${sourceRef} is closed`);
+    mockLiveValidateForDispatch.mockReturnValueOnce(`issue ${sourceRef} is closed`);
 
     await rerouteDispatcher.retryTask(store.getTask(task.id)!);
 
@@ -1562,7 +1668,9 @@ describe("Dispatcher.retryTask — closed-issue guard (issue #431)", () => {
     expect(store.listTasks({}).find((t) => t.title === "[auto-reroute] Fix bug")).toBeUndefined();
 
     const updated = store.getTask(task.id)!;
-    expect(updated.result).toContain("Resolved externally");
+    // Issue closed without PR → done+approved (not failed, not auto-rerouted)
+    expect(updated.status).toBe("done");
+    expect(updated.result).toBe("issue-closed-without-pr");
     expect(updated.next_retry_at).toBeNull();
   });
 
@@ -1581,8 +1689,8 @@ describe("Dispatcher.retryTask — closed-issue guard (issue #431)", () => {
       next_retry_at: new Date(Date.now() - 1000).toISOString(),
     });
 
-    // Issue is still open (via cached validation)
-    mockCachedValidateForDispatch.mockReturnValueOnce(null);
+    // Issue is still open (live validation confirms — issue #1563)
+    mockLiveValidateForDispatch.mockReturnValueOnce(null);
     mockSend.mockResolvedValueOnce({
       content: "retry succeeded",
       usage: { input_tokens: 5, output_tokens: 5 },
@@ -1617,8 +1725,8 @@ describe("Dispatcher.retryTask — closed-issue guard (issue #431)", () => {
 
     await dispatcher.retryTask(store.getTask(task.id)!);
 
-    // cachedValidateForDispatch should NOT have been called for non-github tasks
-    expect(mockCachedValidateForDispatch).not.toHaveBeenCalled();
+    // liveValidateForDispatch should NOT have been called for non-github tasks
+    expect(mockLiveValidateForDispatch).not.toHaveBeenCalled();
     expect(mockSend).toHaveBeenCalledTimes(1);
   });
 });
@@ -1627,7 +1735,7 @@ describe("Dispatcher.retryTask — closed-issue guard (issue #431)", () => {
 // retryTask() — already-resolved guard (issue #457)
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("Dispatcher.retryTask — already-resolved guard (issue #457, #458 cached)", () => {
+describe("Dispatcher.retryTask — already-resolved guard (issue #457, #458 live)", () => {
   let store: StateStore;
   let dispatcher: Dispatcher;
 
@@ -1637,7 +1745,7 @@ describe("Dispatcher.retryTask — already-resolved guard (issue #457, #458 cach
     dispatcher = new Dispatcher(makeConfig(), store);
   });
 
-  it("skips retry when issue has a merged PR", async () => {
+  it("skips retry and marks failed when issue has a merged PR (not closed)", async () => {
     const task = store.createTask({
       title: "Fix bug",
       description: "Fix the bug",
@@ -1652,17 +1760,18 @@ describe("Dispatcher.retryTask — already-resolved guard (issue #457, #458 cach
       next_retry_at: new Date(Date.now() - 1000).toISOString(),
     });
 
-    mockCachedValidateForDispatch.mockReturnValueOnce("issue owner/repo#99 has a merged PR");
+    // Live check (not cached) detects merged PR — not a closed-without-PR completion
+    mockLiveValidateForDispatch.mockReturnValueOnce("issue owner/repo#99 has a merged PR");
 
     await dispatcher.retryTask(store.getTask(task.id)!);
 
     // Should NOT have called send
     expect(mockSend).not.toHaveBeenCalled();
 
-    // Task should be failed with resolved-externally message
+    // Merged PR (but not "is closed") → keeps "failed" status
     const updated = store.getTask(task.id)!;
     expect(updated.status).toBe("failed");
-    expect(updated.result).toContain("merged PR");
+    expect(updated.result).toContain("Resolved externally");
     expect(updated.next_retry_at).toBeNull();
   });
 
@@ -1681,7 +1790,7 @@ describe("Dispatcher.retryTask — already-resolved guard (issue #457, #458 cach
       next_retry_at: new Date(Date.now() - 1000).toISOString(),
     });
 
-    mockCachedValidateForDispatch.mockReturnValueOnce(null);
+    mockLiveValidateForDispatch.mockReturnValueOnce(null);
     mockSend.mockResolvedValueOnce({
       content: "retry succeeded",
       usage: { input_tokens: 5, output_tokens: 5 },

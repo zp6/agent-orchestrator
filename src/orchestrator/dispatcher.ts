@@ -9,7 +9,7 @@ import { type OrchestratorConfig, getPoolMembers } from "../config/schema.js";
 import { ulid } from "ulid";
 import { createLogger } from "../service/logger.js";
 import { validateGhAuth, GhAuthError, countOpenPRs } from "../triggers/github.js";
-import { cachedValidateForDispatch } from "../triggers/issue-state-bridge.js";
+import { cachedValidateForDispatch, liveValidateForDispatch } from "../triggers/issue-state-bridge.js";
 import { checkDuplicate } from "../triggers/duplicate-guard.js";
 import { reportEscalation, DEFAULT_ESCALATION_RETRY_LIMIT } from "../triggers/reporters.js";
 import { buildRejectionHistoryBlock } from "./rejection-history.js";
@@ -2322,39 +2322,70 @@ export class Dispatcher {
       }
     }
 
-    // Pre-retry closed-issue guard (issue #431): if the source issue has been
-    // closed since the task was originally dispatched, skip the retry entirely
-    // and mark the task as resolved externally. This prevents wasting an agent
-    // cycle on work that is no longer needed.
+    // Pre-retry closed-issue guard (issue #431 / #1563): if the source issue
+    // has been closed since the task was originally dispatched, skip the retry
+    // entirely and mark the task as resolved externally. This prevents wasting
+    // an agent cycle on work that is no longer needed.
+    //
+    // Issue #1563: use liveValidateForDispatch (cache-bypassing) instead of
+    // cachedValidateForDispatch to avoid the stale-cache race where a 30–60 s
+    // connection-error retry fires before the 60 s TTL expires, sees the cached
+    // "open" state, and re-dispatches a task whose issue was already closed by
+    // a prior attempt (e.g. the agent closed it without opening a PR). Fetching
+    // live state on every retry is safe: retries are infrequent (≥ 30 s apart),
+    // so the GitHub API call rate is negligible. The cache is populated as a
+    // side effect of the fetch so subsequent non-retry dispatch paths remain fast.
     if (task.source === "github" && task.source_ref) {
       const repo = extractRepoFromSourceRef(task.source_ref);
       const issueMatch = task.source_ref.match(/#(\d+)$/);
       if (repo && issueMatch) {
         const issueNumber = parseInt(issueMatch[1], 10);
-        const skipReason = cachedValidateForDispatch(repo, issueNumber);
+        const skipReason = liveValidateForDispatch(repo, issueNumber);
         if (skipReason) {
-          this.log.info("Retry skipped: issue state validation failed (cached)", {
+          // Determine whether the issue was closed without a PR (a valid external
+          // completion) versus blocked by an open/merged PR (a real failure mode).
+          const isClosedWithoutPR = skipReason.includes("is closed");
+          this.log.info("Retry skipped: issue state validation failed (live)", {
             taskId: task.id,
             agentName,
             sourceRef: task.source_ref,
             issueNumber,
             reason: skipReason,
+            isClosedWithoutPR,
           });
           this.store.addLog({
             task_id: task.id,
             direction: "system",
-            content: `Resolved externally: ${skipReason} — retry cancelled.`,
+            content: isClosedWithoutPR
+              ? `Issue closed without PR: ${skipReason} — task marked done (issue-closed-without-pr).`
+              : `Resolved externally: ${skipReason} — retry cancelled.`,
           });
-          this.store.updateTask(task.id, {
-            status: "failed",
-            result: `Resolved externally: ${skipReason} — retry cancelled.`,
-            next_retry_at: null,
-          });
+          if (isClosedWithoutPR) {
+            // The agent (or a human) closed the issue without opening a PR.
+            // This is a valid completion (doctrine-block, won't-fix, duplicate,
+            // etc.) — mark done+approved so it does not count as a failure and
+            // is not retried or re-dispatched.
+            this.store.updateTask(task.id, {
+              status: "done",
+              result: "issue-closed-without-pr",
+              verification_status: "approved",
+              quality_score: 1.0,
+              verification_notes:
+                "Auto-approved: linked issue was closed without a PR (retry #1563 guard).",
+              next_retry_at: null,
+            });
+          } else {
+            this.store.updateTask(task.id, {
+              status: "failed",
+              result: `Resolved externally: ${skipReason} — retry cancelled.`,
+              next_retry_at: null,
+            });
+          }
           return;
         }
 
-        // Note: cachedValidateForDispatch above already covers closed issues,
-        // merged PRs, and open PRs in a single cached check (issue #458).
+        // Note: liveValidateForDispatch above covers closed issues, merged PRs,
+        // and open PRs in a single fresh-fetch check (issue #458 / #1563).
       }
     }
 
