@@ -834,7 +834,10 @@ export class Daemon {
       if (this.cycleCount % ORPHAN_PR_CHECK_EVERY_N_CYCLES === 0) {
         batch4.push(this.createOrphanPRs(time));
       }
-      if (this.cycleCount % PROACTIVE_REBASE_EVERY_N_CYCLES === 0) {
+      if (
+        process.env.PROACTIVE_REBASE_DISABLED !== "true" &&
+        this.cycleCount % PROACTIVE_REBASE_EVERY_N_CYCLES === 0
+      ) {
         batch4.push(this.runProactiveRebases(time));
       }
       if (this.cycleCount % IMPROVEMENT_CHECK_EVERY_N_CYCLES === 0) {
