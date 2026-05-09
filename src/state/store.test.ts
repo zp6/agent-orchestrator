@@ -2406,6 +2406,34 @@ describe("StateStore", () => {
       const info = store.getProcessedTriggerInfo("linear", "owner/repo#42");
       expect(info).toBeUndefined();
     });
+
+    // Regression: better-sqlite3 enables PRAGMA foreign_keys=ON by default.
+    // processed_triggers.task_id REFERENCES tasks(id) — so prior code that
+    // passed synthetic strings (e.g. "closed-issue-42", "skipped:no-task:NOW",
+    // "dispatch-error:Connection error:NOW") fired "FOREIGN KEY constraint
+    // failed" 444+ times in production logs and silently abandoned the dedup
+    // row, causing the same trigger to re-fire every poll cycle.
+    it("accepts null task_id without throwing (no-task / dispatch-error / dedup-only paths)", () => {
+      expect(() => {
+        store.markProcessed("github", "owner/repo#deduponly", null);
+      }).not.toThrow();
+      const info = store.getProcessedTriggerInfo("github", "owner/repo#deduponly");
+      expect(info).toBeDefined();
+      expect(info?.task_id).toBeNull();
+    });
+
+    it("isProcessed returns true after markProcessed(_, _, null) — dedup actually persists", () => {
+      expect(store.isProcessed("linear", "team/checks/2026-05-09")).toBe(false);
+      store.markProcessed("linear", "team/checks/2026-05-09", null);
+      expect(store.isProcessed("linear", "team/checks/2026-05-09")).toBe(true);
+    });
+
+    it("real task_id still works after the signature widening", () => {
+      const task = store.createTask({ title: "Task", source: "github", source_ref: "owner/repo#nullcoexist" });
+      store.markProcessed("github", "owner/repo#nullcoexist", task.id);
+      const info = store.getProcessedTriggerInfo("github", "owner/repo#nullcoexist");
+      expect(info?.task_id).toBe(task.id);
+    });
   });
 
   describe("daemon stats (incrementStat / getStat)", () => {

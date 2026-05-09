@@ -1772,8 +1772,12 @@ export class Daemon {
             result: `Resolved externally: source issue ${task.source_ref} was closed while task was in-flight.`,
             next_retry_at: null,
           });
-          // Mark processed so this issue is not re-dispatched
-          this.store.markProcessed("github", task.source_ref!, `closed-externally-${task.id}`);
+          // Mark processed so this issue is not re-dispatched. Pass the real
+          // task.id (not a synthetic prefix) — task.id is a valid row in the
+          // tasks table (just updated above), so the processed_triggers FK is
+          // satisfied. The "closed-externally" reason is captured in the task's
+          // own result field above.
+          this.store.markProcessed("github", task.source_ref!, task.id);
           cancelled++;
         }
       }

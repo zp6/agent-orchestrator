@@ -425,14 +425,15 @@ function fireAndForget(
       // this, deterministic-skip dispatches (validation failure, scope rejection,
       // "nothing to do" agent responses) leave the sourceRef unmarked, causing
       // the same trigger to re-fire on every poll cycle until the hour bucket
-      // rolls over. The synthetic taskId encodes the skip reason for diagnostics.
-      // See issue #1467.
-      const syntheticTaskId = `skipped:${result.validation?.failureCode ?? "no-task"}:${Date.now()}`;
+      // rolls over. See issues #1467 and the FK fix that paired with this:
+      // pass null because no real task row exists for this dedup record (the
+      // failureCode and other diagnostics are already in the log.info above).
       try {
-        store.markProcessed(options.source, options.sourceRef, syntheticTaskId);
+        store.markProcessed(options.source, options.sourceRef, null);
       } catch (markErr) {
-        // markProcessed uses INSERT OR IGNORE, so this should never throw, but
-        // defensively swallow to keep the no-task return path side-effect-free.
+        // markProcessed uses INSERT OR IGNORE which suppresses unique
+        // violations; FK violations no longer apply because we pass null. This
+        // catch is a defensive backstop for unforeseen errors.
         log.warn("Failed to mark no-task dispatch as processed", {
           sourceRef: options.sourceRef,
           error: markErr instanceof Error ? markErr.message : String(markErr),
@@ -493,9 +494,11 @@ function fireAndForget(
     // open). Linear and Slack source refs are time-bucketed, so a failed
     // dispatch within the same bucket should not fire again this cycle.
     if (options.source !== "github") {
-      const syntheticTaskId = `dispatch-error:${err instanceof Error ? err.message.slice(0, 40) : "unknown"}:${Date.now()}`;
       try {
-        store.markProcessed(options.source, options.sourceRef, syntheticTaskId);
+        // Pass null: no real task row exists for this dedup record. The error
+        // diagnostic is captured in the log.error above (line "Fire-and-forget
+        // dispatch failed").
+        store.markProcessed(options.source, options.sourceRef, null);
       } catch (markErr) {
         log.warn("Failed to mark dispatch-error sourceRef as processed", {
           sourceRef: options.sourceRef,
@@ -857,12 +860,16 @@ export async function dispatchGitHubIssues(
           failureReason: validation.failureReason,
         });
         if (validation.failureCode === "issue_closed") {
-          store.markProcessed("github", sourceRef, `closed-issue-${issue.number}`);
+          // FK constraint precludes synthetic task_ids; the issue number is in
+          // sourceRef and the closure context is in adjacent log lines.
+          store.markProcessed("github", sourceRef, null);
           // Release dispatch lock: issue is closed, no need to hold the lock
           store.releaseDispatchLock("github", sourceRef);
         }
         if (validation.failureCode === "merged_pr_exists") {
-          store.markProcessed("github", sourceRef, `merged-pr-${validation.blockingPRNumber ?? issue.number}`);
+          // FK constraint precludes synthetic task_ids; the merged-PR context
+          // is captured in the log.info above and the validation object.
+          store.markProcessed("github", sourceRef, null);
           // Release dispatch lock: PR merged, issue will be closed shortly
           store.releaseDispatchLock("github", sourceRef);
         }
@@ -1027,7 +1034,9 @@ export async function dispatchGitHubIssues(
             reason: standupDecision.reason,
             actionItemCount: standupDecision.actionItemCount,
           });
-          store.markProcessed("github", sourceRef, `standup-skip-${issue.number}`);
+          // FK constraint precludes synthetic task_ids; the standup-skip
+          // context is in adjacent log lines.
+          store.markProcessed("github", sourceRef, null);
           result.skipped++;
           continue;
         }
@@ -1432,11 +1441,15 @@ export async function dispatchIdleAgentBacklog(
           failureReason: validation.failureReason,
         });
         if (validation.failureCode === "issue_closed") {
-          store.markProcessed("github", sourceRef, `closed-issue-${issue.number}`);
+          // FK constraint precludes synthetic task_ids; the issue number is in
+          // sourceRef and the closure context is in adjacent log lines.
+          store.markProcessed("github", sourceRef, null);
           store.releaseDispatchLock("github", sourceRef);
         }
         if (validation.failureCode === "merged_pr_exists") {
-          store.markProcessed("github", sourceRef, `merged-pr-${validation.blockingPRNumber ?? issue.number}`);
+          // FK constraint precludes synthetic task_ids; the merged-PR context
+          // is captured in the log.info above and the validation object.
+          store.markProcessed("github", sourceRef, null);
           store.releaseDispatchLock("github", sourceRef);
         }
         // Pre-dispatch open-PR deduplication (issue #859) — idle pickup path
@@ -1508,7 +1521,9 @@ export async function dispatchIdleAgentBacklog(
             sourceRef,
             reason: standupDecision.reason,
           });
-          store.markProcessed("github", sourceRef, `standup-skip-${issue.number}`);
+          // FK constraint precludes synthetic task_ids; the standup-skip
+          // context is in adjacent log lines.
+          store.markProcessed("github", sourceRef, null);
           result.skipped++;
           continue;
         }

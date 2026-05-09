@@ -510,7 +510,10 @@ describe("pre-dispatch issue state validation", () => {
     expect(result.skipped).toBe(1);
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
     // Should mark processed so it isn't re-checked every cycle
-    expect(mockStore.markProcessed).toHaveBeenCalledWith("github", "owner/my-repo#42", expect.stringContaining("closed-issue-42"));
+    // markProcessed is called with null as the third arg — synthetic task_ids
+    // would violate the processed_triggers.task_id FK; closure context is
+    // already captured in the log.info call.
+    expect(mockStore.markProcessed).toHaveBeenCalledWith("github", "owner/my-repo#42", null);
   });
 
   it("proceeds with dispatch when issue is confirmed open", async () => {
@@ -663,8 +666,11 @@ describe("duplicate PR detection before dispatch", () => {
     expect(result.dispatched).toBe(1);
     expect(result.skipped).toBe(0);
     expect(mockDispatcher.dispatch).toHaveBeenCalled();
-    // Must NOT mark processed — issue is still open and should be re-evaluated
-    expect(mockStore.markProcessed).not.toHaveBeenCalledWith("github", "owner/my-repo#42", expect.stringContaining("merged-pr-10"));
+    // Must NOT mark this issue as processed via the merged-PR fast-path —
+    // the issue is still open and should be re-evaluated. (The dispatch's
+    // own success path WILL eventually call markProcessed with the real
+    // task_id, but not from the merged_pr_exists branch.)
+    expect(mockStore.markProcessed).not.toHaveBeenCalledWith("github", "owner/my-repo#42", null);
   });
 
   it("skips dispatch when a non-draft open PR already exists (open-PR dispatch guard)", async () => {
@@ -1323,10 +1329,13 @@ describe("dispatchLinearChecks", () => {
     const [source, sourceRef, taskId] = markCalls[0];
     expect(source).toBe("linear");
     expect(sourceRef).toMatch(/^linear-check:linear-agent:/);
-    expect(taskId).toMatch(/^skipped:test-skip-reason:\d+$/);
+    // task_id is null on no-task paths — synthetic strings would violate the
+    // processed_triggers.task_id FK (better-sqlite3 enables foreign_keys=ON
+    // by default). Diagnostic context lives in the log.info above.
+    expect(taskId).toBeNull();
   });
 
-  it("uses 'no-task' fallback in synthetic taskId when validation failureCode is absent", async () => {
+  it("uses null taskId when validation failureCode is absent (no-task path)", async () => {
     (mockDispatcher.dispatch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       taskId: null,
       agentName: "linear-agent",
@@ -1338,7 +1347,7 @@ describe("dispatchLinearChecks", () => {
 
     const markCalls = (mockStore.markProcessed as ReturnType<typeof vi.fn>).mock.calls;
     expect(markCalls.length).toBeGreaterThanOrEqual(1);
-    expect(markCalls[0][2]).toMatch(/^skipped:no-task:\d+$/);
+    expect(markCalls[0][2]).toBeNull();
   });
 
   it("marks sourceRef as processed when dispatch throws a connection error (issue #1444)", async () => {
@@ -1360,7 +1369,8 @@ describe("dispatchLinearChecks", () => {
     const [source, sourceRef, taskId] = markCalls[0];
     expect(source).toBe("linear");
     expect(sourceRef).toMatch(/^linear-check:linear-agent:/);
-    expect(taskId).toMatch(/^dispatch-error:Connection error\.?:\d+$/);
+    // task_id is null on dispatch-error paths — same FK reasoning as above.
+    expect(taskId).toBeNull();
   });
 
   describe("credential guard (issue #1487)", () => {
@@ -1776,9 +1786,10 @@ describe("dispatchIdleAgentBacklog", () => {
     expect(result.dispatched).toBe(0);
     expect(result.skipped).toBe(1);
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
-    expect(mockStore.markProcessed).toHaveBeenCalledWith(
-      "github", "owner/my-repo#1", expect.stringContaining("closed-issue-1"),
-    );
+    // task_id is null on the closed-issue dedup path — synthetic strings
+    // would violate the processed_triggers.task_id FK; the issue number is
+    // already in sourceRef and the closure context is in adjacent log lines.
+    expect(mockStore.markProcessed).toHaveBeenCalledWith("github", "owner/my-repo#1", null);
   });
 
   it("skips dispatch when a non-draft open PR already exists in idle backlog", async () => {

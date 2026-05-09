@@ -2517,8 +2517,16 @@ export class StateStore {
     return !!row;
   }
 
-  markProcessed(source: string, sourceRef: string, taskId: string): void {
+  markProcessed(source: string, sourceRef: string, taskId: string | null): void {
     const now = new Date().toISOString();
+    // Pass null for taskId on dedup-only paths (no real task was created — e.g.
+    // a no-task dispatch skip, a dispatch error, or a github trigger that
+    // recorded "issue closed"/"PR merged"/"standup skip"). The processed_triggers
+    // schema declares `task_id TEXT REFERENCES tasks(id)`, and better-sqlite3
+    // enables `PRAGMA foreign_keys = ON` by default — so passing a synthetic
+    // string like `closed-issue-42` previously fired "FOREIGN KEY constraint
+    // failed" and silently abandoned the dedup row. The trigger then re-fired
+    // every poll cycle on the same sourceRef.  See processed_triggers schema.
     this.db.prepare(`
       INSERT OR IGNORE INTO processed_triggers (source, source_ref, task_id, created_at, completed_at)
       VALUES (?, ?, ?, ?, ?)
