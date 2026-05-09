@@ -1964,6 +1964,7 @@ export class StateStore {
     this.runOSSEngagementMigration();
     this.runMonologueMigration();
     this.runBountyOpportunityMigration();
+    this.runBountyDenylistMigration();
     this.runRevenueLeadMigration();
     this.runDMOutreachMigration();
     this.runFingerprintMigration();
@@ -13710,6 +13711,106 @@ export class StateStore {
     this.db.prepare("DELETE FROM bounty_opportunities WHERE id = ?").run(id);
   }
 
+  // ── Bounty Source Deny-List (issue #1553) ─────────────────────────────────
+  //
+  // Prevents the revenue executor from dispatching against known-hostile orgs/repos
+  // (e.g. prompt-injection honeypots). Entries are org-level ("1712n") or
+  // repo-level ("1712n/dn-institute"). The executor normalises the source URL to
+  // both forms and checks against this table before queuing work.
+
+  private runBountyDenylistMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS bounty_source_denylist (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        org_or_repo TEXT NOT NULL UNIQUE,
+        reason      TEXT NOT NULL,
+        retire_when TEXT,
+        added_at    TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_denylist_org ON bounty_source_denylist(org_or_repo);
+    `);
+    // Seed the known honeypot (idempotent via INSERT OR IGNORE)
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO bounty_source_denylist (org_or_repo, reason, retire_when, added_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(
+      "1712n/dn-institute",
+      "Confirmed prompt-injection honeypot org. Issue bodies contain hidden instructions targeting AI coding agents.",
+      "Retire when #1273 full sanitizer ships AND a manual sample of recent issues comes back clean.",
+      now,
+      now,
+    );
+  }
+
+  addBountyDenylistEntry(params: {
+    org_or_repo: string;
+    reason: string;
+    retire_when?: string;
+  }): BountyDenylistEntry {
+    const now = new Date().toISOString();
+    const normalised = params.org_or_repo.toLowerCase().trim();
+    try {
+      this.db.prepare(`
+        INSERT INTO bounty_source_denylist (org_or_repo, reason, retire_when, added_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(normalised, params.reason, params.retire_when ?? null, now, now);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("UNIQUE constraint failed")) {
+        throw new Error(`Deny-list entry already exists for "${normalised}"`);
+      }
+      throw err;
+    }
+    return this.getBountyDenylistEntry(normalised)!;
+  }
+
+  getBountyDenylistEntry(org_or_repo: string): BountyDenylistEntry | null {
+    const row = this.db
+      .prepare("SELECT * FROM bounty_source_denylist WHERE org_or_repo = ?")
+      .get(org_or_repo.toLowerCase()) as BountyDenylistRow | undefined;
+    return row ? hydrateBountyDenylistEntry(row) : null;
+  }
+
+  listBountyDenylistEntries(): BountyDenylistEntry[] {
+    const rows = this.db
+      .prepare("SELECT * FROM bounty_source_denylist ORDER BY added_at DESC")
+      .all() as BountyDenylistRow[];
+    return rows.map(hydrateBountyDenylistEntry);
+  }
+
+  removeBountyDenylistEntry(org_or_repo: string): void {
+    this.db
+      .prepare("DELETE FROM bounty_source_denylist WHERE org_or_repo = ?")
+      .run(org_or_repo.toLowerCase());
+  }
+
+  /**
+   * Check whether a bounty source URL is deny-listed.
+   *
+   * Normalises the URL to extract both the org ("1712n") and the full repo slug
+   * ("1712n/dn-institute") and checks against the deny-list for either form.
+   *
+   * @param sourceUrl - e.g. "https://github.com/1712n/dn-institute/issues/425"
+   * @returns matching entry if deny-listed, null otherwise
+   */
+  isBountySourceDenylisted(sourceUrl: string): BountyDenylistEntry | null {
+    try {
+      const url = new URL(sourceUrl);
+      const parts = url.pathname.replace(/^\//, "").split("/").filter(Boolean);
+      const org = parts[0]?.toLowerCase();
+      const repoSlug = parts.slice(0, 2).join("/").toLowerCase();
+      if (!org) return null;
+      // Check repo-level first (more specific), then org-level
+      const byRepo = repoSlug ? this.getBountyDenylistEntry(repoSlug) : null;
+      if (byRepo) return byRepo;
+      return this.getBountyDenylistEntry(org);
+    } catch {
+      return null;
+    }
+  }
+
   // ── Idempotency Fingerprint Store (issue #1494) ────────────────────────────
   //
   // A shared deduplication layer that any fleet agent can query before
@@ -13813,6 +13914,28 @@ export class StateStore {
       .run(new Date().toISOString());
     return result.changes;
   }
+}
+
+interface BountyDenylistRow {
+  id: number;
+  org_or_repo: string;
+  reason: string;
+  retire_when: string | null;
+  added_at: string;
+  updated_at: string;
+}
+
+export interface BountyDenylistEntry {
+  id: number;
+  org_or_repo: string;
+  reason: string;
+  retire_when: string | null;
+  added_at: string;
+  updated_at: string;
+}
+
+function hydrateBountyDenylistEntry(row: BountyDenylistRow): BountyDenylistEntry {
+  return { ...row };
 }
 
 interface BountyOpportunityRow {
