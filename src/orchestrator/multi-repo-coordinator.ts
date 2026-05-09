@@ -186,10 +186,15 @@ export function detectMultiRepoChangeSets(
     if (!hasImplVerb(contextWindow)) continue;
 
     seenRepos.add(peerRepo);
+    const rawSnippet = extractContextForRepo(description, matchedToken);
+    const safeSnippet = validateChangeSetDescription(rawSnippet, matchedToken, {
+      repo: peerRepo,
+      sourceRef: task.source_ref ?? undefined,
+    });
     detected.push({
       repo: peerRepo,
       agentName: candidateName,
-      description: extractContextForRepo(description, matchedToken),
+      description: safeSnippet,
       mergeOrder: 0, // assigned after sorting
     });
   }
@@ -673,9 +678,23 @@ function buildChildTaskDescription(
     `\`Part of coordinated change: ${coordinationGroupId}\`\n` +
     `The orchestrator will automatically link the PRs.`;
 
+  // Defense-in-depth: re-validate cs.description at the dispatch boundary in
+  // case it was populated by a path that bypasses detectMultiRepoChangeSets
+  // (e.g. a stored coordination group from before the validation was added,
+  // or a future code path that constructs change sets directly).
+  // We pass `null` for the matched-token check because the original token
+  // (which could have been a topic keyword, not the repo name) isn't
+  // tracked on the change set. This still catches the common failure modes
+  // — empty, antibody fragment, mid-sentence truncation — that motivated
+  // agent-reviewer#668.
+  const safeDescription = validateChangeSetDescription(cs.description, null, {
+    repo: cs.repo,
+    sourceRef: parentTask.source_ref ?? undefined,
+  });
+
   return (
     `${parentRef}\n\n` +
-    `**What to implement in \`${cs.repo}\`:**\n${cs.description}\n` +
+    `**What to implement in \`${cs.repo}\`:**\n${safeDescription}\n` +
     `${siblingNote}` +
     `${mergeOrderNote}` +
     `${crossRefNote}\n\n` +
@@ -689,27 +708,41 @@ function buildChildTaskDescription(
 /**
  * Extract a snippet of text from the task description that is relevant to the
  * given peer repo mention.
+ *
+ * Walks back to the nearest **paragraph boundary** (blank line) rather than
+ * any sentence break. This keeps the extracted snippet inside a logically
+ * connected block, preventing cross-paragraph contamination where the snippet
+ * picks up text from an unrelated bullet/section that happens to precede the
+ * mentioned repo.
+ *
+ * See agent-reviewer#668 for the failure mode this guards against: dispatch
+ * sent the reviewer "Direct commits to main bypass code review, break the
+ * merge queue, and can corrupt .." as the "What to implement" payload — text
+ * which had no relation to the underlying issue (Mastodon/ActivityPub).
  */
 function extractContextForRepo(description: string, matchedToken: string, maxLen = 500): string {
   const lower = description.toLowerCase();
   const idx = lower.indexOf(matchedToken.toLowerCase());
   if (idx === -1) return description.slice(0, maxLen);
 
-  const sentenceBreak = /[.!?\n]/;
+  // Walk back to the nearest paragraph boundary (blank line: \n\n) so the
+  // extracted snippet stays inside one paragraph/list-item.
   let start = 0;
-  let end = description.length;
-
-  // Walk back to sentence start
-  for (let i = idx; i >= 0; i--) {
-    if (sentenceBreak.test(description[i]!) && i < idx - 1) {
-      start = i + 1;
-      break;
-    }
+  const backChunk = description.slice(0, idx);
+  const lastBlank = backChunk.lastIndexOf("\n\n");
+  if (lastBlank !== -1) {
+    start = lastBlank + 2;
   }
 
-  // Walk forward to end of next sentence
+  // Walk forward up to the next paragraph boundary, or to the end of the
+  // second sentence after the match — whichever comes first.
+  let end = description.length;
+  const forwardStart = idx + matchedToken.length;
+  const fwdBlank = description.indexOf("\n\n", forwardStart);
+
+  const sentenceBreak = /[.!?\n]/;
   let sentences = 0;
-  for (let i = idx + matchedToken.length; i < description.length; i++) {
+  for (let i = forwardStart; i < description.length; i++) {
     if (sentenceBreak.test(description[i]!)) {
       sentences++;
       if (sentences >= 2) {
@@ -718,9 +751,152 @@ function extractContextForRepo(description: string, matchedToken: string, maxLen
       }
     }
   }
+  if (fwdBlank !== -1 && fwdBlank < end) end = fwdBlank;
 
   const excerpt = description.slice(start, end).trim();
   return excerpt.length > maxLen ? excerpt.slice(0, maxLen) + "…" : excerpt;
+}
+
+// ── Change-set description validation ─────────────────────────────────────────
+
+/**
+ * Sentinel used as the "What to implement" payload when extraction quality is
+ * poor. Reviewer/dispatch agents recognise this and switch to review-only mode
+ * rather than guessing at code changes from corrupted text.
+ */
+export const NO_CODE_CHANGES_FALLBACK =
+  "No code changes required — review only. (The dispatch could not extract a reliable per-repo description from the parent issue.)";
+
+/**
+ * Heuristic: does this snippet look like a fragment of a fleet-antibody /
+ * learned-pattern hint rather than a real per-repo description?
+ *
+ * Antibody hints are formatted as "- **<title>**: <description>" and often
+ * end with a "..." truncation marker. They are about cross-cutting failure
+ * patterns (branch protection, schema enforcement, etc.) rather than per-repo
+ * implementation work, so they are a clear false-positive when used as a
+ * "What to implement" payload.
+ */
+function looksLikeAntibodyFragment(text: string): boolean {
+  const lower = text.toLowerCase();
+  // Common antibody-block markers
+  if (/fleet antibod/i.test(text)) return true;
+  if (/known failure pattern/i.test(text)) return true;
+  // Common antibody/pattern phrasings
+  const antibodyPhrases = [
+    "bypass code review",
+    "merge queue",
+    "direct commits to main",
+    "must include a json block",
+    "mandatory json schema",
+    "missing \"closes #",
+  ];
+  return antibodyPhrases.some((p) => lower.includes(p));
+}
+
+/**
+ * Heuristic: snippet is mid-sentence truncated (cut off without proper
+ * punctuation). We treat trailing "..", "...", "…", or no terminal punctuation
+ * AFTER a partial word as suspicious.
+ */
+function looksTruncated(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return true;
+  // Bare ellipsis-like trailing markers without a closing sentence
+  if (/(?:\.\.|\.{3,}|…)\s*$/.test(trimmed)) {
+    // If the snippet is short AND ends in ellipsis, it's almost certainly
+    // mid-sentence. (Long extracts with ellipsis appended by maxLen-truncation
+    // are also flagged — that's intentional; we'd rather fall back than ship
+    // a half-thought.)
+    return true;
+  }
+  // Ends without sentence-terminating punctuation (allow ) ] " ' ` after)
+  if (!/[.!?:)\]"'`]\s*$/.test(trimmed)) {
+    // Short, no punctuation, no token containment → suspicious.
+    return trimmed.length < 40;
+  }
+  return false;
+}
+
+/**
+ * Validate that an extracted change-set description is suitable to send as
+ * the "What to implement" payload. If the description looks corrupted
+ * (truncated mid-sentence, mismatches the matched token, or looks like an
+ * antibody fragment), warn and substitute a safe fallback.
+ *
+ * This is the dispatch-boundary defense recommended by agent-reviewer#668.
+ *
+ * `matchedToken` is the token used to detect the peer repo (a repo slug,
+ * agent name, or owns_topics keyword). When provided, the snippet is
+ * required to contain it — a missing token implies the extraction crossed a
+ * paragraph or list-item boundary and is likely noise. Pass `null` at the
+ * dispatch boundary where the original matched token isn't tracked, so we
+ * only flag the easy-to-detect failure modes (empty, antibody fragment,
+ * truncation).
+ */
+export function validateChangeSetDescription(
+  description: string,
+  matchedToken: string | null,
+  ctx: { repo: string; sourceRef?: string },
+): string {
+  const trimmed = description.trim();
+
+  if (trimmed.length === 0) {
+    log.warn("Coordinated change description is empty — falling back to review-only", {
+      repo: ctx.repo,
+      sourceRef: ctx.sourceRef,
+      reason: "empty",
+    });
+    return NO_CODE_CHANGES_FALLBACK;
+  }
+
+  // Already-replaced fallback short-circuits; treat it as a valid payload.
+  if (trimmed === NO_CODE_CHANGES_FALLBACK) return trimmed;
+
+  if (looksLikeAntibodyFragment(trimmed)) {
+    log.warn(
+      "Coordinated change description looks like an antibody/learned-pattern fragment — falling back to review-only",
+      {
+        repo: ctx.repo,
+        sourceRef: ctx.sourceRef,
+        snippet: trimmed.slice(0, 120),
+        reason: "antibody_fragment",
+      },
+    );
+    return NO_CODE_CHANGES_FALLBACK;
+  }
+
+  if (looksTruncated(trimmed)) {
+    log.warn(
+      "Coordinated change description appears truncated mid-sentence — falling back to review-only",
+      {
+        repo: ctx.repo,
+        sourceRef: ctx.sourceRef,
+        snippet: trimmed.slice(0, 120),
+        reason: "truncated",
+      },
+    );
+    return NO_CODE_CHANGES_FALLBACK;
+  }
+
+  // Sanity: the snippet should mention the matched token (when known). If
+  // it doesn't, the extraction crossed a paragraph or list-item boundary
+  // and is likely noise rather than a meaningful per-repo description.
+  if (matchedToken && !trimmed.toLowerCase().includes(matchedToken.toLowerCase())) {
+    log.warn(
+      "Coordinated change description does not contain the matched repo token — falling back to review-only",
+      {
+        repo: ctx.repo,
+        sourceRef: ctx.sourceRef,
+        matchedToken,
+        snippet: trimmed.slice(0, 120),
+        reason: "token_missing",
+      },
+    );
+    return NO_CODE_CHANGES_FALLBACK;
+  }
+
+  return trimmed;
 }
 
 /**

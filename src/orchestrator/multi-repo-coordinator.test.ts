@@ -6,6 +6,8 @@ import {
   extractPRFromTaskResult,
   createCoordinationGroup,
   checkAndAdvanceCoordination,
+  validateChangeSetDescription,
+  NO_CODE_CHANGES_FALLBACK,
   type MultiRepoChangeSet,
 } from "./multi-repo-coordinator.js";
 import type { OrchestratorConfig } from "../config/schema.js";
@@ -168,6 +170,114 @@ describe("detectMultiRepoChangeSets", () => {
       for (let i = 1; i < orders.length; i++) {
         expect(orders[i]).toBe(orders[i - 1]! + 1);
       }
+    }
+  });
+});
+
+// ── validateChangeSetDescription (agent-reviewer#668 regression) ──────────────
+
+describe("validateChangeSetDescription", () => {
+  const ctx = { repo: "rapartlu/agent-reviewer", sourceRef: "rapartlu/agent-orchestrator#1465" };
+
+  it("returns the trimmed description when it is well-formed and contains the matched token", () => {
+    const result = validateChangeSetDescription(
+      "  Update the agent-reviewer client to handle new fields.  ",
+      "agent-reviewer",
+      ctx,
+    );
+    expect(result).toBe("Update the agent-reviewer client to handle new fields.");
+  });
+
+  it("falls back to review-only sentinel when the description is empty", () => {
+    expect(validateChangeSetDescription("", "agent-reviewer", ctx)).toBe(NO_CODE_CHANGES_FALLBACK);
+    expect(validateChangeSetDescription("   \n  ", "agent-reviewer", ctx)).toBe(NO_CODE_CHANGES_FALLBACK);
+  });
+
+  it("falls back when the description looks like a fleet-antibody fragment (the #668 failure)", () => {
+    // Exact failure mode reported by claude-orchestrator-reviewer in #668
+    const truncatedAntibody = "Direct commits to main bypass code review, break the merge queue, and can corrupt ..";
+    expect(validateChangeSetDescription(truncatedAntibody, "agent-reviewer", ctx)).toBe(
+      NO_CODE_CHANGES_FALLBACK,
+    );
+  });
+
+  it("falls back when the description references an antibody marker (Fleet Antibodies section)", () => {
+    const text = "⚠️ Fleet Antibodies — Known failure patterns for this repo (auto-injected)";
+    expect(validateChangeSetDescription(text, "agent-reviewer", ctx)).toBe(NO_CODE_CHANGES_FALLBACK);
+  });
+
+  it("falls back when the description ends mid-sentence with an ellipsis", () => {
+    expect(
+      validateChangeSetDescription("The reviewer should detect malformed dispatches and ...", "review", ctx),
+    ).toBe(NO_CODE_CHANGES_FALLBACK);
+    expect(
+      validateChangeSetDescription("The reviewer should detect malformed dispatches and …", "review", ctx),
+    ).toBe(NO_CODE_CHANGES_FALLBACK);
+    expect(
+      validateChangeSetDescription("The reviewer should detect malformed dispatches and ..", "review", ctx),
+    ).toBe(NO_CODE_CHANGES_FALLBACK);
+  });
+
+  it("falls back when the matched token is missing from the snippet", () => {
+    const description = "Add a new endpoint that returns coordination group state.";
+    expect(validateChangeSetDescription(description, "agent-reviewer", ctx)).toBe(NO_CODE_CHANGES_FALLBACK);
+  });
+
+  it("permits the snippet through when matchedToken is null (dispatch-boundary mode)", () => {
+    const description = "Add a new endpoint that returns coordination group state.";
+    expect(validateChangeSetDescription(description, null, ctx)).toBe(description);
+  });
+
+  it("does not loop on the fallback sentinel itself", () => {
+    expect(validateChangeSetDescription(NO_CODE_CHANGES_FALLBACK, null, ctx)).toBe(NO_CODE_CHANGES_FALLBACK);
+    expect(validateChangeSetDescription(NO_CODE_CHANGES_FALLBACK, "agent-reviewer", ctx)).toBe(
+      NO_CODE_CHANGES_FALLBACK,
+    );
+  });
+});
+
+// ── extractContextForRepo (paragraph-boundary regression) ─────────────────────
+
+describe("detectMultiRepoChangeSets — paragraph isolation", () => {
+  it("does not pull text from a previous paragraph into the change-set description", () => {
+    // Reproduces the agent-reviewer#668 failure: an unrelated antibody-style
+    // bullet precedes the actual repo mention in a separate paragraph. The
+    // extraction must walk back only to the paragraph boundary, and the
+    // antibody fragment must trigger the dispatch-boundary fallback.
+    const task = makeTask({
+      title: "Multi-repo feature",
+      description:
+        "Direct commits to main bypass code review, break the merge queue, and can corrupt repository state.\n\n" +
+        "Add a new agent-dashboard route that displays the coordination state.",
+    });
+    const result = detectMultiRepoChangeSets(task, "claude-agent-orchestrator", config);
+    const dash = result.find((cs) => cs.repo === "rapartlu/agent-dashboard");
+    expect(dash).toBeDefined();
+    // The description must NOT contain the previous-paragraph antibody text
+    expect(dash!.description.toLowerCase()).not.toContain("merge queue");
+    expect(dash!.description.toLowerCase()).not.toContain("bypass code review");
+  });
+
+  it("substitutes the safe fallback when the only nearby text is an antibody fragment", () => {
+    // Construct a task where the matched token sits inside a paragraph that
+    // looks like an antibody hint. Validation must catch it.
+    const task = makeTask({
+      title: "Coordination feature",
+      description:
+        "We need to update the agent-dashboard.\n\n" +
+        "Direct commits to main bypass code review, break the merge queue, and can corrupt the dashboard state.",
+    });
+    const result = detectMultiRepoChangeSets(task, "claude-agent-orchestrator", config);
+    const dash = result.find((cs) => cs.repo === "rapartlu/agent-dashboard");
+    if (dash) {
+      // Either the snippet from the FIRST paragraph (clean) is selected, OR
+      // the antibody-tainted second paragraph is replaced by the fallback.
+      // Both are acceptable outcomes; what's NOT acceptable is shipping the
+      // antibody text verbatim.
+      const lower = dash.description.toLowerCase();
+      const isFallback = dash.description === NO_CODE_CHANGES_FALLBACK;
+      const hasAntibodyPhrase = lower.includes("merge queue") || lower.includes("bypass code review");
+      expect(isFallback || !hasAntibodyPhrase).toBe(true);
     }
   });
 });
