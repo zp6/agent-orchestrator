@@ -1,3 +1,16 @@
+// Load operator env from the canonical path BEFORE any other import reads process.env.
+// Without this, flags set in ~/.claude-orchestrator/.env are only visible when the
+// parent shell explicitly sourced the file — lost on every autonomous restart.
+// See: agent-orchestrator#1539.
+import { config as loadDotenv } from "dotenv";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+loadDotenv({
+  path: join(homedir(), ".claude-orchestrator", ".env"),
+  // override: false (default) — shell-set env vars win over .env file values.
+});
+
 import "@anthropic-ai/sdk/shims/web";
 import { writePid } from "./pid.js";
 import { Daemon } from "./daemon.js";
