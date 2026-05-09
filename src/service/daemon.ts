@@ -74,6 +74,7 @@ import { DagRuntime } from "../orchestrator/dag-runtime.js";
 import { Planner } from "../orchestrator/planner.js";
 import { pollVerificationOutcomes } from "../orchestrator/verification-outcome-poller.js";
 import { startMetricsServer, DEFAULT_METRICS_PORT } from "./metrics-server.js";
+import { reapStaleComposeProcesses } from "../utils/compose-reaper.js";
 import type { Server } from "node:http";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
@@ -439,6 +440,13 @@ export class Daemon {
    * observability. Issue #1517.
    */
   private deploySkippedCount = 0;
+
+  /**
+   * Telemetry: cumulative count of orphan `docker compose` processes the
+   * daemon has SIGKILLed since startup. Surfaced in logs every cycle the
+   * reaper kills anything (silent when no orphans are present). Issue #1558.
+   */
+  private composeOrphansReaped = 0;
 
   constructor(configPath?: string, pollIntervalMs?: number) {
     this.configPath = configPath;
@@ -1294,6 +1302,13 @@ export class Daemon {
   }
 
   private async selfUpdate(): Promise<void> {
+    // Reap prior-cycle orphan compose processes at the top of every
+    // selfUpdate. Previous selfUpdate cycles can leave a hung
+    // `docker compose up --build` from the proxy-side rebuild that triggered
+    // when this daemon last redeployed an agent. Issue #1558.
+    const time = new Date().toISOString().slice(11, 19);
+    this.reapOrphanComposeProcesses(time, "selfUpdate");
+
     // See note in the startup-rebuild block above: this module compiles to
     // dist/service/daemon.js, so two segments up reaches the repo root.
     const repoDir = resolve(new URL("../..", import.meta.url).pathname);
@@ -3504,7 +3519,64 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
     }
   }
 
+  /**
+   * Scan the host process table for orphaned `docker compose` subprocesses
+   * older than 15 minutes and SIGKILL them. Safe to call before any code path
+   * that may itself spawn `docker compose up --build` (selfUpdate / proxy
+   * deploy triggers) so prior-cycle orphans are cleaned up before the next
+   * cycle adds to the pile.
+   *
+   * The orphans observed in #1517/#1558 are the compose CLI process itself,
+   * not the running container — by the time we're past the 15-min ceiling
+   * the container is either up (and the CLI is doing nothing useful) or
+   * never coming up (build cache hung, daemon socket race, registry stall).
+   * Either way SIGKILLing the CLI process is safe.
+   *
+   * Counts and PIDs are logged whenever the reaper kills anything; a no-op
+   * cycle stays silent to avoid log noise.
+   */
+  private reapOrphanComposeProcesses(time: string, callsite: string): void {
+    try {
+      const result = reapStaleComposeProcesses();
+      if (result.killed > 0) {
+        this.composeOrphansReaped += result.killed;
+        // Issue #1558 acceptance: "compose-reap: killed N orphans" log line.
+        this.log.warn("compose-reap: killed orphan docker compose processes", {
+          callsite,
+          killed: result.killed,
+          killedPids: result.killedPids,
+          scanned: result.scanned,
+          cumulative: this.composeOrphansReaped,
+        });
+        console.log(
+          `[${time}] compose-reap: killed ${result.killed} orphan(s) at ${callsite} ` +
+            `(pids: ${result.killedPids.join(", ")}; cumulative since startup: ${this.composeOrphansReaped})`,
+        );
+      }
+      if (result.errors.length > 0) {
+        this.log.warn("compose-reap: per-PID kill errors", {
+          callsite,
+          errors: result.errors,
+        });
+      }
+    } catch (err) {
+      // Defensive: the reaper itself catches ps-read errors, so reaching
+      // here means an unexpected throw. Don't let it abort the cycle.
+      this.log.warn("compose-reap: unexpected error", {
+        callsite,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   private async redeployStale(time: string, registeredAgents?: Set<string>): Promise<void> {
+    // Reap any prior-cycle orphan compose processes before triggering new
+    // deploys. This is the "verify any prior-cycle compose process is dead
+    // before spawning a new one" half of the #1558 acceptance criteria —
+    // even when the inFlightDeploys mutex did its job, a previous cycle's
+    // proxy-spawned compose CLI may still be hung on a build/pull stall.
+    this.reapOrphanComposeProcesses(time, "redeployStale");
+
     try {
       const staleLocal = this.deployer.getStaleAgents(registeredAgents);
       const staleRepo = this.deployer.getStaleRepoAgents(registeredAgents);
