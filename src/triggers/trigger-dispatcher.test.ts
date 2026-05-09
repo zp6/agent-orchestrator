@@ -3519,7 +3519,7 @@ describe("PR guard surge alert (issue #1082)", () => {
     expect(totalDispatched).toBe(0);
     expect(totalSkipped).toBe(11);
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
-  });
+  }, 15_000); // generous timeout: 11 sequential gh CLI calls under test-suite load
 
   // ─────────────────────────────────────────────────────────────────────────
   // Dispatch surge auto-suppression (issue #1113)

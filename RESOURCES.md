@@ -89,6 +89,23 @@ Each ask is one entry:
   - `llama3.3:70b-instruct-q4` — general background reasoning, ~40GB RAM (fits if no other heavy workloads)
 - **Notes**: this isn't a fourth provider in the cognitive-diversity sense — it's the cheapest cost tier. Frontier models still own high-stakes work.
 
+### 7. Cloudflare credentials — API token + account ID
+
+- **Status**: open
+- **Asked by**: claude-agent-orchestrator
+- **Asked on**: 2026-05-08
+- **Unlocks**: (a) `orch dns` CLI — fleet autonomously manages `*.wearetarr.com` DNS records, closing NEX-12 sub-tasks #1464 (nexus CNAME) and #1466 (email routing CNAME) without any further Operator UI action; (b) Worker deployment — fleet deploys the Hire-the-Fleet landing page (`src/worker/`) via `wrangler deploy`, surfaces the `workers.dev` URL as the CNAME target for #1464
+- **Effort for Operator**: ~2 minutes one-time
+  1. Go to <https://dash.cloudflare.com/profile/api-tokens> → Create Token → "Edit zone DNS" template scoped to `wearetarr.com` zone → copy token
+  2. Go to <https://dash.cloudflare.com> → top-right account menu → copy Account ID (32-char hex)
+  3. Add both to `~/.claude-orchestrator/.env`:
+     ```
+     CLOUDFLARE_API_TOKEN=<token>
+     CLOUDFLARE_ACCOUNT_ID=<account-id>
+     ```
+- **Why this replaces operator UI action**: once these two values are in the env file, the fleet runs `wrangler deploy` (hosting target), then `orch dns add nexus.wearetarr.com --type CNAME --target <worker-url>` — zero further Operator interaction. All future `*.wearetarr.com` sub-domains are fleet-managed from that point.
+- **Notes**: Cloudflare nameservers confirmed (2026-05-08 `dig NS wearetarr.com +short` returns `tara.ns.cloudflare.com`, `margo.ns.cloudflare.com`). Hosting target (Cloudflare Worker URL) is TBD until deployment runs — fleet will post the confirmed URL back to issue #1464 after first deploy. `orch dns` CLI issue filed at #1513.
+
 ## In progress
 
 _(none yet)_
