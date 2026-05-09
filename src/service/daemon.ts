@@ -657,7 +657,11 @@ export class Daemon {
     // `npm run build` was never run — the daemon would otherwise silently execute
     // stale compiled code for up to SELF_UPDATE_EVERY_N_CYCLES cycles (~50 min).
     {
-      const repoDir = resolve(new URL("../../..", import.meta.url).pathname);
+      // This module compiles to dist/service/daemon.js. To reach the repo root
+      // we walk two segments up: service/ → dist/ → repo/. Previous code used
+      // "../../.." which walked one segment too far (to the parent of the repo)
+      // and silently broke every self-update path — fixed in the daemon-repo-path PR.
+      const repoDir = resolve(new URL("../..", import.meta.url).pathname);
       const rebuilt = this.rebuildIfDistStale(repoDir);
       if (rebuilt) {
         // Re-exec so the current process loads the fresh dist immediately.
@@ -1290,7 +1294,9 @@ export class Daemon {
   }
 
   private async selfUpdate(): Promise<void> {
-    const repoDir = resolve(new URL("../../..", import.meta.url).pathname);
+    // See note in the startup-rebuild block above: this module compiles to
+    // dist/service/daemon.js, so two segments up reaches the repo root.
+    const repoDir = resolve(new URL("../..", import.meta.url).pathname);
     try {
       const beforeHash = getCurrentCommitHash();
       execSync("git fetch origin main --quiet", { cwd: repoDir, stdio: "pipe" });

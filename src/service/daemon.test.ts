@@ -1047,6 +1047,35 @@ describe("resolveConversationIdForPR", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
+// selfUpdate repoDir path math (regression: previous "../../.." walked too far)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("selfUpdate repoDir path math", () => {
+  // daemon.ts compiles to <repo>/dist/service/daemon.js. The selfUpdate /
+  // startup-rebuild blocks compute repoDir from import.meta.url. Previous
+  // code used "../../.." and walked from .../dist/service/ up to the parent
+  // of the repo (e.g. ~/Documents/Git/), causing every git/npm command in
+  // those blocks to run against a non-existent package.json and silently
+  // fail — selfUpdate has *never* successfully pulled in production logs.
+  it("../.. from a fake dist/service/daemon.js URL resolves to repo root, not the parent", () => {
+    const fakeDaemonUrl = "file:///foo/bar/myrepo/dist/service/daemon.js";
+    const result = new URL("../..", fakeDaemonUrl).pathname;
+    // Expected: /foo/bar/myrepo/  (repo root, with trailing slash from URL)
+    expect(result).toBe("/foo/bar/myrepo/");
+    // Definitively NOT the parent of the repo:
+    expect(result).not.toBe("/foo/bar/");
+  });
+
+  it("../../.. (the previous buggy form) walks one segment too far", () => {
+    const fakeDaemonUrl = "file:///foo/bar/myrepo/dist/service/daemon.js";
+    const buggy = new URL("../../..", fakeDaemonUrl).pathname;
+    expect(buggy).toBe("/foo/bar/");
+    // …which is why the previous selfUpdate ran git/npm in the parent of
+    // the repo and produced ENOENT errors instead of advancing the daemon.
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
 // selfUpdate stash/pop helpers (issue #1540)
 // ────────────────────────────────────────────────────────────────────────────
 
