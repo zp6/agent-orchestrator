@@ -2022,15 +2022,80 @@ export class Dispatcher {
       }
 
       if (isConnectionError(err)) {
-        // Connection errors are transient — retry with exponential backoff.
+        // Issue #1571: pre-retry guard. If the source issue has already been
+        // resolved externally (closed, or has an open/merged PR) by the time
+        // the connection error fires, suppress the retry. liveValidateForDispatch
+        // is **synchronous** — it returns `string | null` directly via execSync
+        // under the hood — so no await is needed (issue #1571 review note).
         const maxConnRetries =
           this.config.retry?.max_connection_retries ?? MAX_CONNECTION_RETRIES;
         const connDelays =
           this.config.retry?.connection_error_delays_ms ?? CONNECTION_ERROR_RETRY_DELAYS_MS;
+        let willRetry = newRetryCount < maxConnRetries;
 
+        if (willRetry && task.source === "github" && task.source_ref) {
+          const repo = extractRepoFromSourceRef(task.source_ref);
+          const issueMatch = task.source_ref.match(/#(\d+)$/);
+          if (repo && issueMatch) {
+            const issueNumber = parseInt(issueMatch[1], 10);
+            // Explicit annotation: liveValidateForDispatch returns `string | null`
+            // synchronously (execSync-backed). No `await` — adding one would be a
+            // no-op type-wise and misleading at runtime. See review note in #1571.
+            const skipReason: string | null = liveValidateForDispatch(repo, issueNumber);
+            if (skipReason) {
+              // Mirror retryTask's done-vs-failed semantics (issue #1563):
+              //   "issue is closed" → done + approved (valid external completion)
+              //   merged/open PR    → failed (resolved externally, not by us)
+              const isClosedWithoutPR = skipReason.includes("is closed");
+              this.log.info("Connection-error retry cancelled: issue resolved externally", {
+                taskId: task.id,
+                sourceRef: task.source_ref,
+                reason: skipReason,
+                isClosedWithoutPR,
+              });
+              this.store.addLog({
+                task_id: task.id,
+                direction: "system",
+                content: isClosedWithoutPR
+                  ? `Connection error during dispatch, but linked issue was closed without a PR (${skipReason}). Task marked done.`
+                  : `Connection error during dispatch, but linked issue is resolved externally (${skipReason}). Retry cancelled.`,
+              });
+              if (isClosedWithoutPR) {
+                this.store.updateTask(task.id, {
+                  status: "done",
+                  result: "issue-closed-without-pr",
+                  verification_status: "approved",
+                  quality_score: 1.0,
+                  verification_notes:
+                    "Auto-approved: linked issue was closed without a PR (#1571 connection-error guard).",
+                  next_retry_at: null,
+                });
+              } else {
+                this.store.updateTask(task.id, {
+                  status: "failed",
+                  result: `Resolved externally: ${skipReason} — retry cancelled.`,
+                  next_retry_at: null,
+                });
+              }
+              // Return a synthetic skip result so callers don't see an error
+              // and the daemon doesn't treat this as a transient failure.
+              return {
+                taskId: task.id,
+                agentName,
+                response: {
+                  content: `Skipped: ${skipReason}`,
+                  model: "",
+                  usage: { input_tokens: 0, output_tokens: 0 },
+                  stop_reason: "skipped",
+                },
+              };
+            }
+          }
+        }
+
+        // Connection errors are transient — retry with exponential backoff.
         // Use strict less-than so that once retry_count == maxConnRetries the task
         // is permanently failed (next_retry_at = null).
-        const willRetry = newRetryCount < maxConnRetries;
         const nextRetryAt = willRetry
           ? new Date(
               Date.now() +

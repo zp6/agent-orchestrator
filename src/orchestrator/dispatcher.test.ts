@@ -882,6 +882,116 @@ describe("Dispatcher — connection-error retry state machine (dispatch)", () =>
   });
 });
 
+// ────────────────────────────────────────────────────────────────────────────
+// dispatch() — connection-error closed-issue guard (issue #1571)
+// Mirrors the retryTask guard (#1563) but inside dispatch()'s own catch block:
+// when a connection error fires after the issue has already been resolved
+// externally, suppress the retry instead of looping the agent.
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("Dispatcher.dispatch — connection-error closed-issue guard (issue #1571)", () => {
+  let store: StateStore;
+  let dispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+    dispatcher = new Dispatcher(makeConfig(), store);
+    mockValidateGhAuth.mockReturnValue({ ok: true });
+    mockLiveValidateForDispatch.mockReturnValue(null);
+  });
+
+  it("connection error + issue closed without PR → marks task done+approved, returns skip result", async () => {
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3457"));
+    mockLiveValidateForDispatch.mockReturnValue("issue owner/repo#42 is closed");
+
+    const result = await dispatcher.dispatch("fix the bug", {
+      agentName: "test-agent",
+      source: "github",
+      sourceRef: "owner/repo#42",
+    });
+
+    // Live check must have run with the parsed repo + issue number
+    expect(mockLiveValidateForDispatch).toHaveBeenCalledWith("owner/repo", 42);
+
+    // Task should be marked done+approved (matches retryTask semantics)
+    const tasks = store.listTasks({});
+    expect(tasks).toHaveLength(1);
+    const task = tasks[0];
+    expect(task.status).toBe("done");
+    expect(task.result).toBe("issue-closed-without-pr");
+    expect(task.verification_status).toBe("approved");
+    expect(task.quality_score).toBe(1.0);
+    expect(task.next_retry_at).toBeNull();
+
+    // Caller must receive a synthetic skip result, not a thrown error
+    expect(result.taskId).toBe(task.id);
+    expect(result.response.stop_reason).toBe("skipped");
+  });
+
+  it("connection error + issue has merged/open PR → marks task failed (resolved externally)", async () => {
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3457"));
+    mockLiveValidateForDispatch.mockReturnValue("issue owner/repo#42 already has an open PR");
+
+    const result = await dispatcher.dispatch("fix the bug", {
+      agentName: "test-agent",
+      source: "github",
+      sourceRef: "owner/repo#42",
+    });
+
+    const tasks = store.listTasks({});
+    const task = tasks[0];
+    // Open-PR / merged-PR case is not a valid external completion — keep failed
+    expect(task.status).toBe("failed");
+    expect(task.result).toContain("Resolved externally");
+    expect(task.next_retry_at).toBeNull();
+
+    expect(result.response.stop_reason).toBe("skipped");
+  });
+
+  it("connection error + issue still open → falls through to normal retry path", async () => {
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3457"));
+    mockLiveValidateForDispatch.mockReturnValue(null);
+
+    await expect(
+      dispatcher.dispatch("fix the bug", {
+        agentName: "test-agent",
+        source: "github",
+        sourceRef: "owner/repo#42",
+      }),
+    ).rejects.toThrow("ECONNREFUSED");
+
+    const tasks = store.listTasks({ status: "failed" });
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].next_retry_at).not.toBeNull();
+    expect(tasks[0].retry_count).toBe(1);
+  });
+
+  it("connection error on non-github task does not call liveValidateForDispatch", async () => {
+    mockSend.mockRejectedValueOnce(new Error("connect ECONNREFUSED 127.0.0.1:3457"));
+
+    await expect(
+      dispatcher.dispatch("do something", { agentName: "test-agent", source: "manual" }),
+    ).rejects.toThrow("ECONNREFUSED");
+
+    expect(mockLiveValidateForDispatch).not.toHaveBeenCalled();
+  });
+
+  it("non-connection (logic) error does not call liveValidateForDispatch", async () => {
+    mockSend.mockRejectedValueOnce(new Error("agent produced no output"));
+
+    await expect(
+      dispatcher.dispatch("do something", {
+        agentName: "test-agent",
+        source: "github",
+        sourceRef: "owner/repo#42",
+      }),
+    ).rejects.toThrow("agent produced no output");
+
+    expect(mockLiveValidateForDispatch).not.toHaveBeenCalled();
+  });
+});
+
 describe("Dispatcher — connection-error retry state machine (retryTask)", () => {
   let store: StateStore;
   let dispatcher: Dispatcher;
