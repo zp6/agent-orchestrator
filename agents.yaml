@@ -414,5 +414,23 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
+  # # ── Hustle ─────────────────────────────────────────────────────
+  hustle-agent:
+    dir: "hustle-agent"
+    repo: "git@github.com:rapartlu/hustle-agent.git"
+    provider: "claude"
+    model: "claude-sonnet-4-6"
+    description: "Daily external-impact production. Outreach DMs, demo repos, bounty submissions, content cadence, lead generation. Pairs with auditor-agent: auditor measures the OKR-1/OKR-5 gap; hustle closes it."
+    capabilities: ["outreach", "content-production", "demo-creation", "bounty-submission", "lead-generation"]
+    github: "rapartlu/hustle-agent"
+    owns_topics: ["outreach", "demand-generation", "external-impact", "demo", "bounty", "content", "publishing", "growth"]
+    # Housekeeping fires at cycle modulo 80 → eighth slot in each 5h window (~:400min offset)
+    housekeeping_offset_cycles: 80
+    docker:
+      port: 3487
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
   # grok-meeting-voice, deepseek-background, deepseek-reasoning, gemini-synth
   # removed 2026-05-03 — culled non-core agents to reduce noise/resource use
