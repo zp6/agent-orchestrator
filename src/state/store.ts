@@ -1979,6 +1979,7 @@ export class StateStore {
     this.runMonologueMigration();
     this.runBountyOpportunityMigration();
     this.runBountyDenylistMigration();
+    this.runSubmissionsMigration();
     this.runRevenueLeadMigration();
     this.runDMOutreachMigration();
     this.runFingerprintMigration();
@@ -13911,6 +13912,240 @@ export class StateStore {
     }
   }
 
+  // ── Submissions (issue #1599 / Layer 3 of #1512) ───────────────────────────
+  //
+  // Submissions are crypto-direct security findings the fleet ships to
+  // platforms like Immunefi. The flow is:
+  //
+  //   draft -> sanitize -> pending_submissions (status='awaiting-approval')
+  //         -> operator /approve -> pending status='approved'
+  //         -> adapter.submit() -> submissions row (status='submitted')
+  //         -> Layer 4 watcher (#1562) eventually flips status -> 'paid'
+  //
+  // The pending and submitted states are kept in separate tables so the
+  // approval queue stays small (operator dashboards) while the submission
+  // history grows append-only (revenue accounting).
+
+  private runSubmissionsMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pending_submissions (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        platform            TEXT NOT NULL,
+        program             TEXT NOT NULL,
+        title               TEXT NOT NULL,
+        severity            TEXT NOT NULL,
+        body                TEXT NOT NULL,
+        expected_payout_usd REAL,
+        meta                TEXT,
+        status              TEXT NOT NULL DEFAULT 'awaiting-approval',
+        rejection_reason    TEXT,
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL,
+        decided_at          TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_pending_submissions_status ON pending_submissions(status);
+      CREATE INDEX IF NOT EXISTS idx_pending_submissions_platform ON pending_submissions(platform);
+
+      CREATE TABLE IF NOT EXISTS submissions (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        pending_id           INTEGER UNIQUE,
+        platform             TEXT NOT NULL,
+        program              TEXT NOT NULL,
+        title                TEXT NOT NULL,
+        severity             TEXT NOT NULL,
+        platform_submission_id TEXT NOT NULL,
+        status_url           TEXT NOT NULL,
+        expected_payout_usd  REAL,
+        actual_payout_usd    REAL,
+        status               TEXT NOT NULL DEFAULT 'submitted',
+        submitted_at         TEXT NOT NULL,
+        updated_at           TEXT NOT NULL,
+        FOREIGN KEY (pending_id) REFERENCES pending_submissions(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status);
+      CREATE INDEX IF NOT EXISTS idx_submissions_platform ON submissions(platform);
+    `);
+  }
+
+  /**
+   * Insert a new pending submission row in `awaiting-approval` state.
+   *
+   * The caller has already sanitized + adapter-validated the draft; this method
+   * is the persistence layer only.
+   */
+  addPendingSubmission(params: {
+    platform: string;
+    program: string;
+    title: string;
+    severity: string;
+    body: string;
+    expected_payout_usd?: number | null;
+    meta?: Record<string, unknown>;
+  }): PendingSubmission {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `INSERT INTO pending_submissions
+         (platform, program, title, severity, body, expected_payout_usd, meta,
+          status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'awaiting-approval', ?, ?)`,
+      )
+      .run(
+        params.platform,
+        params.program,
+        params.title,
+        params.severity,
+        params.body,
+        params.expected_payout_usd ?? null,
+        params.meta ? JSON.stringify(params.meta) : null,
+        now,
+        now,
+      );
+    return this.getPendingSubmission(Number(result.lastInsertRowid))!;
+  }
+
+  getPendingSubmission(id: number): PendingSubmission | null {
+    const row = this.db
+      .prepare("SELECT * FROM pending_submissions WHERE id = ?")
+      .get(id) as PendingSubmissionRow | undefined;
+    return row ? hydratePendingSubmission(row) : null;
+  }
+
+  listPendingSubmissions(opts?: {
+    status?: PendingSubmissionStatus;
+    limit?: number;
+  }): PendingSubmission[] {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (opts?.status) {
+      conditions.push("status = ?");
+      params.push(opts.status);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limit = opts?.limit ?? 100;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM pending_submissions ${where}
+         ORDER BY created_at DESC
+         LIMIT ?`,
+      )
+      .all(...params, limit) as PendingSubmissionRow[];
+    return rows.map(hydratePendingSubmission);
+  }
+
+  /**
+   * Transition a pending submission to `approved`. Returns false if the row is
+   * not in `awaiting-approval` state (callers should treat this as a no-op
+   * to maintain idempotency).
+   */
+  approvePendingSubmission(id: number): boolean {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE pending_submissions
+         SET status = 'approved', updated_at = ?, decided_at = ?
+         WHERE id = ? AND status = 'awaiting-approval'`,
+      )
+      .run(now, now, id);
+    return result.changes > 0;
+  }
+
+  /**
+   * Transition a pending submission to `rejected` with a stored reason.
+   */
+  rejectPendingSubmission(id: number, reason: string): boolean {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE pending_submissions
+         SET status = 'rejected', rejection_reason = ?, updated_at = ?, decided_at = ?
+         WHERE id = ? AND status = 'awaiting-approval'`,
+      )
+      .run(reason, now, now, id);
+    return result.changes > 0;
+  }
+
+  /** Mark a previously-approved pending submission as consumed (after submit). */
+  markPendingSubmissionConsumed(id: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE pending_submissions SET status = 'consumed', updated_at = ?
+         WHERE id = ? AND status = 'approved'`,
+      )
+      .run(now, id);
+  }
+
+  /** Record a successful submission (post-network-call). */
+  recordSubmission(params: {
+    pending_id: number | null;
+    platform: string;
+    program: string;
+    title: string;
+    severity: string;
+    platform_submission_id: string;
+    status_url: string;
+    expected_payout_usd?: number | null;
+    submitted_at: string;
+  }): Submission {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `INSERT INTO submissions
+         (pending_id, platform, program, title, severity,
+          platform_submission_id, status_url, expected_payout_usd,
+          status, submitted_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?)`,
+      )
+      .run(
+        params.pending_id,
+        params.platform,
+        params.program,
+        params.title,
+        params.severity,
+        params.platform_submission_id,
+        params.status_url,
+        params.expected_payout_usd ?? null,
+        params.submitted_at,
+        now,
+      );
+    return this.getSubmission(Number(result.lastInsertRowid))!;
+  }
+
+  getSubmission(id: number): Submission | null {
+    const row = this.db
+      .prepare("SELECT * FROM submissions WHERE id = ?")
+      .get(id) as SubmissionRow | undefined;
+    return row ? hydrateSubmission(row) : null;
+  }
+
+  listSubmissions(opts?: {
+    status?: SubmissionStatus;
+    platform?: string;
+    limit?: number;
+  }): Submission[] {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (opts?.status) {
+      conditions.push("status = ?");
+      params.push(opts.status);
+    }
+    if (opts?.platform) {
+      conditions.push("platform = ?");
+      params.push(opts.platform);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limit = opts?.limit ?? 100;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM submissions ${where}
+         ORDER BY submitted_at DESC
+         LIMIT ?`,
+      )
+      .all(...params, limit) as SubmissionRow[];
+    return rows.map(hydrateSubmission);
+  }
+
   // ── Idempotency Fingerprint Store (issue #1494) ────────────────────────────
   //
   // A shared deduplication layer that any fleet agent can query before
@@ -14089,6 +14324,111 @@ function hydrateBountyOpportunity(row: BountyOpportunityRow): BountyOpportunity 
     }
   }
   return { ...row, capabilities };
+}
+
+// ── Submission types (issue #1599) ──────────────────────────────────────────
+
+export type PendingSubmissionStatus =
+  | "awaiting-approval"
+  | "approved"
+  | "rejected"
+  | "consumed";
+
+export type SubmissionStatus =
+  | "submitted"
+  | "accepted"
+  | "rejected"
+  | "paid"
+  | "expired";
+
+interface PendingSubmissionRow {
+  id: number;
+  platform: string;
+  program: string;
+  title: string;
+  severity: string;
+  body: string;
+  expected_payout_usd: number | null;
+  meta: string | null;
+  status: string;
+  rejection_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  decided_at: string | null;
+}
+
+export interface PendingSubmission {
+  id: number;
+  platform: string;
+  program: string;
+  title: string;
+  severity: string;
+  body: string;
+  expected_payout_usd: number | null;
+  meta: Record<string, unknown> | null;
+  status: PendingSubmissionStatus;
+  rejection_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  decided_at: string | null;
+}
+
+function hydratePendingSubmission(row: PendingSubmissionRow): PendingSubmission {
+  let meta: Record<string, unknown> | null = null;
+  if (row.meta) {
+    try {
+      const parsed = JSON.parse(row.meta);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        meta = parsed as Record<string, unknown>;
+      }
+    } catch {
+      meta = null;
+    }
+  }
+  return {
+    ...row,
+    meta,
+    status: row.status as PendingSubmissionStatus,
+  };
+}
+
+interface SubmissionRow {
+  id: number;
+  pending_id: number | null;
+  platform: string;
+  program: string;
+  title: string;
+  severity: string;
+  platform_submission_id: string;
+  status_url: string;
+  expected_payout_usd: number | null;
+  actual_payout_usd: number | null;
+  status: string;
+  submitted_at: string;
+  updated_at: string;
+}
+
+export interface Submission {
+  id: number;
+  pending_id: number | null;
+  platform: string;
+  program: string;
+  title: string;
+  severity: string;
+  platform_submission_id: string;
+  status_url: string;
+  expected_payout_usd: number | null;
+  actual_payout_usd: number | null;
+  status: SubmissionStatus;
+  submitted_at: string;
+  updated_at: string;
+}
+
+function hydrateSubmission(row: SubmissionRow): Submission {
+  return {
+    ...row,
+    status: row.status as SubmissionStatus,
+  };
 }
 
 interface RevenueLeadRow {

@@ -1,9 +1,10 @@
 # Roadmap - agent-orchestrator
 
-_Last updated: 2026-05-10 (triage cycle 18) — closed #1512 umbrella (Layer 1 shipped; Layers 2-4 tracked separately); filed crypto-native follow-ups #1598 and #1599; doctrine drift removed from autonomous-revenue plan_
+_Last updated: 2026-05-10 (triage cycle 19) — Layer 3 Phase A shipped (#1599 submission agent — data plane + Immunefi adapter with stubbed network call); revenue layer count: 1.5/4 layers shipped_
 
 ## Recently shipped
 
+- **#1599 (Phase A)** — Submission agent Layer 3: `pending_submissions` + `submissions` tables, `SubmissionAdapter` interface, Immunefi adapter (no-KYC allow-list + stubbed `submit()` until `IMMUNEFI_API_TOKEN` provisioned), `SubmissionAgent` orchestrator with sanitizer defense-in-depth, `orch submission queue/list/show/approve/reject/submit/platforms` CLI, feature flag `SUBMISSION_AGENT_ENABLED`. 31 new tests. Phase B (live network call) is a follow-up once token is provisioned.
 - **#1512** — Fleet autonomous-revenue umbrella closed: Layer 1 shipped via #1527/#1528/#1557. Layer 2 → #1598 (live opportunity monitor — Immunefi/GitHub only, Algora dropped per Article V). Layer 3 → #1599 (submission agent — Immunefi USDC payout, no KYC). Layer 4 → #1562 (on-chain revenue watcher; Stripe webhook variant explicitly dropped, see agent-proxy#567). Crypto-native scope only — Stripe Connect / Algora / KYC paths excised.
 - **#1542** — env-gate proactive-rebase-scheduler (hot-fix, closes daemon crash on divergent config)
 - **#1536** — Add pub/sub architecture RFC to ROADMAP Ideas (closes #1535)
