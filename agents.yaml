@@ -232,10 +232,16 @@ agents:
   codex-orchestrator-reviewer:
     dir: "claude-orchestrator-reviewer"
     repo: "git@github.com:rapartlu/agent-reviewer.git"
-    provider: "openai"
-    model: "gpt-5.4-mini"
+    # Container runs Claude Code which only accepts Anthropic model IDs (see
+    # #1364 / commit 0a723d5). The reviewer pool model guard in
+    # src/config/schema.test.ts:440 enforces this. Re-enabled in #1595 with
+    # provider=openai, which broke main and was reverted here as #1600.
+    # Parallel throughput is achieved via claude-haiku (different quota tier
+    # from claude-sonnet variant), not via OpenAI cross-quota.
+    provider: "claude"
+    model: "claude-haiku-4-5-20251001"
     pool: "reviewer"
-    description: "PR reviewer, verifier, supervisor (Codex/OpenAI). Parallel throughput for reviewer pool on a different quota from claude-sonnet variant."
+    description: "PR reviewer, verifier, supervisor (Claude Haiku). Parallel throughput for reviewer pool on the haiku quota tier."
     capabilities: ["typescript", "llm", "review", "verification"]
     capability_tags: ["review-only"]
     github: "rapartlu/agent-reviewer"
