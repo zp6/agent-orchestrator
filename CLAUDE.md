@@ -2,25 +2,25 @@
 
 ## Scope - Read This First
 
-This repository is the quality and oversight layer for the Claude Agent Orchestrator.
-It is responsible for PR review, task verification, supervisor decisions, routing and
-quality guardrails, Telegram/CLI operator surfaces, and the helper clients that let the
-fleet coordinate with GitHub, Linear, and the shared `state.db`.
+This repository is the **orchestrator runtime** for the Claude agent fleet.
+It owns the dispatch daemon, supervisor logic, routing guards, CLI operator surface,
+fleet coordination, and revenue-path helpers. The PR review scoring logic lives in the
+separate `rapartlu/agent-reviewer` (`claude-orchestrator-reviewer`) package, which this
+orchestrator imports as an internal dependency.
 
-This repo is **not** the agent runtime, the proxy server, or the dashboard app.
+This repo is **not** the proxy server, the dashboard app, or the reviewer package.
 Do not create issues or PRs here for:
-- container lifecycle or Docker orchestration
+- container lifecycle or Docker orchestration (that belongs to the proxy)
 - proxy/OpenAI compatibility endpoints
-- dashboard UI or frontend layout work
-- unrelated product features that do not touch reviewer, verifier, or supervisor flows
-- broad meta-tooling, unless it directly unblocks the orchestrator/reviewer pipeline
+- dashboard UI or frontend layout work (that belongs to agent-dashboard)
+- broad meta-tooling that is not directly needed for dispatch, supervision, or fleet coordination
 
 Focus improvements on:
-1. **Review and verification quality** - PR review, task scoring, revision feedback, and merge safety
-2. **Supervisor and dispatch logic** - routing decisions, capability checks, cross-agent guards, and follow-up handling
+1. **Dispatch loop and daemon** - trigger polling, issue-state cache, dedupe guards, cascade enforcement
+2. **Supervisor and routing logic** - routing decisions, capability checks, cross-agent guards, and follow-up handling
 3. **Quality guardrails** - score provenance, calibration, anomaly detection, triage schema enforcement, and bypass handling
-4. **Operator surfaces** - CLI commands, Telegram commands, status feeds, and review/health summaries
-5. **Integration helpers** - GitHub App auth, Linear client wiring, meeting outcome helpers, and state-store adapters
+4. **Operator surfaces** - CLI commands (`orch`), Telegram commands, status feeds, and review/health summaries
+5. **Fleet economics** - treasury operations, revenue-path helpers (bounty, DM outreach, Hire-the-Fleet), and OKR tracking
 
 ## Fleet Economics — read this before any spending or strategic decision
 
@@ -199,10 +199,11 @@ This replaces what the remote CI gate used to enforce. The fleet promises broken
 
 ## Overview
 
-`claude-orchestrator-reviewer` is a TypeScript package plus CLI for the orchestrator fleet.
-It exports the reviewer, verifier, supervisor, and supporting coordination utilities the
-daemon uses to evaluate tasks and keep the fleet aligned. The same codebase also powers the
-Telegram operator bot and the `orch` CLI used for local inspection and maintenance.
+`claude-agent-orchestrator` is a TypeScript package plus CLI for the orchestrator fleet.
+It powers the dispatch loop, supervision, cross-repo coordination, and quality-guard utilities
+the fleet uses to evaluate tasks and keep agents aligned. The same codebase also hosts the
+`orch` CLI used for local inspection and maintenance, the metrics server, and the
+Hire-the-Fleet landing page (Cloudflare Worker).
 
 ## Architecture
 
@@ -214,13 +215,19 @@ MISSION.md                # Fleet mission and quarterly objectives
 README.md                 # Package usage and configuration overview
 RESOURCES.md              # Resource requests and budget channel
 ROADMAP.md                # Current backlog snapshot
+SEVERANCE.md              # Operator severance plan and phase gates
 WORKFLOW.md               # Fleet workflow notes
 agents.yaml               # Fleet agent registry used by the orchestrator
+fly.toml                  # Fly.io deployment config for the fleet PR Review API
+goals.yaml                # OKR definitions and baseline values
+wrangler.toml             # Cloudflare Worker config (hire-the-fleet landing page)
+contracts/                # Solidity / ABI artefacts (FlashArbBot)
 docs/                     # Migration specs, incidents, and standup notes
-scripts/copy-schema-contract.mjs  # Copies schema-contract.json into dist during build
+packages/                 # Fleet sub-packages (fleet-browser, fleet-signer)
+scripts/                  # Utility scripts (copy-schema-contract, arb-monitor, check-linear-issues, post-migration-update-refs)
 
 src/
-  index.ts                # Public package entrypoint; re-exports the stable API surface
+  index.ts                # Public package entrypoint; exports activity-reporting helpers
   cli/                    # `orch` Commander CLI and subcommands
   client/                 # Orchestrator-facing clients (LLM, Linear, fleet-signer, reviewer, management, proxy, standup-action)
   config/                 # Schema registry, validator, and catalog for triage/task schemas
@@ -235,35 +242,31 @@ src/
 
 ## Key Design Decisions
 
-- `src/index.ts` is the canonical public export surface for package consumers.
-- `createReviewerInstances()` is the one-call integration path for the orchestrator daemon.
-- The shared SQLite `state.db` is the authoritative store for reviewer, verifier, and supervisor state.
+- `src/index.ts` exports only stable, outward-facing helpers (currently: activity-reporting). Internal modules are not re-exported here; import them directly from their source paths.
+- The shared SQLite `state.db` is the authoritative store for task, dispatch, and verification state.
 - GitHub work should use per-agent GitHub App identities rather than a shared Operator PAT.
 - `scripts/copy-schema-contract.mjs` keeps the checked-in schema contract aligned between `src/` and `dist/`.
 - Triage and housekeeping tasks should be schema-validated before LLM scoring whenever possible.
-- The CLI is intentionally operator-facing and should stay focused on inspection, review, and coordination.
+- The CLI is intentionally operator-facing and should stay focused on inspection, dispatch, and coordination.
 
 ## APIs
 
 This repository exposes three main API surfaces:
 
 1. **Package exports** via `src/index.ts`
-   - Core classes: `PRReviewer`, `Verifier`, `Supervisor`, `ImprovementDetector`, `IssueCreator`
-   - Integration helpers: `createReviewerInstances`, `TelegramCommandHandler`, `HealthRecoveryTracker`
-   - State and client helpers: `StateStore`, `ReviewerClient`, `ManagementClient`, `createLLMClient`
-   - Feeds and payload builders: quality anomalies, agent trends, fleet health, PR guard cooldowns, quality system health, triage health, investigations, meeting goal, score provenance, and quality summary
-   - Guardrail modules: `UniversalQualityGateMonitor`, `ScoreCalibrator`, `QualityFloorBypassDetector`, `LowScoreApprovalAlerter`, `ScoreZeroApprovalAlerter`, `CrossAgentInFlightGuard`, `PRGuardCooldown` helpers, and related detectors
+   - Activity reporting helpers: `generateWeeklyActivityReport`, `getWeeklyMergedPRs`, `getWeeklyClosedLinearIssues`, `getDirectorHighlights`, `formatActivityReportAsMarkdown`
+   - These are the only stable public exports; all other modules (orchestrator, state, client, reviewer, triggers) are internal and imported by path.
 
 2. **CLI commands** via `orch`
    - The CLI entrypoint is `src/cli/index.ts`
-   - It wires the operational command families for status, dispatch, review, supervision, health, metrics, routing, triage, memory, monologue, anomalies, and fleet operations
+   - It wires ~50 operator-facing command families for status, dispatch, routing, review, health, metrics, anomaly detection, immune system, treasury, and fleet operations
    - Run `npx tsx src/cli/index.ts --help` in development or `node dist/cli/index.js --help` after building to see the full command list
 
-3. **Telegram commands** via `TelegramCommandHandler`
-   - Common operator commands include `/status`, `/health`, `/pause`, `/resume`, `/dispatch`, `/prioritize`, `/queue`, `/review-queue`, `/approve`, `/reject`, `/quality`, `/quality-health`, `/quality-summary`, `/pr-guard-status`, `/triage-health`, `/investigations`, `/memory`, `/monologue`, `/misrouting`, and `/meeting-goal`
-   - These commands read from the shared `state.db` and the reporting helpers exported from `src/index.ts`
+3. **Telegram commands** — wired in `src/service/telegram.ts` (long-poll handler)
+   - Common operator commands: `/status`, `/health`, `/pause`, `/resume`, `/dispatch`, `/queue`, `/approve`, `/reject`, `/quality`, `/memory`, `/misrouting`, `/monologue`, and `/meeting-goal`
+   - Commands read from the shared `state.db` and the internal reporting modules in `src/orchestrator/`
 
-If you need the exact runtime shape of any helper, treat `src/index.ts` and the module-level source file as the source of truth.
+If you need the exact runtime shape of any helper, treat the module-level source file as the source of truth.
 
 ## Commands
 
@@ -276,21 +279,80 @@ If you need the exact runtime shape of any helper, treat `src/index.ts` and the 
 
 Common `orch` commands:
 
+**Core operations**
 - `orch status` - operator status and active work snapshot
 - `orch health` - fleet health and quality overview
-- `orch review` - PR review workflow
+- `orch dispatch` - dispatch a task to an agent
 - `orch supervise` - supervisor decision loop
-- `orch dispatch` - dispatch work to an agent
+- `orch review` - PR review workflow
 - `orch prs` - PR queue and related review state
-- `orch triage-health` - triage schema health and revision metrics
-- `orch quality-summary` - rolling approval-quality summary
+- `orch service` - start / stop / status for the daemon service
+
+**Quality & scoring**
+- `orch anomalies` - persistent anomaly feed by agent and type
 - `orch memory` - semantic task memory digest
-- `orch anomalies` - anomaly and drift surfaces
+- `orch reliability` - per-agent unified reliability score (0–100)
+- `orch marginal-score-tasks` - borderline quality task panel
+- `orch guard-health` - PR guard surge suppression effectiveness metrics
+- `orch review-saturation` - fleet review saturation health
+
+**Routing & dispatch**
+- `orch routing-accuracy` - per-task-type routing accuracy and misrouting flags
+- `orch routing-mismatches` - audit routing mismatches (expected vs. actual agent)
+- `orch dispatch-efficiency` - dispatch waste-rate widget
+- `orch skip-blockers` - top dispatch skip blockers
+- `orch variant-duplicates` - Claude vs Codex variant duplicate pairs
+
+**Tracing & lineage**
+- `orch lineage` - trace cross-repo task lineage
+- `orch followup-chains` - follow-up chain cost explorer
+- `orch decisions` - supervisor decision feed
+- `orch supervisor-log` - live supervisor decision feed with gate info
+
+**Immune system & patterns**
+- `orch antibodies` - self-learned failure immunity panel
+- `orch learned-patterns` - immune-system pattern browser (inspect, suppress, promote)
+- `orch learned-rules` - manage per-repo review conventions
+- `orch failure-interceptions` - pre-dispatch similarity filter hits
+
+**Agent & fleet**
+- `orch agents` - list configured agents or sync with proxy
+- `orch fleet` - Claude vs Codex fleet performance comparison
+- `orch agent-gaps` - detect coverage gaps and scope overload
+- `orch budget` - per-agent token budget utilization
+- `orch borrow` - cross-domain borrowed task assignments
+
+**Diagnostics**
+- `orch health-checks` - health check storm effectiveness panel
+- `orch health-check-efficiency` - health check false-positive rate trend
+- `orch timeouts` - timeout analytics and per-agent suggestions
+- `orch cost` - PR iteration cost leaderboard
+- `orch metrics` - per-agent productivity and quality metrics
+
+**Operator tools**
+- `orch controls` - pause, redirect, inject directives into in-flight tasks
+- `orch directives` - manage persistent behavioral directives
+- `orch deescalate` - unblock an escalated source_ref for re-dispatch
+- `orch pr-reset` - clear a PR's escalation record so the reviewer re-reviews it
+- `orch audit` - issue-to-PR traceability gap report
+- `orch audit-infra` - detect built-but-unwired features (exported but never imported)
+- `orch preflight` - run the PR pre-flight checklist before `gh pr create`
+- `orch config` - discover and inspect configuration parameters
+- `orch signals` - inspect stigmergy signals written by agents into state.db
+- `orch dag` - DAG parallel subtask execution management
+- `orch issue` - GitHub issue inspection
+
+**Revenue & goals**
 - `orch treasury` - treasury balance and on-chain operations (supply, withdraw, morpho-migrate)
 - `orch bounty` - crypto-native bounty queue management (Immunefi/Gitcoin)
 - `orch revenue-leads` - revenue lead matcher output inspection
 - `orch dm-outreach` - outbound DM outreach generation and tracking
-- `orch goals-snapshot` - snapshot current KR values into docs/goals-progress.yaml; `--capture-baseline` also updates goals.yaml baseline section; `--json` for machine-readable output
+- `orch goals-snapshot` - snapshot current KR values into docs/goals-progress.yaml
+
+**Research & standup**
+- `orch research` - dispatch a research question (analysis only, no code changes)
+- `orch standup-quality` - standup quality history management
+- `orch digest` - fleet activity summary
 
 ## Treasury Operations
 
