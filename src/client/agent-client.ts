@@ -247,10 +247,19 @@ export class AgentClient {
       return { alive: true };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      // On Node.js 22 fetch() wraps the underlying error: err.message === 'fetch failed'
+      // while the ECONNREFUSED detail is in err.cause.message.  Check both.
+      const causeMsg =
+        err instanceof Error && err.cause instanceof Error ? err.cause.message : "";
       let errorType = "other";
       if (err instanceof Error && err.name === "AbortError") {
         errorType = "timeout";
-      } else if (msg.includes("ECONNREFUSED") || msg.includes("connection refused")) {
+      } else if (
+        msg.includes("ECONNREFUSED") ||
+        msg.includes("connection refused") ||
+        causeMsg.includes("ECONNREFUSED") ||
+        causeMsg.includes("connection refused")
+      ) {
         errorType = "connection_refused";
       }
       return { alive: false, errorType };

@@ -99,6 +99,98 @@ describe("AgentClient.ping", () => {
   });
 });
 
+describe("AgentClient.pingWithDetail", () => {
+  it("returns alive:true with no errorType on success", async () => {
+    const client = new AgentClient(makeConfig(port));
+    const result = await client.pingWithDetail("test-agent", 3000);
+    expect(result.alive).toBe(true);
+    expect(result.errorType).toBeUndefined();
+  });
+
+  it("returns connection_refused for top-level ECONNREFUSED (Node.js < 22 style)", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(
+      Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:1"), { name: "Error" }),
+    );
+    const orig = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      const client = new AgentClient(makeConfig(1));
+      const result = await client.pingWithDetail("test-agent", 3000);
+      expect(result.alive).toBe(false);
+      expect(result.errorType).toBe("connection_refused");
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  it("returns connection_refused when ECONNREFUSED is in err.cause.message (Node.js 22 style)", async () => {
+    // On Node.js 22, fetch wraps: err.message === 'fetch failed',
+    // err.cause.message === 'connect ECONNREFUSED 127.0.0.1:PORT'
+    const cause = new Error("connect ECONNREFUSED 127.0.0.1:1");
+    const fetchError = Object.assign(new Error("fetch failed"), { cause });
+    const fetchMock = vi.fn().mockRejectedValue(fetchError);
+    const orig = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      const client = new AgentClient(makeConfig(1));
+      const result = await client.pingWithDetail("test-agent", 3000);
+      expect(result.alive).toBe(false);
+      expect(result.errorType).toBe("connection_refused");
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  it("returns timeout for AbortError", async () => {
+    const abortErr = Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
+    const fetchMock = vi.fn().mockRejectedValue(abortErr);
+    const orig = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      const client = new AgentClient(makeConfig(port));
+      const result = await client.pingWithDetail("test-agent", 3000);
+      expect(result.alive).toBe(false);
+      expect(result.errorType).toBe("timeout");
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  it("returns other for unrecognized errors", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("some weird TLS error"));
+    const orig = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      const client = new AgentClient(makeConfig(port));
+      const result = await client.pingWithDetail("test-agent", 3000);
+      expect(result.alive).toBe(false);
+      expect(result.errorType).toBe("other");
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  it("returns no_port for agents with no docker.port configured", async () => {
+    const config: OrchestratorConfig = {
+      proxy: { url: "http://localhost:3400", manager_url: "http://localhost:3400", timeout_ms: 5000 },
+      base_dir: "/tmp",
+      orchestrator_dir: "/tmp",
+      agents: {
+        "no-port-agent": {
+          dir: "no-port-agent",
+          description: "No port",
+          capabilities: [],
+          owns_topics: [],
+        },
+      },
+    };
+    const client = new AgentClient(config);
+    const result = await client.pingWithDetail("no-port-agent", 3000);
+    expect(result.alive).toBe(false);
+    expect(result.errorType).toBe("no_port");
+  });
+});
+
 describe("buildAgentSystemPrompt", () => {
   const agentName = "my-agent";
   const githubRepo = "owner/my-agent";
