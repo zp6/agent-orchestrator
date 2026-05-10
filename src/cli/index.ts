@@ -64,6 +64,7 @@ import { registerRevenueLeadCommand } from "./commands/revenue-leads.js";
 import { registerDMOutreachCommand } from "./commands/dm-outreach.js";
 import { registerConnectionErrorsCommand } from "./commands/connection-errors.js";
 import { registerGoalsSnapshotCommand } from "./commands/goals-snapshot.js";
+import { registerDnsCommand } from "./commands/dns.js";
 
 const program = new Command();
 
@@ -137,6 +138,7 @@ registerRevenueLeadCommand(program);
 registerDMOutreachCommand(program);
 registerConnectionErrorsCommand(program);
 registerGoalsSnapshotCommand(program);
+registerDnsCommand(program);
 
 program.parse();
 // docs PR ci-trigger
