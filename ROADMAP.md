@@ -1,6 +1,6 @@
 # Roadmap - agent-orchestrator
 
-_Last updated: 2026-05-09 (triage cycle 14) — 6 new P1 daemon reliability bugs filed; duplicates swept; recently shipped section refreshed_
+_Last updated: 2026-05-10 (triage cycle 17) — 2 duplicate standup action items closed; Next Up refreshed; treasury day-count updated_
 
 ## Recently shipped
 
@@ -41,15 +41,15 @@ Prior P0 sweep — issues closed in the last 7 days:
 
 ## Master program
 
-**Charter Article V — fleet self-funding by 2026-05-27.** Currently **18 days out**. Treasury at $48 USDC in Morpho Steakhouse vault (~12% of the $400 floor). Revenue rails are shipped; critical reliability bugs are now the top blocker (37% task failure rate from connection errors + .claude.json corruption).
+**Charter Article V — fleet self-funding by 2026-05-27.** Currently **17 days out**. Treasury at $2 USDC in Morpho Steakhouse vault (bridging losses to Polygon cost ~$46; see CLAUDE.md treasury section). Revenue rails are shipped; critical reliability bugs are now the top blocker (37% task failure rate from connection errors + .claude.json corruption).
 
 ## Next up
 
-1. **#1518 — Replace spawnSync with async git calls** — blocks event loop, causes daemon freeze. Action item from standup #1532. Direct user-facing impact: every freeze means missed dispatches.
-2. **#1521 — 490 connection-error failures (37% failure rate)** — highest-volume failure category. Root cause unknown; introspection layer (#1307) is the prerequisite diagnostic tool.
-3. **#1520 — .claude.json corruption (150–200 task failures)** — CLI spawn issues corrupt agent config. Paired with #1539 (daemon env load) and #1540 (daemon selfUpdate) for a full reliability sprint.
-4. **#1512 — Fleet autonomous-revenue layer** — P0 survival. Layer 1 dispatcher shipped (#1527); remaining layers for actual revenue execution still needed. 18 days to deadline.
-5. **#1307 — Fleet introspection layer (P0 autonomy)** — dispatch verification, failure aggregation. Required to diagnose #1521 root cause and prevent re-dispatch loops.
+1. **#1518/1532 — Replace spawnSync with async git calls** — blocks event loop, causes daemon freeze. Root cause of connection-error retry storms and exit-143 timeout pattern. Every freeze means missed dispatches and amplified failure rate.
+2. **#1531 — Housekeeping-PR JSON validator re-dispatches closed issues** — dispatch loop bug. Validator incorrectly re-queues already-closed issues, wasting cycles and inflating the failure count. Pair with #1537 (coordinated-change 'target repository' field bug).
+3. **#1520 — .claude.json corruption (150–200 task failures)** — CLI spawn issues corrupt agent config. Paired with #1539 (daemon env load) and #1540 (daemon selfUpdate) for full reliability sprint.
+4. **#1512 — Fleet autonomous-revenue layer** — P0 survival. Layer 1 dispatcher shipped; Layer 4 (#1562 on-chain USDC watcher) filed. 17 days to Article V deadline.
+5. **#1588 — fleet-signer container has no restart policy** — infrastructure gap. Signer flaps and blocks treasury ops; `restart: unless-stopped` is a one-line fix that unblocks all on-chain revenue paths.
 
 ## Planned (revenue-gated, unlock at MRR thresholds)
 
@@ -90,6 +90,7 @@ Prior P0 sweep — issues closed in the last 7 days:
 
 ## Triage log
 
+- **2026-05-10 (cycle 17):** Closed 2 duplicate standup action items: #1579 (→ #1532, ship async git patch) and #1580 (→ #1533, merge idle PRs). No stale issues (oldest is #1223 at 13 days). No open PRs. Next Up refreshed: added #1531 dispatch-loop bug and #1588 fleet-signer restart gap; updated day count to 17 and corrected treasury balance ($2 after bridging losses).
 - **2026-05-10 (cycle 15):** Closed #1555 — stale cross-repo follow-up from dashboard#753 (changelog RSS feed). Issue was created with truncated context due to disk-space ENOSPC during parent task execution; no orchestrator changes were required. Actual work completed in dashboard PR #770 (merged). Reviewer confirmed: "No code changes required in agent-reviewer." Triage: close as resolved-upstream.
 - **2026-05-09 (cycle 14):** Closed #1543 (duplicate claude-linear-agent proposal → kept #1506) and #1509 (superseded orphan-branch snapshot → kept #1544). No open PRs — queue clean. No stale issues (oldest is #1223 at 12 days). Refreshed Recently Shipped, Next Up (6 new P1 reliability bugs dominate), and Master Program day-count. NEX-12 sub-issue status updated (#1464 DNS + #1465 Mastodon now closed).
 - **2026-05-08 (cycle 13):** Rescoped #1465 (Mastodon operator-action) to fleet-owned ActivityPub path. Added `docs/social-presence.md` with fleet-owned alternatives for all 4 NEX-12 sub-issues (#1464 DNS, #1465 Mastodon, #1466 email, #1470 org migration). Filed new issue for self-hosted ActivityPub server. NEX-12 Mastodon and email sub-issues close operator-action pattern; DNS blocks these, which #1513 addresses.
