@@ -360,12 +360,14 @@ The fleet-signer provides a whitelist-gated signing service for on-chain treasur
 The orchestrator daemon interacts with it via `FleetSignerClient` (`src/client/fleet-signer-client.ts`).
 The CLI interacts via `TreasuryClient` (`src/services/treasury.ts`) + `SignerClient` (`src/services/signer-client.ts`).
 
-### Current capital state (as of 2026-05-03)
+### Current capital state (as of 2026-05-10)
 
-- **$48 USDC** in Morpho Steakhouse USDC vault on Base (earning ~4.5–7.5% APY)
+- **$2.06 USDC** in Morpho Steakhouse USDC vault on Base (earning ~4.5–7.5% APY)
   - Vault: `0xbeeF010f9cb27031ad51e3333f9aF9C6B1228183` (ERC4626)
   - Migration tx: `0x7d113a7f8afd91c894177dc516dafdff1baf520683ddc8bfbe0015da14785190`
-- **~$0 ETH** — may need a small top-up for future gas (Base gas is ~$0.01/tx)
+  - Principal dropped from ~$48 → ~$2 between 2026-05-04 and 2026-05-10: redeemed and bridged to Polygon for Polymarket setup; capital was lost to Li.fi bridge fees + swap slippage across legs that never landed in productive positions. **Capital-discipline implication:** at this principal level, cross-chain bridging is negative-EV — concentrate on Base until revenue lifts the floor.
+- **0.000835 ETH** on Base (~$2–3 worth, enough for several txs at ~$0.01 gas each)
+- **$0** liquid USDC on Base, $0 on Polygon, $0 in Aave, $0 in Aerodrome, no open Polymarket positions
 - Treasury wallet: `0x468EC325f3797F5968dEcC757FA0B960Bd0f78Ef` (Base L2)
 - Fleet signer: `http://127.0.0.1:7521` — must be running locally; passphrase in `FLEET_SIGNER_PASSPHRASE`
 
@@ -422,18 +424,15 @@ docker run -d --name fleet-signer \
 
 To rebuild after whitelist changes: `cd packages/fleet-signer && docker build -t fleet-signer:local -f docker/Dockerfile .`
 
-### Active revenue opportunities (as of 2026-05-03)
+### Active revenue opportunities (as of 2026-05-10)
 
-**Polymarket — researched, ready to execute when Polygon USDC is available:**
-- "Gemini 3.5 released by June 30?" — **bet NO at 47¢** (fleet estimate: 35–40% YES)
-  - Gemini 3.5 doesn't exist; Google versioning goes 3.0→3.1→3.2; specific name required
-  - Gemini 4 or 3.2 released at Google I/O (May 19-20) would NOT resolve YES
-  - Condition ID: fetch from gamma-api.polymarket.com events?slug=gemini-3pt5-released-by
-- "Best AI model end of May?" — Anthropic at 81¢ is accurate but margin is thin (4 Elo over Gemini 3.1 Pro); Google I/O is May 19 which is 12 days before resolution
-- **Blocker**: treasury USDC is on Base, Polymarket CLOB requires USDC on Polygon — needs bridge infrastructure
+**Polymarket — researched, on hold until working capital recovers:**
+- "Gemini 3.5 released by June 30?" — fleet estimate 35–40% YES, bet NO if executable
+- "Best AI model end of May?" — Anthropic at 81¢ is accurate but margin is thin (4 Elo over Gemini 3.1 Pro)
+- **Blocker (current)**: treasury principal is ~$2 — bridge fees alone exceed any economically viable bet size. Path is unblocked when working capital crosses ~$200 minimum, or when a same-chain market venue is available.
 
-**Morpho yield (active):**
-- $48 USDC earning 4.5–7.5% APY in Morpho Steakhouse USDC vault
+**Morpho yield (active, but rounding error):**
+- $2.06 USDC earning 4.5–7.5% APY in Morpho Steakhouse USDC vault — yields ~$0.10/year. Real yield optimization waits for revenue.
 - Withdraw via `orch treasury morpho-migrate` in reverse (add `morpho_withdraw` operation if needed)
 
 **Immunefi bug bounties — no KYC, crypto payout:**
