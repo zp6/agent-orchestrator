@@ -845,6 +845,7 @@ export class Daemon {
 
       // Self-update: pull + rebuild if behind origin/main, then re-exec.
       if (this.cycleCount % SELF_UPDATE_EVERY_N_CYCLES === 0) {
+        this.log.info("Self-update: check starting", { cycle: this.cycleCount });
         await this.selfUpdate();
       }
 
@@ -1276,7 +1277,7 @@ export class Daemon {
       // If dist doesn't exist at all, we must rebuild.
       if (!existsSync(distFile)) {
         this.log.warn("Stale dist: dist/service/daemon-entry.js missing — rebuilding");
-        execSync("npm run build", { cwd: repoDir, stdio: "pipe" });
+        execSync("npm run build", { cwd: repoDir, stdio: "pipe", timeout: 300_000 });
         this.log.info("Stale dist: rebuild complete (was missing)");
         return true;
       }
@@ -1287,6 +1288,7 @@ export class Daemon {
       const headCommitSec = execSync("git log -1 --format=%ct HEAD", {
         cwd: repoDir,
         stdio: "pipe",
+        timeout: 10_000,
       })
         .toString()
         .trim();
@@ -1300,7 +1302,7 @@ export class Daemon {
         headCommit: new Date(headCommitMs).toISOString(),
         staleBySeconds: staleSec,
       });
-      execSync("npm run build", { cwd: repoDir, stdio: "pipe" });
+      execSync("npm run build", { cwd: repoDir, stdio: "pipe", timeout: 300_000 });
       this.log.info("Stale dist: rebuild complete", { staleBySeconds: staleSec });
       return true;
     } catch (err) {
@@ -1324,19 +1326,31 @@ export class Daemon {
     const repoDir = resolve(new URL("../..", import.meta.url).pathname);
     try {
       const beforeHash = getCurrentCommitHash();
-      execSync("git fetch origin main --quiet", { cwd: repoDir, stdio: "pipe" });
-      const behind = execSync("git rev-list HEAD..origin/main --count", { cwd: repoDir, stdio: "pipe" })
+      // Timeout guard: git fetch can hang indefinitely on network stall.
+      // Without a timeout, execSync blocks the event loop and the watchdog
+      // setTimeout callbacks cannot fire — the daemon silently hangs. Issue #1594.
+      execSync("git fetch origin main --quiet", { cwd: repoDir, stdio: "pipe", timeout: 30_000 });
+      const behind = execSync("git rev-list HEAD..origin/main --count", {
+        cwd: repoDir,
+        stdio: "pipe",
+        timeout: 10_000,
+      })
         .toString()
         .trim();
       if (behind === "0") {
         // Git is current but dist might still be stale (e.g. git pull without build,
         // or a manual file edit).  Rebuild silently if needed; no re-exec required
         // because this is an in-place fix that takes effect on the next cycle.
+        this.log.info("Self-update: up to date", { commit: beforeHash });
         this.rebuildIfDistStale(repoDir);
         return;
       }
 
-      const commits = execSync("git log HEAD..origin/main --oneline", { cwd: repoDir, stdio: "pipe" })
+      const commits = execSync("git log HEAD..origin/main --oneline", {
+        cwd: repoDir,
+        stdio: "pipe",
+        timeout: 10_000,
+      })
         .toString()
         .trim();
       this.log.info("Self-update: new commits detected, pulling and rebuilding", {
@@ -1352,7 +1366,7 @@ export class Daemon {
       const hadStash = stashWorkingTree(repoDir);
 
       try {
-        execSync("git pull --ff-only origin main", { cwd: repoDir, stdio: "pipe" });
+        execSync("git pull --ff-only origin main", { cwd: repoDir, stdio: "pipe", timeout: 30_000 });
       } catch (pullErr) {
         // Issue #1492: detect branch divergence from main (typically caused by
         // a squash-merge that left the daemon's checkout pointing at a feature
@@ -1364,6 +1378,7 @@ export class Daemon {
           ahead = execSync("git rev-list origin/main..HEAD --count", {
             cwd: repoDir,
             stdio: "pipe",
+            timeout: 10_000,
           })
             .toString()
             .trim();
@@ -1439,7 +1454,7 @@ export class Daemon {
         }
       }
 
-      execSync("npm run build", { cwd: repoDir, stdio: "pipe" });
+      execSync("npm run build", { cwd: repoDir, stdio: "pipe", timeout: 300_000 });
 
       const afterHash = getCurrentCommitHash();
       this.log.info("Self-update: rebuild complete, re-execing daemon", {
