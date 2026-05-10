@@ -176,38 +176,38 @@ agents:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CODEX POOL — DECOMMISSIONED 2026-05-03
+# CODEX / PARALLEL POOL — re-enabled 2026-05-10
 #
-# OpenAI/codex subscription is rate-limit-exhausted until 2026-05-05 07:15 UTC.
-# All codex agents are commented out below to prevent the daemon's deployer
-# from auto-starting them and to remove them from the dispatch model router's
-# pool.
+# Originally decommissioned 2026-05-03 because the OpenAI subscription was
+# rate-limit-exhausted until 2026-05-05 07:15 UTC. Re-enabled now that the
+# rate-limit window has passed (5+ days ago) and #1420 (model router
+# exhausted-provider handling) has shipped — the router auto-skips
+# rate-limited providers, so leaving codex enabled is safe even if it
+# hits limits again.
 #
-# To re-enable after the rate limit resets:
-#   1. Uncomment the codex-* blocks below
-#   2. Run `node dist/cli/index.js agents sync` to re-register with the proxy
-#   3. Restart daemon if needed
+# Re-enabled subset (high-bottleneck only) — both on openai provider for
+# genuine cross-quota parallelism with the claude-opus / claude-sonnet pool:
+#   - codex-agent-orchestrator: parallel Director (orchestrator pool)
+#   - codex-orchestrator-reviewer: parallel reviewer (reviewer pool)
 #
-# Tracked in rapartlu/agent-orchestrator#1420 (model router exhausted-provider
-# handling) — once that lands, codex can be left enabled and routing will
-# avoid it automatically when rate-limited.
+# Skipped (not bottlenecks observed today): codex-orchestrator-dashboard,
+# codex-research-agent, codex-proxy. Re-enable later as needed.
 # ──────────────────────────────────────────────────────────────────────────────
-  # === DECOMMISSIONED 2026-05-03 — see banner above ===
-  # codex-agent-orchestrator:
-  # dir: "claude-agent-orchestrator"
-  # repo: "git@github.com:rapartlu/agent-orchestrator.git"
-  # provider: "openai"
-  # model: "gpt-4.1"
-  # pool: "orchestrator"
-  # description: "Core orchestration infrastructure (Codex). Parallel throughput for orchestrator pool."
-  # capabilities: ["typescript", "orchestration", "sqlite"]
-  # github: "rapartlu/agent-orchestrator"
-  # owns_topics: ["orchestrator", "daemon", "routing", "dispatcher", "planner", "deployer", "state", "triggers", "sync"]
-  # docker:
-  # port: 3480
-  # api_key: "cheese"
-  # permissions: "bypassPermissions"
-  # session: "fresh"
+  codex-agent-orchestrator:
+    dir: "claude-agent-orchestrator"
+    repo: "git@github.com:rapartlu/agent-orchestrator.git"
+    provider: "openai"
+    model: "gpt-5.4-mini"
+    pool: "orchestrator"
+    description: "Core orchestration infrastructure (Codex/OpenAI). Parallel throughput for orchestrator pool, different quota from claude-opus."
+    capabilities: ["typescript", "orchestration", "sqlite"]
+    github: "rapartlu/agent-orchestrator"
+    owns_topics: ["orchestrator", "daemon", "routing", "dispatcher", "planner", "deployer", "state", "triggers", "sync"]
+    docker:
+      port: 3480
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
 
   # # ── Reviewer ────────────────────────────────────────────────────
   claude-orchestrator-reviewer:
@@ -229,22 +229,23 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
-  # === DECOMMISSIONED 2026-05-03 — see banner above ===
-  # codex-orchestrator-reviewer:
-  # dir: "claude-orchestrator-reviewer"
-  # repo: "git@github.com:rapartlu/agent-reviewer.git"
-  # provider: "claude"
-  # model: "claude-haiku-4-5-20251001"
-  # pool: "reviewer"
-  # description: "PR reviewer, verifier, supervisor (Claude Haiku). Parallel throughput for reviewer pool."
-  # capabilities: ["typescript", "llm", "review", "verification"]
-  # github: "rapartlu/agent-reviewer"
-  # owns_topics: ["review", "verification", "supervisor", "improvement", "escalation", "telegram", "quality"]
-  # docker:
-  # port: 3481
-  # api_key: "cheese"
-  # permissions: "bypassPermissions"
-  # session: "fresh"
+  codex-orchestrator-reviewer:
+    dir: "claude-orchestrator-reviewer"
+    repo: "git@github.com:rapartlu/agent-reviewer.git"
+    provider: "openai"
+    model: "gpt-5.4-mini"
+    pool: "reviewer"
+    description: "PR reviewer, verifier, supervisor (Codex/OpenAI). Parallel throughput for reviewer pool on a different quota from claude-sonnet variant."
+    capabilities: ["typescript", "llm", "review", "verification"]
+    capability_tags: ["review-only"]
+    github: "rapartlu/agent-reviewer"
+    owns_topics: ["review", "verification", "supervisor", "improvement", "escalation", "telegram", "quality"]
+    housekeeping_offset_cycles: 70
+    docker:
+      port: 3481
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
 
   # # ── Dashboard ───────────────────────────────────────────────────
   claude-orchestrator-dashboard:
