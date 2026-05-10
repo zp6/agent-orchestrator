@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execAsync } from "../utils/exec-async.js";
 import { createLogger } from "../service/logger.js";
 
 const log = createLogger("merge-stall-guard");
@@ -60,17 +60,17 @@ export interface MergeStallCheckResult {
  * Fails open on any error: if we can't query GitHub, the agent proceeds with
  * dispatch rather than being permanently blocked.
  */
-export function checkMergeStall(
+export async function checkMergeStall(
   repo: string,
   agentName: string,
-  execFn: (cmd: string, opts: { encoding: "utf-8"; timeout: number }) => string = (cmd, opts) =>
-    execSync(cmd, opts),
-): MergeStallCheckResult {
+  execFn: (cmd: string, opts: { encoding?: "utf-8"; timeout: number }) => Promise<string> = (cmd, opts) =>
+    execAsync(cmd, opts),
+): Promise<MergeStallCheckResult> {
   const thresholdHours = getMergeStallThresholdHours();
   const now = Date.now();
 
   try {
-    const raw = execFn(
+    const raw = await execFn(
       `gh pr list --repo ${repo} --state open --json number,title,url,updatedAt,headRefName,isDraft,reviewDecision,statusCheckRollup --limit 50`,
       { encoding: "utf-8", timeout: 15000 },
     );
@@ -158,14 +158,14 @@ export function checkMergeStall(
  * Used by `orch merge-sweep` CLI command to surface the full merge backlog.
  * Returns all stale MERGEABLE PRs grouped by repo.
  */
-export function scanFleetMergeStalls(
+export async function scanFleetMergeStalls(
   repos: string[],
-  execFn?: (cmd: string, opts: { encoding: "utf-8"; timeout: number }) => string,
-): MergeablePR[] {
+  execFn?: (cmd: string, opts: { encoding?: "utf-8"; timeout: number }) => Promise<string>,
+): Promise<MergeablePR[]> {
   const allStale: MergeablePR[] = [];
 
   for (const repo of repos) {
-    const result = checkMergeStall(repo, repo.split("/").pop() ?? repo, execFn);
+    const result = await checkMergeStall(repo, repo.split("/").pop() ?? repo, execFn);
     allStale.push(...result.stalePRs);
   }
 
@@ -186,13 +186,13 @@ export interface MergeResult {
  * Returns a MergeResult indicating success or failure.
  * Never throws — failures are captured in the result.
  */
-export function mergePR(
+export async function mergePR(
   pr: MergeablePR,
-  execFn: (cmd: string, opts: { encoding: "utf-8"; timeout: number }) => string = (cmd, opts) =>
-    execSync(cmd, opts),
-): MergeResult {
+  execFn: (cmd: string, opts: { encoding?: "utf-8"; timeout: number }) => Promise<string> = (cmd, opts) =>
+    execAsync(cmd, opts),
+): Promise<MergeResult> {
   try {
-    execFn(
+    await execFn(
       `gh pr merge ${pr.number} --repo ${pr.repo} --squash --delete-branch`,
       { encoding: "utf-8", timeout: 30000 },
     );
@@ -223,14 +223,14 @@ export function mergePR(
  * Used by `orch merge-sweep --execute` to land rotting PRs.
  * Merges sequentially (one at a time) to avoid race conditions.
  */
-export function autoMergeFleetPRs(
+export async function autoMergeFleetPRs(
   prs: MergeablePR[],
-  execFn?: (cmd: string, opts: { encoding: "utf-8"; timeout: number }) => string,
-): MergeResult[] {
+  execFn?: (cmd: string, opts: { encoding?: "utf-8"; timeout: number }) => Promise<string>,
+): Promise<MergeResult[]> {
   const results: MergeResult[] = [];
 
   for (const pr of prs) {
-    const result = execFn ? mergePR(pr, execFn) : mergePR(pr);
+    const result = await (execFn ? mergePR(pr, execFn) : mergePR(pr));
     results.push(result);
   }
 

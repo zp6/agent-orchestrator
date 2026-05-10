@@ -57,9 +57,9 @@ describe("checkMergeStall", () => {
     setMergeStallThresholdHours(undefined);
   });
 
-  it("returns blocked when agent has a stale MERGEABLE PR", () => {
-    const mockExec = vi.fn().mockReturnValue(JSON.stringify([makePR()]));
-    const result = checkMergeStall("owner/repo", "test-agent", mockExec);
+  it("returns blocked when agent has a stale MERGEABLE PR", async () => {
+    const mockExec = vi.fn().mockResolvedValue(JSON.stringify([makePR()]));
+    const result = await checkMergeStall("owner/repo", "test-agent", mockExec);
 
     expect(result.blocked).toBe(true);
     expect(result.stalePRs).toHaveLength(1);
@@ -67,92 +67,90 @@ describe("checkMergeStall", () => {
     expect(result.reason).toContain("stale MERGEABLE PR");
   });
 
-  it("returns not blocked when PR was recently updated", () => {
-    const mockExec = vi.fn().mockReturnValue(
+  it("returns not blocked when PR was recently updated", async () => {
+    const mockExec = vi.fn().mockResolvedValue(
       JSON.stringify([makePR({ updatedAt: hoursAgo(1) })]),
     );
-    const result = checkMergeStall("owner/repo", "test-agent", mockExec);
+    const result = await checkMergeStall("owner/repo", "test-agent", mockExec);
 
     expect(result.blocked).toBe(false);
     expect(result.stalePRs).toHaveLength(0);
   });
 
-  it("skips draft PRs", () => {
-    const mockExec = vi.fn().mockReturnValue(
+  it("skips draft PRs", async () => {
+    const mockExec = vi.fn().mockResolvedValue(
       JSON.stringify([makePR({ isDraft: true })]),
     );
-    const result = checkMergeStall("owner/repo", "test-agent", mockExec);
+    const result = await checkMergeStall("owner/repo", "test-agent", mockExec);
 
     expect(result.blocked).toBe(false);
     expect(result.stalePRs).toHaveLength(0);
   });
 
-  it("skips PRs with failing CI", () => {
-    const mockExec = vi.fn().mockReturnValue(
+  it("skips PRs with failing CI", async () => {
+    const mockExec = vi.fn().mockResolvedValue(
       JSON.stringify([
         makePR({
           statusCheckRollup: [{ conclusion: "FAILURE", state: "COMPLETED" }],
         }),
       ]),
     );
-    const result = checkMergeStall("owner/repo", "test-agent", mockExec);
+    const result = await checkMergeStall("owner/repo", "test-agent", mockExec);
 
     expect(result.blocked).toBe(false);
     expect(result.stalePRs).toHaveLength(0);
   });
 
-  it("skips PRs with no status checks", () => {
-    const mockExec = vi.fn().mockReturnValue(
+  it("skips PRs with no status checks", async () => {
+    const mockExec = vi.fn().mockResolvedValue(
       JSON.stringify([makePR({ statusCheckRollup: [] })]),
     );
-    const result = checkMergeStall("owner/repo", "test-agent", mockExec);
+    const result = await checkMergeStall("owner/repo", "test-agent", mockExec);
 
     expect(result.blocked).toBe(false);
     expect(result.stalePRs).toHaveLength(0);
   });
 
-  it("skips PRs with null status checks", () => {
-    const mockExec = vi.fn().mockReturnValue(
+  it("skips PRs with null status checks", async () => {
+    const mockExec = vi.fn().mockResolvedValue(
       JSON.stringify([makePR({ statusCheckRollup: null })]),
     );
-    const result = checkMergeStall("owner/repo", "test-agent", mockExec);
+    const result = await checkMergeStall("owner/repo", "test-agent", mockExec);
 
     expect(result.blocked).toBe(false);
     expect(result.stalePRs).toHaveLength(0);
   });
 
-  it("fails open on GitHub API error", () => {
-    const mockExec = vi.fn().mockImplementation(() => {
-      throw new Error("gh CLI timeout");
-    });
-    const result = checkMergeStall("owner/repo", "test-agent", mockExec);
+  it("fails open on GitHub API error", async () => {
+    const mockExec = vi.fn().mockRejectedValue(new Error("gh CLI timeout"));
+    const result = await checkMergeStall("owner/repo", "test-agent", mockExec);
 
     expect(result.blocked).toBe(false);
     expect(result.reason).toContain("gh CLI timeout");
   });
 
-  it("respects custom threshold", () => {
+  it("respects custom threshold", async () => {
     setMergeStallThresholdHours(12);
 
     // PR updated 6h ago — within 12h threshold, should not block
-    const mockExec = vi.fn().mockReturnValue(
+    const mockExec = vi.fn().mockResolvedValue(
       JSON.stringify([makePR({ updatedAt: hoursAgo(6) })]),
     );
-    const result = checkMergeStall("owner/repo", "test-agent", mockExec);
+    const result = await checkMergeStall("owner/repo", "test-agent", mockExec);
 
     expect(result.blocked).toBe(false);
     expect(result.stalePRs).toHaveLength(0);
   });
 
-  it("detects multiple stale PRs", () => {
-    const mockExec = vi.fn().mockReturnValue(
+  it("detects multiple stale PRs", async () => {
+    const mockExec = vi.fn().mockResolvedValue(
       JSON.stringify([
         makePR({ number: 100, updatedAt: hoursAgo(10) }),
         makePR({ number: 101, updatedAt: hoursAgo(20) }),
         makePR({ number: 102, updatedAt: hoursAgo(1) }), // fresh — not stale
       ]),
     );
-    const result = checkMergeStall("owner/repo", "test-agent", mockExec);
+    const result = await checkMergeStall("owner/repo", "test-agent", mockExec);
 
     expect(result.blocked).toBe(true);
     expect(result.stalePRs).toHaveLength(2);
@@ -166,8 +164,8 @@ describe("scanFleetMergeStalls", () => {
     setMergeStallThresholdHours(undefined);
   });
 
-  it("aggregates stale PRs across repos sorted by stale hours descending", () => {
-    const mockExec = vi.fn().mockImplementation((cmd: string) => {
+  it("aggregates stale PRs across repos sorted by stale hours descending", async () => {
+    const mockExec = vi.fn().mockImplementation(async (cmd: string) => {
       if (cmd.includes("repo-a")) {
         return JSON.stringify([makePR({ number: 1, updatedAt: hoursAgo(5) })]);
       }
@@ -177,7 +175,7 @@ describe("scanFleetMergeStalls", () => {
       return "[]";
     });
 
-    const result = scanFleetMergeStalls(["owner/repo-a", "owner/repo-b"], mockExec);
+    const result = await scanFleetMergeStalls(["owner/repo-a", "owner/repo-b"], mockExec);
 
     expect(result).toHaveLength(2);
     // Most stale first
@@ -185,9 +183,9 @@ describe("scanFleetMergeStalls", () => {
     expect(result[1].number).toBe(1);
   });
 
-  it("returns empty array when no stale PRs exist", () => {
-    const mockExec = vi.fn().mockReturnValue("[]");
-    const result = scanFleetMergeStalls(["owner/repo-a"], mockExec);
+  it("returns empty array when no stale PRs exist", async () => {
+    const mockExec = vi.fn().mockResolvedValue("[]");
+    const result = await scanFleetMergeStalls(["owner/repo-a"], mockExec);
     expect(result).toHaveLength(0);
   });
 });
@@ -206,10 +204,10 @@ function makeMergeablePR(overrides: Partial<MergeablePR> = {}): MergeablePR {
 }
 
 describe("mergePR", () => {
-  it("calls gh pr merge with correct args on success", () => {
-    const mockExec = vi.fn().mockReturnValue("");
+  it("calls gh pr merge with correct args on success", async () => {
+    const mockExec = vi.fn().mockResolvedValue("");
     const pr = makeMergeablePR();
-    const result = mergePR(pr, mockExec);
+    const result = await mergePR(pr, mockExec);
 
     expect(result.success).toBe(true);
     expect(result.pr).toBe(pr);
@@ -220,24 +218,22 @@ describe("mergePR", () => {
     );
   });
 
-  it("captures error on merge failure without throwing", () => {
-    const mockExec = vi.fn().mockImplementation(() => {
-      throw new Error("merge conflict");
-    });
+  it("captures error on merge failure without throwing", async () => {
+    const mockExec = vi.fn().mockRejectedValue(new Error("merge conflict"));
     const pr = makeMergeablePR();
-    const result = mergePR(pr, mockExec);
+    const result = await mergePR(pr, mockExec);
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("merge conflict");
     expect(result.pr).toBe(pr);
   });
 
-  it("handles non-Error thrown values", () => {
-    const mockExec = vi.fn().mockImplementation(() => {
+  it("handles non-Error thrown values", async () => {
+    const mockExec = vi.fn().mockImplementation(async () => {
       throw "string error";
     });
     const pr = makeMergeablePR();
-    const result = mergePR(pr, mockExec);
+    const result = await mergePR(pr, mockExec);
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("string error");
@@ -245,14 +241,14 @@ describe("mergePR", () => {
 });
 
 describe("autoMergeFleetPRs", () => {
-  it("merges all PRs and returns results", () => {
-    const mockExec = vi.fn().mockReturnValue("");
+  it("merges all PRs and returns results", async () => {
+    const mockExec = vi.fn().mockResolvedValue("");
     const prs = [
       makeMergeablePR({ number: 1, repo: "owner/repo-a" }),
       makeMergeablePR({ number: 2, repo: "owner/repo-b" }),
     ];
 
-    const results = autoMergeFleetPRs(prs, mockExec);
+    const results = await autoMergeFleetPRs(prs, mockExec);
 
     expect(results).toHaveLength(2);
     expect(results[0].success).toBe(true);
@@ -260,26 +256,26 @@ describe("autoMergeFleetPRs", () => {
     expect(mockExec).toHaveBeenCalledTimes(2);
   });
 
-  it("continues merging after individual failures", () => {
+  it("continues merging after individual failures", async () => {
     const mockExec = vi.fn()
-      .mockImplementationOnce(() => { throw new Error("failed"); })
-      .mockReturnValueOnce("");
+      .mockRejectedValueOnce(new Error("failed"))
+      .mockResolvedValueOnce("");
 
     const prs = [
       makeMergeablePR({ number: 1 }),
       makeMergeablePR({ number: 2 }),
     ];
 
-    const results = autoMergeFleetPRs(prs, mockExec);
+    const results = await autoMergeFleetPRs(prs, mockExec);
 
     expect(results).toHaveLength(2);
     expect(results[0].success).toBe(false);
     expect(results[1].success).toBe(true);
   });
 
-  it("returns empty array for empty input", () => {
+  it("returns empty array for empty input", async () => {
     const mockExec = vi.fn();
-    const results = autoMergeFleetPRs([], mockExec);
+    const results = await autoMergeFleetPRs([], mockExec);
 
     expect(results).toHaveLength(0);
     expect(mockExec).not.toHaveBeenCalled();

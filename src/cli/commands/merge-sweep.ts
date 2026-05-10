@@ -125,7 +125,7 @@ export function registerMergeSweepCommand(program: Command): void {
       );
       console.log();
 
-      const stalePRs = scanFleetMergeStalls([...repos]);
+      const stalePRs = await scanFleetMergeStalls([...repos]);
 
       if (opts.json && !opts.execute) {
         console.log(JSON.stringify(stalePRs, null, 2));
@@ -148,7 +148,7 @@ export function registerMergeSweepCommand(program: Command): void {
       console.log();
       console.log(chalk.yellow(`Merging ${stalePRs.length} PR(s)…`));
 
-      const results = autoMergeFleetPRs(stalePRs);
+      const results = await autoMergeFleetPRs(stalePRs);
 
       if (opts.json) {
         console.log(JSON.stringify(results, null, 2));

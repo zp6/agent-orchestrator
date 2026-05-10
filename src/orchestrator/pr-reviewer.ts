@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process";
 import { resolve } from "node:path";
 import { unlinkSync } from "node:fs";
+import { execAsync } from "../utils/exec-async.js";
 import { ReviewerClient } from "../client/reviewer-client.js";
 import { createLogger } from "../service/logger.js";
 import type { OrchestratorConfig } from "../config/schema.js";
@@ -65,7 +66,7 @@ export class PRReviewer {
     //   1. CONFLICTING — the branch has actual merge conflicts; rebase or escalate.
     //   2. MERGEABLE/UNKNOWN — the branch may be stale (behind main); proactively rebase so
     //      reviews reflect the current codebase. Best-effort: always continue to review.
-    const localPath = this.findLocalRepoPath(repo);
+    const localPath = await this.findLocalRepoPath(repo);
 
     if (pr.mergeable === "CONFLICTING") {
       // Record which files are involved in this conflict so the reviewer agent
@@ -89,7 +90,7 @@ export class PRReviewer {
           branch: pr.branch,
           localPath,
         });
-        const rebaseOutcome = this.tryAutoRebase(localPath, pr.branch);
+        const rebaseOutcome = await this.tryAutoRebase(localPath, pr.branch);
         if (rebaseOutcome === "success") {
           this.log.info("Auto-rebase succeeded — continuing with review", {
             repo,
@@ -137,7 +138,7 @@ export class PRReviewer {
       // Proactive rebase for stale branches (behind main but not yet CONFLICTING).
       // This prevents slow accumulation of lag that eventually causes conflicts.
       // Always continue to review regardless of outcome — this is best-effort.
-      const rebaseOutcome = this.tryAutoRebase(localPath, pr.branch);
+      const rebaseOutcome = await this.tryAutoRebase(localPath, pr.branch);
       this.log.info("Proactive pre-review rebase", {
         repo,
         prNumber,
@@ -1362,7 +1363,7 @@ Please add this block to your PR description and try again.`,
    * onto the new main so they stay conflict-free.
    */
   private async rebaseRemainingQueue(repo: string, justMergedBranch: string): Promise<void> {
-    const localPath = this.findLocalRepoPath(repo);
+    const localPath = await this.findLocalRepoPath(repo);
     if (!localPath) {
       this.log.warn("Cannot rebase queued branches: no local repo path found", { repo });
       return;
@@ -1375,7 +1376,7 @@ Please add this block to your PR description and try again.`,
 
     for (const entry of remaining) {
       try {
-        const outcome = this.tryAutoRebase(localPath, entry.branch);
+        const outcome = await this.tryAutoRebase(localPath, entry.branch);
         this.log.info("Rebase of queued branch", { repo, branch: entry.branch, outcome });
         if (outcome === "failed") {
           // Remove from queue and notify — can't safely merge if rebase fails
@@ -1443,14 +1444,14 @@ Please add this block to your PR description and try again.`,
     }
   }
 
-  private findLocalRepoPath(repo: string): string | null {
+  private async findLocalRepoPath(repo: string): Promise<string | null> {
     // Match agent repos by their github field
     for (const agent of Object.values(this.config.agents)) {
       if (agent.github === repo) {
         const candidate = resolve(this.config.base_dir, agent.dir);
-        // Validate it's actually a git repo
+        // Validate it's actually a git repo (async — won't block event loop)
         try {
-          execSync("git rev-parse --git-dir", { cwd: candidate, encoding: "utf-8", timeout: 5000 });
+          await execAsync("git rev-parse --git-dir", { cwd: candidate, timeout: 5000 });
           return candidate;
         } catch {
           this.log.warn("Agent repo path is not a valid git repo", { repo, path: candidate });
@@ -1460,11 +1461,12 @@ Please add this block to your PR description and try again.`,
     }
     // Check if the orchestrator's own repo matches
     try {
-      const remote = execSync("git remote get-url origin", {
-        cwd: this.config.orchestrator_dir,
-        encoding: "utf-8",
-        timeout: 10000,
-      }).trim();
+      const remote = (
+        await execAsync("git remote get-url origin", {
+          cwd: this.config.orchestrator_dir,
+          timeout: 10000,
+        })
+      ).trim();
       if (remote.includes(repo)) {
         return this.config.orchestrator_dir;
       }
@@ -1482,7 +1484,7 @@ Please add this block to your PR description and try again.`,
    *   'success'    — rebase completed and changes were pushed
    *   'failed'     — rebase had conflicts or another git error prevented completion
    */
-  private tryAutoRebase(localPath: string, branch: string): "success" | "up-to-date" | "failed" {
+  private async tryAutoRebase(localPath: string, branch: string): Promise<"success" | "up-to-date" | "failed"> {
     // Build git env with credentials from config
     const env: Record<string, string> = { ...process.env } as Record<string, string>;
     if (this.config.proxy.ssh_key) {
@@ -1491,35 +1493,36 @@ Please add this block to your PR description and try again.`,
     }
     env.GIT_TERMINAL_PROMPT = "0";
 
-    const opts = { cwd: localPath, encoding: "utf-8" as const, env };
+    const opts = { cwd: localPath, env };
     let currentBranch = "main";
 
     try {
       // Clean stale git state that blocks future operations
-      try { execSync("git rebase --abort", { ...opts, timeout: 5000 }); } catch { /* no rebase in progress */ }
+      // These are async — won't freeze the event loop even on iCloud-synced repos
+      try { await execAsync("git rebase --abort", { ...opts, timeout: 5000 }); } catch { /* no rebase in progress */ }
       try { unlinkSync(resolve(localPath, ".git/index.lock")); } catch { /* no lock file */ }
-      try { execSync("git stash --include-untracked", { ...opts, timeout: 10000 }); } catch { /* nothing to stash */ }
+      try { await execAsync("git stash --include-untracked", { ...opts, timeout: 10000 }); } catch { /* nothing to stash */ }
 
       currentBranch =
-        execSync("git rev-parse --abbrev-ref HEAD", { ...opts, timeout: 10000 }).trim() || "main";
+        (await execAsync("git rev-parse --abbrev-ref HEAD", { ...opts, timeout: 10000 })).trim() || "main";
 
-      execSync("git fetch origin", { ...opts, timeout: 30000 });
-      execSync(`git checkout ${branch}`, { ...opts, timeout: 15000 });
+      await execAsync("git fetch origin", { ...opts, timeout: 30000 });
+      await execAsync(`git checkout ${branch}`, { ...opts, timeout: 15000 });
 
       // Rebase step — separate try-catch so push failure doesn't abort the rebase
       try {
-        const rebaseOutput = execSync("git rebase origin/main", { ...opts, timeout: 60000 });
+        const rebaseOutput = await execAsync("git rebase origin/main", { ...opts, timeout: 60000 });
         if (rebaseOutput.includes("is up to date")) {
           return "up-to-date";
         }
       } catch {
-        try { execSync("git rebase --abort", { ...opts, timeout: 10000 }); } catch { /* ignore */ }
+        try { await execAsync("git rebase --abort", { ...opts, timeout: 10000 }); } catch { /* ignore */ }
         return "failed";
       }
 
       // Push step — if this fails, the rebase succeeded but push didn't. Don't abort.
       try {
-        execSync(`git push --force-with-lease origin ${branch}`, { ...opts, timeout: 30000 });
+        await execAsync(`git push --force-with-lease origin ${branch}`, { ...opts, timeout: 30000 });
         return "success";
       } catch (err) {
         this.log.warn("Rebase succeeded but push failed — will retry next cycle", {
@@ -1533,9 +1536,9 @@ Please add this block to your PR description and try again.`,
       });
       return "failed";
     } finally {
-      // Restore original branch (best-effort)
+      // Restore original branch (best-effort — async so event loop stays live)
       try {
-        execSync(`git checkout ${currentBranch}`, { ...opts, timeout: 10000 });
+        await execAsync(`git checkout ${currentBranch}`, { ...opts, timeout: 10000 });
       } catch { /* ignore */ }
     }
   }

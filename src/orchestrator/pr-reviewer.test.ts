@@ -55,6 +55,12 @@ vi.mock("node:child_process", () => ({
   }),
 }));
 
+// execAsync is used by tryAutoRebase and findLocalRepoPath (non-blocking git calls).
+// Default: all git commands succeed and return "" (rebase "success" path; findLocalRepoPath finds /projects/a).
+vi.mock("../utils/exec-async.js", () => ({
+  execAsync: vi.fn().mockResolvedValue(""),
+}));
+
 const config: OrchestratorConfig = {
   proxy: { url: "http://localhost:3457", timeout_ms: 5000 },
   orchestrator_dir: "/tmp/orchestrator",
@@ -292,6 +298,12 @@ describe("PRReviewer", () => {
   });
 
   describe("merge conflict detection", () => {
+    // Restore default execAsync implementation between tests — earlier tests may override it.
+    beforeEach(async () => {
+      const { execAsync } = await import("../utils/exec-async.js");
+      vi.mocked(execAsync).mockResolvedValue("");
+    });
+
     it("auto-rebases conflicting PRs and proceeds to review when local repo is found", async () => {
       // agent-a owns "owner/repo" → local path /projects/a exists in config
       // Git commands succeed (mock returns "" for all git calls)
@@ -331,19 +343,13 @@ describe("PRReviewer", () => {
         mergeable: "CONFLICTING",
       });
 
-      const { execSync: mockExecSync } = await import("node:child_process");
-      // Make git rebase fail on the next call that includes "rebase origin/main"
-      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
-        if (typeof cmd === "string" && cmd.includes("git rebase origin/main")) {
+      // Make git rebase fail (async path — tryAutoRebase uses execAsync)
+      const { execAsync } = await import("../utils/exec-async.js");
+      vi.mocked(execAsync).mockImplementation(async (cmd: string) => {
+        if (cmd.includes("git rebase origin/main")) {
           throw new Error("CONFLICT (content): Merge conflict in src/index.ts");
         }
-        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
-        if (cmd.includes("gh pr view")) return mockPRViewResponse;
-        if (cmd.includes("gh pr diff")) return mockDiffResponse;
-        if (cmd.includes("gh issue list")) return mockIssueListResponse;
-        if (cmd.includes("gh pr list")) return JSON.stringify([{ number: 9, title: "Test PR" }]);
-        if (cmd.includes("gh pr review") || cmd.includes("gh pr edit") || cmd.includes("gh pr comment") || cmd.includes("gh pr merge")) return "";
-        return ""; // covers git fetch, checkout, push, rebase --abort, etc.
+        return "";
       });
 
       const reviewer = new PRReviewer(config);
@@ -394,17 +400,13 @@ describe("PRReviewer", () => {
         })}],
       });
 
-      const { execSync: mockExecSync } = await import("node:child_process");
-      const execSyncMock = vi.mocked(mockExecSync);
-      // Mock git rebase to return a rebase-happened output (not "up to date")
-      execSyncMock.mockImplementation((cmd: string) => {
-        if (cmd.includes("git rebase origin/main")) return "Successfully rebased and updated refs/heads/issue-5-add-feature.\n";
-        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
-        if (cmd.includes("gh pr view")) return mockPRViewResponse;
-        if (cmd.includes("gh pr diff")) return mockDiffResponse;
-        if (cmd.includes("gh issue list")) return mockIssueListResponse;
-        if (cmd.includes("gh api") && cmd.includes("comments")) return "0\n";
-        if (cmd.includes("gh pr list")) return JSON.stringify([{ number: 9, title: "[agent-a] Add feature", body: "Closes #5" }]);
+      // Mock execAsync for git rebase to return a rebase-happened output (async path)
+      const { execAsync } = await import("../utils/exec-async.js");
+      const execAsyncMock = vi.mocked(execAsync);
+      execAsyncMock.mockImplementation(async (cmd: string) => {
+        if (cmd.includes("git rebase origin/main")) {
+          return "Successfully rebased and updated refs/heads/issue-5-add-feature.\n";
+        }
         return "";
       });
 
@@ -415,9 +417,9 @@ describe("PRReviewer", () => {
       expect(result.decision).toBe("approve");
       expect(mockCreate).toHaveBeenCalled();
 
-      // Verify git rebase was called (proactive path)
-      const rebaseCall = execSyncMock.mock.calls.find(
-        (args) => typeof args[0] === "string" && args[0].includes("git rebase origin/main"),
+      // Verify git rebase was called (proactive path — via execAsync)
+      const rebaseCall = execAsyncMock.mock.calls.find(
+        (args) => typeof args[0] === "string" && (args[0] as string).includes("git rebase origin/main"),
       );
       expect(rebaseCall).toBeDefined();
     });
@@ -441,16 +443,8 @@ describe("PRReviewer", () => {
         })}],
       });
 
-      const { execSync: mockExecSync } = await import("node:child_process");
-      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
-        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
-        if (cmd.includes("gh pr view")) return mockPRViewResponse;
-        if (cmd.includes("gh pr diff")) return mockDiffResponse;
-        if (cmd.includes("gh issue list")) return mockIssueListResponse;
-        if (cmd.includes("gh api") && cmd.includes("comments")) return "0\n";
-        if (cmd.includes("gh pr list")) return JSON.stringify([]);
-        return "";
-      });
+      const { execAsync } = await import("../utils/exec-async.js");
+      const execAsyncMock = vi.mocked(execAsync);
 
       const reviewer = new PRReviewer(config);
       // "unknown/external" has no local path in config
@@ -459,9 +453,9 @@ describe("PRReviewer", () => {
       expect(result.decision).toBe("approve");
       expect(mockCreate).toHaveBeenCalled();
 
-      // git rebase should NOT have been called (no local path)
-      const rebaseCall = vi.mocked(mockExecSync).mock.calls.find(
-        (args) => typeof args[0] === "string" && args[0].includes("git rebase"),
+      // git rebase should NOT have been called (no local path — async execAsync path)
+      const rebaseCall = execAsyncMock.mock.calls.find(
+        (args) => typeof args[0] === "string" && (args[0] as string).includes("git rebase"),
       );
       expect(rebaseCall).toBeUndefined();
     });
@@ -486,15 +480,10 @@ describe("PRReviewer", () => {
         })}],
       });
 
-      const { execSync: mockExecSync } = await import("node:child_process");
-      vi.mocked(mockExecSync).mockImplementation((cmd: string) => {
+      // Make git fetch fail (async path — tryAutoRebase uses execAsync)
+      const { execAsync } = await import("../utils/exec-async.js");
+      vi.mocked(execAsync).mockImplementation(async (cmd: string) => {
         if (cmd.includes("git fetch origin")) throw new Error("network error");
-        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
-        if (cmd.includes("gh pr view")) return mockPRViewResponse;
-        if (cmd.includes("gh pr diff")) return mockDiffResponse;
-        if (cmd.includes("gh issue list")) return mockIssueListResponse;
-        if (cmd.includes("gh api") && cmd.includes("comments")) return "0\n";
-        if (cmd.includes("gh pr list")) return JSON.stringify([{ number: 9, title: "[agent-a] Fix bug", body: "Closes #7" }]);
         return "";
       });
 
@@ -525,17 +514,13 @@ describe("PRReviewer", () => {
         })}],
       });
 
-      const { execSync: mockExecSync } = await import("node:child_process");
-      const execSyncMock = vi.mocked(mockExecSync);
-      execSyncMock.mockImplementation((cmd: string) => {
-        // Simulate git rebase reporting branch is already up to date
-        if (cmd.includes("git rebase origin/main")) return "Current branch issue-3-add-feature is up to date.\n";
-        if (cmd.includes("gh pr view") && cmd.includes("-q .state")) return mockPRStateResponse;
-        if (cmd.includes("gh pr view")) return mockPRViewResponse;
-        if (cmd.includes("gh pr diff")) return mockDiffResponse;
-        if (cmd.includes("gh issue list")) return mockIssueListResponse;
-        if (cmd.includes("gh api") && cmd.includes("comments")) return "0\n";
-        if (cmd.includes("gh pr list")) return JSON.stringify([{ number: 9, title: "[agent-a] Add feature", body: "Closes #3" }]);
+      // Simulate git rebase reporting branch is already up to date (async path)
+      const { execAsync } = await import("../utils/exec-async.js");
+      const execAsyncMock = vi.mocked(execAsync);
+      execAsyncMock.mockImplementation(async (cmd: string) => {
+        if (cmd.includes("git rebase origin/main")) {
+          return "Current branch issue-3-add-feature is up to date.\n";
+        }
         return "";
       });
 
@@ -546,9 +531,9 @@ describe("PRReviewer", () => {
       expect(result.decision).toBe("approve");
       expect(mockCreate).toHaveBeenCalled();
 
-      // git push should NOT have been called (nothing to push when up-to-date)
-      const pushCall = execSyncMock.mock.calls.find(
-        (args) => typeof args[0] === "string" && args[0].includes("git push"),
+      // git push should NOT have been called (nothing to push when up-to-date — check execAsync)
+      const pushCall = execAsyncMock.mock.calls.find(
+        (args) => typeof args[0] === "string" && (args[0] as string).includes("git push"),
       );
       expect(pushCall).toBeUndefined();
     });
@@ -1428,6 +1413,9 @@ describe("PRReviewer", () => {
         }
         return "";
       });
+      // Also restore execAsync default (used by tryAutoRebase / findLocalRepoPath)
+      const { execAsync } = await import("../utils/exec-async.js");
+      vi.mocked(execAsync).mockResolvedValue("");
     });
 
     it("accepts housekeeping PR with valid JSON schema and passes to LLM review", async () => {

@@ -614,7 +614,7 @@ export async function dispatchGitHubIssues(
     // their completed work before receiving new tasks. Fail-open on API errors.
     const mergeStallEnabled = config.triggers?.merge_stall_guard !== false;
     if (mergeStallEnabled) {
-      const mergeStall = checkMergeStall(agent.github, agentName);
+      const mergeStall = await checkMergeStall(agent.github, agentName);
       if (mergeStall.blocked) {
         log.warn("Merge-stall guard: holding dispatch for agent with rotting PRs", {
           agentName,
