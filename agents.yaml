@@ -388,5 +388,24 @@ agents:
       permissions: "bypassPermissions"
       session: "fresh"
 
+  # # ── Auditor ────────────────────────────────────────────────────
+  auditor-agent:
+    dir: "auditor-agent"
+    repo: "git@github.com:rapartlu/auditor-agent.git"
+    provider: "claude"
+    model: "claude-sonnet-4-6"
+    description: "Daily fleet-vs-charter accountability pass. Reads goals.yaml, treasury, compliance, retros, and merge mix; surfaces stated-commitment-vs-actual-state gaps; files P1 issues for course corrections."
+    capabilities: ["audit", "compliance-check", "kr-progress"]
+    capability_tags: ["audit-only", "read-only-fleet-state"]
+    github: "rapartlu/auditor-agent"
+    owns_topics: ["fleet-audit", "kr-progress", "commitment-compliance", "audit"]
+    # Housekeeping fires at cycle modulo 60 → seventh slot in each 5h window (~:300min offset)
+    housekeeping_offset_cycles: 60
+    docker:
+      port: 3486
+      api_key: "cheese"
+      permissions: "bypassPermissions"
+      session: "fresh"
+
   # grok-meeting-voice, deepseek-background, deepseek-reasoning, gemini-synth
   # removed 2026-05-03 — culled non-core agents to reduce noise/resource use
