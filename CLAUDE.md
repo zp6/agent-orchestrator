@@ -411,16 +411,19 @@ orch treasury morpho-migrate --amount <usd|all>  # migrate Aave → Morpho Steak
 
 ### Running the fleet-signer
 
-The fleet-signer is a Docker container that must be running for any treasury operation:
+The fleet-signer is a Docker container that must be running for any treasury operation. Always include `--restart unless-stopped` so the container auto-recovers across host sleep, OrbStack restarts, and daemon-driven SIGTERMs (issue #1588 — without the policy, the signer flapped 3+ times in a single session).
 
 ```bash
 docker run -d --name fleet-signer \
   -p 127.0.0.1:7521:7521 \
+  --restart unless-stopped \
   -e FLEET_SIGNER_PASSPHRASE="<passphrase>" \
   -v "$HOME/.fleet-signer/key.enc:/keystore/key.enc:ro" \
   -v "$HOME/.fleet-signer/audit.log:/audit/audit.log" \
   fleet-signer:local
 ```
+
+If the container already exists without the policy, apply it in place without recreating: `docker update --restart=unless-stopped fleet-signer && docker start fleet-signer`.
 
 To rebuild after whitelist changes: `cd packages/fleet-signer && docker build -t fleet-signer:local -f docker/Dockerfile .`
 
