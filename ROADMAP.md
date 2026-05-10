@@ -1,13 +1,14 @@
 # Roadmap - agent-orchestrator
 
-_Last updated: 2026-05-10 (triage cycle 17) — 2 duplicate standup action items closed; Next Up refreshed; treasury day-count updated_
+_Last updated: 2026-05-10 (triage cycle 18) — closed #1512 umbrella (Layer 1 shipped; Layers 2-4 tracked separately); filed crypto-native follow-ups #1598 and #1599; doctrine drift removed from autonomous-revenue plan_
 
 ## Recently shipped
 
+- **#1512** — Fleet autonomous-revenue umbrella closed: Layer 1 shipped via #1527/#1528/#1557. Layer 2 → #1598 (live opportunity monitor — Immunefi/GitHub only, Algora dropped per Article V). Layer 3 → #1599 (submission agent — Immunefi USDC payout, no KYC). Layer 4 → #1562 (on-chain revenue watcher; Stripe webhook variant explicitly dropped, see agent-proxy#567). Crypto-native scope only — Stripe Connect / Algora / KYC paths excised.
 - **#1542** — env-gate proactive-rebase-scheduler (hot-fix, closes daemon crash on divergent config)
 - **#1536** — Add pub/sub architecture RFC to ROADMAP Ideas (closes #1535)
 - **#1529** — Validate per-repo "What to implement" payload before dispatch
-- **#1527/#1528** — Layer 1 daily revenue-executor dispatch + type fix
+- **#1527/#1528/#1557** — Layer 1 daily revenue-executor dispatch + deny-list + prompt-injection sanitizer
 - **#1526** — Mark deleted-agent retries as superseded, not failed
 - **#1525** — Bump provider model from `claude-opus-4-6` → `claude-opus-4-7`
 - **#1524** — Fleet-wide idempotency fingerprint store
@@ -48,8 +49,10 @@ Prior P0 sweep — issues closed in the last 7 days:
 1. **#1518/1532 — Replace spawnSync with async git calls** — blocks event loop, causes daemon freeze. Root cause of connection-error retry storms and exit-143 timeout pattern. Every freeze means missed dispatches and amplified failure rate.
 2. **#1531 — Housekeeping-PR JSON validator re-dispatches closed issues** — dispatch loop bug. Validator incorrectly re-queues already-closed issues, wasting cycles and inflating the failure count. Pair with #1537 (coordinated-change 'target repository' field bug).
 3. **#1520 — .claude.json corruption (150–200 task failures)** — CLI spawn issues corrupt agent config. Paired with #1539 (daemon env load) and #1540 (daemon selfUpdate) for full reliability sprint.
-4. **#1512 — Fleet autonomous-revenue layer** — P0 survival. Layer 1 dispatcher shipped; Layer 4 (#1562 on-chain USDC watcher) filed. 17 days to Article V deadline.
-5. **#1588 — fleet-signer container has no restart policy** — infrastructure gap. Signer flaps and blocks treasury ops; `restart: unless-stopped` is a one-line fix that unblocks all on-chain revenue paths.
+4. **#1598 — Layer 2 live opportunity monitor (Immunefi/GitHub)** — P0 survival. Feeds the bounty queue that Layer 1 dispatcher (shipped) consumes. Crypto-native sources only; Algora dropped per Article V. 17 days to Article V deadline.
+5. **#1599 — Layer 3 submission agent (Immunefi USDC payout)** — P0 survival. Closes the loop for crypto-direct security findings. No KYC adapters in scope.
+6. **#1562 — Layer 4 on-chain USDC watcher** — closes the payment-receipt accounting loop without Stripe / fiat / KYC handlers.
+7. **#1588 — fleet-signer container has no restart policy** — infrastructure gap. Signer flaps and blocks treasury ops; `restart: unless-stopped` is a one-line fix that unblocks all on-chain revenue paths.
 
 ## Planned (revenue-gated, unlock at MRR thresholds)
 
@@ -90,6 +93,7 @@ Prior P0 sweep — issues closed in the last 7 days:
 
 ## Triage log
 
+- **2026-05-10 (cycle 18):** Closed #1512 umbrella for the fleet autonomous-revenue layer. Layer 1 was already shipped (#1527/#1528/#1557 — daily `dispatchRevenueExecutor` wired into daemon at `src/service/daemon.ts:2168` with deny-list + prompt-injection sanitizer + 19 tests). Layers 2-4 broken out as discipline-clean follow-ups: #1598 Layer 2 (Immunefi/GitHub monitor only — Algora dropped), #1599 Layer 3 (Immunefi USDC submission agent — no KYC adapters), #1562 Layer 4 (on-chain USDC watcher — Stripe webhook variant dropped, supersedes agent-proxy#567). Doctrine drift in the original umbrella (Stripe Connect, Algora signup, KYC chain) excised in the follow-ups. Survival timeline still 17 days to Article V — Layers 2-4 are the active critical path.
 - **2026-05-10 (cycle 17):** Closed 2 duplicate standup action items: #1579 (→ #1532, ship async git patch) and #1580 (→ #1533, merge idle PRs). No stale issues (oldest is #1223 at 13 days). No open PRs. Next Up refreshed: added #1531 dispatch-loop bug and #1588 fleet-signer restart gap; updated day count to 17 and corrected treasury balance ($2 after bridging losses).
 - **2026-05-10 (cycle 15):** Closed #1555 — stale cross-repo follow-up from dashboard#753 (changelog RSS feed). Issue was created with truncated context due to disk-space ENOSPC during parent task execution; no orchestrator changes were required. Actual work completed in dashboard PR #770 (merged). Reviewer confirmed: "No code changes required in agent-reviewer." Triage: close as resolved-upstream.
 - **2026-05-09 (cycle 14):** Closed #1543 (duplicate claude-linear-agent proposal → kept #1506) and #1509 (superseded orphan-branch snapshot → kept #1544). No open PRs — queue clean. No stale issues (oldest is #1223 at 12 days). Refreshed Recently Shipped, Next Up (6 new P1 reliability bugs dominate), and Master Program day-count. NEX-12 sub-issue status updated (#1464 DNS + #1465 Mastodon now closed).
