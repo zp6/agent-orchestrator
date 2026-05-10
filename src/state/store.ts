@@ -1901,6 +1901,20 @@ CREATE TABLE IF NOT EXISTS meeting_entries (
 
 CREATE INDEX IF NOT EXISTS idx_meetings_date ON meetings(date DESC);
 CREATE INDEX IF NOT EXISTS idx_meeting_entries_meeting ON meeting_entries(meeting_id);
+
+CREATE TABLE IF NOT EXISTS auto_merge_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  pr_number INTEGER NOT NULL,
+  title TEXT,
+  success INTEGER NOT NULL,
+  error TEXT,
+  cycle_id INTEGER,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_auto_merge_log_created ON auto_merge_log(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_auto_merge_log_repo_pr ON auto_merge_log(repo, pr_number);
 `;
 
 export class StateStore {
@@ -3636,6 +3650,44 @@ export class StateStore {
         "UPDATE daemon_cycles SET finished_at = ?, duration_ms = ?, stale_dispatches_prevented = ? WHERE id = ?",
       )
       .run(finishedAt.toISOString(), durationMs, staleDispatchesPrevented, cycleId);
+  }
+
+  // ── Auto-merge sweep audit log (issue #1587) ─────────────────────────────
+
+  /** Record one auto-merge attempt (success or failure) to the audit log. */
+  recordAutoMerge(entry: {
+    repo: string;
+    prNumber: number;
+    title: string;
+    success: boolean;
+    error?: string;
+    cycleId?: number | null;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO auto_merge_log (repo, pr_number, title, success, error, cycle_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        entry.repo,
+        entry.prNumber,
+        entry.title,
+        entry.success ? 1 : 0,
+        entry.error ?? null,
+        entry.cycleId ?? null,
+        new Date().toISOString(),
+      );
+  }
+
+  /** Count auto-merges (success only) within the trailing window. Used for daily-cap enforcement. */
+  countAutoMergesIn(windowMs: number): number {
+    const cutoff = new Date(Date.now() - windowMs).toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM auto_merge_log WHERE success = 1 AND created_at >= ?`,
+      )
+      .get(cutoff) as { n: number };
+    return row.n;
   }
 
   // ── Aggregated metrics ───────────────────────────────────────────────────

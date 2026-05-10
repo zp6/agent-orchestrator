@@ -3242,4 +3242,45 @@ describe("StateStore", () => {
       expect(StateStore.DISPATCH_LOCK_TTL_MS).toBe(600_000);
     });
   });
+
+  describe("auto-merge log (issue #1587)", () => {
+    it("recordAutoMerge inserts a row and countAutoMergesIn returns the count", () => {
+      store.recordAutoMerge({
+        repo: "rapartlu/agent-orchestrator",
+        prNumber: 1576,
+        title: "feat(dns): orch dns CLI",
+        success: true,
+      });
+      store.recordAutoMerge({
+        repo: "rapartlu/agent-orchestrator",
+        prNumber: 1577,
+        title: "Fix stale CLAUDE.md",
+        success: true,
+      });
+
+      expect(store.countAutoMergesIn(60 * 60 * 1000)).toBe(2);
+    });
+
+    it("countAutoMergesIn excludes failed merges", () => {
+      store.recordAutoMerge({
+        repo: "rapartlu/agent-orchestrator",
+        prNumber: 1,
+        title: "ok",
+        success: true,
+      });
+      store.recordAutoMerge({
+        repo: "rapartlu/agent-orchestrator",
+        prNumber: 2,
+        title: "boom",
+        success: false,
+        error: "merge conflict",
+      });
+
+      expect(store.countAutoMergesIn(60 * 60 * 1000)).toBe(1);
+    });
+
+    it("countAutoMergesIn returns zero when window is empty", () => {
+      expect(store.countAutoMergesIn(24 * 60 * 60 * 1000)).toBe(0);
+    });
+  });
 });

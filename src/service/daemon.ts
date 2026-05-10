@@ -32,7 +32,12 @@ import { planSync, executeSync } from "../orchestrator/sync.js";
 import { notifyOperator, clearNotifyRateLimit, setTelegramRateLimitMs } from "./notify.js";
 import { buildHealthPostmortem, renderPostmortemBlock } from "./health-postmortem.js";
 import { setRecencyWindowHours } from "../triggers/duplicate-guard.js";
-import { setMergeStallThresholdHours } from "../triggers/merge-stall-guard.js";
+import {
+  setMergeStallThresholdHours,
+  scanFleetMergeStalls,
+  autoMergeFleetPRs,
+  selectMergeCandidates,
+} from "../triggers/merge-stall-guard.js";
 import { DuplicateIdDetector, checkDbForDuplicateIds } from "../state/duplicate-id-detector.js";
 import { startTelegramPolling, stopTelegramPolling, pollTelegram, maybePostDailyGuardDigest, maybePostDailyAnomaliesDigest } from "./telegram.js";
 import { OperatorControlProcessor } from "./operator-controls.js";
@@ -895,6 +900,11 @@ export class Daemon {
         batch3.push(this.runSupervisor(time));
       } else {
         batch3.push(this.processMergeQueue(time));
+      }
+      // Auto-merge sweep (issue #1587): catches CLEAN/MERGEABLE PRs that
+      // bypassed the reviewer (typically blocked by self-approval).
+      if (this.cycleCount % AUTO_MERGE_SWEEP_EVERY_N_CYCLES === 0) {
+        batch3.push(this.sweepStaleCleanPRs(time));
       }
       await this.runBatch("pr-lifecycle+deploy", batch3);
 
@@ -4106,6 +4116,93 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
       }
     } catch (err) {
       console.error(`[${time}] Auto-merge sweep failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  /**
+   * Sweep CLEAN/MERGEABLE PRs that bypassed the reviewer and merge them.
+   *
+   * Catches PRs that are CI-green and mergeable but have not been touched
+   * by the reviewer (typically because the self-approval block prevents
+   * the reviewer from approving fleet-authored PRs in shared-identity
+   * setups). Without this, those PRs sit indefinitely.
+   *
+   * Safety guards:
+   *  - Author allowlist (default: ["rapartlu"]) — external-contributor PRs are skipped.
+   *  - Daily cap (default: 25 successful merges per 24h) — caps blast radius.
+   *  - Kill switch (`triggers.auto_merge_sweep_enabled = false`) — operator can disable
+   *    via agents.yaml without redeploy.
+   *
+   * Each merge attempt (success or failure) is recorded in `auto_merge_log`
+   * for audit + Auditor agent (#1570) consumption. See issue #1587 for the
+   * full design.
+   */
+  private async sweepStaleCleanPRs(time: string): Promise<void> {
+    const enabled = this.config.triggers?.auto_merge_sweep_enabled !== false;
+    if (!enabled) return;
+
+    try {
+      const repos = Array.from(
+        new Set(
+          Object.values(this.config.agents)
+            .map((a) => a.github)
+            .filter((r): r is string => typeof r === "string" && r.length > 0),
+        ),
+      );
+
+      if (repos.length === 0) return;
+
+      const stale = await scanFleetMergeStalls(repos);
+      const allowlist = new Set(
+        this.config.triggers?.auto_merge_author_allowlist ?? ["rapartlu"],
+      );
+      const dailyCap = this.config.triggers?.auto_merge_daily_cap ?? 25;
+      const merged24h = this.store.countAutoMergesIn(24 * 60 * 60 * 1000);
+
+      const decision = selectMergeCandidates(
+        stale,
+        { enabled: true, authorAllowlist: allowlist, dailyCap },
+        merged24h,
+      );
+
+      if (decision.skipped) {
+        if (decision.reason === "daily-cap") {
+          this.log.warn("Auto-merge sweep daily cap reached", {
+            merged24h,
+            dailyCap,
+            deferred: decision.deferred,
+          });
+        }
+        return;
+      }
+
+      console.log(
+        `[${time}] Auto-merge sweep: merging ${decision.toMerge.length} stale CLEAN PR(s)` +
+          (decision.deferred > 0 ? ` (${decision.deferred} deferred by daily cap)` : ""),
+      );
+
+      const results = await autoMergeFleetPRs(decision.toMerge);
+      for (const r of results) {
+        this.store.recordAutoMerge({
+          repo: r.pr.repo,
+          prNumber: r.pr.number,
+          title: r.pr.title,
+          success: r.success,
+          error: r.error,
+        });
+      }
+
+      const succeeded = results.filter((r) => r.success).length;
+      const failed = results.length - succeeded;
+      if (failed > 0) {
+        this.log.warn("Auto-merge sweep had failures", { succeeded, failed });
+      } else {
+        this.log.info("Auto-merge sweep completed", { merged: succeeded });
+      }
+    } catch (err) {
+      this.log.warn("sweepStaleCleanPRs failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

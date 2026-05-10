@@ -35,6 +35,8 @@ export interface MergeablePR {
   repo: string;
   updatedAt: string;
   headRefName: string;
+  /** PR author login (used by auto-merge sweep allowlist) */
+  authorLogin: string;
   /** Hours since last update */
   staleHours: number;
 }
@@ -71,7 +73,7 @@ export async function checkMergeStall(
 
   try {
     const raw = await execFn(
-      `gh pr list --repo ${repo} --state open --json number,title,url,updatedAt,headRefName,isDraft,reviewDecision,statusCheckRollup --limit 50`,
+      `gh pr list --repo ${repo} --state open --json number,title,url,updatedAt,headRefName,isDraft,reviewDecision,statusCheckRollup,author --limit 50`,
       { encoding: "utf-8", timeout: 15000 },
     );
 
@@ -84,6 +86,7 @@ export async function checkMergeStall(
       isDraft: boolean;
       reviewDecision: string;
       statusCheckRollup: Array<{ conclusion: string; state: string }> | null;
+      author: { login: string } | null;
     }>;
 
     const stalePRs: MergeablePR[] = [];
@@ -110,6 +113,7 @@ export async function checkMergeStall(
         repo,
         updatedAt: pr.updatedAt,
         headRefName: pr.headRefName,
+        authorLogin: pr.author?.login ?? "",
         staleHours: Math.round(ageHours * 10) / 10,
       });
     }
@@ -235,4 +239,63 @@ export async function autoMergeFleetPRs(
   }
 
   return results;
+}
+
+// ── Auto-merge sweep helpers (issue #1587) ──────────────────────────────────
+
+export interface AutoMergeSweepConfig {
+  /** Master kill switch (false = sweep skipped entirely). */
+  enabled: boolean;
+  /** PR-author logins eligible for auto-merge. External contributors must be excluded. */
+  authorAllowlist: Set<string>;
+  /** Maximum successful auto-merges per trailing 24h window. */
+  dailyCap: number;
+}
+
+export interface SelectMergeCandidatesResult {
+  /** True when no merges should be attempted this sweep. */
+  skipped: boolean;
+  /** Why the sweep was skipped, if it was. */
+  reason?: "disabled" | "no-stale" | "no-eligible" | "daily-cap";
+  /** PRs the daemon should attempt to merge. */
+  toMerge: MergeablePR[];
+  /** Eligible PRs that exceeded the daily cap and were deferred. */
+  deferred: number;
+}
+
+/**
+ * Pure function that decides which stale PRs to merge in a sweep cycle.
+ *
+ * Splits the decision logic out of the daemon so it can be tested without
+ * spinning up a Daemon instance. The daemon method composes:
+ *   stale = await scanFleetMergeStalls(repos);
+ *   merged24h = store.countAutoMergesIn(24*60*60*1000);
+ *   const decision = selectMergeCandidates(stale, config, merged24h);
+ *   if (decision.skipped) return;
+ *   const results = await autoMergeFleetPRs(decision.toMerge);
+ *   for (const r of results) store.recordAutoMerge(...);
+ */
+export function selectMergeCandidates(
+  stale: MergeablePR[],
+  config: AutoMergeSweepConfig,
+  merged24h: number,
+): SelectMergeCandidatesResult {
+  if (!config.enabled) {
+    return { skipped: true, reason: "disabled", toMerge: [], deferred: 0 };
+  }
+  if (stale.length === 0) {
+    return { skipped: true, reason: "no-stale", toMerge: [], deferred: 0 };
+  }
+  const eligible = stale.filter((pr) => config.authorAllowlist.has(pr.authorLogin));
+  if (eligible.length === 0) {
+    return { skipped: true, reason: "no-eligible", toMerge: [], deferred: 0 };
+  }
+  const remaining = config.dailyCap - merged24h;
+  if (remaining <= 0) {
+    return { skipped: true, reason: "daily-cap", toMerge: [], deferred: eligible.length };
+  }
+  if (remaining >= eligible.length) {
+    return { skipped: false, toMerge: eligible, deferred: 0 };
+  }
+  return { skipped: false, toMerge: eligible.slice(0, remaining), deferred: eligible.length - remaining };
 }

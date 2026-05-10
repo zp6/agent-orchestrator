@@ -586,6 +586,28 @@ export interface TriggersConfig {
    * Defaults to 4 when omitted.
    */
   merge_stall_threshold_hours?: number;
+
+  /**
+   * Auto-merge sweep (issue #1587). When enabled, the daemon periodically
+   * scans fleet repos for CLEAN/MERGEABLE PRs older than the merge-stall
+   * threshold and merges them. This catches PRs that bypass the reviewer
+   * (e.g. when self-approval is structurally blocked). Default true.
+   */
+  auto_merge_sweep_enabled?: boolean;
+
+  /**
+   * Author logins eligible for auto-merge sweep. Only PRs whose author
+   * matches one of these is considered. Prevents external-contributor PRs
+   * from being merged automatically. Defaults to ["rapartlu"].
+   */
+  auto_merge_author_allowlist?: string[];
+
+  /**
+   * Maximum number of successful auto-merges per trailing 24-hour window.
+   * Defaults to 25. Caps blast radius if a misconfiguration causes a
+   * runaway merge loop.
+   */
+  auto_merge_daily_cap?: number;
 }
 
 export interface NotificationsConfig {

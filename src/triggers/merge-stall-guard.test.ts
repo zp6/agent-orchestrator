@@ -4,6 +4,7 @@ import {
   scanFleetMergeStalls,
   mergePR,
   autoMergeFleetPRs,
+  selectMergeCandidates,
   setMergeStallThresholdHours,
   getMergeStallThresholdHours,
   DEFAULT_MERGE_STALL_THRESHOLD_HOURS,
@@ -33,6 +34,7 @@ function makePR(overrides: Record<string, unknown> = {}) {
     isDraft: false,
     reviewDecision: "APPROVED",
     statusCheckRollup: [{ conclusion: "SUCCESS", state: "COMPLETED" }],
+    author: { login: "rapartlu" },
     ...overrides,
   };
 }
@@ -198,6 +200,7 @@ function makeMergeablePR(overrides: Partial<MergeablePR> = {}): MergeablePR {
     repo: "owner/repo",
     updatedAt: hoursAgo(6),
     headRefName: "issue-123-fix",
+    authorLogin: "rapartlu",
     staleHours: 6,
     ...overrides,
   };
@@ -279,5 +282,102 @@ describe("autoMergeFleetPRs", () => {
 
     expect(results).toHaveLength(0);
     expect(mockExec).not.toHaveBeenCalled();
+  });
+});
+
+// ── selectMergeCandidates (issue #1587) ───────────────────────────────────
+
+describe("selectMergeCandidates", () => {
+  const allowlist = new Set(["rapartlu"]);
+
+  it("skips when disabled (kill switch off)", () => {
+    const decision = selectMergeCandidates(
+      [makeMergeablePR()],
+      { enabled: false, authorAllowlist: allowlist, dailyCap: 25 },
+      0,
+    );
+    expect(decision.skipped).toBe(true);
+    expect(decision.reason).toBe("disabled");
+    expect(decision.toMerge).toHaveLength(0);
+  });
+
+  it("skips when no stale PRs to consider", () => {
+    const decision = selectMergeCandidates(
+      [],
+      { enabled: true, authorAllowlist: allowlist, dailyCap: 25 },
+      0,
+    );
+    expect(decision.skipped).toBe(true);
+    expect(decision.reason).toBe("no-stale");
+  });
+
+  it("skips when no stale PR matches the author allowlist", () => {
+    const decision = selectMergeCandidates(
+      [
+        makeMergeablePR({ number: 1, authorLogin: "external-contributor" }),
+        makeMergeablePR({ number: 2, authorLogin: "another-outsider" }),
+      ],
+      { enabled: true, authorAllowlist: allowlist, dailyCap: 25 },
+      0,
+    );
+    expect(decision.skipped).toBe(true);
+    expect(decision.reason).toBe("no-eligible");
+  });
+
+  it("filters allowlisted PRs and returns them all when under daily cap", () => {
+    const decision = selectMergeCandidates(
+      [
+        makeMergeablePR({ number: 1, authorLogin: "rapartlu" }),
+        makeMergeablePR({ number: 2, authorLogin: "external" }),
+        makeMergeablePR({ number: 3, authorLogin: "rapartlu" }),
+      ],
+      { enabled: true, authorAllowlist: allowlist, dailyCap: 25 },
+      0,
+    );
+    expect(decision.skipped).toBe(false);
+    expect(decision.toMerge).toHaveLength(2);
+    expect(decision.toMerge.map((p) => p.number)).toEqual([1, 3]);
+    expect(decision.deferred).toBe(0);
+  });
+
+  it("skips when daily cap is already exhausted", () => {
+    const decision = selectMergeCandidates(
+      [makeMergeablePR({ authorLogin: "rapartlu" })],
+      { enabled: true, authorAllowlist: allowlist, dailyCap: 25 },
+      25, // already merged 25 today
+    );
+    expect(decision.skipped).toBe(true);
+    expect(decision.reason).toBe("daily-cap");
+    expect(decision.deferred).toBe(1);
+  });
+
+  it("partial cap: merges up to remaining slots, defers the rest", () => {
+    const stale = [1, 2, 3, 4, 5].map((n) =>
+      makeMergeablePR({ number: n, authorLogin: "rapartlu" }),
+    );
+    const decision = selectMergeCandidates(
+      stale,
+      { enabled: true, authorAllowlist: allowlist, dailyCap: 5 },
+      3, // 2 slots remaining today
+    );
+    expect(decision.skipped).toBe(false);
+    expect(decision.toMerge).toHaveLength(2);
+    expect(decision.toMerge.map((p) => p.number)).toEqual([1, 2]);
+    expect(decision.deferred).toBe(3);
+  });
+
+  it("multi-allowlist: accepts any author in the set", () => {
+    const multi = new Set(["rapartlu", "fleet-bot"]);
+    const decision = selectMergeCandidates(
+      [
+        makeMergeablePR({ number: 1, authorLogin: "rapartlu" }),
+        makeMergeablePR({ number: 2, authorLogin: "fleet-bot" }),
+        makeMergeablePR({ number: 3, authorLogin: "external" }),
+      ],
+      { enabled: true, authorAllowlist: multi, dailyCap: 25 },
+      0,
+    );
+    expect(decision.toMerge).toHaveLength(2);
+    expect(decision.toMerge.map((p) => p.number)).toEqual([1, 2]);
   });
 });
