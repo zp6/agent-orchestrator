@@ -64,13 +64,13 @@ export function registerReviewSaturationCommand(program: Command): void {
         ? chalk.red.bold(`${statusIcon}HIGH — above ${Math.round(ALERT_THRESHOLD * 100)}% alert threshold`)
         : chalk.green(`${statusIcon}OK`);
 
-      console.log(`  Fleet ratio : ${formatRatioPct(data.ratio)}  (${data.alreadyInReview} of ${data.total} done tasks)`);
+      console.log(`  Fleet ratio : ${formatRatioPct(data.ratio)}  (${data.alreadyInReview} of ${data.total} dispatch attempts)`);
       console.log(`  Status      : ${statusLabel}`);
       console.log(`  Threshold   : ${Math.round(ALERT_THRESHOLD * 100)}%`);
       console.log();
 
       if (data.total === 0) {
-        console.log(chalk.dim("  No completed tasks found in this window.\n"));
+        console.log(chalk.dim("  No dispatch attempts found in this window.\n"));
         return;
       }
 

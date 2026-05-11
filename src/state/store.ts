@@ -4181,11 +4181,22 @@ export class StateStore {
   /**
    * Compute the "already-in-review" saturation ratio over a rolling window.
    *
-   * Returns the fraction of completed tasks whose `result` begins with
-   * `"already-in-review:"` — i.e. tasks that were skipped because an open PR
-   * was already in flight.  A high ratio (>0.30 by convention) indicates that
-   * dispatch deduplication is failing or that PR throughput is falling behind
-   * the issue intake rate.
+   * Returns the fraction of dispatch attempts that were blocked because an open
+   * (or approved-waiting) PR was already in flight.  A high ratio (>0.30 by
+   * convention) indicates that dispatch deduplication is failing or that PR
+   * throughput is falling behind the issue intake rate.
+   *
+   * Issue #1604: the metric is now derived from the `dispatch_blocks` audit
+   * table rather than synthetic "already-in-review" tasks.  Before #1604, the
+   * orchestrator created a "done"+"approved" task per guard hit so this query
+   * could count `result LIKE 'already-in-review:%'`; that approach polluted
+   * the activity log with one task per blocked dispatch.  The dispatch_blocks
+   * table records exactly the same audit information (sourceRef, agent,
+   * timestamp, blocking PR) without the visible task spam.
+   *
+   *   numerator   = dispatch_blocks rows with block_code IN
+   *                 ('open_pr_exists', 'approved_pr_waiting') in the window
+   *   denominator = dispatch_blocks (same filter) + tasks created in window
    *
    * @param windowHours - Rolling look-back window (default 1 hour).
    */
@@ -4196,45 +4207,81 @@ export class StateStore {
     ratio: number;
     perAgent: Array<{ agent_name: string; total: number; alreadyInReview: number; ratio: number }>;
   } {
+    this.runDispatchBlocksMigration();
     const since = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
 
-    const globalRow = this.db.prepare(`
-      SELECT
-        COUNT(*) AS total,
-        COALESCE(SUM(CASE WHEN result LIKE 'already-in-review:%' THEN 1 ELSE 0 END), 0) AS alreadyInReview
-      FROM tasks
-      WHERE status = 'done'
-        AND created_at >= ?
-    `).get(since) as { total: number; alreadyInReview: number };
+    const blockedRow = this.db.prepare(`
+      SELECT COUNT(*) AS alreadyInReview
+      FROM dispatch_blocks
+      WHERE block_code IN ('open_pr_exists', 'approved_pr_waiting')
+        AND timestamp >= ?
+    `).get(since) as { alreadyInReview: number };
 
-    const perAgentRows = this.db.prepare(`
-      SELECT
-        agent_name,
-        COUNT(*) AS total,
-        COALESCE(SUM(CASE WHEN result LIKE 'already-in-review:%' THEN 1 ELSE 0 END), 0) AS alreadyInReview
+    const dispatchedRow = this.db.prepare(`
+      SELECT COUNT(*) AS dispatched
       FROM tasks
-      WHERE status = 'done'
+      WHERE created_at >= ?
+    `).get(since) as { dispatched: number };
+
+    const alreadyInReview = blockedRow.alreadyInReview ?? 0;
+    const dispatched = dispatchedRow.dispatched ?? 0;
+    const total = alreadyInReview + dispatched;
+    const ratio = total > 0 ? alreadyInReview / total : 0;
+
+    const blockedByAgent = this.db.prepare(`
+      SELECT agent_name, COUNT(*) AS alreadyInReview
+      FROM dispatch_blocks
+      WHERE block_code IN ('open_pr_exists', 'approved_pr_waiting')
         AND agent_name IS NOT NULL
+        AND timestamp >= ?
+      GROUP BY agent_name
+    `).all(since) as Array<{ agent_name: string; alreadyInReview: number }>;
+
+    const dispatchedByAgent = this.db.prepare(`
+      SELECT agent_name, COUNT(*) AS dispatched
+      FROM tasks
+      WHERE agent_name IS NOT NULL
         AND created_at >= ?
       GROUP BY agent_name
-      ORDER BY alreadyInReview DESC, total DESC
-    `).all(since) as Array<{ agent_name: string; total: number; alreadyInReview: number }>;
+    `).all(since) as Array<{ agent_name: string; dispatched: number }>;
 
-    const total = globalRow.total ?? 0;
-    const alreadyInReview = globalRow.alreadyInReview ?? 0;
-    const ratio = total > 0 ? alreadyInReview / total : 0;
+    const perAgentMap = new Map<string, { alreadyInReview: number; dispatched: number }>();
+    for (const row of blockedByAgent) {
+      perAgentMap.set(row.agent_name, {
+        alreadyInReview: row.alreadyInReview,
+        dispatched: 0,
+      });
+    }
+    for (const row of dispatchedByAgent) {
+      const entry = perAgentMap.get(row.agent_name);
+      if (entry) {
+        entry.dispatched = row.dispatched;
+      } else {
+        perAgentMap.set(row.agent_name, { alreadyInReview: 0, dispatched: row.dispatched });
+      }
+    }
+
+    const perAgent = Array.from(perAgentMap.entries())
+      .map(([agent_name, counts]) => {
+        const agentTotal = counts.alreadyInReview + counts.dispatched;
+        return {
+          agent_name,
+          total: agentTotal,
+          alreadyInReview: counts.alreadyInReview,
+          ratio: agentTotal > 0 ? counts.alreadyInReview / agentTotal : 0,
+        };
+      })
+      .sort((a, b) => {
+        if (b.alreadyInReview !== a.alreadyInReview) return b.alreadyInReview - a.alreadyInReview;
+        return b.total - a.total;
+      });
 
     return {
       windowHours,
       total,
       alreadyInReview,
       ratio,
-      perAgent: perAgentRows.map((r) => ({
-        agent_name: r.agent_name,
-        total: r.total,
-        alreadyInReview: r.alreadyInReview,
-        ratio: r.total > 0 ? r.alreadyInReview / r.total : 0,
-      })),
+      perAgent,
     };
   }
 
@@ -12440,16 +12487,25 @@ export class StateStore {
     `);
   }
 
+  /**
+   * Has a recent "already-in-review" dispatch block been recorded for this
+   * (repo, issue) within the given window?
+   *
+   * Issue #1604: prior to the activity-log cleanup, every guard hit also
+   * created a synthetic "done" task and this check looked there.  Now the
+   * canonical record is `dispatch_blocks` — same audit data, no task spam —
+   * so the dedup check follows.  The function name is retained for backward
+   * compatibility with existing callers and tests.
+   */
   hasRecentAlreadyInReviewTask(repo: string, issueNumber: number, windowMs: number = 6 * 60 * 60 * 1000): boolean {
+    this.runDispatchBlocksMigration();
     const sourceRef = `${repo}#${issueNumber}`;
     const cutoff = new Date(Date.now() - windowMs).toISOString();
     const row = this.db.prepare(`
-      SELECT 1 FROM tasks
-      WHERE source = 'github'
-        AND source_ref = ?
-        AND status = 'done'
-        AND verification_status = 'approved'
-        AND created_at > ?
+      SELECT 1 FROM dispatch_blocks
+      WHERE source_ref = ?
+        AND block_code IN ('open_pr_exists', 'approved_pr_waiting')
+        AND timestamp >= ?
       LIMIT 1
     `).get(sourceRef, cutoff);
     return !!row;

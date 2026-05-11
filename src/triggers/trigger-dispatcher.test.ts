@@ -689,11 +689,12 @@ describe("duplicate PR detection before dispatch", () => {
     expect(result.dispatched).toBe(0);
     expect(result.skipped).toBe(1);
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
-    // recordAlreadyInReviewTask creates an audit-trail task and calls markProcessed
-    // for the FK constraint on processed_triggers.task_id. This does NOT block
-    // re-dispatch: the GitHub dispatch path never calls isProcessed("github", …),
-    // so the issue will be re-evaluated next cycle if the PR closes.
-    expect(mockStore.markProcessed).toHaveBeenCalledWith("github", "owner/my-repo#42", "task-already-in-review");
+    // recordAlreadyInReviewSkip records a dispatch_blocks audit row and calls
+    // markProcessed with null (FK-safe, no task created — issue #1604). This
+    // does NOT block re-dispatch: the GitHub dispatch path never calls
+    // isProcessed("github", …), so the issue will be re-evaluated next cycle
+    // if the PR closes.
+    expect(mockStore.markProcessed).toHaveBeenCalledWith("github", "owner/my-repo#42", null);
   });
 
   it("dispatches with draft PR context injected when only a draft PR exists", async () => {
@@ -2569,7 +2570,11 @@ describe("approved PR skip logic", () => {
     expect(mockDispatcher.dispatch).toHaveBeenCalled();
   });
 
-  it("dispatchGitHubIssues: does NOT mark processed when skipping approved PR (PR not yet merged)", async () => {
+  it("dispatchGitHubIssues: marks processed with null task_id when skipping approved PR (issue stays pollable)", async () => {
+    // Issue #1604: markProcessed is now called with null taskId for
+    // already-in-review skips.  This is FK-safe and does NOT block re-dispatch
+    // because the GitHub dispatch path does not consult processed_triggers
+    // (it re-evaluates each cycle via fetchOpenIssues + per-issue validation).
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 381, title: "Skip me", body: "body", url: "https://...", labels: [] },
     ]);
@@ -2577,9 +2582,12 @@ describe("approved PR skip logic", () => {
 
     await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
-    // markProcessed must NOT be called for approved-PR skip — the issue should
-    // remain pollable so it is re-evaluated after the PR merges and closes the issue.
-    expect(mockStore.markProcessed).not.toHaveBeenCalled();
+    // markProcessed gets called with null taskId (no synthetic task, FK-safe).
+    expect(mockStore.markProcessed).toHaveBeenCalledWith(
+      "github",
+      "owner/my-repo#381",
+      null,
+    );
   });
 
   it("dispatchGitHubIssues: calls findApprovedPRForIssue with correct repo and issue number", async () => {
@@ -2724,7 +2732,10 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
     mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
   });
 
-  it("creates already-in-review task when open PR exists", async () => {
+  it("records already-in-review dispatch block (no task) when open PR exists", async () => {
+    // Issue #1604: pre-dispatch detection of an open PR no longer creates a
+    // synthetic task record.  The dispatch_blocks audit row + dashboard skip
+    // event together provide the operator-visible audit trail.
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Feature", body: "Do it", url: "https://...", labels: [] },
     ]);
@@ -2736,40 +2747,31 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
 
     expect(result.skipped).toBeGreaterThanOrEqual(1);
     expect(result.dispatched).toBe(0);
-    // Should create an "already-in-review" task record
-    expect(mockStore.createTask).toHaveBeenCalledWith(
+    // No synthetic "Already in review" task is created (issue #1604)
+    expect(mockStore.createTask).not.toHaveBeenCalled();
+    expect(mockStore.updateTask).not.toHaveBeenCalled();
+    // Dispatch block audit row IS recorded
+    expect(mockStore.recordDispatchBlock).toHaveBeenCalledWith(
       expect.objectContaining({
-        title: expect.stringContaining("Already in review"),
-        source: "github",
-        source_ref: "owner/my-repo#42",
+        sourceRef: "owner/my-repo#42",
+        blockCode: "open_pr_exists",
+        blockingPRNumber: 99,
       }),
     );
-    // Should update the task to done with already-in-review result
-    expect(mockStore.updateTask).toHaveBeenCalledWith(
-      "task-already-in-review",
-      expect.objectContaining({
-        status: "done",
-        result: expect.stringContaining("already-in-review"),
-        verification_status: "approved",
-        quality_score: 1.0,
-      }),
-    );
-    // Should mark as processed using the real task ID (not a synthetic string)
-    // so the processed_triggers.task_id FK constraint is satisfied.
+    // Trigger marked processed with null task_id (FK-safe, no task to reference)
     expect(mockStore.markProcessed).toHaveBeenCalledWith(
       "github",
       "owner/my-repo#42",
-      "task-already-in-review",
+      null,
     );
     // Should NOT dispatch to agent
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
   });
 
-  it("passes real task.id to markProcessed (not synthetic string) to satisfy FK constraint", async () => {
-    // Regression test for issue #1003:
-    // markProcessed() previously received "already-in-review-pr-N", which is not
-    // a real tasks.id and violates the processed_triggers.task_id FK constraint
-    // (REFERENCES tasks.id). The fix: pass the id returned from createTask().
+  it("markProcessed always uses null task_id for already-in-review skips (FK-safe)", async () => {
+    // Issue #1604 + #1003 regression: no task is created for already-in-review
+    // skips, so the only FK-safe value to pass to processed_triggers.task_id is
+    // null.  Synthetic strings like "already-in-review-pr-N" remain forbidden.
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 441, title: "Cross-repo issue", body: "body", url: "https://...", labels: [] },
     ]);
@@ -2779,12 +2781,10 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
 
     await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
-    // markProcessed must be called with the task ID returned by createTask(),
-    // NOT with a synthetic "already-in-review-pr-N" string.
     expect(mockStore.markProcessed).toHaveBeenCalledWith(
       "github",
       "owner/my-repo#441",
-      "task-already-in-review",  // real task.id from the mocked createTask()
+      null,
     );
     // The synthetic string must NOT be used — it would violate the FK constraint
     expect(mockStore.markProcessed).not.toHaveBeenCalledWith(
@@ -2794,7 +2794,7 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
     );
   });
 
-  it("creates already-in-review task when approved PR is waiting", async () => {
+  it("records dispatch block (no task) when approved PR is waiting", async () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 55, title: "Bugfix", body: "Fix bug", url: "https://...", labels: [] },
     ]);
@@ -2804,42 +2804,43 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
     const result = await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
     expect(result.skipped).toBeGreaterThanOrEqual(1);
-    expect(mockStore.createTask).toHaveBeenCalledWith(
+    expect(mockStore.createTask).not.toHaveBeenCalled();
+    expect(mockStore.recordDispatchBlock).toHaveBeenCalledWith(
       expect.objectContaining({
-        title: expect.stringContaining("PR #77"),
-        source_ref: "owner/my-repo#55",
-      }),
-    );
-    expect(mockStore.updateTask).toHaveBeenCalledWith(
-      "task-already-in-review",
-      expect.objectContaining({
-        result: expect.stringContaining("Approved PR #77"),
+        sourceRef: "owner/my-repo#55",
+        blockCode: "approved_pr_waiting",
+        blockingPRNumber: 77,
       }),
     );
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
   });
 
-  it("dispatchIdleAgentBacklog: creates already-in-review task for open PR", async () => {
+  it("dispatchIdleAgentBacklog: records dispatch block (no task) when open PR exists", async () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 33, title: "Task", body: "body", url: "https://...", labels: [] },
     ]);
     mockFindExistingPRs.mockReturnValue([
       { number: 44, title: "Task PR", url: "https://github.com/owner/my-repo/pull/44", state: "open", isDraft: false },
     ]);
+    // Reset stale mockFindApprovedPR from previous test (vi.clearAllMocks does
+    // not clear implementations, only call history).
+    mockFindApprovedPR.mockReturnValue(null);
 
     const result = await dispatchIdleAgentBacklog(config, mockStore, mockDispatcher);
 
     expect(result.skipped).toBeGreaterThanOrEqual(1);
-    expect(mockStore.createTask).toHaveBeenCalledWith(
+    expect(mockStore.createTask).not.toHaveBeenCalled();
+    expect(mockStore.recordDispatchBlock).toHaveBeenCalledWith(
       expect.objectContaining({
-        title: expect.stringContaining("Already in review"),
-        source_ref: "owner/my-repo#33",
+        sourceRef: "owner/my-repo#33",
+        blockCode: "open_pr_exists",
+        blockingPRNumber: 44,
       }),
     );
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
   });
 
-  it("does NOT create already-in-review task for draft PRs (allowed to dispatch)", async () => {
+  it("does NOT record dispatch block for draft PRs (allowed to dispatch)", async () => {
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 10, title: "Feature", body: "body", url: "https://...", labels: [] },
     ]);
@@ -2853,6 +2854,7 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
     // Draft PRs are allowed through — agent dispatched to continue work
     expect(result.dispatched).toBe(1);
     expect(mockStore.createTask).not.toHaveBeenCalled();
+    expect(mockStore.recordDispatchBlock).not.toHaveBeenCalled();
   });
 
   it("gracefully handles store errors during already-in-review recording", async () => {
@@ -2862,8 +2864,8 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
     mockFindExistingPRs.mockReturnValue([
       { number: 99, title: "Fix Feature", url: "https://github.com/owner/my-repo/pull/99", state: "open", isDraft: false },
     ]);
-    // Simulate store error
-    (mockStore.createTask as ReturnType<typeof vi.fn>).mockImplementation(() => {
+    // Simulate store error on the audit-trail write
+    (mockStore.recordDispatchBlock as ReturnType<typeof vi.fn>).mockImplementation(() => {
       throw new Error("DB connection lost");
     });
 
@@ -3023,7 +3025,10 @@ describe("dispatch flood gate (issue #1060)", () => {
     mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
   });
 
-  it("creates already-in-review task and records block on FIRST guard fire within window", async () => {
+  it("records block (no task) on FIRST guard fire within window", async () => {
+    // Issue #1604: synthetic "Already in review" tasks were removed.  The
+    // dispatch_blocks audit row is now the canonical record for the first
+    // guard fire — the activity log stays clean.
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 42, title: "Feature", body: "Do it", url: "https://...", labels: [] },
     ]);
@@ -3035,11 +3040,9 @@ describe("dispatch flood gate (issue #1060)", () => {
 
     await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
-    // Task must be created for the first guard fire
-    expect(mockStore.createTask).toHaveBeenCalledWith(
-      expect.objectContaining({ source_ref: "owner/my-repo#42" }),
-    );
-    // Block event must be recorded (which sets the flood gate)
+    // No synthetic task is created (issue #1604)
+    expect(mockStore.createTask).not.toHaveBeenCalled();
+    // Block event must be recorded (the lightweight audit trail)
     expect(mockStore.recordDispatchBlock).toHaveBeenCalledWith(
       expect.objectContaining({ sourceRef: "owner/my-repo#42", blockCode: "open_pr_exists" }),
     );

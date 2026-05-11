@@ -139,15 +139,33 @@ function reportDashboardSkip(params: {
 }
 
 /**
- * Create an "already-in-review" task record when a dispatch is blocked because
- * an open PR already exists for the issue. This provides a visible audit trail
- * in task history showing that the orchestrator detected the PR and skipped
- * re-implementation, instead of silently incrementing a skip counter.
+ * Record an "already-in-review" dispatch skip when the pre-dispatch validator
+ * detects an open or approved PR for an issue.
  *
- * The task is created as "done" with verification_status "approved" so it
- * appears as a completed task that required zero agent-hours.
+ * Issue #1604: previously this function created a fake "done"+"approved" task
+ * record so the audit trail was visible in task history.  In practice that
+ * spammed the activity log — a single blocking PR could trigger one task per
+ * GitHub issue in its surrounding cluster (5+ tasks for a single PR was common),
+ * and downstream operators had to scroll past them on every dashboard refresh.
+ *
+ * The lightweight replacement leans on infrastructure that already exists:
+ *
+ *   • `dispatch_blocks` table (recordDispatchBlock) — durable audit trail with
+ *     timestamp, agent, blocking PR number, detection strategy, etc.  This is
+ *     what `orch dispatch-efficiency`, `orch skip-blockers`, and the saturation
+ *     metric now derive from.
+ *   • `processed_triggers` table (markProcessed) — github trigger dedup; a null
+ *     task_id is FK-safe and prevents the issue from being re-polled until the
+ *     next sweep.
+ *   • `guard_hits` / `guard_duplicate_suppressions` — guard-health metrics.
+ *   • `reportDashboardSkip` — pushes a structured skip event to the dashboard's
+ *     `/api/dispatch-skip-log` feed (the caller still does this).
+ *
+ * Net effect: zero rows added to `tasks`, but every analytical surface that
+ * previously inspected the synthetic task still has data — pointed at the
+ * dispatch_blocks table instead.
  */
-function recordAlreadyInReviewTask(
+function recordAlreadyInReviewSkip(
   store: StateStore,
   params: {
     sourceRef: string;
@@ -156,65 +174,58 @@ function recordAlreadyInReviewTask(
     blockingPRNumber: number;
     failureCode: string;
     repo: string;
+    detectionStrategy?: string;
   },
 ): void {
-  const { sourceRef, agentName, issueNumber, blockingPRNumber, failureCode, repo } = params;
+  const { sourceRef, agentName, issueNumber, blockingPRNumber, failureCode, repo, detectionStrategy } = params;
   const resolution = failureCode === "approved_pr_waiting"
     ? `Approved PR #${blockingPRNumber} is awaiting merge`
     : `Open PR #${blockingPRNumber} is already in review`;
 
   try {
-    // Check for recent duplicate already-in-review task (issue #1164)
-    const hasRecentTask = store.hasRecentAlreadyInReviewTask(repo, issueNumber, 6 * 60 * 60 * 1000);
+    // Issue #1164: a prior block within the dedup window means we've already
+    // emitted a guard hit / dispatch_blocks row for this (repo, issue).  Now
+    // that we no longer create tasks, the dedup signal comes straight from
+    // dispatch_blocks (the canonical store).
+    const hasRecentBlock = store.hasRecentAlreadyInReviewTask(repo, issueNumber, 6 * 60 * 60 * 1000);
 
-    // Always record the guard hit
-    store.recordGuardHit(repo, issueNumber, hasRecentTask);
+    // Always record the guard hit for health metrics
+    store.recordGuardHit(repo, issueNumber, hasRecentBlock);
 
-    if (hasRecentTask) {
-      // Duplicate detected: skip task creation but record suppression
+    if (hasRecentBlock) {
       store.recordGuardDuplicateSuppression(repo, issueNumber);
-      log.debug("Already-in-review deduplication: skipped task creation", {
+      log.debug("Already-in-review skip: duplicate dispatch block in last 6h — no new block recorded", {
         sourceRef,
         blockingPRNumber,
-        reason: "duplicate task exists in last 6h",
       });
+      // Re-mark processed (idempotent due to INSERT OR IGNORE) so the GitHub
+      // trigger doesn't re-poll the issue on the next cycle.
+      store.markProcessed("github", sourceRef, null);
       return;
     }
 
-    // No recent task: proceed with task creation
-    const task = store.createTask({
-      title: `[${repo}#${issueNumber}] Already in review — PR #${blockingPRNumber}`,
-      description: `Pre-dispatch check detected that issue #${issueNumber} already has an ` +
-        `open PR (#${blockingPRNumber}) with a matching "Closes #${issueNumber}" reference. ` +
-        `Dispatch skipped to avoid re-implementation waste. ${resolution}.`,
-      source: "github",
-      source_ref: sourceRef,
-      agent_name: agentName,
-    });
-
-    store.updateTask(task.id, {
-      status: "done",
-      result: `already-in-review: ${resolution}. ` +
-        `See https://github.com/${repo}/pull/${blockingPRNumber}`,
-      verification_status: "approved",
-      quality_score: 1.0,
-      verification_notes: "Auto-approved: dispatch skipped because open PR already exists for this issue.",
-    });
-
-    // Use the real task.id so the processed_triggers.task_id FK constraint
-    // (REFERENCES tasks.id) is satisfied.  Passing a synthetic string like
-    // "already-in-review-pr-N" caused "FOREIGN KEY constraint failed" because
-    // that string has no matching row in the tasks table.
-    store.markProcessed("github", sourceRef, task.id);
-
-    log.info("Recorded already-in-review task for issue with existing PR", {
-      taskId: task.id,
+    // First block in the dedup window: persist the audit trail.  We use a null
+    // task_id because no task is created — the processed_triggers schema
+    // declares task_id as nullable (`task_id TEXT REFERENCES tasks(id)`), and
+    // every analytical surface now derives from dispatch_blocks instead.
+    store.recordDispatchBlock({
       sourceRef,
+      agentName,
+      reason: `Pre-dispatch guard blocked: ${resolution}`,
+      blockCode: failureCode,
+      blockingPRNumber,
+      detectionStrategy,
+    });
+    store.markProcessed("github", sourceRef, null);
+
+    log.info("Recorded already-in-review dispatch skip (issue #1604: no task created)", {
+      sourceRef,
+      agentName,
       blockingPRNumber,
       failureCode,
     });
   } catch (err) {
-    log.warn("Failed to record already-in-review task", {
+    log.warn("Failed to record already-in-review skip", {
       sourceRef,
       blockingPRNumber,
       error: err instanceof Error ? err.message : String(err),
@@ -921,17 +932,19 @@ export async function dispatchGitHubIssues(
             continue;
           }
 
-          // Lock acquired — first guard fire within the window.  Record the task
-          // and persist the block event.  Telegram alert is deferred to the
-          // post-loop surge flush (issue #1082) so we can consolidate when many
-          // issues hit the same PR.
-          recordAlreadyInReviewTask(store, {
+          // Lock acquired — first guard fire within the window.  Record a
+          // lightweight dispatch_blocks audit row (no task is created — see
+          // issue #1604 and the recordAlreadyInReviewSkip helper above).
+          // Telegram alert is deferred to the post-loop surge flush (issue
+          // #1082) so we can consolidate when many issues hit the same PR.
+          recordAlreadyInReviewSkip(store, {
             sourceRef,
             agentName,
             issueNumber: issue.number,
             blockingPRNumber: validation.blockingPRNumber,
             failureCode: validation.failureCode,
             repo: issue.repo,
+            detectionStrategy: validation.blockingPRDetectionStrategy ?? undefined,
           });
 
           // Dispatch surge auto-suppression (issue #1113): record this "already-in-review"
@@ -953,28 +966,6 @@ export async function dispatchGitHubIssues(
                 timeZone: "America/New_York",
               })} ET.`,
             );
-          }
-
-          // Dispatch efficiency tracking (issue #976): persist a block event
-          // so operators can measure how many dispatches are wasted on issues
-          // that already have open PRs.
-          try {
-            const resolution = validation.failureCode === "approved_pr_waiting"
-              ? `Approved PR #${validation.blockingPRNumber} is awaiting merge`
-              : `Open PR #${validation.blockingPRNumber} is already in review`;
-            store.recordDispatchBlock({
-              sourceRef,
-              agentName,
-              reason: `Pre-dispatch guard blocked: ${resolution}`,
-              blockCode: validation.failureCode,
-              blockingPRNumber: validation.blockingPRNumber,
-              detectionStrategy: validation.blockingPRDetectionStrategy ?? undefined,
-            });
-          } catch (blockErr) {
-            log.warn("Failed to record dispatch block event", {
-              sourceRef,
-              error: blockErr instanceof Error ? blockErr.message : String(blockErr),
-            });
           }
 
           // Accumulate into surge tracker (issue #1082): Telegram alert will be
@@ -1457,13 +1448,14 @@ export async function dispatchIdleAgentBacklog(
           (validation.failureCode === "open_pr_exists" || validation.failureCode === "approved_pr_waiting") &&
           validation.blockingPRNumber
         ) {
-          recordAlreadyInReviewTask(store, {
+          recordAlreadyInReviewSkip(store, {
             sourceRef,
             agentName,
             issueNumber: issue.number,
             blockingPRNumber: validation.blockingPRNumber,
             failureCode: validation.failureCode,
             repo: issue.repo,
+            detectionStrategy: validation.blockingPRDetectionStrategy ?? undefined,
           });
 
           // Dispatch surge auto-suppression (issue #1113) — idle pickup path:

@@ -1124,12 +1124,12 @@ export class Daemon {
             total: sat.total,
           });
           console.warn(
-            `[${time}] ⚠  Already-in-review saturation: ${pct}% (${sat.alreadyInReview}/${sat.total} tasks in last hour)`,
+            `[${time}] ⚠  Already-in-review saturation: ${pct}% (${sat.alreadyInReview}/${sat.total} dispatch attempts in last hour)`,
           );
           await notifyOperator(
             "⚠️ High Already-in-Review Saturation",
-            `${pct}% of tasks completed in the last hour (${sat.alreadyInReview}/${sat.total}) were ` +
-            `"already-in-review" dedup responses — exceeds the ${Math.round(ALREADY_IN_REVIEW_SATURATION_THRESHOLD * 100)}% threshold.\n\n` +
+            `${pct}% of dispatch attempts in the last hour (${sat.alreadyInReview}/${sat.total}) were ` +
+            `blocked by the "already-in-review" guard — exceeds the ${Math.round(ALREADY_IN_REVIEW_SATURATION_THRESHOLD * 100)}% threshold.\n\n` +
             `Top agents:\n${sat.perAgent.slice(0, 5).map((a) => `• ${a.agent_name}: ${Math.round(a.ratio * 100)}% (${a.alreadyInReview}/${a.total})`).join("\n")}\n\n` +
             `Check dispatch dedup logic or PR throughput — run \`orch review-saturation\` for details.`,
             "warning",
