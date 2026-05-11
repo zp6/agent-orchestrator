@@ -347,6 +347,38 @@ export function runGitHubPreDispatchValidation(params: {
     });
     return failed;
   }
+
+  // ── CLI-missing check (issue #1520) ──────────────────────────────────────
+  // Block ALL dispatches (including research tasks) when the container's Claude
+  // CLI is broken.  Unlike auth-degraded (which allows research), a missing CLI
+  // means no task can execute.  The daemon's recovery loop will restart the
+  // container and clear this flag once the health check passes.
+  if (store.isAgentCliMissing(agentName)) {
+    const health = store.getAgentHealth(agentName);
+    const since = health.cli_missing_at
+      ? ` (since ${health.cli_missing_at})`
+      : "";
+    const failed = makeFailedResult(
+      base,
+      "agent_availability",
+      "agent_cli_missing",
+      `agent "${agentName}" has a broken CLI installation${since} — container restart pending; dispatch blocked until recovery`,
+    );
+    store.addDispatchValidation({
+      source,
+      source_ref: sourceRef,
+      agent_name: agentName,
+      repo: issue.repo,
+      issue_number: issue.number,
+      outcome: failed.outcome,
+      failure_check: failed.failureCheck,
+      failure_code: failed.failureCode,
+      failure_reason: failed.failureReason,
+      checklist: failed.checks,
+    });
+    return failed;
+  }
+
   checks.push(makePassedCheck("agent_availability", "agent_available", `agent "${agentName}" is available`));
 
   const repoPrCap = resolveRepoPrCap(config, agentName);

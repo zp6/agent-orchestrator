@@ -213,6 +213,45 @@ export function isConnectionError(err: unknown): boolean {
 }
 
 /**
+ * Detect whether an error message indicates a permanent CLI-level failure inside
+ * the agent container — as opposed to a transient network hiccup.
+ *
+ * CLI-install failures are a distinct sub-class of connection error that require
+ * a container restart to fix; retrying the task alone will not help.
+ *
+ * Recognised patterns (issue #1520):
+ * - `spawn claude ENOENT` / `spawn enoent` — Claude CLI binary missing from PATH
+ * - `Configuration error in /home/claude/.claude.json` — config file evicted/
+ *   corrupted (iCloud eviction, Docker volume reset, write-permission loss)
+ * - `Timeout waiting for persistent session to become ready` — container startup
+ *   race: the persistent-session handshake never completed (usually caused by
+ *   the two patterns above because the CLI dies before completing init)
+ * - `503 failed to spawn claude cli` — proxy returns 503 when the spawn() call
+ *   fails; appears in escalation messages like
+ *   "Escalated after 3 retry attempts: 503 Failed to spawn claude CLI"
+ *
+ * Note: `isConnectionError()` catches spawn-enoent and failed-to-spawn already
+ * so they get retried.  This function is a narrower classifier to determine
+ * *after* exhaustion whether the agent needs a container-level recovery action
+ * rather than just a circuit-breaker suspension.
+ */
+export function isCliInstallError(msg: string): boolean {
+  const lower = msg.toLowerCase();
+  return (
+    // CLI binary missing (ENOENT on `claude` executable)
+    lower.includes("spawn claude enoent") ||
+    lower.includes("spawn enoent") ||
+    // .claude.json corrupt / evicted
+    lower.includes("configuration error in") && lower.includes(".claude.json") ||
+    // Proxy reports the CLI couldn't be spawned (E2BIG, ENOENT, EAGAIN)
+    lower.includes("failed to spawn claude cli") ||
+    lower.includes("failed to spawn claude") ||
+    // Startup-race: persistent session never became ready (usually due to CLI failure)
+    lower.includes("timeout waiting for persistent session")
+  );
+}
+
+/**
  * Select the healthiest pool instance from a list of pool members.
  * Prefers instances that are:
  *   1. Idle (no active task)
@@ -256,6 +295,7 @@ export function selectHealthiestPoolInstance(
       is_healthy: true,
       auth_status: "ok" as const,
       auth_degraded_at: null,
+      cli_missing_at: null,
       suspended_until: null,
       suspension_reason: null,
     },
@@ -397,6 +437,7 @@ export class Dispatcher {
       is_healthy: true,
       auth_status: "ok",
       auth_degraded_at: null,
+      cli_missing_at: null,
       suspended_until: null,
       suspension_reason: null,
     };
@@ -2142,6 +2183,31 @@ export class Dispatcher {
             suspendedUntil,
             taskId: task.id,
           });
+
+          // ── CLI-install detection (issue #1520) ─────────────────────────
+          // When connection errors are specifically caused by CLI install or
+          // config corruption (spawn ENOENT, .claude.json invalid, persistent-
+          // session timeout), retrying is futile — the container itself is
+          // broken.  Mark the agent cli-missing so the daemon's recovery loop
+          // will restart the container and clear the flag once healthy.
+          if (isCliInstallError(errorMsg)) {
+            this.store.setAgentCliMissing(
+              agentName,
+              `CLI install failure detected after retry exhaustion: ${errorMsg.slice(0, 200)}`,
+            );
+            this.store.recordIncident({
+              incident_type: "cli-spawn-failure",
+              agent_name: agentName,
+              error_message: errorMsg,
+              task_id: task.id,
+              severity: "high",
+            });
+            this.log.error("Agent marked cli-missing — container restart required", {
+              agentName,
+              errorMsg: errorMsg.slice(0, 200),
+              taskId: task.id,
+            });
+          }
         }
       } else {
         // Logic errors are not transient — failing immediately without retry
@@ -2164,6 +2230,30 @@ export class Dispatcher {
           retry_count: newRetryCount,
           next_retry_at: null,
         });
+
+        // ── CLI-install detection for non-connection-error path (issue #1520) ─
+        // Some CLI failures (e.g. "Configuration error in .claude.json") are not
+        // classified as connection errors because they come back as non-5xx
+        // responses or structured error text.  Detect them here so the daemon
+        // can restart the container even when isConnectionError() didn't fire.
+        if (isCliInstallError(errorMsg)) {
+          this.store.setAgentCliMissing(
+            agentName,
+            `CLI config error (non-connection path): ${errorMsg.slice(0, 200)}`,
+          );
+          this.store.recordIncident({
+            incident_type: "cli-spawn-failure",
+            agent_name: agentName,
+            error_message: errorMsg,
+            task_id: task.id,
+            severity: "high",
+          });
+          this.log.error("Agent marked cli-missing (logic-error path) — container restart required", {
+            agentName,
+            errorMsg: errorMsg.slice(0, 200),
+            taskId: task.id,
+          });
+        }
       }
 
       if (failureReroute) {

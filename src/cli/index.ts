@@ -64,6 +64,7 @@ import { registerSubmissionCommand } from "./commands/submission.js";
 import { registerRevenueLeadCommand } from "./commands/revenue-leads.js";
 import { registerDMOutreachCommand } from "./commands/dm-outreach.js";
 import { registerConnectionErrorsCommand } from "./commands/connection-errors.js";
+import { registerCliHealthCommand } from "./commands/cli-health.js";
 import { registerGoalsSnapshotCommand } from "./commands/goals-snapshot.js";
 import { registerDnsCommand } from "./commands/dns.js";
 
@@ -139,6 +140,7 @@ registerSubmissionCommand(program);
 registerRevenueLeadCommand(program);
 registerDMOutreachCommand(program);
 registerConnectionErrorsCommand(program);
+registerCliHealthCommand(program);
 registerGoalsSnapshotCommand(program);
 registerDnsCommand(program);
 

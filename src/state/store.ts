@@ -1199,7 +1199,7 @@ export interface RoutingAccuracyDrillDown {
  * Tracks consecutive dispatch failures so the dispatcher can route around
  * unhealthy pool instances without waiting for the supervisor to intervene.
  */
-export type AgentAuthStatus = "ok" | "auth-degraded";
+export type AgentAuthStatus = "ok" | "auth-degraded" | "cli-missing";
 
 export interface AgentHealth {
   agent_name: string;
@@ -1208,10 +1208,18 @@ export interface AgentHealth {
   last_error_message: string | null;
   last_success_at: string | null;
   is_healthy: boolean;
-  /** Auth status: "ok" means fully functional, "auth-degraded" means GH_TOKEN missing/invalid. */
+  /**
+   * Auth status for the agent:
+   * - "ok"           — fully functional
+   * - "auth-degraded" — GH_TOKEN missing/invalid; only research tasks allowed
+   * - "cli-missing"  — Claude CLI binary is missing or .claude.json is corrupt;
+   *                    container restart is required before any dispatch
+   */
   auth_status: AgentAuthStatus;
   /** ISO timestamp when the agent entered auth-degraded state, or null. */
   auth_degraded_at: string | null;
+  /** ISO timestamp when the agent entered cli-missing state, or null. */
+  cli_missing_at: string | null;
   /**
    * Circuit-breaker: ISO timestamp until which the agent is suspended.
    * null means the agent is not suspended (dispatch is allowed).
@@ -1228,6 +1236,7 @@ export type IncidentType =
   | "connection-error-exhausted"
   | "agent-suspended"
   | "cascade-detected"
+  | "cli-spawn-failure"
   | "other";
 
 /** Severity level for an incident entry. */
@@ -5622,6 +5631,13 @@ export class StateStore {
       `);
     }
 
+    // Migration: add cli_missing_at column (issue #1520)
+    if (!colNames.has("cli_missing_at")) {
+      this.db.exec(`
+        ALTER TABLE agent_health ADD COLUMN cli_missing_at TEXT;
+      `);
+    }
+
     // Migration: add circuit-breaker columns (issue #1398)
     if (!colNames.has("suspended_until")) {
       this.db.exec(`
@@ -5695,6 +5711,7 @@ export class StateStore {
       last_success_at: string | null;
       auth_status: string;
       auth_degraded_at: string | null;
+      cli_missing_at: string | null;
       suspended_until: string | null;
       suspension_reason: string | null;
     } | undefined;
@@ -5709,6 +5726,7 @@ export class StateStore {
         is_healthy: true,
         auth_status: "ok",
         auth_degraded_at: null,
+        cli_missing_at: null,
         suspended_until: null,
         suspension_reason: null,
       };
@@ -5718,6 +5736,7 @@ export class StateStore {
       ...row,
       is_healthy: row.consecutive_failures < 3,
       auth_status: (row.auth_status as AgentAuthStatus) ?? "ok",
+      cli_missing_at: row.cli_missing_at ?? null,
       suspended_until: row.suspended_until ?? null,
       suspension_reason: row.suspension_reason ?? null,
     };
@@ -5894,6 +5913,7 @@ export class StateStore {
       last_success_at: string | null;
       auth_status: string;
       auth_degraded_at: string | null;
+      cli_missing_at: string | null;
       suspended_until: string | null;
       suspension_reason: string | null;
     }>;
@@ -5901,6 +5921,80 @@ export class StateStore {
       ...row,
       is_healthy: row.consecutive_failures < 3,
       auth_status: row.auth_status as AgentAuthStatus,
+      cli_missing_at: row.cli_missing_at ?? null,
+      suspended_until: row.suspended_until ?? null,
+      suspension_reason: row.suspension_reason ?? null,
+    }));
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Agent CLI-missing quarantine (issue #1520)
+  // ────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Mark an agent as cli-missing: the Claude CLI binary is absent or
+   * /home/claude/.claude.json is corrupt inside its container.
+   *
+   * Dispatches to cli-missing agents are blocked entirely until a container
+   * restart succeeds and clearAgentCliMissing() is called.  Unlike
+   * auth-degraded, even research tasks are blocked — the CLI itself is broken.
+   */
+  setAgentCliMissing(agentName: string, reason: string): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO agent_health
+        (agent_name, consecutive_failures, auth_status, cli_missing_at, last_error_at, last_error_message)
+      VALUES (?, 0, 'cli-missing', ?, ?, ?)
+      ON CONFLICT(agent_name) DO UPDATE SET
+        auth_status     = 'cli-missing',
+        cli_missing_at  = COALESCE(agent_health.cli_missing_at, ?),
+        last_error_at   = ?,
+        last_error_message = ?
+    `).run(agentName, now, now, reason, now, now, reason);
+  }
+
+  /**
+   * Clear cli-missing status after a successful container restart + health check.
+   */
+  clearAgentCliMissing(agentName: string): void {
+    this.db.prepare(`
+      UPDATE agent_health
+      SET auth_status = 'ok', cli_missing_at = NULL
+      WHERE agent_name = ?
+    `).run(agentName);
+  }
+
+  /**
+   * Return true if the agent's container is in cli-missing state.
+   */
+  isAgentCliMissing(agentName: string): boolean {
+    const health = this.getAgentHealth(agentName);
+    return health.auth_status === "cli-missing";
+  }
+
+  /**
+   * Get all agents currently in cli-missing state.
+   */
+  getCliMissingAgents(): AgentHealth[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM agent_health WHERE auth_status = 'cli-missing'"
+    ).all() as Array<{
+      agent_name: string;
+      consecutive_failures: number;
+      last_error_at: string | null;
+      last_error_message: string | null;
+      last_success_at: string | null;
+      auth_status: string;
+      auth_degraded_at: string | null;
+      cli_missing_at: string | null;
+      suspended_until: string | null;
+      suspension_reason: string | null;
+    }>;
+    return rows.map((row) => ({
+      ...row,
+      is_healthy: false,
+      auth_status: row.auth_status as AgentAuthStatus,
+      cli_missing_at: row.cli_missing_at ?? null,
       suspended_until: row.suspended_until ?? null,
       suspension_reason: row.suspension_reason ?? null,
     }));

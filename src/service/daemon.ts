@@ -630,6 +630,12 @@ export class Daemon {
     // cycles (~5 min) for the periodic check.
     await this.checkAuthRecovery();
 
+    // Recover any agents that were left in cli-missing state from a previous
+    // daemon run.  This handles the case where the daemon was restarted while
+    // agents were in a broken state — attempt a container restart immediately
+    // so the agents are unblocked before the first dispatch cycle runs.
+    await this.checkCliMissingRecovery();
+
     // Scan state.db for any pre-existing duplicate task IDs at startup (issue #935).
     // Fires a Telegram alert if any are found so operators can investigate
     // before the first cycle begins.
@@ -855,6 +861,7 @@ export class Daemon {
         registeredAgents = await this.deployer.getRegisteredAgents();
         await this.checkAgentGhAuth();
         await this.checkAuthRecovery();
+        await this.checkCliMissingRecovery();
       }
 
       // ── Parallel Batch 1: Housekeeping (no LLM, fast) ─────────────────
@@ -1668,6 +1675,77 @@ export class Daemon {
         "info",
         "auth-recovery",
       );
+    }
+  }
+
+  /**
+   * Periodic CLI-missing recovery (issue #1520).
+   *
+   * For each agent in cli-missing state, attempt a container restart via the
+   * deployer.  If the restart succeeds and the health check passes, clear the
+   * cli-missing flag so dispatch resumes.  If the restart fails, leave the
+   * agent in cli-missing state so the next cycle retries.
+   *
+   * This prevents the fleet from permanently blocking an agent just because it
+   * had a transient CLI install failure — the container restart reinstalls the
+   * CLI, restores .claude.json from backup, and brings the agent back online.
+   */
+  private async checkCliMissingRecovery(): Promise<void> {
+    const missing = this.store.getCliMissingAgents();
+    if (missing.length === 0) return;
+
+    this.log.info("CLI-missing recovery: checking agents", {
+      count: missing.length,
+      agents: missing.map((a) => a.agent_name),
+    });
+
+    const recovered: string[] = [];
+    const failed: string[] = [];
+
+    for (const agent of missing) {
+      const agentName = agent.agent_name;
+      try {
+        this.log.info("CLI-missing recovery: restarting container", { agentName });
+        const result = await this.deployer.restartAgent(agentName);
+
+        if (result.action === "redeployed") {
+          // Restart succeeded + health check passed (deployer.restartAgent does both)
+          this.store.clearAgentCliMissing(agentName);
+          // Also lift any circuit-breaker suspension that was set alongside cli-missing
+          this.store.liftAgentSuspension(agentName);
+          recovered.push(agentName);
+          this.log.info("CLI-missing recovery: agent recovered", { agentName });
+        } else {
+          // health-check-failed or error: container still broken
+          failed.push(agentName);
+          this.log.warn("CLI-missing recovery: restart did not restore agent", {
+            agentName,
+            action: result.action,
+            detail: result.detail,
+          });
+        }
+      } catch (err) {
+        failed.push(agentName);
+        this.log.error("CLI-missing recovery: restart threw", {
+          agentName,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    if (recovered.length > 0) {
+      console.log(`✅ CLI-missing recovery: ${recovered.length} agent(s) restored: ${recovered.join(", ")}`);
+      notifyOperator(
+        "Agents recovered from cli-missing",
+        `${recovered.length} agent(s) restored after CLI install recovery (container restart): ${recovered.join(", ")}.`,
+        "info",
+        "cli-missing-recovery",
+      );
+    }
+
+    if (failed.length > 0) {
+      this.log.warn("CLI-missing recovery: some agents still broken", { failed });
+      console.log(`⚠  CLI-missing recovery: ${failed.length} agent(s) still broken: ${failed.join(", ")} — will retry next cycle`);
     }
   }
 
