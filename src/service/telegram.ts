@@ -961,6 +961,9 @@ dispatch <agent> <msg> — send task
 ack|dismiss|resolve <ref|all> — de-escalate an active alert or task
 escalated — list active escalations
 deescalate <ref|all> — unblock escalated tasks
+/security-exemptions [repo] — list security FP exemptions
+/security-exempt <repo> <file> <pattern> <reason> — add FP exemption
+/security-unexempt <repo> <file> <pattern> — remove FP exemption
 help — this message`;
   }
 
@@ -1068,6 +1071,69 @@ help — this message`;
       : `🎙 *Monologue — fleet* (last ${entries.length})`;
 
     return `${header}\n\n${lines.join("\n\n")}`;
+  }
+
+  // /security-exemptions [repo] — list active FP exemptions (issue #1612)
+  if (
+    cmd === "security-exemptions" ||
+    cmd === "/security-exemptions" ||
+    cmd.startsWith("security-exemptions ") ||
+    cmd.startsWith("/security-exemptions ")
+  ) {
+    const repoFilter = text.trim().split(/\s+/)[1] || undefined;
+    const exemptions = ctx.store.listSecurityFpExemptions(repoFilter);
+    if (exemptions.length === 0) {
+      return repoFilter
+        ? `🛡️ No security FP exemptions for \`${repoFilter}\`.`
+        : "🛡️ No security FP exemptions registered.\n\nUse `/security-exempt <owner/repo> <file-path> <pattern-name> <reason>` to add one.";
+    }
+    const lines = exemptions.slice(0, 20).map((e) => {
+      const ts = e.created_at.slice(0, 10);
+      const repo = e.repo === "*" ? "*(all repos)*" : `\`${e.repo}\``;
+      const filePath = e.file_path === "*" ? "*(all files)*" : `\`${e.file_path}\``;
+      return `• ${repo} / ${filePath}\n  Pattern: \`${e.pattern_name}\`\n  _${e.reason}_ (${ts})`;
+    });
+    if (exemptions.length > 20) lines.push(`…+${exemptions.length - 20} more`);
+    const heading = repoFilter
+      ? `🛡️ *Security FP Exemptions — ${repoFilter}* (${exemptions.length})`
+      : `🛡️ *Security FP Exemptions* (${exemptions.length})`;
+    return `${heading}\n\n${lines.join("\n\n")}`;
+  }
+
+  // /security-exempt <owner/repo> <file-path> <pattern-name> <reason...>
+  if (cmd.startsWith("security-exempt ") || cmd.startsWith("/security-exempt ")) {
+    const parts = text.trim().split(/\s+/);
+    if (parts.length < 5) {
+      return (
+        "Usage: `/security-exempt <owner/repo> <file-path> <pattern-name> <reason...>`\n\n" +
+        "Example:\n`/security-exempt rapartlu/agent-proxy docker-compose.generated.yml " +
+        "\"Docker Compose env_file referencing plaintext .env\" Intentional non-secret env_file`"
+      );
+    }
+    const [, repo, filePath, patternName, ...reasonParts] = parts;
+    const reason = reasonParts.join(" ");
+    ctx.store.addSecurityFpExemption({ repo, file_path: filePath, pattern_name: patternName, reason });
+    return (
+      `✅ Security FP exemption registered:\n` +
+      `*Repo:* \`${repo}\`\n` +
+      `*File:* \`${filePath}\`\n` +
+      `*Pattern:* \`${patternName}\`\n` +
+      `*Reason:* ${reason}\n\n` +
+      `Future scan cycles will skip this finding automatically.`
+    );
+  }
+
+  // /security-unexempt <owner/repo> <file-path> <pattern-name>
+  if (cmd.startsWith("security-unexempt ") || cmd.startsWith("/security-unexempt ")) {
+    const parts = text.trim().split(/\s+/);
+    if (parts.length < 4) {
+      return "Usage: `/security-unexempt <owner/repo> <file-path> <pattern-name>`";
+    }
+    const [, repo, filePath, patternName] = parts;
+    const removed = ctx.store.removeSecurityFpExemption(repo, filePath, patternName);
+    return removed
+      ? `✅ Security FP exemption removed for:\n\`${repo}\` / \`${filePath}\` / \`${patternName}\`\n\nThe scanner will resume flagging this triple.`
+      : `⚠️ No exemption found for:\n\`${repo}\` / \`${filePath}\` / \`${patternName}\``;
   }
 
   // Default: treat as directive (fire-and-forget)

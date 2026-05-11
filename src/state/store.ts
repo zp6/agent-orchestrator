@@ -1983,6 +1983,7 @@ export class StateStore {
     this.runRevenueLeadMigration();
     this.runDMOutreachMigration();
     this.runFingerprintMigration();
+    this.runSecurityFpExemptionsMigration();
   }
 
   private runPhase2Migration(): void {
@@ -14249,6 +14250,114 @@ export class StateStore {
       .run(new Date().toISOString());
     return result.changes;
   }
+
+  // ── Security FP Exemption Registry (issue #1612) ────────────────────────────
+
+  private runSecurityFpExemptionsMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS security_fp_exemptions (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo         TEXT NOT NULL,
+        file_path    TEXT NOT NULL,
+        pattern_name TEXT NOT NULL,
+        reason       TEXT NOT NULL,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL,
+        UNIQUE(repo, file_path, pattern_name)
+      );
+      CREATE INDEX IF NOT EXISTS idx_security_fp_exemptions_repo
+        ON security_fp_exemptions(repo);
+      CREATE INDEX IF NOT EXISTS idx_security_fp_exemptions_repo_file
+        ON security_fp_exemptions(repo, file_path);
+    `);
+  }
+
+  /**
+   * Record a (repo, file_path, pattern_name) triple as a confirmed false
+   * positive.  Idempotent — if the triple already exists the original row is
+   * returned unchanged.
+   *
+   * Use `repo="*"` to exempt a file+pattern across all repos.
+   * Use `file_path="*"` to exempt an entire pattern for a given repo.
+   */
+  addSecurityFpExemption(input: SecurityFpExemptionInput): SecurityFpExemption {
+    this.runSecurityFpExemptionsMigration();
+    const existing = this.db
+      .prepare(
+        `SELECT * FROM security_fp_exemptions WHERE repo = ? AND file_path = ? AND pattern_name = ?`,
+      )
+      .get(input.repo, input.file_path, input.pattern_name) as SecurityFpExemption | undefined;
+    if (existing) return existing;
+
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `INSERT INTO security_fp_exemptions
+         (repo, file_path, pattern_name, reason, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(input.repo, input.file_path, input.pattern_name, input.reason, now, now);
+    return this.db
+      .prepare(`SELECT * FROM security_fp_exemptions WHERE id = ?`)
+      .get(Number(result.lastInsertRowid)) as SecurityFpExemption;
+  }
+
+  /**
+   * Return true if the (repo, file_path, pattern_name) triple is covered by
+   * any active exemption row.  Wildcard support:
+   *   - `repo="*"` in the table matches any repo
+   *   - `file_path="*"` in the table matches any file
+   *   - `pattern_name="*"` in the table matches any pattern
+   */
+  isSecurityFpExempt(repo: string, filePath: string, patternName: string): boolean {
+    this.runSecurityFpExemptionsMigration();
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM security_fp_exemptions
+         WHERE (repo = ? OR repo = '*')
+           AND (file_path = ? OR file_path = '*')
+           AND (pattern_name = ? OR pattern_name = '*')
+         LIMIT 1`,
+      )
+      .get(repo, filePath, patternName);
+    return row !== undefined;
+  }
+
+  /**
+   * List all exemption records, optionally filtered to a specific repo.
+   * When repo is provided, also includes wildcard `repo='*'` rows.
+   */
+  listSecurityFpExemptions(repo?: string): SecurityFpExemption[] {
+    this.runSecurityFpExemptionsMigration();
+    if (repo) {
+      return this.db
+        .prepare(
+          `SELECT * FROM security_fp_exemptions
+           WHERE repo = ? OR repo = '*'
+           ORDER BY created_at DESC`,
+        )
+        .all(repo) as SecurityFpExemption[];
+    }
+    return this.db
+      .prepare(
+        `SELECT * FROM security_fp_exemptions ORDER BY repo, file_path, pattern_name`,
+      )
+      .all() as SecurityFpExemption[];
+  }
+
+  /**
+   * Remove a specific exemption triple.  Returns true when a row was deleted,
+   * false when no matching row was found.
+   */
+  removeSecurityFpExemption(repo: string, filePath: string, patternName: string): boolean {
+    this.runSecurityFpExemptionsMigration();
+    const result = this.db
+      .prepare(
+        `DELETE FROM security_fp_exemptions WHERE repo = ? AND file_path = ? AND pattern_name = ?`,
+      )
+      .run(repo, filePath, patternName);
+    return result.changes > 0;
+  }
 }
 
 interface BountyDenylistRow {
@@ -14576,4 +14685,39 @@ export interface FingerprintCheckResult {
 /** Result of recordFingerprint() */
 export interface FingerprintRecordResult {
   recorded: boolean;
+}
+
+// ── Security FP Exemption types (issue #1612) ────────────────────────────────
+
+/**
+ * A persisted false-positive exemption record.  Once recorded, the security
+ * scanner will skip any finding that matches the (repo, file_path, pattern_name)
+ * triple — including wildcard variants — so it is never re-filed as an issue.
+ */
+export interface SecurityFpExemption {
+  id: number;
+  /** "owner/repo" or "*" to exempt the pattern across all repos */
+  repo: string;
+  /** Relative file path within the repo, or "*" to exempt all files */
+  file_path: string;
+  /** Pattern name as emitted by the scanner, or "*" to exempt all patterns for the file */
+  pattern_name: string;
+  /** Human-readable reason the operator recorded for this exemption */
+  reason: string;
+  /** ISO 8601 timestamp */
+  created_at: string;
+  /** ISO 8601 timestamp */
+  updated_at: string;
+}
+
+/** Parameters for addSecurityFpExemption() */
+export interface SecurityFpExemptionInput {
+  /** "owner/repo" or "*" */
+  repo: string;
+  /** Relative file path or "*" */
+  file_path: string;
+  /** Scanner pattern name or "*" */
+  pattern_name: string;
+  /** Why this triple was determined to be a false positive */
+  reason: string;
 }

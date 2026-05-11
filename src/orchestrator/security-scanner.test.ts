@@ -7,9 +7,15 @@ import {
   scanYamlContentForSecrets,
   todayDateString,
   maybeRunDailySecurityScan,
+  runSecurityScan,
   type SecurityScanState,
 } from "./security-scanner.js";
 import type { OrchestratorConfig } from "../config/schema.js";
+import { StateStore } from "../state/store.js";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -391,5 +397,88 @@ describe("maybeRunDailySecurityScan", () => {
     const nextDay = new Date("2026-04-07T03:00:00");
     await maybeRunDailySecurityScan(state, emptyConfig, nextDay);
     expect(state.lastScanDate).toBe("2026-04-07");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runSecurityScan — FP exemption registry integration (issue #1612)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("runSecurityScan — FP exemption skipping", () => {
+  let store: StateStore;
+  let dbPath: string;
+
+  beforeEach(() => {
+    dbPath = join(tmpdir(), `orch-scanner-fp-${randomUUID()}.db`);
+    store = new StateStore(dbPath);
+  });
+
+  afterEach(() => {
+    store.close();
+    vi.restoreAllMocks();
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try {
+        unlinkSync(dbPath + suffix);
+      } catch {}
+    }
+  });
+
+  it("isSecurityFpExempt returns true after registering an exemption matching the docker-compose FP", () => {
+    store.addSecurityFpExemption({
+      repo: "owner/agent-proxy",
+      file_path: "docker-compose.generated.yml",
+      pattern_name: "Docker Compose env_file referencing plaintext .env",
+      reason: "env_file references are non-secret in this generated file",
+    });
+    expect(
+      store.isSecurityFpExempt(
+        "owner/agent-proxy",
+        "docker-compose.generated.yml",
+        "Docker Compose env_file referencing plaintext .env",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not exempt a different repo's finding with the same file+pattern", () => {
+    store.addSecurityFpExemption({
+      repo: "owner/agent-proxy",
+      file_path: "docker-compose.generated.yml",
+      pattern_name: "Docker Compose env_file referencing plaintext .env",
+      reason: "known FP in agent-proxy only",
+    });
+    // The same file+pattern in a different repo is NOT exempted
+    expect(
+      store.isSecurityFpExempt(
+        "owner/other-repo",
+        "docker-compose.generated.yml",
+        "Docker Compose env_file referencing plaintext .env",
+      ),
+    ).toBe(false);
+  });
+
+  it("runSecurityScan with no agents completes without error when store is provided", async () => {
+    const config = makeConfig({});
+    await expect(runSecurityScan(config, undefined, store)).resolves.not.toThrow();
+  });
+
+  it("maybeRunDailySecurityScan accepts and threads the store parameter through", async () => {
+    const state: SecurityScanState = { lastScanDate: null };
+    const after2am = new Date("2026-04-07T03:00:00");
+    // No agents → no-op scan, but the store parameter is accepted without error
+    await expect(
+      maybeRunDailySecurityScan(state, makeConfig({}), after2am, store),
+    ).resolves.not.toThrow();
+    expect(state.lastScanDate).toBe("2026-04-07");
+  });
+
+  it("exemption is checked before issue creation — isSecurityFpExempt returns false for unknown triple", () => {
+    // Ensure the function correctly gates on unregistered triples
+    expect(
+      store.isSecurityFpExempt(
+        "owner/repo",
+        "some-file.yml",
+        "Docker Compose env_file referencing plaintext .env",
+      ),
+    ).toBe(false);
   });
 });

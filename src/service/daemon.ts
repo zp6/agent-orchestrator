@@ -1035,7 +1035,7 @@ export class Daemon {
       batch4.push(maybePostDailyDigest(this.digestState, this.store, this.config));
       batch4.push(maybePostDailyGuardDigest(this.guardDigestState, this.store, "09:00"));
       batch4.push(maybePostDailyAnomaliesDigest(this.anomaliesDigestState, this.store, "09:00"));
-      batch4.push(maybeRunDailySecurityScan(this.securityScanState, this.config));
+      batch4.push(maybeRunDailySecurityScan(this.securityScanState, this.config, new Date(), this.store));
       if (this.cycleCount % QUALITY_SLA_CHECK_EVERY_N_CYCLES === 0) {
         batch4.push(this.checkQualitySlaBreaches(time));
       }

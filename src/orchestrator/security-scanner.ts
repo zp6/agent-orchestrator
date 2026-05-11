@@ -18,6 +18,7 @@
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import type { OrchestratorConfig } from "../config/schema.js";
+import type { StateStore } from "../state/store.js";
 import { notifyOperator } from "../service/notify.js";
 import { createLogger } from "../service/logger.js";
 
@@ -582,6 +583,7 @@ function shellEscape(s: string): string {
 export async function runSecurityScan(
   config: OrchestratorConfig,
   configPath?: string,
+  store?: StateStore,
 ): Promise<void> {
   const repos = new Set<string>();
   for (const agent of Object.values(config.agents)) {
@@ -643,7 +645,13 @@ export async function runSecurityScan(
 
   let issuesCreated = 0;
   for (const [_key, group] of grouped) {
-    const { repo, filePath } = group[0];
+    const { repo, filePath, patternName } = group[0];
+    // Check the FP exemption registry before creating an issue.  When the
+    // finding matches a confirmed false-positive triple, skip it permanently.
+    if (store && store.isSecurityFpExempt(repo, filePath, patternName)) {
+      log.info("Security scan: finding exempted, skipping", { repo, filePath, patternName });
+      continue;
+    }
     if (securityIssueExists(repo, filePath)) {
       log.info("Security scan: issue already exists, skipping", { repo, filePath });
       continue;
@@ -691,6 +699,7 @@ export async function maybeRunDailySecurityScan(
   state: SecurityScanState,
   config: OrchestratorConfig,
   now: Date = new Date(),
+  store?: StateStore,
 ): Promise<void> {
   const today = todayDateString(now);
 
@@ -705,7 +714,7 @@ export async function maybeRunDailySecurityScan(
   log.info("Security scan: firing daily scan", { date: today });
 
   try {
-    await runSecurityScan(config);
+    await runSecurityScan(config, undefined, store);
   } catch (err) {
     log.error("Security scan: unexpected error during daily scan", {
       error: err instanceof Error ? err.message : String(err),
