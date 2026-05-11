@@ -14775,6 +14775,15 @@ export class StateStore {
       .run(repo, filePath, patternName);
     return result.changes > 0;
   }
+
+  /** Remove an exemption by row ID. */
+  removeSecurityFpExemptionById(id: number): boolean {
+    this.runSecurityFpExemptionsMigration();
+    const result = this.db
+      .prepare(`DELETE FROM security_fp_exemptions WHERE id = ?`)
+      .run(id);
+    return result.changes > 0;
+  }
 }
 
 interface BountyDenylistRow {
