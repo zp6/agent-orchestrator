@@ -1,6 +1,6 @@
 # Roadmap - agent-orchestrator
 
-_Last updated: 2026-05-10 (triage cycle 19) — Layer 3 Phase A shipped (#1599 submission agent — data plane + Immunefi adapter with stubbed network call); revenue layer count: 1.5/4 layers shipped_
+_Last updated: 2026-05-10 (triage cycle 20) — 3 open PRs in flight: #1610 (Telegram submission queue, closes #1608), #1609 (Layer 4 on-chain revenue watcher, closes #1562), #1596 (selfUpdate timeouts + observability, closes #1594). Revenue layer count: still 1.5/4 layers shipped; Layer 4 merges with #1609._
 
 ## Recently shipped
 
@@ -51,9 +51,17 @@ Prior P0 sweep — issues closed in the last 7 days:
 2. **#1531 — Housekeeping-PR JSON validator re-dispatches closed issues** — dispatch loop bug. Validator incorrectly re-queues already-closed issues, wasting cycles and inflating the failure count. Pair with #1537 (coordinated-change 'target repository' field bug).
 3. **#1520 — .claude.json corruption (150–200 task failures)** — CLI spawn issues corrupt agent config. Paired with #1539 (daemon env load) and #1540 (daemon selfUpdate) for full reliability sprint.
 4. **#1598 — Layer 2 live opportunity monitor (Immunefi/GitHub)** — P0 survival. Feeds the bounty queue that Layer 1 dispatcher (shipped) consumes. Crypto-native sources only; Algora dropped per Article V. 17 days to Article V deadline.
-5. **#1599 — Layer 3 submission agent (Immunefi USDC payout)** — P0 survival. Closes the loop for crypto-direct security findings. No KYC adapters in scope.
-6. **#1562 — Layer 4 on-chain USDC watcher** — closes the payment-receipt accounting loop without Stripe / fiat / KYC handlers.
+5. **#1607 — Layer 3 Phase B: activate ImmunefiAdapter live submission** — Phase A (#1599) is merged; Phase B unlocks once `IMMUNEFI_API_TOKEN` is provisioned. After that, #1611 (Telegram `/submit <id>` one-step approve-and-ship) closes the loop end-to-end.
+6. **#1568 — Director must auto-act on /api/compliance incident state** — closes the operator-substitution loop. Compliance incidents already detected; missing the action layer.
 7. **#1588 — fleet-signer container has no restart policy** — infrastructure gap. Signer flaps and blocks treasury ops; `restart: unless-stopped` is a one-line fix that unblocks all on-chain revenue paths.
+
+## In flight (open PRs)
+
+| PR | Closes | Status |
+|---|---|---|
+| #1610 | #1608 | Telegram submission queue commands + auto-ping. 31 new tests; awaiting merge. |
+| #1609 | #1562 | Layer 4 on-chain USDC revenue watcher; 19 new tests; awaiting merge. |
+| #1596 | #1594 | selfUpdate execSync timeouts + observability log lines; awaiting merge. |
 
 ## Planned (revenue-gated, unlock at MRR thresholds)
 
@@ -94,6 +102,7 @@ Prior P0 sweep — issues closed in the last 7 days:
 
 ## Triage log
 
+- **2026-05-10 (cycle 20):** Closed #1534 (2026-05-09 standup tracker — superseded by today's standup #1582; action items already split out as separate issues, e.g. #1581 idempotency-key follow-up). Verified all 3 open PRs (#1610, #1609, #1596) include `Closes #N` references and pre-flight requirements. No issues cross the 14-day stale threshold (#1228 baseline-snapshot at ~13 days is the oldest and still labeled P0 — held for next cycle). No duplicate product issues: #1611 (Telegram one-step `/submit`) is a discipline-clean follow-up to #1608's separate approve/reject commands, not a dupe. Next-up list refreshed to retire `#1599 Layer 3` (shipped) and `#1562 Layer 4` (in flight via PR #1609), adding #1607 Phase B and #1568 Director auto-act as the next P0 levers. Survival timeline still 17 days to Article V; treasury at $2 USDC (Morpho).
 - **2026-05-10 (cycle 18):** Closed #1512 umbrella for the fleet autonomous-revenue layer. Layer 1 was already shipped (#1527/#1528/#1557 — daily `dispatchRevenueExecutor` wired into daemon at `src/service/daemon.ts:2168` with deny-list + prompt-injection sanitizer + 19 tests). Layers 2-4 broken out as discipline-clean follow-ups: #1598 Layer 2 (Immunefi/GitHub monitor only — Algora dropped), #1599 Layer 3 (Immunefi USDC submission agent — no KYC adapters), #1562 Layer 4 (on-chain USDC watcher — Stripe webhook variant dropped, supersedes agent-proxy#567). Doctrine drift in the original umbrella (Stripe Connect, Algora signup, KYC chain) excised in the follow-ups. Survival timeline still 17 days to Article V — Layers 2-4 are the active critical path.
 - **2026-05-10 (cycle 17):** Closed 2 duplicate standup action items: #1579 (→ #1532, ship async git patch) and #1580 (→ #1533, merge idle PRs). No stale issues (oldest is #1223 at 13 days). No open PRs. Next Up refreshed: added #1531 dispatch-loop bug and #1588 fleet-signer restart gap; updated day count to 17 and corrected treasury balance ($2 after bridging losses).
 - **2026-05-10 (cycle 15):** Closed #1555 — stale cross-repo follow-up from dashboard#753 (changelog RSS feed). Issue was created with truncated context due to disk-space ENOSPC during parent task execution; no orchestrator changes were required. Actual work completed in dashboard PR #770 (merged). Reviewer confirmed: "No code changes required in agent-reviewer." Triage: close as resolved-upstream.
