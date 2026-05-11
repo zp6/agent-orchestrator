@@ -156,6 +156,9 @@ describe("dispatchGitHubIssues", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       // Cross-agent inflight guard (issue #1168 / #1158)
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
@@ -170,6 +173,8 @@ describe("dispatchGitHubIssues", () => {
         duplicate_suppressed_hits: 0,
         active_suppressions: 0,
         suppressions: [],
+        active_pr_surge_suppressions: 0,
+        pr_surge_suppressions: [],
       }),
       // Guard duplicate suppressions (issue #1164)
       hasRecentAlreadyInReviewTask: vi.fn().mockReturnValue(false),
@@ -190,6 +195,9 @@ describe("dispatchGitHubIssues", () => {
       hasRecentAlreadyInReviewTask: vi.fn().mockReturnValue(false),
       recordGuardDuplicateSuppression: vi.fn(),
       getGuardDuplicateSuppressions: vi.fn().mockReturnValue([]),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       // Guard health metrics (issue #1163)
       recordGuardHit: vi.fn(),
@@ -467,6 +475,9 @@ describe("pre-dispatch issue state validation", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       // Cross-agent inflight guard (issue #1168 / #1158)
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
@@ -481,11 +492,16 @@ describe("pre-dispatch issue state validation", () => {
         duplicate_suppressed_hits: 0,
         active_suppressions: 0,
         suppressions: [],
+        active_pr_surge_suppressions: 0,
+        pr_surge_suppressions: [],
       }),
       // Guard duplicate suppressions (issue #1164)
       hasRecentAlreadyInReviewTask: vi.fn().mockReturnValue(false),
       recordGuardDuplicateSuppression: vi.fn(),
       getGuardDuplicateSuppressions: vi.fn().mockReturnValue([]),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
     } as unknown as StateStore;
@@ -598,6 +614,9 @@ describe("duplicate PR detection before dispatch", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       // Cross-agent inflight guard (issue #1168 / #1158)
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
@@ -612,11 +631,16 @@ describe("duplicate PR detection before dispatch", () => {
         duplicate_suppressed_hits: 0,
         active_suppressions: 0,
         suppressions: [],
+        active_pr_surge_suppressions: 0,
+        pr_surge_suppressions: [],
       }),
       // Guard duplicate suppressions (issue #1164)
       hasRecentAlreadyInReviewTask: vi.fn().mockReturnValue(false),
       recordGuardDuplicateSuppression: vi.fn(),
       getGuardDuplicateSuppressions: vi.fn().mockReturnValue([]),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       createTask: vi.fn().mockReturnValue({ id: "task-already-in-review" }),
       updateTask: vi.fn(),
     } as unknown as StateStore;
@@ -867,6 +891,9 @@ describe("idle agent pickup (post-completion dispatch)", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       // Cross-agent inflight guard (issue #1168 / #1158)
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
@@ -881,6 +908,8 @@ describe("idle agent pickup (post-completion dispatch)", () => {
         duplicate_suppressed_hits: 0,
         active_suppressions: 0,
         suppressions: [],
+        active_pr_surge_suppressions: 0,
+        pr_surge_suppressions: [],
       }),
       // Guard duplicate suppressions (issue #1164)
       hasRecentAlreadyInReviewTask: vi.fn().mockReturnValue(false),
@@ -1031,6 +1060,9 @@ describe("dispatchIdleAgentBacklog — force-reclaim path", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       // Cross-agent inflight guard (issue #1168 / #1158)
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
@@ -1628,6 +1660,9 @@ describe("dispatchIdleAgentBacklog", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       // Cross-agent inflight guard (issue #1168 / #1158)
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
@@ -1932,6 +1967,9 @@ describe("dispatchGitHubIssues onAgentCompleted hook", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       // Cross-agent inflight guard (issue #1168 / #1158)
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
@@ -2115,6 +2153,9 @@ describe("in-flight branch detection", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       // Cross-agent inflight guard (issue #1168 / #1158)
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
@@ -2209,6 +2250,9 @@ describe("in-flight branch detection", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       // Cross-agent inflight guard (issue #1168 / #1158)
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
@@ -2304,6 +2348,9 @@ describe("in-flight branch detection", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       // Cross-agent inflight guard (issue #1168 / #1158)
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
@@ -2394,6 +2441,9 @@ describe("in-flight branch detection", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       // Cross-agent inflight guard (issue #1168 / #1158)
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
@@ -2487,6 +2537,9 @@ describe("approved PR skip logic", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       // Cross-agent inflight guard (issue #1168 / #1158)
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
@@ -2691,6 +2744,9 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       // Cross-agent inflight guard (issue #1168 / #1158)
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
@@ -2766,6 +2822,32 @@ describe("pre-dispatch open-PR deduplication (issue #859)", () => {
     );
     // Should NOT dispatch to agent
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("activates per-PR multi-issue suppression when two distinct issues hit the same blocking PR", async () => {
+    mockFetchIssues.mockReturnValue([
+      { repo: "owner/my-repo", number: 41, title: "Feature A", body: "Do it", url: "https://...", labels: [] },
+      { repo: "owner/my-repo", number: 42, title: "Feature B", body: "Do it", url: "https://...", labels: [] },
+    ]);
+    mockFindExistingPRs.mockReturnValue([
+      { number: 99, title: "Fix Feature", url: "https://github.com/owner/my-repo/pull/99", state: "open", isDraft: false },
+    ]);
+
+    await dispatchGitHubIssues(config, mockStore, mockDispatcher);
+
+    expect(mockStore.setPRGuardMultiIssueSuppression).toHaveBeenCalledTimes(1);
+    expect(mockStore.setPRGuardMultiIssueSuppression).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repo: "owner/my-repo",
+        blockingPrNumber: 99,
+        blockedIssueNumbers: expect.arrayContaining([41, 42]),
+        eventCount: 2,
+      }),
+    );
+    expect(mockSendTelegramAlert).toHaveBeenCalledTimes(1);
+    expect(mockSendTelegramAlert).toHaveBeenCalledWith(
+      expect.stringContaining("PR guard suppression"),
+    );
   });
 
   it("markProcessed always uses null task_id for already-in-review skips (FK-safe)", async () => {
@@ -2982,6 +3064,9 @@ describe("dispatch flood gate (issue #1060)", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       // Cross-agent inflight guard (issue #1168 / #1158)
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
@@ -3207,6 +3292,9 @@ describe("PR guard surge alert (issue #1082)", () => {
       // Dispatch surge suppression (issue #1113)
       getDispatchSurgeStatus: vi.fn().mockReturnValue({ active: false }),
       recordDispatchSurgeEvent: vi.fn().mockReturnValue({ suppressed: false }),
+      setPRGuardMultiIssueSuppression: vi.fn(),
+      getPRGuardMultiIssueSuppression: vi.fn().mockReturnValue(undefined),
+      listActivePRGuardMultiIssueSuppressions: vi.fn().mockReturnValue([]),
       // Cross-agent inflight guard (issue #1168 / #1158)
       hasRecentSurgeEvent: vi.fn().mockReturnValue(false),
       getMostRecentSurgeEventAt: vi.fn().mockReturnValue(null),
@@ -3258,8 +3346,8 @@ describe("PR guard surge alert (issue #1082)", () => {
     mockCachedGetIssueState.mockReturnValue({ state: "open", hasOpenPR: true, hasMergedPR: false });
   });
 
-  it("sends individual Telegram alerts when blocked count is below threshold", async () => {
-    // 3 issues blocked by the same PR — below default threshold of 5
+  it("activates per-PR suppression once a second distinct issue hits the same PR", async () => {
+    // 3 issues blocked by the same PR — the second issue should activate suppression
     mockFetchIssues.mockReturnValue([
       { repo: "owner/my-repo", number: 10, title: "Issue 10", body: "body", url: "https://...", labels: [] },
       { repo: "owner/my-repo", number: 11, title: "Issue 11", body: "body", url: "https://...", labels: [] },
@@ -3271,16 +3359,15 @@ describe("PR guard surge alert (issue #1082)", () => {
 
     await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
-    // Should send 3 individual alerts (one per issue), not a surge alert
-    expect(mockSendTelegramAlert).toHaveBeenCalledTimes(3);
-    // Each alert should mention the specific issue, not say "surge"
-    for (const call of mockSendTelegramAlert.mock.calls) {
-      expect(call[0]).toContain("Dispatch guard fired");
-      expect(call[0]).not.toContain("surge");
-    }
+    expect(mockSendTelegramAlert).toHaveBeenCalledTimes(1);
+    const alertText = mockSendTelegramAlert.mock.calls[0][0] as string;
+    expect(alertText).toContain("PR guard suppression");
+    expect(alertText).toContain("2 issues");
+    expect(alertText).toContain("#10");
+    expect(alertText).toContain("#11");
   });
 
-  it("sends one consolidated surge alert when blocked count meets threshold", async () => {
+  it("sends one consolidated suppression digest when a blocking PR hits multiple issues", async () => {
     // PR_GUARD_SURGE_THRESHOLD (5) issues blocked by the same PR
     const issues = Array.from({ length: PR_GUARD_SURGE_THRESHOLD }, (_, i) => ({
       repo: "owner/my-repo",
@@ -3297,18 +3384,16 @@ describe("PR guard surge alert (issue #1082)", () => {
 
     await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
-    // Exactly one consolidated surge alert
+    // Exactly one consolidated suppression digest
     expect(mockSendTelegramAlert).toHaveBeenCalledTimes(1);
     const alertText = mockSendTelegramAlert.mock.calls[0][0] as string;
-    expect(alertText).toContain("PR guard surge");
-    expect(alertText).toContain(`${PR_GUARD_SURGE_THRESHOLD} issues`);
-    // PR URL included (AC #2)
-    expect(alertText).toContain("https://github.com/owner/my-repo/pull/300");
-    // Up to 5 issue numbers included (AC #2)
+    expect(alertText).toContain("PR guard suppression");
+    expect(alertText).toContain("2 issues");
     expect(alertText).toContain("#100");
+    expect(alertText).toContain("#101");
   });
 
-  it("surge alert message includes up to 5 issue numbers and remainder count", async () => {
+  it("suppression digest includes the blocking PR and first issues", async () => {
     // 8 issues blocked by the same PR (> 5 surge threshold)
     const issues = Array.from({ length: 8 }, (_, i) => ({
       repo: "owner/my-repo",
@@ -3327,16 +3412,13 @@ describe("PR guard surge alert (issue #1082)", () => {
 
     expect(mockSendTelegramAlert).toHaveBeenCalledTimes(1);
     const alertText = mockSendTelegramAlert.mock.calls[0][0] as string;
-    // Total count in message (AC #2)
-    expect(alertText).toContain("8 issues");
-    // At most 5 explicit issue numbers
-    const issueRefs = (alertText.match(/#\d+/g) ?? []).filter((r: string) => r !== `#400`);
-    expect(issueRefs.length).toBeLessThanOrEqual(5);
-    // Remainder shown (8 - 5 = 3 more)
-    expect(alertText).toContain("+3 more");
+    expect(alertText).toContain("PR guard suppression");
+    expect(alertText).toContain("2 issues");
+    expect(alertText).toContain("#200");
+    expect(alertText).toContain("#201");
   });
 
-  it("suppresses surge Telegram alert when surge cooldown is active (AC #3)", async () => {
+  it("does not emit a second suppression digest once a PR-level suppression is already active", async () => {
     const issues = Array.from({ length: PR_GUARD_SURGE_THRESHOLD }, (_, i) => ({
       repo: "owner/my-repo",
       number: 300 + i,
@@ -3350,16 +3432,24 @@ describe("PR guard surge alert (issue #1082)", () => {
       { number: 500, title: "PR", url: "https://github.com/owner/my-repo/pull/500", state: "open", isDraft: false },
     ]);
 
-    // Simulate surge cooldown already active for this PR
-    prGuardSurgeAlertSentAt.set("owner/my-repo#500", Date.now());
+    // Simulate an already-active PR-level suppression entry
+    (mockStore.getPRGuardMultiIssueSuppression as ReturnType<typeof vi.fn>).mockReturnValue({
+      repo: "owner/my-repo",
+      blocking_pr_number: 500,
+      suppressed_at: new Date(Date.now() - 60_000).toISOString(),
+      expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+      event_count: 2,
+      blocked_issues: [300, 301],
+      minutes_remaining: 60,
+    });
 
     await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
-    // No Telegram alert — surge cooldown suppresses it
+    // No Telegram alert — the existing suppression already covers this PR
     expect(mockSendTelegramAlert).not.toHaveBeenCalled();
   });
 
-  it("fires surge alert again after cooldown window expires", async () => {
+  it("re-emits the suppression digest after the previous suppression expires", async () => {
     const issues = Array.from({ length: PR_GUARD_SURGE_THRESHOLD }, (_, i) => ({
       repo: "owner/my-repo",
       number: 400 + i,
@@ -3373,20 +3463,19 @@ describe("PR guard surge alert (issue #1082)", () => {
       { number: 600, title: "PR", url: "https://github.com/owner/my-repo/pull/600", state: "open", isDraft: false },
     ]);
 
-    // Simulate cooldown expired (last alert was more than GUARD_FLOOD_GATE_WINDOW_MS ago)
-    prGuardSurgeAlertSentAt.set("owner/my-repo#600", Date.now() - GUARD_FLOOD_GATE_WINDOW_MS - 1);
+    // No active PR-level suppression
+    (mockStore.getPRGuardMultiIssueSuppression as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
 
     await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
-    // Should fire again since cooldown expired
+    // Should emit the suppression digest for the new cycle
     expect(mockSendTelegramAlert).toHaveBeenCalledTimes(1);
     const alertText = mockSendTelegramAlert.mock.calls[0][0] as string;
-    expect(alertText).toContain("PR guard surge");
+    expect(alertText).toContain("PR guard suppression");
   });
 
-  it("flood-gated hits count toward surge total (AC #3)", async () => {
-    // 3 first-fire issues + 3 flood-gated issues = 6 total blocked by same PR
-    // 6 >= threshold(5) → should trigger surge alert
+  it("still counts flood-gated hits toward the per-PR suppression digest", async () => {
+    // 3 first-fire issues + 3 flood-gated issues = 6 total blocked by same PR.
     const firstFireIssues = Array.from({ length: 3 }, (_, i) => ({
       repo: "owner/my-repo",
       number: 500 + i,
@@ -3405,17 +3494,12 @@ describe("PR guard surge alert (issue #1082)", () => {
     // We do this by making hasRecentGuardBlock return true for issues 503, 504, 505
     // and false for 500, 501, 502.
     // Since fetchOpenIssues only returns 3 issues here, we test a simpler scenario:
-    // 3 first-fires alone are below threshold(5) → individual alerts sent.
-    // For flood-gate integration, the important guarantee is that flood-gated issues
-    // increment totalBlockedCount — tested via the surge alert text showing the correct total.
+    // 3 first-fires alone are enough to activate the new suppression digest.
 
     await dispatchGitHubIssues(config, mockStore, mockDispatcher);
 
-    // 3 < 5 threshold → individual alerts
-    expect(mockSendTelegramAlert).toHaveBeenCalledTimes(3);
-    for (const call of mockSendTelegramAlert.mock.calls) {
-      expect(call[0]).toContain("Dispatch guard fired");
-    }
+    expect(mockSendTelegramAlert).toHaveBeenCalledTimes(1);
+    expect(mockSendTelegramAlert.mock.calls[0][0]).toContain("PR guard suppression");
   });
 
   it("PR_GUARD_SURGE_THRESHOLD exported constant equals 5", () => {
@@ -4043,4 +4127,3 @@ describe("dispatchRevenueExecutor", () => {
     );
   });
 });
-

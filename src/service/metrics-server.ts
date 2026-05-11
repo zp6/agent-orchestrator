@@ -13,6 +13,8 @@
  *   GET /health                       — basic liveness check
  *   GET /guard-health                 — PR guard surge metrics (issue #1163)
  *   GET /guard-health?hours=24        — configurable window in hours
+ *   GET /api/pr-guard-surge-suppressions
+ *   GET /api/pr-guard-surge-suppressions?repo=owner/repo
  *   GET /investigations               — research investigation feed (issue #140)
  *   GET /investigations?limit=20&offset=0&status=done
  *   GET /misrouting                   — research agent impl-task misroute feed (issue #1077)
@@ -320,7 +322,41 @@ export interface GuardHealthResponse {
       expires_at: string;
       minutes_remaining: number;
     }>;
+    /** Number of currently active per-PR multi-issue suppressions. */
+    active_pr_surge_suppressions: number;
+    /** List of active per-PR multi-issue suppressions with expiry times. */
+    pr_surge_suppressions: Array<{
+      repo: string;
+      blocking_pr_number: number;
+      suppressed_at: string;
+      expires_at: string;
+      event_count: number;
+      blocked_issues: number[];
+      minutes_remaining: number;
+    }>;
   };
+  /** ISO timestamp of when this response was generated. */
+  generated_at: string;
+}
+
+/**
+ * JSON response shape for GET /api/pr-guard-surge-suppressions.
+ */
+export interface PRGuardSurgeSuppressionFeedResponse {
+  /** Repository filter applied, or null if all repos are returned. */
+  repo_filter: string | null;
+  /** Number of active suppression entries returned. */
+  total: number;
+  /** Per-PR multi-issue suppression entries ordered by expiry. */
+  suppressions: Array<{
+    repo: string;
+    blocking_pr_number: number;
+    suppressed_at: string;
+    expires_at: string;
+    event_count: number;
+    blocked_issues: number[];
+    minutes_remaining: number;
+  }>;
   /** ISO timestamp of when this response was generated. */
   generated_at: string;
 }
@@ -421,6 +457,11 @@ function parseMonologueKind(value: string | null): MonologueKind | null {
   return null;
 }
 
+function parseRepoFilter(value: string | null): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 // ── Server factory ─────────────────────────────────────────────────────────────
 
 /**
@@ -475,6 +516,27 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
           error: err instanceof Error ? err.message : String(err),
         });
         sendJson(res, 500, { error: "Failed to compute metrics" });
+      }
+      return;
+    }
+
+    // ── GET /api/pr-guard-surge-suppressions ─────────────────────────────────
+    if (url.pathname === "/api/pr-guard-surge-suppressions") {
+      try {
+        const repoFilter = parseRepoFilter(url.searchParams.get("repo"));
+        const suppressions = store.listActivePRGuardMultiIssueSuppressions(repoFilter);
+        const body: PRGuardSurgeSuppressionFeedResponse = {
+          repo_filter: repoFilter ?? null,
+          total: suppressions.length,
+          suppressions,
+          generated_at: new Date().toISOString(),
+        };
+        sendJson(res, 200, body);
+      } catch (err) {
+        log.warn("Failed to fetch per-PR guard surge suppressions", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to fetch suppressions" });
       }
       return;
     }
@@ -1069,6 +1131,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
         "/marginal-score-tasks",
         "POST /marginal-score-tasks/:id/redispatch",
         "/guard-health",
+        "/api/pr-guard-surge-suppressions",
         "/api/persistent-anomalies",
         "/api/incidents",
         "POST /api/fingerprint/check",

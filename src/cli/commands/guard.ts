@@ -46,6 +46,16 @@ export function registerGuardHealthCommand(program: Command): void {
               expires_at: string;
               minutes_remaining: number;
             }>;
+            active_pr_surge_suppressions: number;
+            pr_surge_suppressions: Array<{
+              repo: string;
+              blocking_pr_number: number;
+              suppressed_at: string;
+              expires_at: string;
+              event_count: number;
+              blocked_issues: number[];
+              minutes_remaining: number;
+            }>;
           };
           generated_at: string;
         };
@@ -60,6 +70,7 @@ export function registerGuardHealthCommand(program: Command): void {
           console.log(`🚫 Leaked hits: ${metrics.leaked_hits}`);
           console.log(`🔄 Duplicate-suppressed: ${metrics.duplicate_suppressed_hits}`);
           console.log(`🔒 Active suppressions: ${metrics.active_suppressions}`);
+          console.log(`🚦 Active PR suppressions: ${metrics.active_pr_surge_suppressions ?? 0}`);
 
           if (metrics.suppressions.length > 0) {
             console.log(`\n*Active Suppressions:*`);
@@ -68,6 +79,21 @@ export function registerGuardHealthCommand(program: Command): void {
             }
             if (metrics.suppressions.length > 10) {
               console.log(`  ... and ${metrics.suppressions.length - 10} more`);
+            }
+          }
+
+          if ((metrics.pr_surge_suppressions ?? []).length > 0) {
+            console.log(`\n*Active PR Suppressions:*`);
+            for (const s of metrics.pr_surge_suppressions.slice(0, 10)) {
+              const issues = s.blocked_issues.slice(0, 5).map((n) => `#${n}`).join(", ");
+              const overflow = s.blocked_issues.length > 5 ? ` +${s.blocked_issues.length - 5} more` : "";
+              console.log(
+                `  PR #${s.blocking_pr_number} in ${s.repo} — ` +
+                `blocks ${s.blocked_issues.length} issues: ${issues}${overflow} — ${s.minutes_remaining}m remaining`,
+              );
+            }
+            if (metrics.pr_surge_suppressions.length > 10) {
+              console.log(`  ... and ${metrics.pr_surge_suppressions.length - 10} more`);
             }
           }
 

@@ -1650,6 +1650,29 @@ export interface DispatchBlockMetrics {
 }
 
 /**
+ * A single per-PR multi-issue suppression entry.
+ *
+ * This records the blocking PR number rather than the blocked issue number so
+ * operators can see which PR is causing a cluster of already-in-review skips.
+ */
+export interface PRGuardMultiIssueSuppression {
+  /** Repository slug, e.g. "owner/repo". */
+  repo: string;
+  /** PR number that is suppressing dispatch across multiple issues. */
+  blocking_pr_number: number;
+  /** ISO timestamp when the suppression was recorded. */
+  suppressed_at: string;
+  /** ISO timestamp when the suppression expires. */
+  expires_at: string;
+  /** Total number of already-in-review hits recorded for this suppression. */
+  event_count: number;
+  /** Distinct issue numbers blocked by the PR. */
+  blocked_issues: number[];
+  /** Minutes remaining before the suppression expires. */
+  minutes_remaining: number;
+}
+
+/**
  * Breakdown of dispatch blocks by PR detection strategy (issue #1179).
  * Covers the rolling N-day window requested by the operator.
  */
@@ -10829,6 +10852,24 @@ export class StateStore {
     `);
   }
 
+  private runPRGuardMultiIssueSuppressionMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pr_guard_multi_issue_suppressions (
+        repo                TEXT    NOT NULL,
+        blocking_pr_number  INTEGER NOT NULL,
+        suppressed_at       TEXT    NOT NULL,
+        expires_at          TEXT    NOT NULL,
+        event_count         INTEGER NOT NULL,
+        blocked_issues_json  TEXT    NOT NULL,
+        PRIMARY KEY (repo, blocking_pr_number)
+      );
+      CREATE INDEX IF NOT EXISTS idx_pr_guard_multi_issue_suppressions_expires
+        ON pr_guard_multi_issue_suppressions(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_pr_guard_multi_issue_suppressions_repo
+        ON pr_guard_multi_issue_suppressions(repo, blocking_pr_number);
+    `);
+  }
+
   /**
    * Record a dispatch surge event (when "already-in-review" task is created).
    *
@@ -10956,6 +10997,171 @@ export class StateStore {
       )
       .get(repo, issueNumber, cutoff) as { event_at: string } | undefined;
     return row?.event_at ?? null;
+  }
+
+  /**
+   * Record or refresh a per-PR multi-issue suppression entry.
+   *
+   * The caller supplies the full list of distinct blocked issues so the row
+   * always reflects the latest cycle state.
+   */
+  setPRGuardMultiIssueSuppression(params: {
+    repo: string;
+    blockingPrNumber: number;
+    blockedIssueNumbers: number[];
+    eventCount: number;
+    suppressedUntil: Date;
+  }): void {
+    this.runPRGuardMultiIssueSuppressionMigration();
+    const nowIso = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO pr_guard_multi_issue_suppressions
+           (repo, blocking_pr_number, suppressed_at, expires_at, event_count, blocked_issues_json)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(repo, blocking_pr_number) DO UPDATE SET
+           suppressed_at = excluded.suppressed_at,
+           expires_at = excluded.expires_at,
+           event_count = excluded.event_count,
+           blocked_issues_json = excluded.blocked_issues_json`,
+      )
+      .run(
+        params.repo,
+        params.blockingPrNumber,
+        nowIso,
+        params.suppressedUntil.toISOString(),
+        params.eventCount,
+        JSON.stringify([...new Set(params.blockedIssueNumbers)].sort((a, b) => a - b)),
+      );
+  }
+
+  /**
+   * Return the active per-PR multi-issue suppression for a blocking PR.
+   */
+  getPRGuardMultiIssueSuppression(
+    repo: string,
+    blockingPrNumber: number,
+  ): PRGuardMultiIssueSuppression | undefined {
+    this.runPRGuardMultiIssueSuppressionMigration();
+    const row = this.db
+      .prepare(
+        `SELECT repo, blocking_pr_number, suppressed_at, expires_at, event_count, blocked_issues_json
+         FROM pr_guard_multi_issue_suppressions
+         WHERE repo = ?
+           AND blocking_pr_number = ?
+           AND julianday(expires_at) > julianday('now')
+         LIMIT 1`,
+      )
+      .get(repo, blockingPrNumber) as
+      | {
+          repo: string;
+          blocking_pr_number: number;
+          suppressed_at: string;
+          expires_at: string;
+          event_count: number;
+          blocked_issues_json: string;
+        }
+      | undefined;
+
+    if (!row) return undefined;
+
+    const blockedIssues = (() => {
+      try {
+        const parsed = JSON.parse(row.blocked_issues_json) as unknown;
+        return Array.isArray(parsed) ? parsed.filter((n): n is number => typeof n === "number") : [];
+      } catch {
+        return [];
+      }
+    })();
+
+    return {
+      repo: row.repo,
+      blocking_pr_number: row.blocking_pr_number,
+      suppressed_at: row.suppressed_at,
+      expires_at: row.expires_at,
+      event_count: row.event_count,
+      blocked_issues: blockedIssues,
+      minutes_remaining: Math.ceil((new Date(row.expires_at).getTime() - Date.now()) / 60_000),
+    };
+  }
+
+  /**
+   * Return true when a per-PR multi-issue suppression is active.
+   */
+  isPRGuardMultiIssueSuppressionActive(repo: string, blockingPrNumber: number): boolean {
+    return this.getPRGuardMultiIssueSuppression(repo, blockingPrNumber) !== undefined;
+  }
+
+  /**
+   * Return all active per-PR multi-issue suppression entries.
+   */
+  listActivePRGuardMultiIssueSuppressions(repo?: string): PRGuardMultiIssueSuppression[] {
+    this.runPRGuardMultiIssueSuppressionMigration();
+    const rows = repo
+      ? (this.db
+          .prepare(
+            `SELECT repo, blocking_pr_number, suppressed_at, expires_at, event_count, blocked_issues_json
+             FROM pr_guard_multi_issue_suppressions
+             WHERE julianday(expires_at) > julianday('now')
+               AND repo = ?
+             ORDER BY expires_at ASC`,
+          )
+          .all(repo) as Array<{
+            repo: string;
+            blocking_pr_number: number;
+            suppressed_at: string;
+            expires_at: string;
+            event_count: number;
+            blocked_issues_json: string;
+          }>)
+      : (this.db
+          .prepare(
+            `SELECT repo, blocking_pr_number, suppressed_at, expires_at, event_count, blocked_issues_json
+             FROM pr_guard_multi_issue_suppressions
+             WHERE julianday(expires_at) > julianday('now')
+             ORDER BY expires_at ASC`,
+          )
+          .all() as Array<{
+            repo: string;
+            blocking_pr_number: number;
+            suppressed_at: string;
+            expires_at: string;
+            event_count: number;
+            blocked_issues_json: string;
+          }>);
+
+    return rows.map((row) => {
+      let blockedIssues: number[] = [];
+      try {
+        const parsed = JSON.parse(row.blocked_issues_json) as unknown;
+        if (Array.isArray(parsed)) {
+          blockedIssues = parsed.filter((n): n is number => typeof n === "number");
+        }
+      } catch {
+        blockedIssues = [];
+      }
+
+      return {
+        repo: row.repo,
+        blocking_pr_number: row.blocking_pr_number,
+        suppressed_at: row.suppressed_at,
+        expires_at: row.expires_at,
+        event_count: row.event_count,
+        blocked_issues: blockedIssues,
+        minutes_remaining: Math.ceil((new Date(row.expires_at).getTime() - Date.now()) / 60_000),
+      };
+    });
+  }
+
+  /**
+   * Delete expired per-PR multi-issue suppression rows.
+   */
+  prunePRGuardMultiIssueSuppressions(): number {
+    this.runPRGuardMultiIssueSuppressionMigration();
+    const result = this.db
+      .prepare(`DELETE FROM pr_guard_multi_issue_suppressions WHERE julianday(expires_at) <= julianday('now')`)
+      .run();
+    return result.changes;
   }
 
   /**
@@ -12424,9 +12630,12 @@ export class StateStore {
     duplicate_suppressed_hits: number;
     active_suppressions: number;
     suppressions: Array<{ repo: string; issue_number: number; expires_at: string; minutes_remaining: number }>;
+    active_pr_surge_suppressions: number;
+    pr_surge_suppressions: PRGuardMultiIssueSuppression[];
   } {
     this.runGuardHealthMetricsMigration();
     this.runGuardDuplicateSuppressionsMigration();
+    this.runDispatchSurgeSuppressionMigration();
     const cutoff = new Date(Date.now() - windowMs).toISOString();
     const now = Date.now();
 
@@ -12461,12 +12670,16 @@ export class StateStore {
       minutes_remaining: Math.ceil((new Date(s.expires_at).getTime() - now) / (60 * 1000)),
     }));
 
+    const prSurgeSuppressions = this.listActivePRGuardMultiIssueSuppressions();
+
     return {
       total_hits,
       leaked_hits,
       duplicate_suppressed_hits,
       active_suppressions: suppressions.length,
       suppressions,
+      active_pr_surge_suppressions: prSurgeSuppressions.length,
+      pr_surge_suppressions: prSurgeSuppressions,
     };
   }
 

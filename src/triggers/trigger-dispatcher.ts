@@ -82,6 +82,19 @@ export const GUARD_FLOOD_GATE_WINDOW_MS = 3_600_000;
 export const PR_GUARD_SURGE_THRESHOLD = 5;
 
 /**
+ * Per-PR multi-issue suppression threshold (issue #1619).
+ * When a second distinct issue in the same daemon cycle is blocked by the
+ * same PR, the dispatcher activates a 2-hour suppression entry for that PR.
+ */
+export const PR_GUARD_MULTI_ISSUE_SUPPRESSION_THRESHOLD = 2;
+
+/**
+ * Per-PR multi-issue suppression TTL (issue #1619).
+ * Once activated, dispatches blocked by the same PR stay suppressed for 120m.
+ */
+export const PR_GUARD_MULTI_ISSUE_SUPPRESSION_TTL_MS = 120 * 60 * 1000;
+
+/**
  * In-memory cooldown tracker for PR guard surge alerts (issue #1082).
  * Key: `${repo}#${prNumber}` — the blocking PR reference (repo-qualified).
  * Value: timestamp (ms) when the last surge alert was sent.
@@ -135,6 +148,21 @@ function reportDashboardSkip(params: {
     signal: AbortSignal.timeout(5_000),
   }).catch(() => {
     // Intentionally swallowed — dashboard skip reporting is best-effort
+  });
+}
+
+function formatIssueNumberList(issueNumbers: number[]): string {
+  const display = issueNumbers.slice(0, 5).map((n) => `#${n}`).join(", ");
+  const overflow = issueNumbers.length > 5 ? ` +${issueNumbers.length - 5} more` : "";
+  return `${display}${overflow}`;
+}
+
+function formatUtcTime(isoTimestamp: string): string {
+  return new Date(isoTimestamp).toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "UTC",
   });
 }
 
@@ -555,6 +583,10 @@ export async function dispatchGitHubIssues(
     firstFireIssueNumbers: number[];
     /** Total blocked count including flood-gated hits (AC #3: "still counted"). */
     totalBlockedCount: number;
+    /** True when the per-PR suppression entry has been activated for this cycle. */
+    multiIssueSuppressionActive: boolean;
+    /** When the suppression expires, if it was activated this cycle. */
+    multiIssueSuppressionExpiresAt: string | null;
   }
   const prGuardAccumulator = new Map<string, PrGuardSurgeEntry>();
 
@@ -926,6 +958,8 @@ export async function dispatchGitHubIssues(
                 repo: issue.repo,
                 firstFireIssueNumbers: [],
                 totalBlockedCount: 1,
+                multiIssueSuppressionActive: false,
+                multiIssueSuppressionExpiresAt: null,
               });
             }
             result.skipped++;
@@ -974,19 +1008,64 @@ export async function dispatchGitHubIssues(
           // messages per source_ref (when below threshold).
           {
             const prKey = `${issue.repo}#${validation.blockingPRNumber}`;
-            const surgeEntry = prGuardAccumulator.get(prKey);
-            if (surgeEntry) {
+            const surgeEntry = prGuardAccumulator.get(prKey) ?? {
+              prUrl: `https://github.com/${issue.repo}/pull/${validation.blockingPRNumber}`,
+              prNumber: validation.blockingPRNumber,
+              repo: issue.repo,
+              firstFireIssueNumbers: [],
+              totalBlockedCount: 0,
+              multiIssueSuppressionActive: false,
+              multiIssueSuppressionExpiresAt: null,
+            };
+            if (!surgeEntry.firstFireIssueNumbers.includes(issue.number)) {
               surgeEntry.firstFireIssueNumbers.push(issue.number);
-              surgeEntry.totalBlockedCount++;
-            } else {
-              prGuardAccumulator.set(prKey, {
-                prUrl: `https://github.com/${issue.repo}/pull/${validation.blockingPRNumber}`,
-                prNumber: validation.blockingPRNumber,
+            }
+            surgeEntry.totalBlockedCount++;
+
+            const activeSuppression = store.getPRGuardMultiIssueSuppression?.(issue.repo, validation.blockingPRNumber);
+            if (activeSuppression) {
+              surgeEntry.multiIssueSuppressionActive = true;
+              surgeEntry.multiIssueSuppressionExpiresAt = activeSuppression.expires_at;
+              const mergedIssues = activeSuppression.blocked_issues.includes(issue.number)
+                ? activeSuppression.blocked_issues
+                : [...activeSuppression.blocked_issues, issue.number];
+              store.setPRGuardMultiIssueSuppression?.({
                 repo: issue.repo,
-                firstFireIssueNumbers: [issue.number],
-                totalBlockedCount: 1,
+                blockingPrNumber: validation.blockingPRNumber,
+                blockedIssueNumbers: mergedIssues,
+                eventCount: activeSuppression.event_count + 1,
+                suppressedUntil: new Date(activeSuppression.expires_at),
+              });
+            } else if (
+              !surgeEntry.multiIssueSuppressionActive &&
+              surgeEntry.firstFireIssueNumbers.length >= PR_GUARD_MULTI_ISSUE_SUPPRESSION_THRESHOLD
+            ) {
+              const suppressedUntil = new Date(Date.now() + PR_GUARD_MULTI_ISSUE_SUPPRESSION_TTL_MS);
+              store.setPRGuardMultiIssueSuppression?.({
+                repo: issue.repo,
+                blockingPrNumber: validation.blockingPRNumber,
+                blockedIssueNumbers: surgeEntry.firstFireIssueNumbers,
+                eventCount: surgeEntry.totalBlockedCount,
+                suppressedUntil,
+              });
+              surgeEntry.multiIssueSuppressionActive = true;
+              surgeEntry.multiIssueSuppressionExpiresAt = suppressedUntil.toISOString();
+              const issueList = formatIssueNumberList(surgeEntry.firstFireIssueNumbers);
+              const untilUtc = formatUtcTime(suppressedUntil.toISOString());
+              sendTelegramAlert(
+                `🚦 *PR guard suppression* — PR #${validation.blockingPRNumber} is blocking ` +
+                `${surgeEntry.firstFireIssueNumbers.length} issues: ${issueList} — ` +
+                `dispatch suppressed until ${untilUtc} UTC`,
+              );
+              log.info("Per-PR multi-issue suppression activated", {
+                sourceRef,
+                repo: issue.repo,
+                blockingPRNumber: validation.blockingPRNumber,
+                blockedIssues: surgeEntry.firstFireIssueNumbers,
+                expiresAt: suppressedUntil.toISOString(),
               });
             }
+            prGuardAccumulator.set(prKey, surgeEntry);
           }
 
           // Priority review fast-lane (issue #871): route open PRs blocking dispatch
@@ -1191,9 +1270,27 @@ export async function dispatchGitHubIssues(
       .triggers?.pr_guard_surge_threshold ?? PR_GUARD_SURGE_THRESHOLD;
 
     for (const [prKey, surgeEntry] of prGuardAccumulator) {
-      const { prUrl, prNumber, repo, firstFireIssueNumbers, totalBlockedCount } = surgeEntry;
+      const {
+        prUrl,
+        prNumber,
+        repo,
+        firstFireIssueNumbers,
+        totalBlockedCount,
+        multiIssueSuppressionActive,
+      } = surgeEntry;
       const lastSurgeAlertAt = prGuardSurgeAlertSentAt.get(prKey) ?? 0;
       const surgeCooldownActive = (surgeNow - lastSurgeAlertAt) < GUARD_FLOOD_GATE_WINDOW_MS;
+
+      if (multiIssueSuppressionActive) {
+        log.info("PR guard multi-issue suppression active: skipping legacy surge alert", {
+          prKey,
+          prNumber,
+          repo,
+          totalBlockedCount,
+          blockedIssues: firstFireIssueNumbers,
+        });
+        continue;
+      }
 
       if (totalBlockedCount >= surgeThreshold) {
         if (surgeCooldownActive) {
@@ -1296,6 +1393,17 @@ export async function dispatchIdleAgentBacklog(
   forceReclaimAgents?: Set<string>,
 ): Promise<TriggerResult> {
   const result: TriggerResult = { dispatched: 0, skipped: 0, errors: [], dispatchedAgents: [] };
+
+  interface PrGuardSurgeEntry {
+    prUrl: string;
+    prNumber: number;
+    repo: string;
+    firstFireIssueNumbers: number[];
+    totalBlockedCount: number;
+    multiIssueSuppressionActive: boolean;
+    multiIssueSuppressionExpiresAt: string | null;
+  }
+  const prGuardAccumulator = new Map<string, PrGuardSurgeEntry>();
 
   // Pre-flight: verify gh is authenticated before attempting any API calls.
   const authStatus = validateGhAuth();
@@ -1479,6 +1587,69 @@ export async function dispatchIdleAgentBacklog(
             );
           }
 
+          // Track per-PR multi-issue suppression (issue #1619).
+          {
+            const prKey = `${issue.repo}#${validation.blockingPRNumber}`;
+            const surgeEntry = prGuardAccumulator.get(prKey) ?? {
+              prUrl: `https://github.com/${issue.repo}/pull/${validation.blockingPRNumber}`,
+              prNumber: validation.blockingPRNumber,
+              repo: issue.repo,
+              firstFireIssueNumbers: [],
+              totalBlockedCount: 0,
+              multiIssueSuppressionActive: false,
+              multiIssueSuppressionExpiresAt: null,
+            };
+            if (!surgeEntry.firstFireIssueNumbers.includes(issue.number)) {
+              surgeEntry.firstFireIssueNumbers.push(issue.number);
+            }
+            surgeEntry.totalBlockedCount++;
+
+            const activeSuppression = store.getPRGuardMultiIssueSuppression?.(issue.repo, validation.blockingPRNumber);
+            if (activeSuppression) {
+              surgeEntry.multiIssueSuppressionActive = true;
+              surgeEntry.multiIssueSuppressionExpiresAt = activeSuppression.expires_at;
+              const mergedIssues = activeSuppression.blocked_issues.includes(issue.number)
+                ? activeSuppression.blocked_issues
+                : [...activeSuppression.blocked_issues, issue.number];
+              store.setPRGuardMultiIssueSuppression?.({
+                repo: issue.repo,
+                blockingPrNumber: validation.blockingPRNumber,
+                blockedIssueNumbers: mergedIssues,
+                eventCount: activeSuppression.event_count + 1,
+                suppressedUntil: new Date(activeSuppression.expires_at),
+              });
+            } else if (
+              !surgeEntry.multiIssueSuppressionActive &&
+              surgeEntry.firstFireIssueNumbers.length >= PR_GUARD_MULTI_ISSUE_SUPPRESSION_THRESHOLD
+            ) {
+              const suppressedUntil = new Date(Date.now() + PR_GUARD_MULTI_ISSUE_SUPPRESSION_TTL_MS);
+              store.setPRGuardMultiIssueSuppression?.({
+                repo: issue.repo,
+                blockingPrNumber: validation.blockingPRNumber,
+                blockedIssueNumbers: surgeEntry.firstFireIssueNumbers,
+                eventCount: surgeEntry.totalBlockedCount,
+                suppressedUntil,
+              });
+              surgeEntry.multiIssueSuppressionActive = true;
+              surgeEntry.multiIssueSuppressionExpiresAt = suppressedUntil.toISOString();
+              const issueList = formatIssueNumberList(surgeEntry.firstFireIssueNumbers);
+              const untilUtc = formatUtcTime(suppressedUntil.toISOString());
+              sendTelegramAlert(
+                `🚦 *PR guard suppression* — PR #${validation.blockingPRNumber} is blocking ` +
+                `${surgeEntry.firstFireIssueNumbers.length} issues: ${issueList} — ` +
+                `dispatch suppressed until ${untilUtc} UTC`,
+              );
+              log.info("Idle pickup: per-PR multi-issue suppression activated", {
+                sourceRef,
+                repo: issue.repo,
+                blockingPRNumber: validation.blockingPRNumber,
+                blockedIssues: surgeEntry.firstFireIssueNumbers,
+                expiresAt: suppressedUntil.toISOString(),
+              });
+            }
+            prGuardAccumulator.set(prKey, surgeEntry);
+          }
+
           // Priority review fast-lane (issue #871) — idle pickup path: same as
           // the primary dispatch path, route blocking PRs into the priority queue.
           const routeOutcome = routeBlockingPRToQueue(store, {
@@ -1619,6 +1790,64 @@ export async function dispatchIdleAgentBacklog(
       result.dispatched++;
       result.dispatchedAgents!.push(agentName);
       dispatched = true;
+    }
+  }
+
+  if (prGuardAccumulator.size > 0) {
+    const surgeNow = Date.now();
+    const surgeThreshold = (config as unknown as { triggers?: { pr_guard_surge_threshold?: number } })
+      .triggers?.pr_guard_surge_threshold ?? PR_GUARD_SURGE_THRESHOLD;
+
+    for (const [prKey, surgeEntry] of prGuardAccumulator) {
+      const {
+        prUrl,
+        prNumber,
+        repo,
+        firstFireIssueNumbers,
+        totalBlockedCount,
+        multiIssueSuppressionActive,
+      } = surgeEntry;
+      const lastSurgeAlertAt = prGuardSurgeAlertSentAt.get(prKey) ?? 0;
+      const surgeCooldownActive = (surgeNow - lastSurgeAlertAt) < GUARD_FLOOD_GATE_WINDOW_MS;
+
+      if (multiIssueSuppressionActive) {
+        log.info("Idle pickup: PR guard multi-issue suppression active: skipping legacy surge alert", {
+          prKey,
+          prNumber,
+          repo,
+          totalBlockedCount,
+          blockedIssues: firstFireIssueNumbers,
+        });
+        continue;
+      }
+
+      if (totalBlockedCount >= surgeThreshold) {
+        if (surgeCooldownActive) {
+          log.info("Idle pickup: PR guard surge cooldown active: suppressing consolidated alert", {
+            prKey,
+            totalBlockedCount,
+            msSinceLastAlert: surgeNow - lastSurgeAlertAt,
+          });
+        } else {
+          const displayNums = firstFireIssueNumbers.slice(0, 5).map((n) => `#${n}`);
+          const remaining = totalBlockedCount - displayNums.length;
+          const issueList = displayNums.join(", ") + (remaining > 0 ? ` +${remaining} more` : "");
+          sendTelegramAlert(
+            `🚦 *PR guard surge* — ${totalBlockedCount} issues blocked by ` +
+            `[PR #${prNumber}](${prUrl}) waiting to merge. ` +
+            `Issues: ${issueList}`,
+          );
+          prGuardSurgeAlertSentAt.set(prKey, surgeNow);
+          log.info("Idle pickup: PR guard surge alert sent", { prKey, prNumber, repo, totalBlockedCount, issueList });
+        }
+      } else {
+        for (const issueNumber of firstFireIssueNumbers) {
+          sendTelegramAlert(
+            `🚦 *Dispatch guard fired* for \`${repo}#${issueNumber}\`\n` +
+            `PR [#${prNumber}](${prUrl}) is already in review — dispatch suppressed for 60 min.`,
+          );
+        }
+      }
     }
   }
 

@@ -119,6 +119,76 @@ describe("MetricsServer", () => {
     });
   });
 
+  describe("GET /api/pr-guard-surge-suppressions", () => {
+    it("returns active multi-issue suppressions", async () => {
+      store.setPRGuardMultiIssueSuppression({
+        repo: "owner/repo",
+        blockingPrNumber: 77,
+        blockedIssueNumbers: [10, 11],
+        eventCount: 2,
+        suppressedUntil: new Date(Date.now() + 2 * 60 * 60 * 1000),
+      });
+
+      const { status, body } = await fetchJson(`http://127.0.0.1:${port}/api/pr-guard-surge-suppressions`) as {
+        status: number;
+        body: {
+          repo_filter: string | null;
+          total: number;
+          suppressions: Array<{
+            repo: string;
+            blocking_pr_number: number;
+            blocked_issues: number[];
+            event_count: number;
+          }>;
+          generated_at: string;
+        };
+      };
+
+      expect(status).toBe(200);
+      expect(body.total).toBe(1);
+      expect(body.repo_filter).toBeNull();
+      expect(body.suppressions[0]).toMatchObject({
+        repo: "owner/repo",
+        blocking_pr_number: 77,
+        blocked_issues: [10, 11],
+        event_count: 2,
+      });
+    });
+  });
+
+  describe("GET /guard-health", () => {
+    it("includes active PR surge suppression counts", async () => {
+      store.setPRGuardMultiIssueSuppression({
+        repo: "owner/repo",
+        blockingPrNumber: 77,
+        blockedIssueNumbers: [10, 11],
+        eventCount: 2,
+        suppressedUntil: new Date(Date.now() + 2 * 60 * 60 * 1000),
+      });
+
+      const { body } = await fetchJson(`http://127.0.0.1:${port}/guard-health?hours=24`) as {
+        body: {
+          metrics: {
+            active_pr_surge_suppressions: number;
+            pr_surge_suppressions: Array<{
+              repo: string;
+              blocking_pr_number: number;
+              blocked_issues: number[];
+            }>;
+          };
+        };
+      };
+
+      expect(body.metrics.active_pr_surge_suppressions).toBe(1);
+      expect(body.metrics.pr_surge_suppressions).toHaveLength(1);
+      expect(body.metrics.pr_surge_suppressions[0]).toMatchObject({
+        repo: "owner/repo",
+        blocking_pr_number: 77,
+        blocked_issues: [10, 11],
+      });
+    });
+  });
+
   describe("GET /monologue", () => {
     it("returns paginated prose monologue entries", async () => {
       const first = store.createTask({ title: "Monologue task 1", source: "manual", agent_name: "agent-a" });
