@@ -18,6 +18,13 @@ import type { DigestSchedulerState } from "../service/slack-digest.js";
 import { isScheduledTimeReached, todayLocalDateString } from "../service/slack-digest.js";
 import { daemonStaleness } from "../utils/daemon-staleness.js";
 import type { MonologueEntry } from "../state/store.js";
+import {
+  buildSubmissionsList,
+  buildSubmissionShow,
+  parseSubmissionId,
+  tryHandleSubmissionApprove,
+  tryHandleSubmissionReject,
+} from "./telegram-submission-commands.js";
 
 const log = createLogger("telegram");
 
@@ -827,6 +834,49 @@ Steps:
     );
   }
 
+  // ── Submission queue (issue #1608, layer 3 of #1512) ────────────────────
+  // Telegram-side surface for the pending_submissions table. Mirrors
+  // `orch submission ...` so the operator can approve/reject from their
+  // phone without SSH'ing into the host.
+  //
+  // Per CLAUDE.md operator-comms discipline, external-platform submissions
+  // are an explicit Telegram-signal class (irreversible commitments needing
+  // operator sign-off). The pinger in submission-pinger.ts pages the
+  // operator once when a row lands; these handlers let them respond.
+
+  if (cmd === "submissions" || cmd === "/submissions") {
+    return buildSubmissionsList(ctx.store);
+  }
+
+  if (cmd.startsWith("submission-show ") || cmd.startsWith("/submission-show ")) {
+    const arg = text.trim().split(/\s+/)[1];
+    const id = parseSubmissionId(arg);
+    if (id == null) {
+      return "Usage: /submission-show <id>\nExample: /submission-show 7";
+    }
+    return buildSubmissionShow(ctx.store, id);
+  }
+
+  if (cmd.startsWith("submission-approve ") || cmd.startsWith("/submission-approve ")) {
+    const arg = text.trim().split(/\s+/)[1];
+    if (parseSubmissionId(arg) == null) {
+      return "Usage: /submission-approve <id>\nExample: /submission-approve 7";
+    }
+    const r = tryHandleSubmissionApprove(ctx.store, arg);
+    return r.reply;
+  }
+
+  if (cmd.startsWith("submission-reject ") || cmd.startsWith("/submission-reject ")) {
+    const parts = text.trim().split(/\s+/);
+    const arg = parts[1];
+    const reason = parts.slice(2).join(" ");
+    if (parseSubmissionId(arg) == null) {
+      return "Usage: /submission-reject <id> <reason>\nExample: /submission-reject 7 \"severity inflated\"";
+    }
+    const r = tryHandleSubmissionReject(ctx.store, arg, reason);
+    return r.reply;
+  }
+
   // /approve <taskId> [reason] — operator force-approves a borderline-rejected task
   if (cmd.startsWith("approve ") || cmd.startsWith("/approve ")) {
     const parts = text.trim().split(/\s+/);
@@ -834,6 +884,12 @@ Steps:
     const reason = parts.slice(2).join(" ");
 
     if (!shortId) return "Usage: /approve <task-id> [reason]\nExample: /approve 01KPFBW5\nExample: /approve 01KPFBW5 \"Prototype only, not production\"";
+
+    // Disambiguation: integer-only arg = pending_submission id, ULID arg =
+    // borderline-task id. ULIDs always contain alpha chars (Crockford base32),
+    // so /^\d+$/ unambiguously means the operator wants the submission queue.
+    const submissionMatch = tryHandleSubmissionApprove(ctx.store, shortId);
+    if (submissionMatch.matched) return submissionMatch.reply;
 
     const entry = ctx.store.getApprovalQueueEntryByShortId(shortId);
     if (!entry) {
@@ -896,8 +952,16 @@ Steps:
 
   // /reject <taskId> — operator confirms rejection of a borderline task
   if (cmd.startsWith("reject ") || cmd.startsWith("/reject ")) {
-    const shortId = text.trim().split(/\s+/)[1];
+    const parts = text.trim().split(/\s+/);
+    const shortId = parts[1];
     if (!shortId) return "Usage: /reject <task-id>\nExample: /reject 01KPFBW5";
+
+    // Disambiguation: integer-only arg → submission queue. /reject of a
+    // submission requires a reason (audit trail). Falls through to the
+    // existing task path for ULID short-ids.
+    const submissionReason = parts.slice(2).join(" ");
+    const submissionMatch = tryHandleSubmissionReject(ctx.store, shortId, submissionReason);
+    if (submissionMatch.matched) return submissionMatch.reply;
 
     const entry = ctx.store.getApprovalQueueEntryByShortId(shortId);
     if (!entry) {
@@ -941,8 +1005,12 @@ health — ping containers
 issues — open issues
 prs — open PRs
 queue — pending operator approvals
-/approve <id> — force-approve borderline task
-/reject <id> — confirm task rejection
+/approve <id> — force-approve borderline task (or submission, if numeric id)
+/reject <id> — confirm task rejection (or submission, if numeric id)
+/submissions — pending crypto-submission approvals (#1608)
+/submission-show <id> — full submission body
+/submission-approve <id> — approve a submission for shipping
+/submission-reject <id> <reason> — reject a submission
 antibodies — failure immunity panel
 config — config reload history & status
 chat <agent> <msg> — talk to agent (persistent)

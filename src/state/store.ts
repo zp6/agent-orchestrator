@@ -14329,6 +14329,20 @@ export class StateStore {
       CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status);
       CREATE INDEX IF NOT EXISTS idx_submissions_platform ON submissions(platform);
     `);
+
+    // #1608: persistent dedupe column for the Telegram auto-ping. Set to the
+    // ISO timestamp the operator was first paged about a row. Persistent so
+    // dedupe survives daemon restarts (in-memory tracking would re-page after
+    // every reboot).
+    const pendingCols = this.db
+      .prepare("PRAGMA table_info(pending_submissions)")
+      .all() as Array<{ name: string }>;
+    const pendingColNames = new Set(pendingCols.map((c) => c.name));
+    if (!pendingColNames.has("operator_pinged_at")) {
+      this.db.exec(
+        "ALTER TABLE pending_submissions ADD COLUMN operator_pinged_at TEXT",
+      );
+    }
   }
 
   /**
@@ -14426,6 +14440,46 @@ export class StateStore {
          WHERE id = ? AND status = 'awaiting-approval'`,
       )
       .run(reason, now, now, id);
+    return result.changes > 0;
+  }
+
+  /**
+   * Pending submissions that should still trigger an operator Telegram ping
+   * (issue #1608).
+   *
+   * The auto-ping only fires when:
+   *   - status = 'awaiting-approval' (still actionable)
+   *   - expected_payout_usd IS NOT NULL (real money on the table; no-payout
+   *     drafts are inspectable via /submissions but don't deserve a push)
+   *   - operator_pinged_at IS NULL (haven't pinged yet — persistent dedupe)
+   */
+  listSubmissionsAwaitingPing(limit: number = 50): PendingSubmission[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM pending_submissions
+         WHERE status = 'awaiting-approval'
+           AND expected_payout_usd IS NOT NULL
+           AND operator_pinged_at IS NULL
+         ORDER BY created_at ASC
+         LIMIT ?`,
+      )
+      .all(limit) as PendingSubmissionRow[];
+    return rows.map(hydratePendingSubmission);
+  }
+
+  /**
+   * Stamp the operator_pinged_at column so the auto-pinger does not re-page
+   * the operator about this submission. Returns true on the first call,
+   * false thereafter (idempotent dedupe).
+   */
+  markPendingSubmissionPinged(id: number, at: string = new Date().toISOString()): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE pending_submissions
+         SET operator_pinged_at = ?
+         WHERE id = ? AND operator_pinged_at IS NULL`,
+      )
+      .run(at, id);
     return result.changes > 0;
   }
 
@@ -14827,6 +14881,7 @@ interface PendingSubmissionRow {
   created_at: string;
   updated_at: string;
   decided_at: string | null;
+  operator_pinged_at: string | null;
 }
 
 export interface PendingSubmission {
@@ -14843,6 +14898,8 @@ export interface PendingSubmission {
   created_at: string;
   updated_at: string;
   decided_at: string | null;
+  /** ISO timestamp the operator was first paged about this row (issue #1608). */
+  operator_pinged_at: string | null;
 }
 
 function hydratePendingSubmission(row: PendingSubmissionRow): PendingSubmission {
@@ -14861,6 +14918,7 @@ function hydratePendingSubmission(row: PendingSubmissionRow): PendingSubmission 
     ...row,
     meta,
     status: row.status as PendingSubmissionStatus,
+    operator_pinged_at: row.operator_pinged_at ?? null,
   };
 }
 

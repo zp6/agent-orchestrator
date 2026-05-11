@@ -40,6 +40,7 @@ import {
 } from "../triggers/merge-stall-guard.js";
 import { DuplicateIdDetector, checkDbForDuplicateIds } from "../state/duplicate-id-detector.js";
 import { startTelegramPolling, stopTelegramPolling, pollTelegram, maybePostDailyGuardDigest, maybePostDailyAnomaliesDigest } from "./telegram.js";
+import { pingPendingSubmissions } from "./submission-pinger.js";
 import { OperatorControlProcessor } from "./operator-controls.js";
 import { maybePostDailyDigest, type DigestSchedulerState } from "./slack-digest.js";
 import { maybeRunDailySecurityScan, type SecurityScanState } from "../orchestrator/security-scanner.js";
@@ -871,6 +872,15 @@ export class Daemon {
         this.checkResultMissingTasks(time),
         this.processRetries(time),
         this.pauseDisciplineDriftTasks(time),
+        // #1608: page operator once per fresh awaiting-approval submission
+        // (signal class: irreversible commitments). Internally dedupes via
+        // pending_submissions.operator_pinged_at; cheap when the queue is
+        // empty (a single index-backed SELECT).
+        pingPendingSubmissions(this.store).catch((err) => {
+          this.log.warn("submission-pinger failed", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }),
       ];
       if (this.cycleCount % PROXY_HEALTH_CHECK_EVERY_N_CYCLES === 0) {
         batch1.push(this.checkProxyHealth(time));
