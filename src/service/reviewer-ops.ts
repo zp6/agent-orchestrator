@@ -1125,7 +1125,6 @@ function defaultHealth(agentName: string): AgentHealth {
     is_healthy: true,
     auth_status: "ok",
     auth_degraded_at: null,
-    cli_missing_at: null,
     suspended_until: null,
     suspension_reason: null,
   };

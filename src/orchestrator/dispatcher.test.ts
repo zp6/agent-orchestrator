@@ -9,7 +9,6 @@ import {
   MAX_CONNECTION_RETRIES,
   CONNECTION_ERROR_RETRY_DELAYS_MS,
   isConnectionError,
-  isCliInstallError,
   selectHealthiestPoolInstance,
   extractRepoFromSourceRef,
   buildTargetRepoHeader,
@@ -340,40 +339,6 @@ describe("isConnectionError", () => {
   it("returns true for a genuine 500 without rate-limit indicators", () => {
     const err = Object.assign(new Error("Internal Server Error"), { status: 500 });
     expect(isConnectionError(err)).toBe(true);
-  });
-});
-
-// ────────────────────────────────────────────────────────────────────────────
-// isCliInstallError (issue #1520) — classifies CLI-specific container failures
-// ────────────────────────────────────────────────────────────────────────────
-
-describe("isCliInstallError", () => {
-  it("detects spawn claude ENOENT", () => {
-    expect(isCliInstallError("spawn claude ENOENT")).toBe(true);
-    expect(isCliInstallError("Failed: spawn ENOENT")).toBe(true);
-  });
-
-  it("detects .claude.json configuration error", () => {
-    expect(isCliInstallError("Configuration error in /home/claude/.claude.json: unexpected end of JSON input")).toBe(true);
-    expect(isCliInstallError("Configuration error in .claude.json: failed to parse")).toBe(true);
-  });
-
-  it("detects 'Failed to spawn claude CLI' variants", () => {
-    expect(isCliInstallError("Failed to spawn claude CLI")).toBe(true);
-    expect(isCliInstallError("503 Failed to spawn claude CLI")).toBe(true);
-    expect(isCliInstallError("Escalated after 3 retry attempts: 503 Failed to spawn claude CLI")).toBe(true);
-  });
-
-  it("detects persistent session timeout", () => {
-    expect(isCliInstallError("Timeout waiting for persistent session to become ready")).toBe(true);
-    expect(isCliInstallError("timeout waiting for persistent session to become ready (30s elapsed)")).toBe(true);
-  });
-
-  it("returns false for generic connection errors", () => {
-    expect(isCliInstallError("ECONNREFUSED")).toBe(false);
-    expect(isCliInstallError("connection refused")).toBe(false);
-    expect(isCliInstallError("socket hang up")).toBe(false);
-    expect(isCliInstallError("task logic error")).toBe(false);
   });
 });
 
