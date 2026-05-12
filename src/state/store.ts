@@ -115,7 +115,7 @@ export class DuplicateTaskIdError extends Error {
   }
 }
 
-export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed" | "escalated" | "result_missing" | "superseded" | "paused";
+export type TaskStatus = "pending" | "planning" | "dispatched" | "in_progress" | "done" | "failed" | "escalated" | "result_missing" | "superseded" | "paused" | "cancelled";
 
 // ── Operator Controls types ───────────────────────────────────────────────────
 
@@ -2482,6 +2482,43 @@ export class StateStore {
            AND (? IS NULL OR rowid > ?)`,
       )
       .get(source, sourceRef, clearedRowid, clearedRowid) as { cnt: number } | undefined;
+    return row?.cnt ?? 0;
+  }
+
+  /**
+   * Return tasks stuck in `pending` or `paused` status for more than
+   * `thresholdDays` days.  Health-check probe tasks are excluded.
+   * Used by the stale-task sweeper (issue #1646).
+   */
+  getStalePendingTasks(thresholdDays = 7, statuses: string[] = ["pending", "paused"]): Task[] {
+    const placeholders = statuses.map(() => "?").join(", ");
+    return this.db
+      .prepare(`
+        SELECT * FROM tasks
+        WHERE status IN (${placeholders})
+          AND updated_at < datetime('now', '-${thresholdDays} days')
+          AND title NOT LIKE '[deployment-probe]%'
+          AND title NOT LIKE '[health-check%'
+        ORDER BY updated_at ASC
+      `)
+      .all(...statuses) as Task[];
+  }
+
+  /**
+   * Return the count of tasks currently stuck in `pending` or `paused`
+   * status for more than `thresholdDays` days.  Used for compliance signals.
+   */
+  getStaleTaskCount(thresholdDays = 7, statuses: string[] = ["pending", "paused"]): number {
+    const placeholders = statuses.map(() => "?").join(", ");
+    const row = this.db
+      .prepare(`
+        SELECT COUNT(*) AS cnt FROM tasks
+        WHERE status IN (${placeholders})
+          AND updated_at < datetime('now', '-${thresholdDays} days')
+          AND title NOT LIKE '[deployment-probe]%'
+          AND title NOT LIKE '[health-check%'
+      `)
+      .get(...statuses) as { cnt: number };
     return row?.cnt ?? 0;
   }
 

@@ -608,6 +608,13 @@ export interface TriggersConfig {
    * runaway merge loop.
    */
   auto_merge_daily_cap?: number;
+
+  /**
+   * Number of days a task may remain in `pending` or `paused` status
+   * without dispatch before the stale-task sweeper transitions it to
+   * `superseded` or `cancelled`.  Defaults to 7.
+   */
+  stale_task_threshold_days?: number;
 }
 
 export interface NotificationsConfig {

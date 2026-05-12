@@ -354,6 +354,13 @@ Common `orch` commands:
 - `orch standup-quality` - standup quality history management
 - `orch digest` - fleet activity summary
 
+**Task maintenance**
+- `orch tasks sweep-stale` - list or clear tasks stuck in pending/paused status (dry-run by default; use `--execute` to apply)
+
+### Stale-task sweeper (issue #1646)
+
+`STALE_TASK_SWEEP_EVERY_N_CYCLES = 288` (~24h) — periodic daemon trigger that sweeps tasks stuck in `pending` or `paused` status for more than `triggers.stale_task_threshold_days` (default: 7) days. Marks timed-out tasks as `superseded` (when source issue is closed or task is >30d stale) or `cancelled` (open issue, 7–30d stale). Writes an audit entry to `task_logs` for each transition. Also exposed as `orch tasks sweep-stale` CLI command (dry-run by default; use `--execute` to apply).
+
 ## Treasury Operations
 
 The fleet-signer provides a whitelist-gated signing service for on-chain treasury operations.

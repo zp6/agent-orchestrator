@@ -67,6 +67,7 @@ import { registerDMOutreachCommand } from "./commands/dm-outreach.js";
 import { registerConnectionErrorsCommand } from "./commands/connection-errors.js";
 import { registerGoalsSnapshotCommand } from "./commands/goals-snapshot.js";
 import { registerDnsCommand } from "./commands/dns.js";
+import { registerTasksCommand } from "./commands/tasks.js";
 
 const program = new Command();
 
@@ -143,6 +144,7 @@ registerDMOutreachCommand(program);
 registerConnectionErrorsCommand(program);
 registerGoalsSnapshotCommand(program);
 registerDnsCommand(program);
+registerTasksCommand(program);
 
 program.parse();
 // docs PR ci-trigger

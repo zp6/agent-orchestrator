@@ -82,6 +82,7 @@ import { Planner } from "../orchestrator/planner.js";
 import { pollVerificationOutcomes } from "../orchestrator/verification-outcome-poller.js";
 import { startMetricsServer, DEFAULT_METRICS_PORT } from "./metrics-server.js";
 import { reapStaleComposeProcesses } from "../utils/compose-reaper.js";
+import { sweepStalePendingTasks } from "../triggers/stale-task-sweeper.js";
 import type { Server } from "node:http";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
@@ -113,6 +114,7 @@ const PROXY_HEALTH_CHECK_EVERY_N_CYCLES = 3;   // ~15min — check proxy server 
 const CLOSED_ISSUE_FAILURE_CLEANUP_EVERY_N_CYCLES = 60; // ~5h — clear stale failures for closed issues
 const PROACTIVE_REBASE_EVERY_N_CYCLES = 3; // ~15min — proactively rebase stale branches
 const SEMANTIC_MEMORY_AUDIT_EVERY_N_CYCLES = 288; // ~24h — check semantic memory effectiveness (issue #1016)
+const STALE_TASK_SWEEP_EVERY_N_CYCLES = 288; // ~24h at 5min interval — sweep stale pending/paused tasks (issue #1646)
 
 /**
  * Get the current git HEAD commit hash (short form) for audit logging.
@@ -1240,6 +1242,11 @@ export class Daemon {
           .then((resolved) => { if (resolved > 0) this.log.info("Verification outcomes resolved", { resolved }); })
           .catch((err) => { this.log.warn("Verification outcome poller failed", { error: err instanceof Error ? err.message : String(err) }); }),
       );
+
+      // Stale-task sweep (issue #1646): once per day (~288 cycles at 5min interval).
+      if (this.cycleCount % STALE_TASK_SWEEP_EVERY_N_CYCLES === 0) {
+        batch4.push(this.sweepStaleTasks(time));
+      }
 
       if (batch4.length > 0) await this.runBatch("periodic", batch4);
 
@@ -4228,6 +4235,42 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
       }
     } catch (err) {
       this.log.warn("sweepStaleCleanPRs failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Periodic sweep of stale pending/paused tasks (issue #1646).
+   * Cancels or supersedes tasks that have been stuck in pending/paused status
+   * for more than `triggers.stale_task_threshold_days` (default: 7) days without dispatch.
+   *
+   * Marks timed-out tasks as `superseded` (when source issue is closed or task is >30d stale)
+   * or `cancelled` (open issue, 7–30d stale). Writes an audit entry to `task_logs`.
+   *
+   * Runs once per day (~288 cycles at 5-min interval).
+   */
+  private async sweepStaleTasks(time: string): Promise<void> {
+    const thresholdDays = this.config.triggers?.stale_task_threshold_days ?? 7;
+    try {
+      const result = await sweepStalePendingTasks({
+        store: this.store,
+        thresholdDays,
+        dryRun: false,
+      });
+      const total = result.superseded + result.cancelled;
+      if (total > 0) {
+        console.log(
+          `[${time}] Stale-task sweep: ${result.superseded} superseded, ${result.cancelled} cancelled (threshold: ${thresholdDays}d)`,
+        );
+        this.log.info("Stale-task sweep completed", {
+          superseded: result.superseded,
+          cancelled: result.cancelled,
+          threshold_days: thresholdDays,
+        });
+      }
+    } catch (err) {
+      this.log.warn("sweepStaleTasks failed", {
         error: err instanceof Error ? err.message : String(err),
       });
     }
