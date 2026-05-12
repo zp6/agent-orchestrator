@@ -10,6 +10,7 @@ import { queryPRGuardCooldown, DEFAULT_REVIEWER_URL } from "../client/pr-guard-c
 import { checkMergeStall } from "./merge-stall-guard.js";
 import { validateLinearCredential } from "../client/linear-credential-validator.js";
 import { sanitizeBountyContent, isExternalRepoAllowed } from "../orchestrator/bounty-sanitizer.js";
+export { dispatchRevenueWatcher } from "./revenue-watcher.js";
 
 /**
  * Module-level dedupe flag: once we've logged a warning that the Linear

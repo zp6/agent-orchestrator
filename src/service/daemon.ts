@@ -19,6 +19,7 @@ import {
   dispatchIdleAgentBacklog,
   dispatchLinearChecks,
   dispatchRevenueExecutor,
+  dispatchRevenueWatcher,
   dispatchSlackChecks,
   type TriggerResult,
 } from "../triggers/trigger-dispatcher.js";
@@ -2191,6 +2192,7 @@ export class Daemon {
         dispatchLinearChecks(this.config, this.store, this.dispatcher, registeredAgents),
         dispatchSlackChecks(this.config, this.store, this.dispatcher, registeredAgents),
         dispatchRevenueExecutor(this.config, this.store, this.dispatcher, registeredAgents),
+        dispatchRevenueWatcher(this.store),
       ]);
 
       const totals: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };

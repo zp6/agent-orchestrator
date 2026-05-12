@@ -14595,6 +14595,38 @@ export class StateStore {
     `);
   }
 
+  // ── Revenue Watcher ────────────────────────────────────────────────────────
+
+  /**
+   * Ensures the `revenue_log` and `revenue_watcher_state` tables exist.
+   * Called lazily by every revenue-watcher method.
+   */
+  private runRevenueWatcherMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS revenue_log (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        source       TEXT NOT NULL,
+        amount_usd   REAL NOT NULL,
+        currency     TEXT NOT NULL DEFAULT 'USDC',
+        tx_hash      TEXT UNIQUE,
+        block_number INTEGER,
+        chain        TEXT,
+        received_at  TEXT NOT NULL,
+        path         TEXT,
+        recorded_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_revenue_log_received
+        ON revenue_log(received_at);
+      CREATE INDEX IF NOT EXISTS idx_revenue_log_tx_hash
+        ON revenue_log(tx_hash);
+
+      CREATE TABLE IF NOT EXISTS revenue_watcher_state (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
+  }
+
   /**
    * Record a (repo, file_path, pattern_name) triple as a confirmed false
    * positive.  Idempotent — if the triple already exists the original row is
@@ -14647,6 +14679,51 @@ export class StateStore {
   }
 
   /**
+   * Insert a new on-chain revenue entry. Silently ignores duplicate `tx_hash`
+   * values (INSERT OR IGNORE — `tx_hash` has a UNIQUE constraint).
+   */
+  insertRevenueLog(entry: {
+    source: string;
+    amount_usd: number;
+    currency: string;
+    tx_hash: string;
+    block_number: number;
+    chain: string;
+    received_at: string;
+    path: string;
+  }): void {
+    this.runRevenueWatcherMigration();
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO revenue_log
+           (source, amount_usd, currency, tx_hash, block_number, chain, received_at, path)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        entry.source,
+        entry.amount_usd,
+        entry.currency,
+        entry.tx_hash,
+        entry.block_number,
+        entry.chain,
+        entry.received_at,
+        entry.path,
+      );
+  }
+
+  /**
+   * Returns true when a `revenue_log` row with the given `tx_hash` already
+   * exists (duplicate-detection for the on-chain watcher).
+   */
+  isRevenueLogEntryPresent(txHash: string): boolean {
+    this.runRevenueWatcherMigration();
+    const row = this.db
+      .prepare(`SELECT 1 FROM revenue_log WHERE tx_hash = ? LIMIT 1`)
+      .get(txHash);
+    return row !== undefined;
+  }
+
+  /**
    * List all exemption records, optionally filtered to a specific repo.
    * When repo is provided, also includes wildcard `repo='*'` rows.
    */
@@ -14689,6 +14766,34 @@ export class StateStore {
       .prepare(`DELETE FROM security_fp_exemptions WHERE id = ?`)
       .run(id);
     return result.changes > 0;
+  }
+
+  /**
+   * Returns the last block number successfully processed by the revenue
+   * watcher, or `null` on first run (no bookmark yet).
+   */
+  getRevenueWatcherLastBlock(): bigint | null {
+    this.runRevenueWatcherMigration();
+    const row = this.db
+      .prepare(`SELECT value FROM revenue_watcher_state WHERE key = 'last_block'`)
+      .get() as { value: string } | undefined;
+    if (!row) return null;
+    return BigInt(row.value);
+  }
+
+  /**
+   * Persist the last successfully processed block number for the revenue
+   * watcher so the next cycle resumes from here.
+   */
+  setRevenueWatcherLastBlock(block: bigint): void {
+    this.runRevenueWatcherMigration();
+    this.db
+      .prepare(
+        `INSERT INTO revenue_watcher_state (key, value)
+         VALUES ('last_block', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(block.toString());
   }
 }
 
