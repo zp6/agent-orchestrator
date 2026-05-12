@@ -35,6 +35,7 @@ function makePR(overrides: Record<string, unknown> = {}) {
     reviewDecision: "APPROVED",
     statusCheckRollup: [{ conclusion: "SUCCESS", state: "COMPLETED" }],
     author: { login: "rapartlu" },
+    commits: [{ committedDate: hoursAgo(6) }],
     ...overrides,
   };
 }
@@ -69,9 +70,9 @@ describe("checkMergeStall", () => {
     expect(result.reason).toContain("stale MERGEABLE PR");
   });
 
-  it("returns not blocked when PR was recently updated", async () => {
+  it("returns not blocked when PR has a recent commit", async () => {
     const mockExec = vi.fn().mockResolvedValue(
-      JSON.stringify([makePR({ updatedAt: hoursAgo(1) })]),
+      JSON.stringify([makePR({ commits: [{ committedDate: hoursAgo(1) }] })]),
     );
     const result = await checkMergeStall("owner/repo", "test-agent", mockExec);
 
@@ -134,9 +135,9 @@ describe("checkMergeStall", () => {
   it("respects custom threshold", async () => {
     setMergeStallThresholdHours(12);
 
-    // PR updated 6h ago — within 12h threshold, should not block
+    // PR last committed 6h ago — within 12h threshold, should not block
     const mockExec = vi.fn().mockResolvedValue(
-      JSON.stringify([makePR({ updatedAt: hoursAgo(6) })]),
+      JSON.stringify([makePR({ commits: [{ committedDate: hoursAgo(6) }] })]),
     );
     const result = await checkMergeStall("owner/repo", "test-agent", mockExec);
 
@@ -147,9 +148,9 @@ describe("checkMergeStall", () => {
   it("detects multiple stale PRs", async () => {
     const mockExec = vi.fn().mockResolvedValue(
       JSON.stringify([
-        makePR({ number: 100, updatedAt: hoursAgo(10) }),
-        makePR({ number: 101, updatedAt: hoursAgo(20) }),
-        makePR({ number: 102, updatedAt: hoursAgo(1) }), // fresh — not stale
+        makePR({ number: 100, commits: [{ committedDate: hoursAgo(10) }] }),
+        makePR({ number: 101, commits: [{ committedDate: hoursAgo(20) }] }),
+        makePR({ number: 102, commits: [{ committedDate: hoursAgo(1) }] }), // fresh — not stale
       ]),
     );
     const result = await checkMergeStall("owner/repo", "test-agent", mockExec);
@@ -158,6 +159,36 @@ describe("checkMergeStall", () => {
     expect(result.stalePRs).toHaveLength(2);
     expect(result.stalePRs.map((pr) => pr.number)).toContain(100);
     expect(result.stalePRs.map((pr) => pr.number)).toContain(101);
+  });
+
+  it("skips PRs with no commits (defensive)", async () => {
+    const mockExec = vi.fn().mockResolvedValue(
+      JSON.stringify([makePR({ commits: [] })]),
+    );
+    const result = await checkMergeStall("owner/repo", "test-agent", mockExec);
+
+    expect(result.blocked).toBe(false);
+    expect(result.stalePRs).toHaveLength(0);
+  });
+
+  it("regression: detects stale PR despite recent metadata churn (updatedAt != lastCommitDate)", async () => {
+    // PR was created over 24h ago, last committed 8h ago (stale by 4h threshold),
+    // but updatedAt is only 30min ago due to CI re-run / daemon label change.
+    // The old updatedAt-based check would have incorrectly skipped this PR.
+    const mockExec = vi.fn().mockResolvedValue(
+      JSON.stringify([
+        makePR({
+          updatedAt: hoursAgo(0.5), // very recent metadata update — would have hidden staleness
+          commits: [{ committedDate: hoursAgo(8) }], // actual code activity is 8h old
+        }),
+      ]),
+    );
+    const result = await checkMergeStall("owner/repo", "test-agent", mockExec);
+
+    expect(result.blocked).toBe(true);
+    expect(result.stalePRs).toHaveLength(1);
+    expect(result.stalePRs[0].lastCommitDate).toBeDefined();
+    expect(result.stalePRs[0].staleHours).toBeGreaterThanOrEqual(7.9);
   });
 });
 
@@ -169,10 +200,10 @@ describe("scanFleetMergeStalls", () => {
   it("aggregates stale PRs across repos sorted by stale hours descending", async () => {
     const mockExec = vi.fn().mockImplementation(async (cmd: string) => {
       if (cmd.includes("repo-a")) {
-        return JSON.stringify([makePR({ number: 1, updatedAt: hoursAgo(5) })]);
+        return JSON.stringify([makePR({ number: 1, commits: [{ committedDate: hoursAgo(5) }] })]);
       }
       if (cmd.includes("repo-b")) {
-        return JSON.stringify([makePR({ number: 2, updatedAt: hoursAgo(48) })]);
+        return JSON.stringify([makePR({ number: 2, commits: [{ committedDate: hoursAgo(48) }] })]);
       }
       return "[]";
     });
@@ -202,6 +233,7 @@ function makeMergeablePR(overrides: Partial<MergeablePR> = {}): MergeablePR {
     headRefName: "issue-123-fix",
     authorLogin: "rapartlu",
     staleHours: 6,
+    lastCommitDate: hoursAgo(6),
     ...overrides,
   };
 }

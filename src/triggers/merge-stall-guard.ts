@@ -39,6 +39,8 @@ export interface MergeablePR {
   authorLogin: string;
   /** Hours since last update */
   staleHours: number;
+  /** ISO timestamp of the last commit on the PR branch */
+  lastCommitDate: string;
 }
 
 export interface MergeStallCheckResult {
@@ -73,7 +75,7 @@ export async function checkMergeStall(
 
   try {
     const raw = await execFn(
-      `gh pr list --repo ${repo} --state open --json number,title,url,updatedAt,headRefName,isDraft,reviewDecision,statusCheckRollup,author --limit 50`,
+      `gh pr list --repo ${repo} --state open --json number,title,url,updatedAt,headRefName,isDraft,reviewDecision,statusCheckRollup,author,commits --limit 50`,
       { encoding: "utf-8", timeout: 15000 },
     );
 
@@ -87,6 +89,7 @@ export async function checkMergeStall(
       reviewDecision: string;
       statusCheckRollup: Array<{ conclusion: string; state: string }> | null;
       author: { login: string } | null;
+      commits: Array<{ committedDate: string }> | null;
     }>;
 
     const stalePRs: MergeablePR[] = [];
@@ -101,9 +104,11 @@ export async function checkMergeStall(
         checks.length > 0 && checks.every((c) => c.conclusion === "SUCCESS");
       if (!ciPassing) continue;
 
-      // Check staleness
-      const updatedAt = new Date(pr.updatedAt).getTime();
-      const ageHours = (now - updatedAt) / (1000 * 60 * 60);
+      // Check staleness based on last commit date (not updatedAt, which reflects
+      // metadata churn like CI re-runs, label changes, daemon-side PR-guard touches)
+      const lastCommitDate = pr.commits?.[pr.commits.length - 1]?.committedDate;
+      if (!lastCommitDate) continue;
+      const ageHours = (now - new Date(lastCommitDate).getTime()) / (1000 * 60 * 60);
       if (ageHours < thresholdHours) continue;
 
       stalePRs.push({
@@ -115,6 +120,7 @@ export async function checkMergeStall(
         headRefName: pr.headRefName,
         authorLogin: pr.author?.login ?? "",
         staleHours: Math.round(ageHours * 10) / 10,
+        lastCommitDate,
       });
     }
 
