@@ -197,6 +197,66 @@ Implemented as a `.husky/pre-push` hook in every fleet repo (see #1408). The hoo
 
 This replaces what the remote CI gate used to enforce. The fleet promises broken code doesn't reach `origin/main`; the hook makes that promise mechanical.
 
+## Deploy Mechanics — how merged code reaches the running daemon
+
+Merges to `main` do not automatically reach the running daemon. The daemon's selfUpdate cycle fires every `SELF_UPDATE_EVERY_N_CYCLES` cycles (~10 min at the default 60s poll), pulls `origin/main` into the daemon's working dir, rebuilds, and re-execs itself. When selfUpdate fails silently (stalled trigger, duplicate daemon processes, malformed `.orchestrator-deploy-sha`), the running fleet runs stale code while new commits accumulate on main. Every PR — including P0 fixes — is invisible to production until selfUpdate runs successfully.
+
+This has recurred several times. Operators and the monitor /loop session need a known recovery path.
+
+### Verify the daemon matches main
+
+```bash
+cat ~/Documents/Git/claude-agent-orchestrator/.orchestrator-deploy-sha
+git -C ~/Documents/Git/claude-agent-orchestrator rev-parse origin/main
+```
+
+Both should equal the same commit SHA. If they don't, selfUpdate has stalled.
+
+Common failure mode: `.orchestrator-deploy-sha` shows a **stash hash** rather than a commit reachable from `main`. That points to a bug in selfUpdate's "write deploy-sha after successful pull" logic. Tracked in #1594.
+
+### Verify there is exactly one daemon process
+
+```bash
+pgrep -fl daemon-entry.js
+```
+
+Should show a single PID. Two daemons running simultaneously is a known failure mode — the manager-app's auto-recovery spawns a replacement without killing the original. Both run in parallel against the same `state.db` and can race on triggers.
+
+### Force redeploy (when selfUpdate stalls)
+
+Owner: monitor /loop session (per `MEMORY.md` `manager_process_supervision`).
+
+```bash
+# 1. Kill all daemon processes
+pgrep -fl daemon-entry.js
+kill <pid> [<pid2> ...]
+
+# 2. Wait ~5 seconds for clean exit; manager-app auto-respawn kicks in
+
+# 3. Ensure repo is up to date and built
+cd ~/Documents/Git/claude-agent-orchestrator
+git pull --ff-only origin main
+npm run build
+
+# 4. Verify single respawn
+pgrep -fl daemon-entry.js  # should show exactly ONE pid
+
+# 5. If manager-app did not auto-spawn (rare), start manually
+# source ~/.claude-orchestrator/.env && node dist/service/daemon-entry.js --poll-interval 60000 &
+
+# 6. Verify deploy-sha matches origin/main within 60s of restart
+cat .orchestrator-deploy-sha
+git rev-parse origin/main
+```
+
+### When to suspect selfUpdate stall
+
+- A merged PR's behaviour change is not observable in production after 30 min.
+- `.orchestrator-deploy-sha` content has not changed in hours despite new commits on main.
+- Multiple daemon PIDs visible via `pgrep`.
+- Container kill cycles for previously-stable agents (often a sign that a reverted regression has not yet deployed).
+- Compliance dashboard reports failing rules whose underlying queries were recently fixed.
+
 ## Overview
 
 `claude-agent-orchestrator` is a TypeScript package plus CLI for the orchestrator fleet.
