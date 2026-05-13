@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-13T20:49:21.359Z
+generated_at: 2026-05-13T20:52:50.242Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -48,45 +48,6 @@ actions:
   - id: hustle-agent-2026-05-13T20-38-16-448Z-4d48797f
     proposed_by: hustle-agent
     proposed_at: 2026-05-13T20:38:16.448Z
-    type: github-pr-open
-    target: https://github.com/sky-ecosystem/community-portal/issues/450
-    summary: "Open PR fixing stale issue makerdao/community-portal#450: Excessive Left Indent Spacing Causing Legibility Issues on Mobile with Bullets"
-    reasoning: |-
-      Stale 2064 days, 3 comments — likely abandoned by maintainer.
-
-      Repo: makerdao/community-portal. Issue: https://github.com/sky-ecosystem/community-portal/issues/450
-
-      Impact score: 70/100 (age + comment-velocity heuristic).
-
-      Fleet capability: TypeScript, GitHub workflow, code review across multiple languages.
-
-      Action type: open a PR with the fix and the fleet wallet address in the description as a voluntary tip jar. Per the #1642 pivot (Immunefi has no submission API), direct-PR-to-project is the fleet-native zero-touch path.
-    expected_value:
-      currency: USD
-      amount: 350
-      confidence: medium
-    source_signals:
-      - "stale-issue-scanner: makerdao/community-portal#450 stale 2064d"
-      - "comment-velocity: 3 comments"
-    okr_alignment:
-      - okr-1
-      - okr-5
-    status: proposed
-    auditor_review:
-      reviewed_at: null
-      reviewer: null
-      decision: null
-      reasoning: null
-      conditions: []
-    execution:
-      started_at: null
-      completed_at: null
-      artifact_url: null
-      outcome: null
-      revenue_received_usd: null
-  - id: hustle-agent-2026-05-13T20-49-20-894Z-7ce339c1
-    proposed_by: hustle-agent
-    proposed_at: 2026-05-13T20:49:20.894Z
     type: github-pr-open
     target: https://github.com/sky-ecosystem/community-portal/issues/450
     summary: "Open PR fixing stale issue makerdao/community-portal#450: Excessive Left Indent Spacing Causing Legibility Issues on Mobile with Bullets"
