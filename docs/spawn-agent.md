@@ -67,7 +67,7 @@ These files always need changing:
 
 These files almost never change:
 
-- `.husky/pre-push` — runs `tsc --noEmit && npm test`. Keep it.
+- `.husky/pre-push` — runs `tsc --noEmit && npm test` (the `tsc` step is skipped when no `tsconfig.json` is present, so the hook is safe in JS-only repos). Keep it.
 - `.gitignore` — generic Node ignores. Keep it.
 - `tsconfig.json` — keep it; tweak only if the new agent has unusual module needs.
 

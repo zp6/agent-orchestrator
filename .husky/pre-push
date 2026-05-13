@@ -7,8 +7,12 @@ export GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-test@example.com}"
 export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-Test}"
 export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-test@example.com}"
 
-echo "[pre-push] tsc --noEmit"
-npx tsc --noEmit
+if [ -f tsconfig.json ]; then
+  echo "[pre-push] tsc --noEmit"
+  npx -p typescript tsc --noEmit
+else
+  echo "[pre-push] tsc --noEmit (skipped: no tsconfig.json)"
+fi
 
 echo "[pre-push] npm test"
 npm test --silent

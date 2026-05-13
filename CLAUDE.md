@@ -181,10 +181,12 @@ The remote CI `test` requirement was dropped on 2026-05-03 because Actions runne
 **Every push from every agent must succeed in:**
 
 ```
-npx tsc --noEmit && npm test
+npx -p typescript tsc --noEmit && npm test
 ```
 
 Implemented as a `.husky/pre-push` hook in every fleet repo (see #1408). The hook runs automatically on `git push`. If either step fails, the push is refused; the agent must fix or reduce scope before retrying.
+
+In JS-only fleet repos (no `tsconfig.json`), the hook skips the `tsc` step automatically — `npm test` still gates every push (see #1653). The `npx -p typescript` form pins resolution to the real TypeScript compiler so the hook never accidentally pulls the empty `tsc` shim package from npm.
 
 **Agent obligations:**
 
