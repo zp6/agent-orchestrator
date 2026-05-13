@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-13T21:04:12.000Z
+generated_at: 2026-05-13T21:18:31.984Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -32,16 +32,15 @@ actions:
     okr_alignment:
       - okr-1
       - okr-5
-    status: approved
+    status: executing
     auditor_review:
       reviewed_at: 2026-05-13T21:02:00.000Z
       reviewer: auditor-agent
       decision: approve
-      reasoning: >-
-        Action passes all guardrails: OKR alignment present (okr-1, okr-5), no charter violation, no duplicate target in flight, expected value $330 (low confidence). Treasury live probe: $2.06 total (Base mainnet, Morpho vault + liquid USDC). This action type (github-pr-open) has no on-chain spend - capital-discipline floor does not apply.
+      reasoning: "Action passes all guardrails: OKR alignment present (okr-1, okr-5), no charter violation, no duplicate target in flight, expected value $330 (low confidence). Treasury live probe: $2.06 total (Base mainnet, Morpho vault + liquid USDC). This action type (github-pr-open) has no on-chain spend - capital-discipline floor does not apply."
       conditions: []
     execution:
-      started_at: null
+      started_at: 2026-05-13T21:18:31.984Z
       completed_at: null
       artifact_url: null
       outcome: null
@@ -77,8 +76,7 @@ actions:
       reviewed_at: 2026-05-13T21:04:12.000Z
       reviewer: auditor-agent
       decision: approve
-      reasoning: >-
-        Action passes all guardrails: OKR alignment present (okr-1, okr-5), no charter violation, no duplicate target in flight, expected value $350 (medium confidence). Treasury live probe: $2.06 total (Base mainnet, Morpho vault + liquid USDC). This action type (github-pr-open) has no on-chain spend - capital-discipline floor does not apply. 2064-day stale issue with medium confidence makes this a higher-priority target than the ens-app-v3 action approved last cycle.
+      reasoning: "Action passes all guardrails: OKR alignment present (okr-1, okr-5), no charter violation, no duplicate target in flight, expected value $350 (medium confidence). Treasury live probe: $2.06 total (Base mainnet, Morpho vault + liquid USDC). This action type (github-pr-open) has no on-chain spend - capital-discipline floor does not apply. 2064-day stale issue with medium confidence makes this a higher-priority target than the ens-app-v3 action approved last cycle."
       conditions: []
     execution:
       started_at: null
