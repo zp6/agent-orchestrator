@@ -67,6 +67,7 @@ import { registerDMOutreachCommand } from "./commands/dm-outreach.js";
 import { registerConnectionErrorsCommand } from "./commands/connection-errors.js";
 import { registerGoalsSnapshotCommand } from "./commands/goals-snapshot.js";
 import { registerDnsCommand } from "./commands/dns.js";
+import { registerFleetActionsCommand } from "./commands/fleet-actions.js";
 import { registerTasksCommand } from "./commands/tasks.js";
 
 const program = new Command();
@@ -144,6 +145,7 @@ registerDMOutreachCommand(program);
 registerConnectionErrorsCommand(program);
 registerGoalsSnapshotCommand(program);
 registerDnsCommand(program);
+registerFleetActionsCommand(program);
 registerTasksCommand(program);
 
 program.parse();

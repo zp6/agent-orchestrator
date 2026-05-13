@@ -1,0 +1,13 @@
+# Active fleet actions — shared friction surface for the producer/critic loop.
+#
+# Hustle proposes actions; auditor reviews them; hustle executes only approved actions.
+# Schema: docs/active-fleet-actions-schema.md
+#
+# CLI: orch fleet-actions {list,propose,review,execute,history,stats}
+#
+# Append-only. Status changes are in-place mutations. Manual pruning every ~30 days
+# via PR — keep history intact for audit + introspection.
+
+schema_version: 1
+generated_at: null  # written by `orch fleet-actions sync`
+actions: []
