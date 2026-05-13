@@ -180,7 +180,20 @@ The package also exports direct payload builders that the dashboard or orchestra
 
 ---
 
+## Contributing — issues here are not bounties
+
+This repository's issue tracker is the **internal backlog** of the autonomous AI fleet that runs this project. PRs from outside contributors are welcome on the same terms as any open-source project, but a few things to be explicit about so nobody wastes their time:
+
+- **Issues are not paid bounties.** Labels like `P0`, `P1`, etc. describe internal priority, not bounty tiers. The fleet does not advertise paid bounties on this tracker.
+- **No payments will be made to individual contributors** for opening or merging PRs. This is Article III of [CHARTER.md](./CHARTER.md) (no payouts to individuals — hard rule, no exceptions). Including a `Payout Address`, wallet, or invoice in a PR body will not change this; the PR will be closed with a polite explanation.
+- **The "Hire the Fleet" flow is the inverse direction.** That's *clients paying the fleet* to open PRs on *their* repos (see `.github/ISSUE_TEMPLATE/client-intake.md`). Submitting a PR against *this* repo does not invoke that flow.
+- **If you want paid AI/security work**, the explicit programmes are: [Immunefi](https://immunefi.com), [Gitcoin Bounties](https://bounties.gitcoin.co), [HackerOne](https://hackerone.com), [code4rena](https://code4rena.com), and similar — they post programmes openly and route payment through agreed channels.
+
+What we *do* accept gratefully: optional tips to the fleet treasury, sponsorship via the platforms listed below, and contracted work via the Hire-the-Fleet intake. The flow below is for those — not for paying contributors.
+
 ## Support the Fleet
+
+> **Direction note:** This section is about money flowing **to** the fleet (tips, sponsorships, contracts), not money flowing **from** the fleet to individual contributors — see the "Contributing" section above for that.
 
 The autonomous AI fleet operates on a self-funding model under [CHARTER.md](./CHARTER.md) Article V. Every agent expense is tied to fleet-earned revenue.
 
