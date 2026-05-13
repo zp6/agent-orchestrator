@@ -89,6 +89,7 @@ const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
 const QUALITY_SLA_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
 const IMPROVEMENT_CHECK_EVERY_N_CYCLES = 6; // ~30min at default interval
 const AUTO_MERGE_SWEEP_EVERY_N_CYCLES = 3;  // ~15min — same cadence as PR review
+const FLEET_ACTIONS_DISPATCH_EVERY_N_CYCLES = 5;  // ~5min — producer/critic loop cadence (hustle + auditor)
 const SUPERVISOR_CHECK_EVERY_N_CYCLES = 3; // ~15min at default interval
 const RESEARCH_LINK_EVERY_N_CYCLES = 6; // ~30min — same cadence as improvement detection
 const BACKLOG_TRIAGE_EVERY_N_CYCLES = 60; // ~5h at default interval
@@ -919,6 +920,12 @@ export class Daemon {
       // bypassed the reviewer (typically blocked by self-approval).
       if (this.cycleCount % AUTO_MERGE_SWEEP_EVERY_N_CYCLES === 0) {
         batch3.push(this.sweepStaleCleanPRs(time));
+      }
+      // Fleet-actions cycle: continuous producer/critic loop dispatch.
+      // Hustle + auditor each get a bounded task every ~5min instead of
+      // waiting on the 5h housekeeping cadence.
+      if (this.cycleCount % FLEET_ACTIONS_DISPATCH_EVERY_N_CYCLES === 0) {
+        batch3.push(this.dispatchFleetActionsCycle(time, registeredAgents));
       }
       await this.runBatch("pr-lifecycle+deploy", batch3);
 
@@ -4290,6 +4297,112 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
    * Groups are advanced to "in_progress" immediately so subsequent cycles
    * don't re-dispatch already-running children.
    */
+  /**
+   * Continuous-cadence dispatch for the producer/critic fleet-actions loop.
+   *
+   * Fires every FLEET_ACTIONS_DISPATCH_EVERY_N_CYCLES (~5 min at 60s poll).
+   * Dispatches one bounded task to each of hustle-agent (the producer) and
+   * auditor-agent (the critic), telling them to run one cycle of their
+   * respective fleet-actions logic against docs/active-fleet-actions.yaml.
+   *
+   * Why this cadence: at the previous 5h housekeeping cadence, the producer/
+   * critic loop produced one decision every 5 hours. To make the loop feel
+   * continuous (operator sees activity within minutes), this drops to ~5 min.
+   * Token cost is bounded per task — each agent does at most 1 propose + 1
+   * execute per dispatch.
+   *
+   * Idempotency: each cycle just kicks the agent. The agent's runner is
+   * itself bounded (max 1 propose / max 1 execute) so back-to-back dispatches
+   * don't multiply per-cycle work — they just keep the loop fresh.
+   */
+  private async dispatchFleetActionsCycle(
+    time: string,
+    registeredAgents: Set<string>,
+  ): Promise<void> {
+    const hustleMessage =
+      "Run one fleet-actions cycle:\n\n" +
+      "1. Scan ONE target repo (rotating across configured list) for stale issues, " +
+      "rank by impact score, propose ≤1 new action to the ledger " +
+      "(docs/active-fleet-actions.yaml in rapartlu/agent-orchestrator).\n\n" +
+      "2. Read approved actions from the ledger; execute ≤1 by posting an offer " +
+      "comment on the target issue with the fleet wallet address. Update the " +
+      "ledger with the outcome.\n\n" +
+      "Bounded: max 1 propose + 1 execute per dispatch. Use the runner code in " +
+      "src/hustle-runner.ts (runHustle()). Network failures are recoverable.";
+
+    const auditorMessage =
+      "Run one fleet-actions review cycle:\n\n" +
+      "1. Read docs/active-fleet-actions.yaml from rapartlu/agent-orchestrator " +
+      "via gh api.\n\n" +
+      "2. Pick the OLDEST action in proposed or under_review status.\n\n" +
+      "3. Build FleetStateContext (live treasury probe via " +
+      "src/inputs/treasury-probe.ts, in-flight actions from the ledger).\n\n" +
+      "4. Run the review-pending-fleet-actions classifier — apply the 5 priority " +
+      "rules (Charter III, capital discipline, OKR alignment, duplicate target, " +
+      "low value). Default decision: approve.\n\n" +
+      "5. Write the decision back to the ledger via gh api PUT.\n\n" +
+      "Bounded: max 1 action reviewed per dispatch. Use src/audit-runner.ts " +
+      "(runAudit({ skipFleetActionsReview: false })). Failures are recoverable.";
+
+    const dispatches: Array<Promise<unknown>> = [];
+
+    if (registeredAgents.has("hustle-agent")) {
+      dispatches.push(
+        this.dispatcher
+          .dispatch(hustleMessage, {
+            agentName: "hustle-agent",
+            source: "manual",
+            sourceRef: `fleet-actions-cycle:hustle:${Date.now()}`,
+            title: `[fleet-actions] hustle pass — propose + execute`,
+          })
+          .then((r) => {
+            this.log.info("Fleet-actions hustle dispatch", { taskId: r.taskId });
+          })
+          .catch((err) => {
+            this.log.warn("Fleet-actions hustle dispatch failed", {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }),
+      );
+    }
+
+    if (registeredAgents.has("auditor-agent")) {
+      dispatches.push(
+        this.dispatcher
+          .dispatch(auditorMessage, {
+            agentName: "auditor-agent",
+            source: "manual",
+            sourceRef: `fleet-actions-cycle:auditor:${Date.now()}`,
+            title: `[fleet-actions] auditor pass — review pending`,
+          })
+          .then((r) => {
+            this.log.info("Fleet-actions auditor dispatch", { taskId: r.taskId });
+          })
+          .catch((err) => {
+            this.log.warn("Fleet-actions auditor dispatch failed", {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }),
+      );
+    }
+
+    if (dispatches.length === 0) {
+      // Neither agent registered; no-op
+      return;
+    }
+
+    try {
+      await Promise.allSettled(dispatches);
+      console.log(
+        `[${time}] Fleet-actions cycle dispatched (${dispatches.length} agent${dispatches.length === 1 ? "" : "s"})`,
+      );
+    } catch (err) {
+      this.log.warn("dispatchFleetActionsCycle batch failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   private async dispatchPendingCoordinationGroups(time: string): Promise<void> {
     let groups: Array<{
       id: string;
