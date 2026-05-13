@@ -396,6 +396,37 @@ export function registerFleetActionsCommand(program: Command): void {
           ? null
           : executed.length / approved.length;
 
+      // Pipeline breakdown across ALL actions (not just the window) — gives
+      // a quick view of work-in-progress that lets you spot pipeline stalls
+      // (e.g. many "proposed" piling up = auditor isn't running).
+      const pipeline = {
+        proposed: ledger.actions.filter((a) => a.status === "proposed").length,
+        under_review: ledger.actions.filter((a) => a.status === "under_review").length,
+        approved: ledger.actions.filter((a) => a.status === "approved").length,
+        rejected: ledger.actions.filter((a) => a.status === "rejected").length,
+        executing: ledger.actions.filter((a) => a.status === "executing").length,
+        executed: ledger.actions.filter((a) => a.status === "executed").length,
+        abandoned: ledger.actions.filter((a) => a.status === "abandoned").length,
+      };
+
+      // Last-activity timestamps — when did each stage of the loop last fire?
+      // Used to answer "is the producer/critic loop alive RIGHT NOW?" without
+      // having to dig into the ledger or daemon logs.
+      const allByProposedAt = [...ledger.actions].sort(
+        (a, b) => new Date(b.proposed_at).getTime() - new Date(a.proposed_at).getTime(),
+      );
+      const reviewedAll = ledger.actions.filter((a) => a.auditor_review.reviewed_at);
+      const executedAll = ledger.actions.filter((a) => a.execution.completed_at);
+      const lastProposalAt = allByProposedAt[0]?.proposed_at ?? null;
+      const lastReviewAt = reviewedAll
+        .map((a) => a.auditor_review.reviewed_at as string)
+        .sort()
+        .reverse()[0] ?? null;
+      const lastExecutionAt = executedAll
+        .map((a) => a.execution.completed_at as string)
+        .sort()
+        .reverse()[0] ?? null;
+
       const stats = {
         window_days: Number(opts.days),
         hustle_actions_proposed: proposedCount,
@@ -405,6 +436,10 @@ export function registerFleetActionsCommand(program: Command): void {
         auditor_rejects: rejected.length,
         approved_action_execution_rate: executionRate,
         executed_actions: executed.length,
+        pipeline,
+        last_proposal_at: lastProposalAt,
+        last_review_at: lastReviewAt,
+        last_execution_at: lastExecutionAt,
       };
 
       if (opts.json) {
@@ -426,6 +461,33 @@ export function registerFleetActionsCommand(program: Command): void {
         executionRate === null ? null : `${(executionRate * 100).toFixed(0)}%`,
         "(target: ≥80%)",
       );
+
+      console.log(chalk.bold("\n  Pipeline (all-time)"));
+      const fmtPipe = (label: string, value: number) => {
+        const colour = value > 0 ? chalk.cyan : chalk.dim;
+        console.log(`  ${label.padEnd(38)} ${colour(String(value).padStart(8))}`);
+      };
+      fmtPipe("proposed (awaiting auditor)", pipeline.proposed);
+      fmtPipe("under_review", pipeline.under_review);
+      fmtPipe("approved (awaiting executor)", pipeline.approved);
+      fmtPipe("rejected", pipeline.rejected);
+      fmtPipe("executing", pipeline.executing);
+      fmtPipe("executed", pipeline.executed);
+      fmtPipe("abandoned", pipeline.abandoned);
+
+      console.log(chalk.bold("\n  Last activity"));
+      const ago = (iso: string | null): string => {
+        if (!iso) return chalk.dim("never");
+        const ms = Date.now() - new Date(iso).getTime();
+        const min = Math.floor(ms / 60000);
+        if (min < 60) return chalk.cyan(`${min}m ago`);
+        const hr = Math.floor(min / 60);
+        if (hr < 48) return chalk.cyan(`${hr}h ago`);
+        return chalk.cyan(`${Math.floor(hr / 24)}d ago`);
+      };
+      console.log(`  ${"last_proposal".padEnd(38)} ${ago(lastProposalAt).padStart(8)}`);
+      console.log(`  ${"last_review".padEnd(38)} ${ago(lastReviewAt).padStart(8)}`);
+      console.log(`  ${"last_execution".padEnd(38)} ${ago(lastExecutionAt).padStart(8)}`);
       console.log();
     });
 
