@@ -435,6 +435,45 @@ Common `orch` commands:
 
 `STALE_TASK_SWEEP_EVERY_N_CYCLES = 288` (~24h) — periodic daemon trigger that sweeps tasks stuck in `pending` or `paused` status for more than `triggers.stale_task_threshold_days` (default: 7) days. Marks timed-out tasks as `superseded` (when source issue is closed or task is >30d stale) or `cancelled` (open issue, 7–30d stale). Writes an audit entry to `task_logs` for each transition. Also exposed as `orch tasks sweep-stale` CLI command (dry-run by default; use `--execute` to apply).
 
+### Research finding discipline (issue #1644)
+
+Every research finding produced by the fleet — whether from `orch research` or any agent — **must** include a "Verified External Dependencies" section before it can be promoted into a spec or dispatch. This is a hard gate, not a courtesy.
+
+**Template:** `docs/research/_template.md` — every new finding starts from this template.
+
+**Worked example:** `docs/research/2026-05-11-immunefi-bounty-submission.md` — retroactively
+annotated Immunefi finding that shows both the correct format and the specific silence that caused
+issue #1642 (hallucinated API endpoint).
+
+**The section format:**
+
+```markdown
+## Verified External Dependencies
+
+| Claim | Verification evidence | Status |
+|-------|----------------------|--------|
+| ... | URL + quote | ✓ verified |
+| ... | (no evidence located) | ⚠ unverified |
+
+## Unverified Claims (Load-Bearing Risks)
+
+- **[Claim A]**: [What breaks if wrong. How to probe.]
+```
+
+**Director / dispatcher gate (mandatory):** Before turning any research finding into a spec or
+dispatched implementation task, the Director **must** check the "Unverified Claims" section:
+
+1. If the section is absent → reject the finding and ask the research agent to add it.
+2. If the section lists any ⚠-flagged claims → those claims must be probed and resolved before
+   any code that *depends* on them is dispatched. A 30-second `curl` probe is not optional.
+3. If all claims are verified → proceed normally.
+
+**Why this gate:** The ImmunefiAdapter (issue #1642) was built on a hallucinated API endpoint
+(`api.immunefi.com`) that was never real. The research finding was silent on whether a
+programmatic submission path existed; silence was implicitly interpreted as "API exists." The
+verified-dependencies section makes that silence visible and blocks downstream implementation
+before any code is written.
+
 ## Treasury Operations
 
 The fleet-signer provides a whitelist-gated signing service for on-chain treasury operations.

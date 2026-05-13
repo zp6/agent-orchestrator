@@ -36,8 +36,15 @@ export interface PRInfo {
 export type { PRReviewResult } from "../client/reviewer-client.js";
 import type { PRReviewResult } from "../client/reviewer-client.js";
 
-// Re-export triage schemas for convenient access by callers
-export { TRIAGE_HOUSEKEEPING_SCHEMA, TRIAGE_CROSS_REPO_SCHEMA } from "./verifier.js";
+// Re-export triage schemas and research finding schema for convenient access by callers
+export {
+  TRIAGE_HOUSEKEEPING_SCHEMA,
+  TRIAGE_CROSS_REPO_SCHEMA,
+  RESEARCH_FINDING_SCHEMA,
+  RESEARCH_FINDING_SECTION_HEADINGS,
+  checkResearchFindingCompliance,
+} from "./verifier.js";
+export type { ResearchFindingValidationResult } from "./verifier.js";
 
 export class PRReviewer {
   private log = createLogger("pr-reviewer");
