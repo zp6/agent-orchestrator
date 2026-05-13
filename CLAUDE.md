@@ -122,6 +122,18 @@ If unsure, default to not sending. The Operator can always pull status; the flee
 
 **The same discipline applies to operator-monitoring sessions** (Claude in `/loop` mode driving fleet oversight): wake up, check, fix what's fixable autonomously, only surface to the Operator when their input or action is genuinely needed. Cycle reports and "all clear" updates are noise.
 
+## Writing Style — read before any user-facing text
+
+Every fleet artefact (commit messages, PR bodies, issue descriptions, GitHub comments on external repos, Telegram messages, code comments) follows [STYLE.md](./STYLE.md). The short version:
+
+- No LLM tells. Banned words include `delve`, `comprehensive`, `leverage`, `streamline`, `seamless`, `meticulous`, `furthermore`, `it's important to note that`. Full list in `STYLE.md`.
+- No emdashes (`—`). Use `-` or `,` or a full stop. Same for endashes and ellipsis characters.
+- Brief. Default to one sentence. Cut "in order to" → "to", "make a decision" → "decide".
+- Sound like the operator: lowercase often, sentence fragments fine, direct over polite, no `I'd be happy to`, no `great question`.
+- This rule applies to **every** agent and every artefact, including agent-to-agent ledger messages and audit logs (where future agents will read them).
+
+The Zod-OC incident (2026-05-13) and the duplicate ens-app-v3#732 offer comment showed what happens when fleet text doesn't follow this — public artefacts look amateur and burn goodwill. See `STYLE.md` for worked good/bad examples.
+
 ## Execution Velocity Discipline — bake speed into the fleet's way of working
 
 The fleet operates under a 30-day survival timeline. Pace is itself a charter constraint. The default tempo (5-min polls, 24h standups, weekly retros) is too slow. The following rules are binding while the fleet's `mrr_usd < survival_threshold`:
