@@ -1,12 +1,12 @@
-# Claude Agent Orchestrator
+# agent-orchestrator
 
 ## Scope - Read This First
 
-This repository is the **orchestrator runtime** for the Claude agent fleet.
+This repository is the **orchestrator runtime** for the agent fleet.
 It owns the dispatch daemon, supervisor logic, routing guards, CLI operator surface,
 fleet coordination, and revenue-path helpers. The PR review scoring logic lives in the
-separate `rapartlu/agent-reviewer` (`claude-orchestrator-reviewer`) package, which this
-orchestrator imports as an internal dependency.
+separate `rapartlu/agent-reviewer` package, which this orchestrator imports as an
+internal dependency.
 
 This repo is **not** the proxy server, the dashboard app, or the reviewer package.
 Do not create issues or PRs here for:

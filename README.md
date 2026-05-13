@@ -1,8 +1,8 @@
-# claude-agent-orchestrator
+# agent-orchestrator
 
-[![license](https://img.shields.io/npm/l/claude-agent-orchestrator)](./LICENSE)
+[![license](https://img.shields.io/github/license/rapartlu/agent-orchestrator)](./LICENSE)
 
-The orchestrator runtime for the [Claude agent fleet](./CHARTER.md). A long-running daemon that polls triggers, dispatches tasks to agents in their containers, supervises their work, and drives the producer/critic revenue loop; plus a 68-command `orch` CLI for operator inspection and overrides.
+The orchestrator runtime for the [agent fleet](./CHARTER.md). A long-running daemon that polls triggers, dispatches tasks to agents in their containers, supervises their work, and drives the producer/critic revenue loop; plus a 68-command `orch` CLI for operator inspection and overrides.
 
 ## What's in this repo
 
