@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-14T16:45:27.510Z
+generated_at: 2026-05-14T16:45:31.289Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -461,7 +461,7 @@ actions:
     okr_alignment:
       - okr-1
       - okr-5
-    status: executing
+    status: executed
     auditor_review:
       reviewed_at: 2026-05-14T16:43:52.410Z
       reviewer: auditor-agent
@@ -470,9 +470,9 @@ actions:
       conditions: []
     execution:
       started_at: 2026-05-14T16:45:27.510Z
-      completed_at: null
-      artifact_url: null
-      outcome: null
+      completed_at: 2026-05-14T16:45:31.289Z
+      artifact_url: https://github.com/ensdomains/ens-app-v3/issues/1076#issuecomment-4452713148
+      outcome: success
       revenue_received_usd: null
   - id: hustle-agent-2026-05-14T09-16-23-093Z-7d08357a
     proposed_by: hustle-agent
