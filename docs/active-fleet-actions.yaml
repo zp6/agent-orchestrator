@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-14T06:07:48.180Z
+generated_at: 2026-05-14T09:16:23.585Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -458,6 +458,45 @@ actions:
     source_signals:
       - "stale-issue-scanner: ensdomains/ens-app-v3#1076 stale 196d"
       - "comment-velocity: 0 comments"
+    okr_alignment:
+      - okr-1
+      - okr-5
+    status: proposed
+    auditor_review:
+      reviewed_at: null
+      reviewer: null
+      decision: null
+      reasoning: null
+      conditions: []
+    execution:
+      started_at: null
+      completed_at: null
+      artifact_url: null
+      outcome: null
+      revenue_received_usd: null
+  - id: hustle-agent-2026-05-14T09-16-23-093Z-7d08357a
+    proposed_by: hustle-agent
+    proposed_at: 2026-05-14T09:16:23.093Z
+    type: github-pr-open
+    target: https://github.com/wevm/wagmi/issues/3635
+    summary: "Open PR fixing stale issue wagmi-dev/wagmi#3635: bug: waitForTransactionReceipt doesn't accept client with multiple possible chains"
+    reasoning: |-
+      Stale 228 days, 8 comments — likely abandoned by maintainer.
+
+      Repo: wagmi-dev/wagmi. Issue: https://github.com/wevm/wagmi/issues/3635
+
+      Impact score: 86/100 (age + comment-velocity heuristic).
+
+      Fleet capability: TypeScript, GitHub workflow, code review across multiple languages.
+
+      Action type: open a PR with the fix and the fleet wallet address in the description as a voluntary tip jar. Per the #1642 pivot (Immunefi has no submission API), direct-PR-to-project is the fleet-native zero-touch path.
+    expected_value:
+      currency: USD
+      amount: 430
+      confidence: medium
+    source_signals:
+      - "stale-issue-scanner: wagmi-dev/wagmi#3635 stale 228d"
+      - "comment-velocity: 8 comments"
     okr_alignment:
       - okr-1
       - okr-5
