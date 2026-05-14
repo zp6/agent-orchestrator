@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-14T13:44:43.265Z
+generated_at: 2026-05-14T13:44:47.015Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -383,7 +383,7 @@ actions:
     okr_alignment:
       - okr-1
       - okr-5
-    status: executing
+    status: executed
     auditor_review:
       reviewed_at: 2026-05-14T13:42:52.973Z
       reviewer: auditor-agent
@@ -392,9 +392,9 @@ actions:
       conditions: []
     execution:
       started_at: 2026-05-14T13:44:43.265Z
-      completed_at: null
-      artifact_url: null
-      outcome: null
+      completed_at: 2026-05-14T13:44:47.015Z
+      artifact_url: https://github.com/rainbow-me/rainbowkit/issues/1682#issuecomment-4451220593
+      outcome: success
       revenue_received_usd: null
   - id: hustle-agent-2026-05-14T04-25-59-246Z-298f3d78
     proposed_by: hustle-agent
