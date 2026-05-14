@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-14T00:05:47.586Z
+generated_at: 2026-05-14T00:05:50.576Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -110,7 +110,7 @@ actions:
     okr_alignment:
       - okr-1
       - okr-5
-    status: executing
+    status: executed
     auditor_review:
       reviewed_at: 2026-05-14T00:04:28.000Z
       reviewer: auditor-agent
@@ -119,9 +119,9 @@ actions:
       conditions: []
     execution:
       started_at: 2026-05-14T00:05:47.586Z
-      completed_at: null
-      artifact_url: null
-      outcome: null
+      completed_at: 2026-05-14T00:05:50.576Z
+      artifact_url: https://github.com/Uniswap/interface/issues/7863#issuecomment-4446168997
+      outcome: success
       revenue_received_usd: null
   - id: hustle-agent-2026-05-13T23-51-27-796Z-153185b8
     proposed_by: hustle-agent
