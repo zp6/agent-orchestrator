@@ -42,7 +42,7 @@ actions:
     execution:
       started_at: 2026-05-13T21:18:31.984Z
       completed_at: 2026-05-13T21:20:49.909Z
-      artifact_url: https://github.com/ensdomains/ens-app-v3/issues/732#issuecomment-4445299974
+      artifact_url: https://github.com/ensdomains/ens-app-v3/issues/732#issuecomment-4446171902
       outcome: success
       revenue_received_usd: null
   - id: hustle-agent-2026-05-13T20-38-16-448Z-4d48797f
