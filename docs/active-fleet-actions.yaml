@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-14T04:22:58.681Z
+generated_at: 2026-05-14T04:25:59.721Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -380,6 +380,45 @@ actions:
     source_signals:
       - "stale-issue-scanner: rainbow-me/rainbowkit#1682 stale 483d"
       - "comment-velocity: 14 comments"
+    okr_alignment:
+      - okr-1
+      - okr-5
+    status: proposed
+    auditor_review:
+      reviewed_at: null
+      reviewer: null
+      decision: null
+      reasoning: null
+      conditions: []
+    execution:
+      started_at: null
+      completed_at: null
+      artifact_url: null
+      outcome: null
+      revenue_received_usd: null
+  - id: hustle-agent-2026-05-14T04-25-59-246Z-298f3d78
+    proposed_by: hustle-agent
+    proposed_at: 2026-05-14T04:25:59.246Z
+    type: github-pr-open
+    target: https://github.com/sky-ecosystem/community-portal/issues/453
+    summary: "Open PR fixing stale issue makerdao/community-portal#453: Site Nav Doesn't work when font is enlarged on iPhone (Safari)"
+    reasoning: |-
+      Stale 2058 days, 2 comments — likely abandoned by maintainer.
+
+      Repo: makerdao/community-portal. Issue: https://github.com/sky-ecosystem/community-portal/issues/453
+
+      Impact score: 66/100 (age + comment-velocity heuristic).
+
+      Fleet capability: TypeScript, GitHub workflow, code review across multiple languages.
+
+      Action type: open a PR with the fix and the fleet wallet address in the description as a voluntary tip jar. Per the #1642 pivot (Immunefi has no submission API), direct-PR-to-project is the fleet-native zero-touch path.
+    expected_value:
+      currency: USD
+      amount: 330
+      confidence: low
+    source_signals:
+      - "stale-issue-scanner: makerdao/community-portal#453 stale 2058d"
+      - "comment-velocity: 2 comments"
     okr_alignment:
       - okr-1
       - okr-5
