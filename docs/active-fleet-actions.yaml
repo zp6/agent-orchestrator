@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-14T13:44:47.015Z
+generated_at: 2026-05-14T15:01:23.434Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -536,6 +536,45 @@ actions:
     source_signals:
       - "stale-issue-scanner: safe-global/safe-smart-account#714 stale 114d"
       - "comment-velocity: 24 comments"
+    okr_alignment:
+      - okr-1
+      - okr-5
+    status: proposed
+    auditor_review:
+      reviewed_at: null
+      reviewer: null
+      decision: null
+      reasoning: null
+      conditions: []
+    execution:
+      started_at: null
+      completed_at: null
+      artifact_url: null
+      outcome: null
+      revenue_received_usd: null
+  - id: hustle-agent-2026-05-14T15-01-22-960Z-55c0f8de
+    proposed_by: hustle-agent
+    proposed_at: 2026-05-14T15:01:22.960Z
+    type: github-pr-open
+    target: https://github.com/WalletConnect/walletconnect-monorepo/issues/4064
+    summary: "Open PR fixing stale issue WalletConnect/walletconnect-monorepo#4064: this.events.off is not a function error if Node polyfill"
+    reasoning: |-
+      Stale 477 days, 21 comments — likely abandoned by maintainer.
+
+      Repo: WalletConnect/walletconnect-monorepo. Issue: https://github.com/WalletConnect/walletconnect-monorepo/issues/4064
+
+      Impact score: 100/100 (age + comment-velocity heuristic).
+
+      Fleet capability: TypeScript, GitHub workflow, code review across multiple languages.
+
+      Action type: open a PR with the fix and the fleet wallet address in the description as a voluntary tip jar. Per the #1642 pivot (Immunefi has no submission API), direct-PR-to-project is the fleet-native zero-touch path.
+    expected_value:
+      currency: USD
+      amount: 500
+      confidence: medium
+    source_signals:
+      - "stale-issue-scanner: WalletConnect/walletconnect-monorepo#4064 stale 477d"
+      - "comment-velocity: 21 comments"
     okr_alignment:
       - okr-1
       - okr-5
