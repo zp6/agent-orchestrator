@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-14T16:45:31.289Z
+generated_at: 2026-05-14T19:53:27.575Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -614,6 +614,45 @@ actions:
     source_signals:
       - "stale-issue-scanner: ethereum/ethereum-org-website#13144 stale 263d"
       - "comment-velocity: 17 comments"
+    okr_alignment:
+      - okr-1
+      - okr-5
+    status: proposed
+    auditor_review:
+      reviewed_at: null
+      reviewer: null
+      decision: null
+      reasoning: null
+      conditions: []
+    execution:
+      started_at: null
+      completed_at: null
+      artifact_url: null
+      outcome: null
+      revenue_received_usd: null
+  - id: hustle-agent-2026-05-14T19-53-27-061Z-8ea3217d
+    proposed_by: hustle-agent
+    proposed_at: 2026-05-14T19:53:27.061Z
+    type: github-pr-open
+    target: https://github.com/scaffold-eth/scaffold-eth-2/issues/807
+    summary: "Open PR fixing stale issue scaffold-eth/scaffold-eth-2#807: Vercel CLI gives gated link instead of public URL"
+    reasoning: |-
+      Stale 484 days, 6 comments — likely abandoned by maintainer.
+
+      Repo: scaffold-eth/scaffold-eth-2. Issue: https://github.com/scaffold-eth/scaffold-eth-2/issues/807
+
+      Impact score: 79/100 (age + comment-velocity heuristic).
+
+      Fleet capability: TypeScript, GitHub workflow, code review across multiple languages.
+
+      Action type: open a PR with the fix and the fleet wallet address in the description as a voluntary tip jar. Per the #1642 pivot (Immunefi has no submission API), direct-PR-to-project is the fleet-native zero-touch path.
+    expected_value:
+      currency: USD
+      amount: 395
+      confidence: medium
+    source_signals:
+      - "stale-issue-scanner: scaffold-eth/scaffold-eth-2#807 stale 484d"
+      - "comment-velocity: 6 comments"
     okr_alignment:
       - okr-1
       - okr-5
