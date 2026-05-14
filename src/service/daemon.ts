@@ -4328,7 +4328,13 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
       "comment on the target issue with the fleet wallet address. Update the " +
       "ledger with the outcome.\n\n" +
       "Bounded: max 1 propose + 1 execute per dispatch. Use the runner code in " +
-      "src/hustle-runner.ts (runHustle()). Network failures are recoverable.";
+      "src/hustle-runner.ts (runHustle()). Network failures are recoverable.\n\n" +
+      "IMPORTANT — no journal PR. The ledger is the per-cycle artefact. Do NOT " +
+      "open a PR against rapartlu/agent-orchestrator for a cycle journal file, " +
+      "and do NOT write to docs/hustle/. Only the daily-housekeeping dispatch " +
+      "(separate cadence, title prefix `[hustle-agent] daily`) opens the daily " +
+      "summary PR. Empty passes return a structured summary with " +
+      "summary_pr_url=null and nothing else.";
 
     const auditorMessage =
       "Run one fleet-actions review cycle:\n\n" +
