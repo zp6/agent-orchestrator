@@ -11,6 +11,31 @@ const log = createLogger("merge-stall-guard");
  */
 export const DEFAULT_MERGE_STALL_THRESHOLD_HOURS = 4;
 
+/**
+ * In-process TTL cache for per-repo merge-stall results.
+ *
+ * The check used to fire once per agent per dispatch cycle (~11 calls per
+ * cycle on the current fleet, every ~60s at design speed). Each call is a
+ * `gh pr list --json statusCheckRollup,commits ...` that was triggering
+ * GitHub's GraphQL 500k-node ceiling on repos with many open PRs, and
+ * also adding 11× ~500ms of sequential gh latency to every cycle.
+ *
+ * Caching is correct here: a PR doesn't transition from "not yet stale"
+ * to "stale" inside a 5-min window (the threshold is 4 *hours*), so
+ * re-running this check every cycle just burns rate limit. On cache miss
+ * or expiry, we re-fetch.
+ *
+ * Daemon restart wipes the cache. That's fine — first cycle after
+ * restart will do real fetches.
+ */
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const cache = new Map<string, { result: MergeStallCheckResult; expiresAt: number }>();
+
+/** Test/operator helper: clear the in-process cache. */
+export function clearMergeStallCache(): void {
+  cache.clear();
+}
+
 let configuredThresholdHours: number | undefined;
 
 /**
@@ -73,9 +98,21 @@ export async function checkMergeStall(
   const thresholdHours = getMergeStallThresholdHours();
   const now = Date.now();
 
+  // Return cached result if fresh. See cache definition above for rationale.
+  const cached = cache.get(repo);
+  if (cached && cached.expiresAt > now) {
+    return cached.result;
+  }
+
   try {
+    // `--limit 25` (was 50) and dropped `reviewDecision` (unused). The
+    // expensive fields are `statusCheckRollup` and `commits` — keep them
+    // since both are load-bearing, but cut the count of PRs traversed so
+    // the GraphQL node budget stays well under the 500k ceiling. Repos
+    // with >25 open PRs are an outlier; falling open on truncation is
+    // acceptable given the cache TTL.
     const raw = await execFn(
-      `gh pr list --repo ${repo} --state open --json number,title,url,updatedAt,headRefName,isDraft,reviewDecision,statusCheckRollup,author,commits --limit 50`,
+      `gh pr list --repo ${repo} --state open --json number,title,url,updatedAt,headRefName,isDraft,statusCheckRollup,author,commits --limit 25`,
       { encoding: "utf-8", timeout: 15000 },
     );
 
@@ -86,7 +123,6 @@ export async function checkMergeStall(
       updatedAt: string;
       headRefName: string;
       isDraft: boolean;
-      reviewDecision: string;
       statusCheckRollup: Array<{ conclusion: string; state: string }> | null;
       author: { login: string } | null;
       commits: Array<{ committedDate: string }> | null;
@@ -125,11 +161,13 @@ export async function checkMergeStall(
     }
 
     if (stalePRs.length === 0) {
-      return {
+      const result: MergeStallCheckResult = {
         blocked: false,
         reason: `No stale MERGEABLE PRs for ${agentName} in ${repo}`,
         stalePRs: [],
       };
+      cache.set(repo, { result, expiresAt: now + CACHE_TTL_MS });
+      return result;
     }
 
     const prNumbers = stalePRs.map((pr) => `#${pr.number}`).join(", ");
@@ -141,13 +179,17 @@ export async function checkMergeStall(
       thresholdHours,
     });
 
-    return {
+    const result: MergeStallCheckResult = {
       blocked: true,
       reason: `${agentName} has ${stalePRs.length} stale MERGEABLE PR(s) in ${repo} (${prNumbers}) — land before launching new work`,
       stalePRs,
     };
+    cache.set(repo, { result, expiresAt: now + CACHE_TTL_MS });
+    return result;
   } catch (err) {
-    // Fail open: if we can't query GitHub, don't block dispatch
+    // Fail open: if we can't query GitHub, don't block dispatch. Don't
+    // cache the error result — we want to retry on the next cycle in case
+    // the error was transient (rate limit, network).
     log.warn("Merge-stall guard failed — proceeding with dispatch", {
       agentName,
       repo,

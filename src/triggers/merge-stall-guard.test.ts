@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   checkMergeStall,
+  clearMergeStallCache,
   scanFleetMergeStalls,
   mergePR,
   autoMergeFleetPRs,
@@ -58,6 +59,7 @@ describe("getMergeStallThresholdHours", () => {
 describe("checkMergeStall", () => {
   beforeEach(() => {
     setMergeStallThresholdHours(undefined);
+    clearMergeStallCache();
   });
 
   it("returns blocked when agent has a stale MERGEABLE PR", async () => {
@@ -190,11 +192,54 @@ describe("checkMergeStall", () => {
     expect(result.stalePRs[0].lastCommitDate).toBeDefined();
     expect(result.stalePRs[0].staleHours).toBeGreaterThanOrEqual(7.9);
   });
+
+  it("caches the result per repo and skips the gh call within TTL", async () => {
+    const mockExec = vi.fn().mockResolvedValue(JSON.stringify([makePR()]));
+
+    // First call hits gh.
+    await checkMergeStall("owner/repo", "test-agent", mockExec);
+    expect(mockExec).toHaveBeenCalledTimes(1);
+
+    // Second call within TTL returns cached result without re-invoking gh.
+    await checkMergeStall("owner/repo", "test-agent", mockExec);
+    expect(mockExec).toHaveBeenCalledTimes(1);
+
+    // Different repo bypasses the cache.
+    await checkMergeStall("owner/other", "test-agent", mockExec);
+    expect(mockExec).toHaveBeenCalledTimes(2);
+  });
+
+  it("does NOT cache failure results — retries on next call (transient errors)", async () => {
+    const mockExec = vi.fn().mockRejectedValue(new Error("rate limit"));
+
+    await checkMergeStall("owner/repo", "test-agent", mockExec);
+    expect(mockExec).toHaveBeenCalledTimes(1);
+
+    // Failure path failed open and didn't cache, so retry hits gh again.
+    await checkMergeStall("owner/repo", "test-agent", mockExec);
+    expect(mockExec).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses --limit 25 (was 50) to stay under GraphQL 500k node ceiling", async () => {
+    const mockExec = vi.fn().mockResolvedValue("[]");
+    await checkMergeStall("owner/repo", "test-agent", mockExec);
+    const cmd = mockExec.mock.calls[0][0] as string;
+    expect(cmd).toContain("--limit 25");
+    expect(cmd).not.toContain("--limit 50");
+  });
+
+  it("drops reviewDecision from the gh query (unused, just adds node cost)", async () => {
+    const mockExec = vi.fn().mockResolvedValue("[]");
+    await checkMergeStall("owner/repo", "test-agent", mockExec);
+    const cmd = mockExec.mock.calls[0][0] as string;
+    expect(cmd).not.toContain("reviewDecision");
+  });
 });
 
 describe("scanFleetMergeStalls", () => {
   beforeEach(() => {
     setMergeStallThresholdHours(undefined);
+    clearMergeStallCache();
   });
 
   it("aggregates stale PRs across repos sorted by stale hours descending", async () => {
