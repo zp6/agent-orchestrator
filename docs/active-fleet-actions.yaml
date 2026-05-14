@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-14T19:53:27.575Z
+generated_at: 2026-05-14T19:53:29.633Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -500,7 +500,7 @@ actions:
     okr_alignment:
       - okr-1
       - okr-5
-    status: approved
+    status: executing
     auditor_review:
       reviewed_at: 2026-05-14T19:51:15.000Z
       reviewer: auditor-agent
@@ -508,7 +508,7 @@ actions:
       reasoning: "Action passes all guardrails: OKR alignment present (okr-1, okr-5), no charter violation, no duplicate target in flight, expected value $430 (medium confidence). Treasury live probe: $2.060052 USDC total (Base mainnet, Morpho vault $2.060052 + liquid $0, probed 2026-05-14T19:51:08.162Z). Action type github-pr-open is in ZERO_SPEND_ACTION_TYPES - capital-discipline floor check skipped by design. wevm/wagmi#3635 is 228 days stale with 8 comments; impact score 86/100. In-flight actions (3, excluding target): safe-fndn/safe-smart-account#714, WalletConnect/walletconnect-monorepo#4064, ethereum/ethereum-org-website#13144 - none target wevm/wagmi#3635."
       conditions: []
     execution:
-      started_at: null
+      started_at: 2026-05-14T19:53:29.633Z
       completed_at: null
       artifact_url: null
       outcome: null
