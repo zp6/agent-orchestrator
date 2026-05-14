@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-14T02:47:09.155Z
+generated_at: 2026-05-14T02:50:25.597Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -341,6 +341,45 @@ actions:
     source_signals:
       - "stale-issue-scanner: wevm/viem#3875 stale 221d"
       - "comment-velocity: 7 comments"
+    okr_alignment:
+      - okr-1
+      - okr-5
+    status: proposed
+    auditor_review:
+      reviewed_at: null
+      reviewer: null
+      decision: null
+      reasoning: null
+      conditions: []
+    execution:
+      started_at: null
+      completed_at: null
+      artifact_url: null
+      outcome: null
+      revenue_received_usd: null
+  - id: hustle-agent-2026-05-14T02-50-25-143Z-266c3827
+    proposed_by: hustle-agent
+    proposed_at: 2026-05-14T02:50:25.143Z
+    type: github-pr-open
+    target: https://github.com/rainbow-me/rainbowkit/issues/1682
+    summary: "Open PR fixing stale issue rainbow-me/rainbowkit#1682: [bug] `RainbowKitSiweNextAuthProvider` not working with NextAuth.js v5"
+    reasoning: |-
+      Stale 483 days, 14 comments — likely abandoned by maintainer.
+
+      Repo: rainbow-me/rainbowkit. Issue: https://github.com/rainbow-me/rainbowkit/issues/1682
+
+      Impact score: 100/100 (age + comment-velocity heuristic).
+
+      Fleet capability: TypeScript, GitHub workflow, code review across multiple languages.
+
+      Action type: open a PR with the fix and the fleet wallet address in the description as a voluntary tip jar. Per the #1642 pivot (Immunefi has no submission API), direct-PR-to-project is the fleet-native zero-touch path.
+    expected_value:
+      currency: USD
+      amount: 500
+      confidence: medium
+    source_signals:
+      - "stale-issue-scanner: rainbow-me/rainbowkit#1682 stale 483d"
+      - "comment-velocity: 14 comments"
     okr_alignment:
       - okr-1
       - okr-5
