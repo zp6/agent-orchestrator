@@ -96,6 +96,21 @@ const BACKLOG_TRIAGE_EVERY_N_CYCLES = 60; // ~5h at default interval
 const CONTAINER_RESTART_EVERY_N_CYCLES = 100; // ~50min at 30s interval — prevents Docker stalls
 const AGENT_SYNC_EVERY_N_CYCLES = 10; // ~5min at default interval — recover from proxy restarts
 const SELF_UPDATE_EVERY_N_CYCLES = 10; // ~5min — pull + rebuild if behind origin/main, then re-exec
+
+/**
+ * Per-cycle cap on how many repos get the general PR-review sweep.
+ *
+ * Each repo sweep calls prReviewer.reviewOpenPRs(repo), which runs an LLM
+ * review on every open PR in that repo. With ~11 active fleet repos and
+ * 1–3 open PRs each, the uncapped sweep was running 10+ sequential LLM
+ * calls per pollCycle — ~30s each, blowing out pollCycle past the 1200s
+ * deadlock threshold (#1667). Capping to MAX_REPOS_PER_REVIEW_SWEEP per
+ * cycle and rotating across repos based on `cycleCount` gives each repo
+ * coverage every ~ceil(N_repos / cap) cycles. The priority review fast-
+ * lane still fires on every cycle for dispatch-blocking PRs.
+ */
+const MAX_REPOS_PER_REVIEW_SWEEP = 3;
+
 const CLOSED_ISSUE_CHECK_EVERY_N_CYCLES = 3; // ~15min at default — cancel in-flight tasks for closed issues
 const STALE_ISSUE_AGE_DAYS = 7;
 /** Minimum interval between standups (ms). Time-based so restarts don't skip meetings. */
@@ -3995,8 +4010,28 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
       }
     }
 
+    // Rotate the general sweep across repos so a single cycle never reviews
+    // more than MAX_REPOS_PER_REVIEW_SWEEP. See the constant for the rationale.
+    // Repos with priority-review entries are excluded from this rotation
+    // budget — they already got fast-laned above.
+    const allRepos = Array.from(agentsByRepo.keys());
+    const startIdx = allRepos.length > 0 ? this.cycleCount % allRepos.length : 0;
+    const sweepRepos: string[] = [];
+    for (let i = 0; i < Math.min(MAX_REPOS_PER_REVIEW_SWEEP, allRepos.length); i++) {
+      sweepRepos.push(allRepos[(startIdx + i) % allRepos.length]);
+    }
+    if (allRepos.length > sweepRepos.length) {
+      this.log.debug("PR review general sweep: rotated subset", {
+        cycle: this.cycleCount,
+        repoCount: allRepos.length,
+        sweepingThisCycle: sweepRepos,
+        deferredToNextCycle: allRepos.filter((r) => !sweepRepos.includes(r)),
+      });
+    }
+
     try {
-      for (const [repo, agentName] of agentsByRepo) {
+      for (const repo of sweepRepos) {
+        const agentName = agentsByRepo.get(repo)!;
         const results = await this.prReviewer.reviewOpenPRs(repo);
         for (const { prNumber, result, prBody, prBranch, prDiff } of results) {
           // Skip PRs already handled in the priority fast-lane to avoid double-reviewing
