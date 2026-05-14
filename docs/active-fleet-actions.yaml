@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-14T02:50:25.597Z
+generated_at: 2026-05-14T02:50:27.350Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -188,7 +188,7 @@ actions:
     okr_alignment:
       - okr-1
       - okr-5
-    status: approved
+    status: executing
     auditor_review:
       reviewed_at: 2026-05-14T02:47:09.154Z
       reviewer: auditor-agent
@@ -196,7 +196,7 @@ actions:
       reasoning: "Action passes all guardrails: OKR alignment present (okr-1, okr-5), no charter violation, no duplicate target in flight, expected value $395 (medium confidence)."
       conditions: []
     execution:
-      started_at: null
+      started_at: 2026-05-14T02:50:27.350Z
       completed_at: null
       artifact_url: null
       outcome: null
