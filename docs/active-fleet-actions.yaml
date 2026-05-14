@@ -315,7 +315,7 @@ actions:
     execution:
       started_at: 2026-05-14T09:16:25.638Z
       completed_at: 2026-05-14T09:16:30.088Z
-      artifact_url: https://github.com/OpenZeppelin/openzeppelin-contracts/issues/5146#issuecomment-4449372215
+      artifact_url: https://github.com/OpenZeppelin/openzeppelin-contracts/issues/5146#issuecomment-4449533717
       outcome: success
       revenue_received_usd: null
   - id: hustle-agent-2026-05-14T01-42-09-942Z-e89000df
