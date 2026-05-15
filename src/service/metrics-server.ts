@@ -36,6 +36,8 @@
  *   GET /api/low-score-approved?days=7&limit=200
  *   GET /api/verified-task-count                      — total verified task count for bypass frequency denominator (issue #1706)
  *   GET /api/verified-task-count?days=7
+ *   GET /api/selfupdate-health                        — daemon selfUpdate lag compliance rule (issue #1597)
+ *   GET /api/selfupdate-health?warn_commits=5&fail_commits=20&fail_hours=2
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
@@ -56,7 +58,9 @@ import {
   type FingerprintCheckResult,
   type FingerprintRecordResult,
   type LowScoreApprovedEntry,
+  type SelfUpdateCycleRecord,
 } from "../state/store.js";
+import { daemonStaleness } from "../utils/daemon-staleness.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("metrics-server");
@@ -364,6 +368,51 @@ export interface PRGuardSurgeSuppressionFeedResponse {
   }>;
   /** ISO timestamp of when this response was generated. */
   generated_at: string;
+}
+
+/**
+ * JSON response shape for GET /api/selfupdate-health (issue #1597).
+ *
+ * Surfaces daemon selfUpdate lag as a machine-readable compliance rule so the
+ * auditor-agent and the dashboard can flag when the daemon is running stale code.
+ *
+ * Thresholds (all configurable via query params):
+ *   warn_commits  — commits behind threshold for "warning" (default 5)
+ *   fail_commits  — commits behind threshold for "failing" (default 20)
+ *   fail_hours    — hours since last successful update for "failing" (default 2)
+ *
+ * Status logic (failing takes precedence):
+ *   "failing"  — commits_behind > fail_commits OR hours_since_last_update > fail_hours
+ *   "warning"  — commits_behind > warn_commits (and not failing)
+ *   "ok"       — daemon is up to date and was recently updated
+ */
+export interface SelfUpdateHealthResponse {
+  /** Compliance rule identifier. */
+  rule: "daemon-selfupdate-lag";
+  /** Overall status: ok | warning | failing. */
+  status: "ok" | "warning" | "failing";
+  /** Human-readable explanation of the current status. */
+  detail: string;
+  /** How many commits local HEAD is behind origin/main (from daemonStaleness()). */
+  commits_behind: number;
+  /** Short commit hash of the running daemon code. */
+  current_hash: string;
+  /** ISO timestamp of the last *successful* selfUpdate() invocation, or null if none recorded. */
+  last_self_update_at: string | null;
+  /** Outcome string from the last successful cycle ("up-to-date", "updated to <hash>", …). */
+  last_self_update_outcome: string | null;
+  /** Hours elapsed since the last successful selfUpdate, or null if none recorded. */
+  hours_since_last_update: number | null;
+  /** Threshold for "warning" status (commits). */
+  warning_commits_threshold: number;
+  /** Threshold for "failing" status (commits). */
+  failing_commits_threshold: number;
+  /** Threshold for "failing" status (hours since last successful update). */
+  failing_hours_threshold: number;
+  /** ISO timestamp of when this response was generated. */
+  generated_at: string;
+  /** Staleness computation error, or null. Non-null when git is unavailable. */
+  staleness_error: string | null;
 }
 
 /**
@@ -1139,6 +1188,114 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /api/selfupdate-health (issue #1597) ──────────────────────────────
+    // Daemon selfUpdate lag compliance rule: surfaces when the daemon is running
+    // stale code or has not successfully self-updated recently.
+    //
+    // Data sources:
+    //   - daemonStaleness()                               → commits_behind, current_hash
+    //   - store.getLastSelfUpdateCycle({ successOnly: true }) → last_self_update_at
+    //
+    // Query params (all optional):
+    //   warn_commits=N   — warning threshold in commits behind (default 5)
+    //   fail_commits=N   — failing threshold in commits behind (default 20)
+    //   fail_hours=N     — failing threshold in hours since last success (default 2)
+    if (url.pathname === "/api/selfupdate-health" && req.method === "GET") {
+      try {
+        // Parse configurable thresholds
+        const warnCommits = Math.max(
+          1,
+          parseInt(url.searchParams.get("warn_commits") ?? "5", 10) || 5,
+        );
+        const failCommits = Math.max(
+          warnCommits + 1,
+          parseInt(url.searchParams.get("fail_commits") ?? "20", 10) || 20,
+        );
+        const failHours = Math.max(
+          0.5,
+          parseFloat(url.searchParams.get("fail_hours") ?? "2") || 2,
+        );
+
+        // Fetch staleness from git (non-blocking — daemonStaleness is sync but
+        // runs with timeouts and catches errors internally).
+        const staleness = daemonStaleness(warnCommits);
+
+        // Fetch last successful self-update from the DB.
+        let lastCycle: SelfUpdateCycleRecord | null = null;
+        try {
+          lastCycle = store.getLastSelfUpdateCycle({ successOnly: true });
+        } catch {
+          // Table may not exist yet on older daemon versions — treat as no data.
+        }
+
+        const lastAt = lastCycle?.completed_at ?? null;
+        const lastOutcome = lastCycle?.outcome ?? null;
+
+        let hoursSinceLast: number | null = null;
+        if (lastAt) {
+          hoursSinceLast =
+            (Date.now() - new Date(lastAt).getTime()) / (60 * 60 * 1000);
+        }
+
+        // Classify status (failing takes precedence over warning)
+        let status: "ok" | "warning" | "failing" = "ok";
+        let detail: string;
+
+        const commitsBehind = staleness.commitsBehind;
+        const staleHours =
+          hoursSinceLast !== null ? Math.round(hoursSinceLast * 10) / 10 : null;
+
+        if (
+          commitsBehind > failCommits ||
+          (hoursSinceLast !== null && hoursSinceLast > failHours)
+        ) {
+          status = "failing";
+          if (
+            commitsBehind > failCommits &&
+            hoursSinceLast !== null &&
+            hoursSinceLast > failHours
+          ) {
+            detail = `daemon is ${commitsBehind} commits / ${staleHours}h behind origin/main`;
+          } else if (commitsBehind > failCommits) {
+            detail = `daemon is ${commitsBehind} commits behind origin/main (>${failCommits} threshold)`;
+          } else {
+            detail = `no successful selfUpdate in ${staleHours}h (>${failHours}h threshold)`;
+          }
+        } else if (commitsBehind > warnCommits) {
+          status = "warning";
+          detail = `daemon is ${commitsBehind} commits behind origin/main (>${warnCommits} threshold)`;
+        } else if (lastAt === null) {
+          // No selfUpdate recorded yet — fresh daemon or table missing.
+          detail = `daemon is up to date (${commitsBehind} commits behind) — no selfUpdate history yet`;
+        } else {
+          detail = `daemon is up to date (${commitsBehind} commits behind, last update ${staleHours}h ago)`;
+        }
+
+        const body: SelfUpdateHealthResponse = {
+          rule: "daemon-selfupdate-lag",
+          status,
+          detail,
+          commits_behind: commitsBehind,
+          current_hash: staleness.currentHash,
+          last_self_update_at: lastAt,
+          last_self_update_outcome: lastOutcome,
+          hours_since_last_update: hoursSinceLast,
+          warning_commits_threshold: warnCommits,
+          failing_commits_threshold: failCommits,
+          failing_hours_threshold: failHours,
+          generated_at: new Date().toISOString(),
+          staleness_error: staleness.error,
+        };
+        sendJson(res, 200, body);
+      } catch (err) {
+        log.warn("Failed to compute selfupdate health", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to compute selfupdate health" });
+      }
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -1170,6 +1327,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
         "POST /api/fingerprint/record",
         "/api/low-score-approved",
         "/api/verified-task-count",
+        "/api/selfupdate-health",
       ],
     });
   });

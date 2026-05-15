@@ -435,4 +435,115 @@ describe("MetricsServer", () => {
       expect(body.window_days).toBe(14);
     });
   });
+
+  // ── /api/selfupdate-health (issue #1597) ─────────────────────────────────────
+
+  describe("GET /api/selfupdate-health", () => {
+    type SelfUpdateHealthBody = {
+      rule: string;
+      status: string;
+      detail: string;
+      commits_behind: number;
+      current_hash: string;
+      last_self_update_at: string | null;
+      last_self_update_outcome: string | null;
+      hours_since_last_update: number | null;
+      warning_commits_threshold: number;
+      failing_commits_threshold: number;
+      failing_hours_threshold: number;
+      generated_at: string;
+      staleness_error: string | null;
+    };
+
+    it("returns 200 with required fields when no cycles recorded", async () => {
+      const { status, body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/selfupdate-health`,
+      ) as { status: number; body: SelfUpdateHealthBody };
+
+      expect(status).toBe(200);
+      expect(body.rule).toBe("daemon-selfupdate-lag");
+      expect(["ok", "warning", "failing"]).toContain(body.status);
+      expect(typeof body.detail).toBe("string");
+      expect(body.detail.length).toBeGreaterThan(0);
+      expect(typeof body.commits_behind).toBe("number");
+      expect(body.commits_behind).toBeGreaterThanOrEqual(0);
+      expect(typeof body.current_hash).toBe("string");
+      expect(body.last_self_update_at).toBeNull();
+      expect(body.last_self_update_outcome).toBeNull();
+      expect(body.hours_since_last_update).toBeNull();
+      expect(body.warning_commits_threshold).toBe(5);
+      expect(body.failing_commits_threshold).toBe(20);
+      expect(body.failing_hours_threshold).toBe(2);
+      expect(body.generated_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it("reflects last_self_update_at after a successful cycle is recorded", async () => {
+      store.recordSelfUpdateCycle({
+        durationMs: 3000,
+        success: true,
+        outcome: "up-to-date",
+        commitHash: "abc1234",
+      });
+
+      const { body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/selfupdate-health`,
+      ) as { body: SelfUpdateHealthBody };
+
+      expect(body.last_self_update_at).not.toBeNull();
+      expect(body.last_self_update_outcome).toBe("up-to-date");
+      // hours_since_last_update should be a small positive number (just recorded)
+      expect(typeof body.hours_since_last_update).toBe("number");
+      expect(body.hours_since_last_update).toBeGreaterThanOrEqual(0);
+      expect(body.hours_since_last_update).toBeLessThan(1); // less than 1 hour
+    });
+
+    it("reflects custom fail_hours and fail_commits thresholds in the response", async () => {
+      store.recordSelfUpdateCycle({
+        durationMs: 500,
+        success: true,
+        outcome: "up-to-date",
+      });
+
+      // Verify thresholds are reflected and status is a valid value.
+      // (We cannot reliably force 'failing' from hours in a unit test because
+      // the cycle completes_at is set to now() and the min clamp is 0.5h.)
+      const { body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/selfupdate-health?fail_hours=1&fail_commits=9999`,
+      ) as { body: SelfUpdateHealthBody };
+
+      expect(body.failing_hours_threshold).toBe(1);
+      expect(body.failing_commits_threshold).toBe(9999);
+      // Status depends on actual git state — just check it's valid
+      expect(["ok", "warning", "failing"]).toContain(body.status);
+      expect(typeof body.detail).toBe("string");
+    });
+
+    it("respects custom warn_commits and fail_commits thresholds", async () => {
+      const { body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/selfupdate-health?warn_commits=2&fail_commits=10&fail_hours=99`,
+      ) as { body: SelfUpdateHealthBody };
+
+      expect(body.warning_commits_threshold).toBe(2);
+      expect(body.failing_commits_threshold).toBe(10);
+      expect(body.failing_hours_threshold).toBe(99);
+      // status must be one of the valid values regardless of git state
+      expect(["ok", "warning", "failing"]).toContain(body.status);
+    });
+
+    it("does not reflect failed selfUpdate cycles in last_self_update_at", async () => {
+      store.recordSelfUpdateCycle({
+        durationMs: 1000,
+        success: false,
+        outcome: "git fetch timed out",
+      });
+
+      const { body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/selfupdate-health`,
+      ) as { body: SelfUpdateHealthBody };
+
+      // Failed cycles must NOT appear in last_self_update_at (successOnly=true)
+      expect(body.last_self_update_at).toBeNull();
+      expect(body.hours_since_last_update).toBeNull();
+    });
+  });
 });
