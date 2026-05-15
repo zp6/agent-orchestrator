@@ -80,6 +80,10 @@ Prior P0 sweep — issues closed in the last 7 days:
 **Tier D — Architectural sophistication** (unlocks at $10k/mo MRR)
 - Ensemble multi-model voting; tiered escalation (Haiku → Sonnet → Opus)
 
+## Planned (reliability improvements)
+
+- **#1708 — Shared dispatch_id for structural duplicate-dispatch prevention** — wire the fingerprint store (#1524) into the dispatch path: generate a stable `dispatch_id` per dispatch attempt, record it before calling the proxy, skip the proxy call on duplicates. Proxy side accepts `dispatchId` and checks own dedup store before spawning. Complements #1573 (post-hoc closed-issue guard) with a pre-spawn structural gate. Coordinated change: orchestrator first, then proxy.
+
 ## Ideas
 
 - **Revenue path 4–8 from `docs/revenue-paths.md`** — early-access orchestrator sales, 24/7 services, token-gated research, OSS problem-solving. Each is a focused workstream once a path is selected.
