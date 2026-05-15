@@ -303,6 +303,11 @@ export class AgentClient {
       taskType?: TaskType;
       /** AbortSignal to cancel the in-flight HTTP call (e.g. when task is superseded). */
       signal?: AbortSignal;
+      /**
+       * Stable dispatch identifier forwarded as `X-Dispatch-Id` to the proxy (issue #1708).
+       * Enables structural duplicate-dispatch prevention at the proxy layer.
+       */
+      dispatchId?: string;
     },
   ): Promise<AgentResponse> {
     const workingDir = getAgentDir(this.config, agentName);
@@ -314,6 +319,7 @@ export class AgentClient {
       apiKey,
       baseUrl,
       provider,
+      dispatchId: options?.dispatchId,
     });
 
     const githubRepo = this.config.agents[agentName]?.github ?? "";

@@ -663,6 +663,15 @@ export class Dispatcher {
       parentTaskId?: string;
       /** Optional step id when this dispatch is part of a plan execution. */
       stepId?: string;
+      /**
+       * Stable identifier for this logical dispatch attempt (issue #1708).
+       * When provided, the dispatcher records it in the idempotency fingerprint
+       * store before calling the agent and skips the proxy call if the same id
+       * has already been seen within the TTL window (24 h).  When omitted, a
+       * fresh ulid is auto-generated so every caller automatically gets the
+       * X-Dispatch-Id header on the proxy request.
+       */
+      dispatchId?: string;
     },
   ): Promise<DispatchResult> {
     // Block infrastructure-marker tasks from being dispatched to agents.
@@ -1756,6 +1765,39 @@ export class Dispatcher {
       sourceRef: options?.sourceRef,
     });
 
+    // ── Dispatch idempotency gate (issue #1708) ─────────────────────────────
+    // Generate a stable dispatch_id for this attempt and record it in the
+    // fingerprint store.  If recorded=false the same id was already seen
+    // within the 24-hour TTL, which means either a concurrent daemon instance
+    // already fired this exact dispatch or the caller is retrying with a
+    // preserved id.  In both cases: skip the proxy call to prevent duplicate
+    // CLI spawns.
+    const dispatchId = options?.dispatchId ?? ulid();
+    const { recorded: isNewDispatch } = this.store.recordFingerprint(
+      "dispatch",
+      dispatchId,
+      task.id,
+      24,
+    );
+    if (!isNewDispatch) {
+      this.log.warn("Skipping duplicate dispatch — dispatch_id already seen", {
+        dispatchId,
+        taskId: task.id,
+        agentName,
+        sourceRef: options?.sourceRef,
+      });
+      return {
+        taskId: task.id,
+        agentName,
+        response: {
+          content: "already-dispatched",
+          model: "",
+          usage: { input_tokens: 0, output_tokens: 0 },
+          stop_reason: "duplicate",
+        },
+      };
+    }
+
     try {
       // Send to agent with complexity-routed model
       const response = await this.client.send(agentName, messageToSend, {
@@ -1763,6 +1805,7 @@ export class Dispatcher {
         taskType,
         model: modelRoute.model,
         signal: options?.signal,
+        dispatchId,
       });
 
       // Log the response

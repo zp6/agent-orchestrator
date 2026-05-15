@@ -3577,3 +3577,101 @@ describe("dispatch() — failure genome routing (issue #1131)", () => {
     expect(mockSend.mock.calls[0][0]).toBe("primary-agent");
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// Dispatcher.dispatch — dispatch_id idempotency gate (issue #1708)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("Dispatcher.dispatch — dispatch_id idempotency gate", () => {
+  let store: StateStore;
+  let dispatcher: Dispatcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store = new StateStore(":memory:");
+    dispatcher = new Dispatcher(makeConfig(), store);
+  });
+
+  it("dispatches normally on first call with a dispatch_id", async () => {
+    mockSend.mockResolvedValueOnce({
+      content: "task complete",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    const result = await dispatcher.dispatch("do something", {
+      agentName: "test-agent",
+      source: "manual",
+      dispatchId: "test-dispatch-id-001",
+    });
+
+    expect(mockSend).toHaveBeenCalledOnce();
+    expect(result.response.content).toBe("task complete");
+    expect(result.response.stop_reason).not.toBe("duplicate");
+  });
+
+  it("skips proxy call and returns already-dispatched on second call with same dispatch_id", async () => {
+    mockSend.mockResolvedValue({
+      content: "task complete",
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+
+    const dispatchId = "test-dispatch-id-002";
+
+    // First call — should proceed normally
+    const first = await dispatcher.dispatch("do something", {
+      agentName: "test-agent",
+      source: "manual",
+      dispatchId,
+    });
+
+    expect(mockSend).toHaveBeenCalledOnce();
+    expect(first.response.stop_reason).not.toBe("duplicate");
+
+    // Second call with same dispatch_id — should be short-circuited
+    const second = await dispatcher.dispatch("do something", {
+      agentName: "test-agent",
+      source: "manual",
+      dispatchId,
+    });
+
+    // send() must NOT have been called a second time
+    expect(mockSend).toHaveBeenCalledOnce();
+    expect(second.response.content).toBe("already-dispatched");
+    expect(second.response.stop_reason).toBe("duplicate");
+  });
+
+  it("generates a fresh dispatch_id when none is provided (no dedup across calls)", async () => {
+    mockSend.mockResolvedValue({
+      content: "ok",
+      usage: { input_tokens: 5, output_tokens: 5 },
+    });
+
+    // Two calls without an explicit dispatch_id — each gets its own ulid,
+    // so both should proceed to the proxy.
+    await dispatcher.dispatch("do something", { agentName: "test-agent", source: "manual" });
+    await dispatcher.dispatch("do something", { agentName: "test-agent", source: "manual" });
+
+    expect(mockSend).toHaveBeenCalledTimes(2);
+  });
+
+  it("different dispatch_ids on same agent are treated as independent dispatches", async () => {
+    mockSend.mockResolvedValue({
+      content: "ok",
+      usage: { input_tokens: 5, output_tokens: 5 },
+    });
+
+    await dispatcher.dispatch("task A", {
+      agentName: "test-agent",
+      source: "manual",
+      dispatchId: "dispatch-A",
+    });
+    await dispatcher.dispatch("task B", {
+      agentName: "test-agent",
+      source: "manual",
+      dispatchId: "dispatch-B",
+    });
+
+    // Two different dispatch_ids → two proxy calls
+    expect(mockSend).toHaveBeenCalledTimes(2);
+  });
+});

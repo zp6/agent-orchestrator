@@ -10,6 +10,7 @@ import { queryPRGuardCooldown, DEFAULT_REVIEWER_URL } from "../client/pr-guard-c
 import { checkMergeStall } from "./merge-stall-guard.js";
 import { validateLinearCredential } from "../client/linear-credential-validator.js";
 import { sanitizeBountyContent, isExternalRepoAllowed } from "../orchestrator/bounty-sanitizer.js";
+import { ulid } from "ulid";
 export { dispatchRevenueWatcher } from "./revenue-watcher.js";
 
 /**
@@ -435,7 +436,16 @@ function fireAndForget(
    */
   controller?: AbortController,
 ): void {
-  dispatcher.dispatch(message, { ...options, signal: controller?.signal }).then(async (result) => {
+  // Generate a stable dispatch_id for this logical dispatch attempt (issue #1708).
+  // The same id is forwarded as X-Dispatch-Id to the proxy so the proxy can
+  // detect and reject duplicate spawns from SDK-level retries.
+  // The Dispatcher records the id in the idempotency fingerprint store; if the
+  // same id arrives again within 24 h the Dispatcher short-circuits without
+  // calling the agent.
+  const dispatchId = ulid();
+  log.debug("Dispatch attempt started", { dispatchId, sourceRef: options.sourceRef });
+
+  dispatcher.dispatch(message, { ...options, signal: controller?.signal, dispatchId }).then(async (result) => {
     inFlightDispatches.delete(options.sourceRef);
     // Release the issue claim now that the dispatch has settled
     if (claimOwner) {

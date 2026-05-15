@@ -18,6 +18,16 @@ export function createProxyClient(
     apiKey?: string;
     baseUrl?: string;
     provider?: string;
+    /**
+     * Stable identifier for this logical dispatch attempt (issue #1708).
+     * Forwarded as the `X-Dispatch-Id` header so the proxy can detect and
+     * reject duplicate requests that arrive from SDK-level retries or
+     * concurrent daemon instances.  When the same dispatch_id is received
+     * by the proxy while the first request is still in progress, the proxy
+     * returns 409 Conflict + `Retry-After: 30` without spawning a second
+     * CLI process.
+     */
+    dispatchId?: string;
   },
 ): Anthropic {
   const headers: Record<string, string> = {
@@ -28,6 +38,9 @@ export function createProxyClient(
   }
   if (options?.provider) {
     headers["x-provider"] = options.provider;
+  }
+  if (options?.dispatchId) {
+    headers["x-dispatch-id"] = options.dispatchId;
   }
 
   return new Anthropic({
