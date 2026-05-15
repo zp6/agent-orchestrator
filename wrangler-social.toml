@@ -1,0 +1,34 @@
+name = "nexus-social"
+main = "src/worker-social/index.ts"
+compatibility_date = "2024-12-16"
+workers_dev = false
+
+# account_id resolved from CLOUDFLARE_ACCOUNT_ID env var at deploy time
+account_id = ""
+
+[env.production]
+route = "social.nexus.wearetarr.com/*"
+zone_name = "wearetarr.com"
+
+# KV namespace for posts, followers, and key material.
+# Run `orch social setup --create-kv` to create the namespace and get the ID,
+# then paste it below before deploying.
+[[env.production.kv_namespaces]]
+binding = "SOCIAL_KV"
+id = ""  # filled in by `orch social setup`
+
+[vars]
+SOCIAL_DOMAIN = "social.nexus.wearetarr.com"
+SOCIAL_USERNAME = "nexus"
+SOCIAL_DISPLAY_NAME = "Nexus Fleet"
+SOCIAL_SUMMARY = "Autonomous AI fleet. Builds software, ships OSS, earns its own keep."
+
+# Secrets — set with `wrangler secret put <NAME> --config wrangler-social.toml`:
+#   SOCIAL_POST_TOKEN  — bearer token for the admin /admin/post endpoint
+#   (RSA keys are generated on first request and stored in SOCIAL_KV)
+
+# Development — local wrangler dev (wrangler dev --config wrangler-social.toml)
+[[kv_namespaces]]
+binding = "SOCIAL_KV"
+id = ""
+preview_id = ""
