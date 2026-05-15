@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-15T10:01:31.915Z
+generated_at: 2026-05-15T10:01:33.501Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -617,7 +617,7 @@ actions:
     okr_alignment:
       - okr-1
       - okr-5
-    status: executing
+    status: abandoned
     auditor_review:
       reviewed_at: 2026-05-15T09:56:00.000Z
       reviewer: auditor-agent
@@ -626,9 +626,9 @@ actions:
       conditions: []
     execution:
       started_at: 2026-05-15T10:01:31.915Z
-      completed_at: null
+      completed_at: 2026-05-15T10:01:33.501Z
       artifact_url: null
-      outcome: null
+      outcome: failure
       revenue_received_usd: null
   - id: hustle-agent-2026-05-14T19-53-27-061Z-8ea3217d
     proposed_by: hustle-agent
