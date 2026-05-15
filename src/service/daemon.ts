@@ -76,7 +76,7 @@ import {
   verifyAndReviseTask,
 } from "./reviewer-ops.js";
 import { queueForApproval } from "./telegram-approval-queue.js";
-import { executeCoordinatedMerge } from "../orchestrator/multi-repo-coordinator.js";
+import { executeCoordinatedMerge, checkAndAdvanceCoordination, NO_CODE_CHANGES_FALLBACK } from "../orchestrator/multi-repo-coordinator.js";
 import { DagRuntime } from "../orchestrator/dag-runtime.js";
 import { Planner } from "../orchestrator/planner.js";
 import { pollVerificationOutcomes } from "../orchestrator/verification-outcome-poller.js";
@@ -4447,6 +4447,7 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
   private async dispatchPendingCoordinationGroups(time: string): Promise<void> {
     let groups: Array<{
       id: string;
+      parentSourceRef: string | null;
       childTaskIds: Record<string, string>;
     }>;
     try {
@@ -4463,6 +4464,44 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
     );
 
     for (const group of groups) {
+      // ── Guard 1: cancel the entire group if the source issue is closed ──────
+      // A coordinated change originating from a closed issue has no actionable
+      // work remaining. Cancel all pending child tasks immediately rather than
+      // dispatching agents into ghost work (issue #1691).
+      if (group.parentSourceRef) {
+        const sourceMatch = /^([^#]+)#(\d+)$/.exec(group.parentSourceRef);
+        if (sourceMatch) {
+          const sourceRepo = sourceMatch[1]!;
+          const issueNumber = parseInt(sourceMatch[2]!, 10);
+          const isOpen = cachedIsIssueOpen(sourceRepo, issueNumber);
+          if (!isOpen) {
+            this.log.warn(
+              "Coordination group source issue is closed — cancelling group without dispatch",
+              {
+                groupId: group.id,
+                parentSourceRef: group.parentSourceRef,
+              },
+            );
+            // Mark all pending child tasks as failed so the group can be cleanly closed.
+            for (const [, childTaskId] of Object.entries(group.childTaskIds)) {
+              const childTask = this.store.getTask(childTaskId);
+              if (childTask?.status === "pending") {
+                this.store.updateTask(childTaskId, {
+                  status: "failed",
+                  result: `Coordination group cancelled: source issue ${group.parentSourceRef} is closed — no dispatch needed.`,
+                });
+              }
+            }
+            this.store.updateCoordinationGroup(group.id, { status: "failed" });
+            console.log(
+              `[${time}] Coordination group ${group.id.slice(0, 8)} → failed` +
+                ` (source issue closed: ${group.parentSourceRef})`,
+            );
+            continue;
+          }
+        }
+      }
+
       const childEntries = Object.entries(group.childTaskIds);
       let anyDispatched = false;
 
@@ -4480,6 +4519,37 @@ docker inspect ${containerName} --format '{{json .Config.Healthcheck}}' 2>&1
 
         if (childTask.status !== "pending") {
           // Already dispatched or completed in a prior cycle — skip.
+          continue;
+        }
+
+        // ── Guard 2: skip dispatch when no actionable implementation was extracted ──
+        // When validateChangeSetDescription() could not extract a meaningful
+        // per-repo description from the parent issue it substitutes
+        // NO_CODE_CHANGES_FALLBACK. Dispatching such a task wastes an agent
+        // cycle and creates noise. Mark it done immediately (issue #1691).
+        if (childTask.description?.includes(NO_CODE_CHANGES_FALLBACK)) {
+          this.log.info(
+            "Coordination child skipped: no actionable implementation section in description",
+            {
+              groupId: group.id,
+              repo,
+              childTaskId,
+            },
+          );
+          this.store.updateTask(childTaskId, {
+            status: "done",
+            result: `Skipped: no code changes required for \`${repo}\`. The parent issue had no actionable implementation section for this repo.`,
+          });
+          // Still need to advance coordination state in case this was the last
+          // pending child — checkAndAdvanceCoordination is idempotent and safe
+          // to call with a task that is already "done".
+          checkAndAdvanceCoordination(childTaskId, this.store, this.config).catch((err) => {
+            this.log.error("checkAndAdvanceCoordination failed after skip (non-fatal)", {
+              childTaskId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+          anyDispatched = true; // treat as dispatched so the group advances past "pending"
           continue;
         }
 
