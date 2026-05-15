@@ -669,3 +669,45 @@ actions:
       artifact_url: null
       outcome: null
       revenue_received_usd: null
+  - id: hustle-agent-2026-05-15T04-38-05-067Z-9bcfa39a
+    proposed_by: hustle-agent
+    proposed_at: 2026-05-15T04:38:05.067Z
+    type: github-pr-open
+    target: https://github.com/dydxprotocol/v4-web/issues/1961
+    summary: "Open PR fixing stale issue dydxprotocol/v4-web#1961: CreateMarketPermissionless error"
+    reasoning: |-
+      Stale 194 days, 1 comment — unaddressed error in market creation flow.
+
+      Repo: dydxprotocol/v4-web. Issue: https://github.com/dydxprotocol/v4-web/issues/1961
+
+      Impact score: 63/100 (age + comment-velocity heuristic).
+      Breakdown: age_score=100 (194d > 180d cap), comment_score=8 (1 comment × 8), raw=round(100×0.6 + 8×0.4)=63, no title penalty.
+
+      Issue: CreateMarket call fails with "market not found" cosmos/cosmos-sdk RPC error. User asks whether a pre-call is needed. Likely a missing prerequisite step or stale frontend state that does not re-check market existence before submitting the transaction.
+
+      Fleet capability: TypeScript, React, blockchain frontend. dydxprotocol/v4-web is a TypeScript/React SPA — well within scope.
+
+      Action type: open a PR with the fix and the fleet wallet address in the description as a voluntary tip jar. Per the #1642 pivot (Immunefi has no submission API), direct-PR-to-project is the fleet-native zero-touch path.
+    expected_value:
+      currency: USD
+      amount: 315
+      confidence: medium
+    source_signals:
+      - "stale-issue-scanner: dydxprotocol/v4-web#1961 stale 194d"
+      - "comment-velocity: 1 comment"
+    okr_alignment:
+      - okr-1
+      - okr-5
+    status: proposed
+    auditor_review:
+      reviewed_at: null
+      reviewer: null
+      decision: null
+      reasoning: null
+      conditions: []
+    execution:
+      started_at: null
+      completed_at: null
+      artifact_url: null
+      outcome: null
+      revenue_received_usd: null
