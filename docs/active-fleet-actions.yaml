@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-15T10:01:33.501Z
+generated_at: 2026-05-15T10:18:48.233Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -656,7 +656,7 @@ actions:
     okr_alignment:
       - okr-1
       - okr-5
-    status: approved
+    status: executing
     auditor_review:
       reviewed_at: 2026-05-15T10:09:30.000Z
       reviewer: auditor-agent
@@ -664,7 +664,7 @@ actions:
       reasoning: "Action passes all 5 guardrails. (1) Charter Article III: no payout signals in reasoning text — no outflow to individuals. (2) Capital discipline: github-pr-open is in ZERO_SPEND_ACTION_TYPES — check skipped by design; zero on-chain spend regardless of treasury level. (3) OKR alignment: okr-1, okr-5 present. (4) Duplicate target: no in-flight action targets scaffold-eth/scaffold-eth-2#807 (checked against 3 in-flight: dydxprotocol/v4-web#1961, ensdomains/ens-app-v3#1038, ethereum/ethereum-org-website#13144). (5) Low-value gate: $395 medium confidence — above $5/low threshold. scaffold-eth/scaffold-eth-2#807 is 484 days stale with 6 comments, impact 79/100. Scaffold-ETH 2 is an actively-maintained TypeScript/React development framework; 484-day stale Vercel CLI issue signals maintainer bandwidth constraints, not a rejected idea. Medium confidence and $395 EV are consistent with fleet outreach track record on similar targets. Treasury live probe: $2.060154 USDC total (Base mainnet, Morpho vault $2.060154 + liquid $0, probed 2026-05-15T10:09:22Z)."
       conditions: []
     execution:
-      started_at: null
+      started_at: 2026-05-15T10:18:48.233Z
       completed_at: null
       artifact_url: null
       outcome: null
@@ -794,7 +794,7 @@ actions:
     proposed_at: 2026-05-15T10:11:40.404Z
     type: github-pr-open
     target: https://github.com/compound-finance/compound-protocol/issues/235
-    summary: "Open PR adding Sepolia testnet support for compound-finance/compound-protocol#235"
+    summary: Open PR adding Sepolia testnet support for compound-finance/compound-protocol#235
     reasoning: |-
       Stale 360 days, 5 comments — community request with no maintainer action.
 
