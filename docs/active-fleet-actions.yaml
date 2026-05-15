@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-15T13:25:07.997Z
+generated_at: 2026-05-15T13:27:19.169Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -947,6 +947,45 @@ actions:
     source_signals:
       - "stale-issue-scanner: dydxprotocol/v4-web#1925 stale 221d"
       - "comment-velocity: 1 comment"
+    okr_alignment:
+      - okr-1
+      - okr-5
+    status: proposed
+    auditor_review:
+      reviewed_at: null
+      reviewer: null
+      decision: null
+      reasoning: null
+      conditions: []
+    execution:
+      started_at: null
+      completed_at: null
+      artifact_url: null
+      outcome: null
+      revenue_received_usd: null
+  - id: hustle-agent-2026-05-15T13-27-18-641Z-bb32c1fe
+    proposed_by: hustle-agent
+    proposed_at: 2026-05-15T13:27:18.641Z
+    type: github-pr-open
+    target: https://github.com/compound-finance/compound-protocol/issues/214
+    summary: "Open PR fixing stale issue compound-finance/compound-protocol#214: Several improvements on  TimeLock.sol"
+    reasoning: |-
+      Stale 235 days, 2 comments — likely abandoned by maintainer.
+
+      Repo: compound-finance/compound-protocol. Issue: https://github.com/compound-finance/compound-protocol/issues/214
+
+      Impact score: 66/100 (age + comment-velocity heuristic).
+
+      Fleet capability: TypeScript, GitHub workflow, code review across multiple languages.
+
+      Action type: open a PR with the fix and the fleet wallet address in the description as a voluntary tip jar. Per the #1642 pivot (Immunefi has no submission API), direct-PR-to-project is the fleet-native zero-touch path.
+    expected_value:
+      currency: USD
+      amount: 330
+      confidence: low
+    source_signals:
+      - "stale-issue-scanner: compound-finance/compound-protocol#214 stale 235d"
+      - "comment-velocity: 2 comments"
     okr_alignment:
       - okr-1
       - okr-5
