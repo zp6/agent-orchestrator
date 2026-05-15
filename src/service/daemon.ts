@@ -84,6 +84,7 @@ import { pollVerificationOutcomes } from "../orchestrator/verification-outcome-p
 import { startMetricsServer, DEFAULT_METRICS_PORT } from "./metrics-server.js";
 import { reapStaleComposeProcesses } from "../utils/compose-reaper.js";
 import { sweepStalePendingTasks } from "../triggers/stale-task-sweeper.js";
+import { makeCoronerClient, type CoronerClient } from "../services/coroner-client.js";
 import type { Server } from "node:http";
 
 const DEFAULT_POLL_INTERVAL_MS = 300_000; // 5 minutes
@@ -375,6 +376,7 @@ export class Daemon {
   private prReviewer: PRReviewer;
   private prRetryQueue: PRCreationRetryQueue;
   private dagRuntime: DagRuntime;
+  private coronerClient: CoronerClient | null = null;
   private pollInterval: number;
   private cycleCount = 0;
   private log = createLogger("daemon");
@@ -518,6 +520,14 @@ export class Daemon {
     this.prRetryQueue = new PRCreationRetryQueue(this.store);
     this.dagRuntime = new DagRuntime(this.store, this.dispatcher, new Planner(this.config, this.store));
     this.pollInterval = pollIntervalMs ?? this.config.daemon?.poll_interval_ms ?? DEFAULT_POLL_INTERVAL_MS;
+
+    // Lazy coroner client — fire-and-forget failure events to proxy PR #603.
+    // Skipped silently if the proxy URL is not configured.
+    try {
+      this.coronerClient = makeCoronerClient(this.config.proxy.url);
+    } catch {
+      this.coronerClient = null;
+    }
   }
 
   async start(): Promise<void> {
@@ -1857,6 +1867,19 @@ export class Daemon {
           retry_count: newRetryCount,
           next_retry_at: nextRetryAt,
         });
+
+        // Deliver permanent failures to the coroner webhook (proxy PR #603).
+        // Fire-and-forget — does not block the daemon cycle on any error.
+        if (!willRetry && this.coronerClient && task.agent_name) {
+          void this.coronerClient.deliverFailureEvent({
+            taskId: task.id,
+            agentName: task.agent_name,
+            failureReason: `Timed out: dispatched ${Math.round(age / 60000)} minutes ago with no response`,
+            taskTitle: task.title,
+            sourceRef: task.source_ref,
+            retryCount: newRetryCount,
+          });
+        }
       }
     }
   }
