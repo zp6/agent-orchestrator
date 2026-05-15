@@ -436,6 +436,89 @@ describe("Dispatcher.dispatchCoordinationChild", () => {
     const [, messageArg] = (client.send as ReturnType<typeof vi.fn>).mock.calls[0]!;
     expect(messageArg).toContain("Target repository: `rapartlu/agent-dashboard`");
   });
+
+  // ── issue agent-reviewer#714: "What to implement in X" label must match implementing repo ──
+
+  it("rewrites a mismatched 'What to implement in X' label to match the resolved implementing repo", async () => {
+    // The task description has "What to implement in `rapartlu/agent-orchestrator`"
+    // but the coordination group says the implementing repo for this task is
+    // rapartlu/agent-dashboard. The dispatched message must use the correct label.
+    const task = makeChildTask({
+      description:
+        "Part of coordinated change.\n\n" +
+        "**What to implement in `rapartlu/agent-orchestrator`:**\n" +
+        "Add a coordination status widget.\n\n" +
+        "**Sibling repos:** none.",
+      agent_name: "claude-orchestrator-dashboard",
+      source_ref: "rapartlu/agent-orchestrator#746",
+    });
+
+    const coordinationGroupFixture = {
+      id: "01GROUPID",
+      parentTaskId: "01PARENTTASK",
+      parentSourceRef: "rapartlu/agent-orchestrator#746",
+      changeSets: [],
+      childTaskIds: {
+        // The implementing repo for this task is agent-dashboard, not agent-orchestrator
+        "rapartlu/agent-dashboard": task.id,
+      },
+      childPRNumbers: {},
+      childPRUrls: {},
+      status: "pending" as const,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const storeWithGroup = makeMockStore({
+      getCoordinationGroupByChildTaskId: vi.fn().mockReturnValue(coordinationGroupFixture),
+    });
+
+    const localDispatcher = makeDispatcher(storeWithGroup, client);
+    await localDispatcher.dispatchCoordinationChild(task);
+
+    const [, messageArg] = (client.send as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    // Label must be rewritten to the implementing repo
+    expect(messageArg).toContain("**What to implement in `rapartlu/agent-dashboard`:**");
+    // Original wrong label must not appear
+    expect(messageArg).not.toContain("**What to implement in `rapartlu/agent-orchestrator`:**");
+    // Target header must also use the correct implementing repo
+    expect(messageArg).toContain("Target repository: `rapartlu/agent-dashboard`");
+  });
+
+  it("leaves the 'What to implement in X' label unchanged when it already matches the implementing repo", async () => {
+    const task = makeChildTask({
+      description:
+        "Part of coordinated change.\n\n" +
+        "**What to implement in `rapartlu/agent-dashboard`:**\n" +
+        "Add a coordination status widget.\n\n",
+      agent_name: "claude-orchestrator-dashboard",
+      source_ref: "rapartlu/agent-orchestrator#746",
+    });
+
+    const coordinationGroupFixture = {
+      id: "01GROUPID",
+      parentTaskId: "01PARENTTASK",
+      parentSourceRef: "rapartlu/agent-orchestrator#746",
+      changeSets: [],
+      childTaskIds: { "rapartlu/agent-dashboard": task.id },
+      childPRNumbers: {},
+      childPRUrls: {},
+      status: "pending" as const,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const storeWithGroup = makeMockStore({
+      getCoordinationGroupByChildTaskId: vi.fn().mockReturnValue(coordinationGroupFixture),
+    });
+
+    const localDispatcher = makeDispatcher(storeWithGroup, client);
+    await localDispatcher.dispatchCoordinationChild(task);
+
+    const [, messageArg] = (client.send as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(messageArg).toContain("**What to implement in `rapartlu/agent-dashboard`:**");
+    expect(messageArg).toContain("Target repository: `rapartlu/agent-dashboard`");
+  });
 });
 
 // ── Tests: daemon dispatchPendingCoordinationGroups (via store mock) ──────────

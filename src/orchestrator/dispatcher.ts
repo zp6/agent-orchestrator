@@ -2300,7 +2300,6 @@ export class Dispatcher {
     }
 
     const conversationId = ulid();
-    const message = task.description ?? task.title;
 
     // Issue #1537: child tasks inherit source_ref from the parent (origin) task,
     // so extracting the repo from source_ref yields the origin repo, not the
@@ -2312,6 +2311,34 @@ export class Dispatcher {
       ? Object.entries(coordinationGroup.childTaskIds)
           .find(([, taskId]) => taskId === task.id)?.[0]
       : undefined;
+
+    // Issue agent-reviewer#714: the "What to implement in `X`" label is baked
+    // into the task description at creation time using cs.repo. When the
+    // resolved implementing repo (from childTaskIds) differs from the embedded
+    // label — e.g. due to a detection false-positive or a stale coordination
+    // group record — the label contradicts the target-repo header and confuses
+    // the receiving agent. Normalise it here at the dispatch boundary so the
+    // two signals are always consistent.
+    let message = task.description ?? task.title;
+    if (implementingRepo) {
+      const labelPattern = /\*\*What to implement in `([^`]+)`:\*\*/;
+      const labelMatch = labelPattern.exec(message);
+      if (labelMatch && labelMatch[1] !== implementingRepo) {
+        this.log.warn(
+          "dispatchCoordinationChild: correcting mismatched 'What to implement in' repo label",
+          {
+            taskId: task.id,
+            embeddedRepo: labelMatch[1],
+            implementingRepo,
+          },
+        );
+        message = message.replace(
+          labelPattern,
+          `**What to implement in \`${implementingRepo}\`:**`,
+        );
+      }
+    }
+
     const repoHeader = implementingRepo
       ? buildTargetRepoHeaderFromRepo(implementingRepo)
       : buildTargetRepoHeader(task.source_ref);
