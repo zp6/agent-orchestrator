@@ -76,6 +76,23 @@ export type {
   ScopeContractViolationType,
 } from "./reviewer/scope-contract.js";
 
+// PR preflight URL gate — external dependency reachability checks before
+// `gh pr create` / `orch preflight` submission.
+export {
+  formatPreflightHelp,
+  parsePreflightArgs,
+  scanPreflightUrlCandidates,
+  checkUrlsInDiff,
+  formatPreflightFailureReport,
+} from "./reviewer/preflight.js";
+export type {
+  PreflightCliOptions,
+  PreflightCliResult,
+  PreflightFailure,
+  PreflightReport,
+} from "./reviewer/preflight.js";
+export { runPreflightCli } from "./cli/preflight.js";
+
 // Agent quality trend sparklines — `/agent-trends` API payload (issue #156).
 //
 // Mount in the orchestrator or dashboard server:

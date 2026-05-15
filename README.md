@@ -18,6 +18,7 @@ Quality and oversight layer for the [Claude Agent Orchestrator](https://github.c
 | `IssueCreator` | Programmatically opens GitHub issues on agent repos |
 | `createNotifier` | Sends Telegram escalation alerts and health recovery notices |
 | `TelegramCommandHandler` | Two-way Telegram bot wired to the live `state.db` |
+| `runPreflightCli()` | CLI helper for `orch preflight`, including URL reachability checks and caching |
 
 ---
 
@@ -158,6 +159,12 @@ The package also exports direct payload builders that the dashboard or orchestra
 - `getAgentTrendsApiPayload(store)` → `GET /agent-trends`
 - `getQualityAnomaliesApiPayload(store, opts)` → `GET /quality-anomalies`
 - `getReroutesApiPayload(store, opts)` → `GET /api/reroutes`
+
+## CLI preflight
+
+`orch preflight` runs the PR pre-flight checklist before `gh pr create` and now includes an external-URL reachability gate.
+
+Use `--skip-url-check` only for intentional stubs marked with `// @preflight-skip-url-check` adjacent to the constant.
 
 ---
 

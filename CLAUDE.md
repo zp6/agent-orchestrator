@@ -40,6 +40,7 @@ The `TRIAGE_OUTPUT_SCHEMA` and `TRIAGE_REQUIRED_FIELDS` constants exported from 
 - Every PR must have `Closes #N` in the body
 - Agents use `Co-Authored-By: <agent-name> <agent-name@agent>` in commits
 - One issue, one branch, one PR — no bundling
+- `orch preflight` includes an external-URL reachability gate before PR submission; use `--skip-url-check` only for intentional stubs marked with `// @preflight-skip-url-check`
 - PRs with merge conflicts get auto-rebased; if rebase fails, escalate
 
 ## Review Guidelines

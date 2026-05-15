@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Quality and oversight layer for the Claude Agent Orchestrator \u2014 PR review, task verification, supervision, and improvement detection.",
   "type": "module",
+  "bin": {
+    "orch": "./dist/cli/orch.js"
+  },
   "scripts": {
     "build": "tsc && node scripts/copy-schema-contract.mjs",
     "prepare": "tsc && node scripts/copy-schema-contract.mjs",
