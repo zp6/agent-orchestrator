@@ -167,10 +167,16 @@ export function scanPreflightUrlCandidates(diffText: string): PreflightUrlCandid
   const candidates: PreflightUrlCandidate[] = [];
 
   for (const block of blocks) {
-    if (block.hasSkipMarker) {
-      continue;
-    }
+    let skipNextAddedLine = false;
     for (const line of block.lines) {
+      if (line.text.includes(SKIP_MARKER)) {
+        skipNextAddedLine = true;
+        continue;
+      }
+      if (skipNextAddedLine) {
+        skipNextAddedLine = false;
+        continue;
+      }
       for (const match of line.text.matchAll(URL_PATTERN)) {
         const url = trimTrailingPunctuation(match[0] ?? "");
         if (!url) continue;
@@ -227,7 +233,7 @@ export async function checkUrlsInDiff(
       cacheChanged,
     );
 
-    if (!rootResult.ok) {
+    if (isRootFailure(rootResult)) {
       for (const candidate of items) {
         failures.push({
           url: candidate.url,
@@ -243,7 +249,7 @@ export async function checkUrlsInDiff(
 
     for (const candidate of items) {
       const url = normalizeProbeUrl(candidate.url);
-      if (isRootPath(url.pathname, url.search)) {
+      if (isRootPath(url.pathname, url.search) || !shouldPathProbe(url.pathname)) {
         continue;
       }
 
@@ -396,6 +402,15 @@ function isRootPath(pathname: string, search: string): boolean {
   return (pathname === "/" || pathname === "") && search === "";
 }
 
+function shouldPathProbe(pathname: string): boolean {
+  const segments = pathname.split("/").filter(Boolean);
+  if (segments.length === 0) {
+    return false;
+  }
+
+  return segments[0] === "api" || /^v\d+$/i.test(segments[0] ?? "");
+}
+
 function isInternalHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
   return (
@@ -500,6 +515,11 @@ function shouldFallbackToGet(result: ProbeResult): boolean {
 function isPathFailure(result: ProbeResult): boolean {
   if (result.errorCode) return true;
   if (result.statusCode === 404) return true;
+  return typeof result.statusCode === "number" && result.statusCode >= 500;
+}
+
+function isRootFailure(result: ProbeResult): boolean {
+  if (result.errorCode) return true;
   return typeof result.statusCode === "number" && result.statusCode >= 500;
 }
 
