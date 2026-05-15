@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-15T13:27:19.169Z
+generated_at: 2026-05-15T13:29:36.943Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -985,6 +985,45 @@ actions:
       confidence: low
     source_signals:
       - "stale-issue-scanner: compound-finance/compound-protocol#214 stale 235d"
+      - "comment-velocity: 2 comments"
+    okr_alignment:
+      - okr-1
+      - okr-5
+    status: proposed
+    auditor_review:
+      reviewed_at: null
+      reviewer: null
+      decision: null
+      reasoning: null
+      conditions: []
+    execution:
+      started_at: null
+      completed_at: null
+      artifact_url: null
+      outcome: null
+      revenue_received_usd: null
+  - id: hustle-agent-2026-05-15T13-29-36-443Z-6ce8fa5f
+    proposed_by: hustle-agent
+    proposed_at: 2026-05-15T13:29:36.443Z
+    type: github-pr-open
+    target: https://github.com/aave/interface/issues/2545
+    summary: "Open PR fixing stale issue aave/interface#2545: bug: favicon is hard to see in dark mode"
+    reasoning: |-
+      Stale 290 days, 2 comments — likely abandoned by maintainer.
+
+      Repo: aave/interface. Issue: https://github.com/aave/interface/issues/2545
+
+      Impact score: 66/100 (age + comment-velocity heuristic).
+
+      Fleet capability: TypeScript, GitHub workflow, code review across multiple languages.
+
+      Action type: open a PR with the fix and the fleet wallet address in the description as a voluntary tip jar. Per the #1642 pivot (Immunefi has no submission API), direct-PR-to-project is the fleet-native zero-touch path.
+    expected_value:
+      currency: USD
+      amount: 330
+      confidence: low
+    source_signals:
+      - "stale-issue-scanner: aave/interface#2545 stale 290d"
       - "comment-velocity: 2 comments"
     okr_alignment:
       - okr-1
