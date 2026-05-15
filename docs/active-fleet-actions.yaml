@@ -1177,3 +1177,62 @@ actions:
       artifact_url: null
       outcome: null
       revenue_received_usd: null
+  - id: hustle-agent-2026-05-15T16-45-36-171Z-c27c26b7
+    proposed_by: hustle-agent
+    proposed_at: 2026-05-15T16:45:36.000Z
+    type: github-pr-open
+    target: https://github.com/WalletConnect/walletconnect-monorepo/issues/4275
+    summary: "Open PR fixing stale issue WalletConnect/walletconnect-monorepo#4275: Two issues: walletconnect and metamask mobile"
+    reasoning: |-
+      Stale 152 days, 10 comments — maintainer acknowledged but no fix shipped.
+
+      Repo: WalletConnect/walletconnect-monorepo.
+      Issue: https://github.com/WalletConnect/walletconnect-monorepo/issues/4275
+
+      Impact score: 82/100 (age + comment-velocity heuristic).
+      Breakdown: ageDays=152 → ageScore=min(100,(152-7)/173×100)=83.8;
+      commentScore=min(100,10×8)=80; impactScore=round(83.8×0.6+80×0.4)=82.
+
+      Bug has two parts:
+      1. switchChain via WalletConnect to MetaMask Mobile: rejecting the
+         chain-switch prompt doesn't resolve the pending request; accepting
+         doesn't update the chain in the DApp. Root cause: the session
+         namespace handling doesn't confirm the chain_changed event or
+         re-sync the active chain after MetaMask Mobile resolves.
+      2. Sign requests on non-ETH chains (e.g. Polygon) fail silently
+         or route to the wrong namespace.
+
+      Fix path: in the WalletConnect provider's chain-switching logic,
+      add a settled-state check after the peer responds to the
+      wallet_switchEthereumChain call, and ensure the active chain is
+      re-queried from the session rather than assumed from the request.
+      TypeScript changes — well within fleet capability.
+
+      Rotation note: cycleIndex 494128 % 9 = 1 → makerdao/community-portal
+      (archived). Index 2 = Uniswap/interface already scanned this hour
+      (proposal #7940 submitted). Advanced to index 3 =
+      WalletConnect/walletconnect-monorepo to avoid duplicate-repo scanning
+      within the same dispatch hour.
+    expected_value:
+      currency: USD
+      amount: 410
+      confidence: low
+    source_signals:
+      - "stale-issue-scanner: WalletConnect/walletconnect-monorepo#4275 stale 152d"
+      - "comment-velocity: 10 comments"
+    okr_alignment:
+      - okr-1
+      - okr-5
+    status: proposed
+    auditor_review:
+      reviewed_at: null
+      reviewer: null
+      decision: null
+      reasoning: null
+      conditions: []
+    execution:
+      started_at: null
+      completed_at: null
+      artifact_url: null
+      outcome: null
+      revenue_received_usd: null
