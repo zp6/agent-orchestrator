@@ -1068,7 +1068,7 @@ actions:
     okr_alignment:
       - okr-1
       - okr-5
-    status: proposed
+    status: abandoned
     auditor_review:
       reviewed_at: null
       reviewer: null
@@ -1107,7 +1107,7 @@ actions:
     okr_alignment:
       - okr-1
       - okr-5
-    status: proposed
+    status: abandoned
     auditor_review:
       reviewed_at: null
       reviewer: null
