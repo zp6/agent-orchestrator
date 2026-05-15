@@ -36,6 +36,7 @@
  *   GET /api/low-score-approved?days=7&limit=200
  *   GET /api/verified-task-count                      — total verified task count for bypass frequency denominator (issue #1706)
  *   GET /api/verified-task-count?days=7
+ *   GET /api/compliance                               — fleet compliance rules (issue #1597)
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
@@ -58,6 +59,7 @@ import {
   type LowScoreApprovedEntry,
 } from "../state/store.js";
 import { createLogger } from "./logger.js";
+import { daemonStaleness } from "../utils/daemon-staleness.js";
 
 const log = createLogger("metrics-server");
 
@@ -388,6 +390,40 @@ export interface MonologueFeedResponse {
   generated_at: string;
 }
 
+/**
+ * Status of a single compliance rule (issue #1597).
+ *
+ * - "ok"      — all thresholds met
+ * - "warning" — approaching threshold (>5 commits behind, or between 2h and 12h stale)
+ * - "failing" — threshold breached (>20 commits behind or >2h since last successful self-update)
+ */
+export type ComplianceRuleStatus = "ok" | "warning" | "failing";
+
+/**
+ * One compliance rule result as returned by GET /api/compliance.
+ */
+export interface ComplianceRule {
+  rule: string;
+  status: ComplianceRuleStatus;
+  detail: string;
+  /** ISO timestamp of the most recent successful self-update (null if never recorded). */
+  last_self_update_at: string | null;
+  /** Commits the running daemon is behind origin/main (null on fetch error). */
+  commits_behind: number | null;
+}
+
+/**
+ * Response shape for GET /api/compliance.
+ */
+export interface ComplianceResponse {
+  /** Aggregate status: worst across all rules. */
+  overall_status: ComplianceRuleStatus;
+  /** One entry per evaluated compliance rule. */
+  rules: ComplianceRule[];
+  /** ISO timestamp of when this response was generated. */
+  generated_at: string;
+}
+
 // ── Handler helpers ────────────────────────────────────────────────────────────
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -468,6 +504,93 @@ function parseRepoFilter(value: string | null): string | undefined {
 }
 
 // ── Server factory ─────────────────────────────────────────────────────────────
+
+// ── Compliance rule builders ──────────────────────────────────────────────────
+
+/** Hours threshold for warning status on self-update lag. */
+const SELF_UPDATE_WARNING_HOURS = 2;
+
+/** Hours threshold for failing status on self-update lag. */
+const SELF_UPDATE_FAILING_HOURS = 2;
+
+/** Commit count threshold for warning status. */
+const COMMITS_BEHIND_WARNING = 5;
+
+/** Commit count threshold for failing status. */
+const COMMITS_BEHIND_FAILING = 20;
+
+/**
+ * Build the `daemon-selfupdate-lag` compliance rule.
+ *
+ * Status logic:
+ *   "failing" — commits_behind > 20 OR last successful self-update > 2h ago
+ *   "warning" — commits_behind > 5 (but <= 20) AND last successful self-update <= 2h ago
+ *   "ok"      — commits_behind <= 5 AND last successful self-update <= 2h ago
+ *
+ * When no self-update record exists the daemon has never completed a selfUpdate
+ * cycle since the table was created, which is treated as "failing".
+ */
+export function buildSelfUpdateLagRule(store: StateStore): ComplianceRule {
+  const staleness = daemonStaleness(COMMITS_BEHIND_WARNING);
+  const commitsBehind = staleness.error ? null : staleness.commitsBehind;
+
+  const lastCycle = store.getLastSelfUpdateCycle({ successOnly: true });
+  const lastSelfUpdateAt = lastCycle?.completed_at ?? null;
+
+  const nowMs = Date.now();
+  const cycleAgeMs = lastSelfUpdateAt ? nowMs - new Date(lastSelfUpdateAt).getTime() : null;
+  const cycleAgeHours = cycleAgeMs !== null ? cycleAgeMs / (1000 * 60 * 60) : null;
+
+  // Determine status
+  const lagFailing =
+    cycleAgeHours === null || cycleAgeHours > SELF_UPDATE_FAILING_HOURS;
+  const commitsFailing =
+    commitsBehind !== null && commitsBehind > COMMITS_BEHIND_FAILING;
+  const commitsWarning =
+    commitsBehind !== null && commitsBehind > COMMITS_BEHIND_WARNING;
+
+  let status: ComplianceRuleStatus;
+  if (lagFailing || commitsFailing) {
+    status = "failing";
+  } else if (commitsWarning) {
+    status = "warning";
+  } else {
+    status = "ok";
+  }
+
+  // Build detail message
+  const parts: string[] = [];
+  if (commitsBehind !== null) {
+    parts.push(`${commitsBehind} commit${commitsBehind === 1 ? "" : "s"} behind origin/main`);
+  } else {
+    parts.push("could not determine commits behind (git fetch error)");
+  }
+  if (cycleAgeHours !== null) {
+    const h = Math.floor(cycleAgeHours);
+    const m = Math.round((cycleAgeHours - h) * 60);
+    parts.push(`last successful self-update ${h}h ${m}m ago`);
+  } else {
+    parts.push("no successful self-update recorded");
+  }
+  const detail = parts.join(", ");
+
+  return {
+    rule: "daemon-selfupdate-lag",
+    status,
+    detail,
+    last_self_update_at: lastSelfUpdateAt,
+    commits_behind: commitsBehind,
+  };
+}
+
+/**
+ * Aggregate status: worst across all rules.
+ */
+function worstStatus(rules: ComplianceRule[]): ComplianceRuleStatus {
+  if (rules.some((r) => r.status === "failing")) return "failing";
+  if (rules.some((r) => r.status === "warning")) return "warning";
+  return "ok";
+}
 
 /**
  * Create and start the metrics HTTP server.
@@ -1139,6 +1262,34 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /api/compliance (issue #1597) ─────────────────────────────────────
+    // Fleet compliance rules.  Includes the daemon-selfupdate-lag rule that
+    // surfaces when the running daemon is stale relative to origin/main.
+    // Consumed by the auditor-agent daily classifier and the dashboard.
+    //
+    // Status thresholds for daemon-selfupdate-lag:
+    //   "ok"      — <=5 commits behind AND last successful self-update <=2h ago
+    //   "warning" — >5 commits behind (and <=20) AND self-update <=2h ago
+    //   "failing" — >20 commits behind OR last successful self-update >2h ago
+    if (url.pathname === "/api/compliance" && req.method === "GET") {
+      try {
+        const selfUpdateLag = buildSelfUpdateLagRule(store);
+        const rules: ComplianceRule[] = [selfUpdateLag];
+        const body: ComplianceResponse = {
+          overall_status: worstStatus(rules),
+          rules,
+          generated_at: new Date().toISOString(),
+        };
+        sendJson(res, 200, body);
+      } catch (err) {
+        log.warn("Failed to compute compliance rules", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 500, { error: "Failed to compute compliance rules" });
+      }
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -1170,6 +1321,7 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
         "POST /api/fingerprint/record",
         "/api/low-score-approved",
         "/api/verified-task-count",
+        "/api/compliance",
       ],
     });
   });

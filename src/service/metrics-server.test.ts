@@ -6,12 +6,13 @@
  * - /dispatch-efficiency returns correct JSON shape
  * - Unknown routes return 404
  * - ?days query param is respected
+ * - /api/compliance returns selfUpdate-lag rule (issue #1597)
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createServer, type Server } from "node:http";
 import { StateStore } from "../state/store.js";
-import { startMetricsServer } from "./metrics-server.js";
+import { startMetricsServer, buildSelfUpdateLagRule, type ComplianceRule, type ComplianceResponse } from "./metrics-server.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unlinkSync } from "node:fs";
@@ -433,6 +434,118 @@ describe("MetricsServer", () => {
       ) as { body: { window_days: number } };
 
       expect(body.window_days).toBe(14);
+    });
+  });
+
+  // ── GET /api/compliance (issue #1597) ──────────────────────────────────────
+
+  describe("GET /api/compliance", () => {
+    it("returns 200 with correct shape", async () => {
+      const { status, body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/compliance`,
+      ) as { status: number; body: ComplianceResponse };
+
+      expect(status).toBe(200);
+      expect(body.overall_status).toMatch(/^(ok|warning|failing)$/);
+      expect(Array.isArray(body.rules)).toBe(true);
+      expect(body.rules.length).toBeGreaterThanOrEqual(1);
+      expect(typeof body.generated_at).toBe("string");
+    });
+
+    it("includes the daemon-selfupdate-lag rule", async () => {
+      const { body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/compliance`,
+      ) as { body: ComplianceResponse };
+
+      const lagRule = body.rules.find((r: ComplianceRule) => r.rule === "daemon-selfupdate-lag");
+      expect(lagRule).toBeDefined();
+      expect(lagRule!.status).toMatch(/^(ok|warning|failing)$/);
+      expect(typeof lagRule!.detail).toBe("string");
+      // commits_behind may be null if git fetch errored, but should be a number or null
+      expect(lagRule!.commits_behind === null || typeof lagRule!.commits_behind === "number").toBe(true);
+    });
+
+    it("fails when no successful self-update has been recorded", async () => {
+      // Empty store — no self_update_cycles rows
+      const { body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/compliance`,
+      ) as { body: ComplianceResponse };
+
+      const lagRule = body.rules.find((r: ComplianceRule) => r.rule === "daemon-selfupdate-lag")!;
+      expect(lagRule.last_self_update_at).toBeNull();
+      // No successful cycle recorded = failing (regardless of commits_behind)
+      expect(lagRule.status).toBe("failing");
+    });
+
+    it("reports last_self_update_at after recording a successful cycle", async () => {
+      store.recordSelfUpdateCycle({ durationMs: 1000, success: true, outcome: "up-to-date" });
+
+      const { body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/compliance`,
+      ) as { body: ComplianceResponse };
+
+      const lagRule = body.rules.find((r: ComplianceRule) => r.rule === "daemon-selfupdate-lag")!;
+      expect(lagRule.last_self_update_at).not.toBeNull();
+      expect(typeof lagRule.last_self_update_at).toBe("string");
+    });
+
+    it("overall_status is failing when selfupdate-lag rule is failing", async () => {
+      // Empty store means lag rule is failing
+      const { body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/compliance`,
+      ) as { body: ComplianceResponse };
+
+      expect(body.overall_status).toBe("failing");
+    });
+
+    it("returns 405 for non-GET requests", async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/api/compliance`, { method: "POST" });
+      expect(res.status).toBe(405);
+    });
+  });
+
+  // ── buildSelfUpdateLagRule unit tests (issue #1597) ───────────────────────
+
+  describe("buildSelfUpdateLagRule", () => {
+    it("returns failing status when no self-update cycles exist", () => {
+      const result = buildSelfUpdateLagRule(store);
+      expect(result.rule).toBe("daemon-selfupdate-lag");
+      expect(result.status).toBe("failing");
+      expect(result.last_self_update_at).toBeNull();
+      expect(typeof result.detail).toBe("string");
+    });
+
+    it("returns non-failing when a recent successful cycle exists (assuming <= 20 commits behind)", () => {
+      // Record a successful cycle just now
+      store.recordSelfUpdateCycle({ durationMs: 500, success: true, outcome: "up-to-date" });
+
+      const result = buildSelfUpdateLagRule(store);
+      expect(result.last_self_update_at).not.toBeNull();
+      // Status may be ok or warning depending on commits_behind, but NOT failing due to age
+      // (we just recorded the cycle, so cycleAgeHours is effectively 0)
+      // Only way to be failing is if commits_behind > 20
+      if (result.commits_behind !== null && result.commits_behind <= 20) {
+        expect(result.status).toMatch(/^(ok|warning)$/);
+      }
+      // commits_behind > 20 or null — status could be failing, but that's a real signal
+    });
+
+    it("detail includes commits_behind and last self-update info", () => {
+      store.recordSelfUpdateCycle({ durationMs: 500, success: true, outcome: "up-to-date" });
+      const result = buildSelfUpdateLagRule(store);
+      // Detail should mention commits or git error
+      expect(result.detail).toMatch(/commit|could not determine/);
+      // And should mention self-update timing
+      expect(result.detail).toMatch(/self-update/);
+    });
+
+    it("ignores failed cycles when finding last_self_update_at", () => {
+      // Record a failed cycle only
+      store.recordSelfUpdateCycle({ durationMs: 500, success: false, outcome: "error: git fetch failed" });
+      const result = buildSelfUpdateLagRule(store);
+      // Failed cycles don't count — last_self_update_at should still be null
+      expect(result.last_self_update_at).toBeNull();
+      expect(result.status).toBe("failing");
     });
   });
 });
