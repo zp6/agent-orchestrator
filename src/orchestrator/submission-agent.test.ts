@@ -5,7 +5,6 @@ import { unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { StateStore } from "../state/store.js";
 import { SubmissionAgent, isSubmissionAgentEnabled } from "./submission-agent.js";
-import { ImmunefiAdapter } from "./submission-adapters/immunefi.js";
 import type {
   FindingDraft,
   SubmissionAdapter,
@@ -99,7 +98,8 @@ describe("SubmissionAgent", () => {
     dbPath = join(tmpdir(), `orch-submission-${randomUUID()}.db`);
     store = new StateStore(dbPath);
     stub = new StubAdapter();
-    agent = new SubmissionAgent(store, [stub, new ImmunefiAdapter()]);
+    // ImmunefiAdapter removed (issue #1642) — use stub adapter only
+    agent = new SubmissionAgent(store, [stub]);
     delete process.env.SUBMISSION_AGENT_ENABLED;
   });
 
@@ -299,7 +299,7 @@ describe("SubmissionAgent", () => {
     it("returns registered adapter platform names", () => {
       const platforms = agent.listPlatforms();
       expect(platforms).toContain("stub");
-      expect(platforms).toContain("immunefi");
+      // ImmunefiAdapter removed in issue #1642 — no immunefi platform expected
     });
   });
 });

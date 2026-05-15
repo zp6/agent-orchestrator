@@ -6,7 +6,6 @@ import {
   SubmissionAgent,
   isSubmissionAgentEnabled,
 } from "../../orchestrator/submission-agent.js";
-import { ImmunefiAdapter } from "../../orchestrator/submission-adapters/immunefi.js";
 import type { FindingDraft } from "../../orchestrator/submission-adapters/types.js";
 
 function openStore(): StateStore {
@@ -21,8 +20,18 @@ function openStore(): StateStore {
   }
 }
 
+/**
+ * Build SubmissionAgent with no adapters registered.
+ *
+ * NOTE (issue #1642): ImmunefiAdapter was removed — it called a hallucinated
+ * API endpoint (api.immunefi.com) that does not exist. Future adapters must
+ * verify external API reachability before implementation.
+ *
+ * The submission infrastructure (queue, approve, reject, submit commands) is
+ * preserved for when a real adapter (direct-GitHub-PR, Gitcoin, etc.) is wired in.
+ */
 function buildAgent(store: StateStore): SubmissionAgent {
-  return new SubmissionAgent(store, [new ImmunefiAdapter()]);
+  return new SubmissionAgent(store, []);
 }
 
 function colorSeverity(severity: string): string {
@@ -69,7 +78,7 @@ export function registerSubmissionCommand(program: Command): void {
   submission
     .command("queue")
     .description("Queue a draft finding for operator approval (no network call yet)")
-    .requiredOption("--platform <name>", "Adapter platform (e.g. immunefi)")
+    .requiredOption("--platform <name>", "Adapter platform (e.g. gitcoin, github-pr)")
     .requiredOption("--program <id>", "Target program identifier (e.g. ipor)")
     .requiredOption("--title <title>", "Finding title (≤ 200 chars)")
     .requiredOption("--severity <level>", "critical | high | medium | low | informational")

@@ -77,30 +77,42 @@ This revised plan **discards operator-dependent paths entirely** and selects 8 p
 
 ---
 
-### Path 3 — Crypto-Native Bug Bounties (Immunefi + Gitcoin)
+### Path 3 — Direct GitHub PR Contributions to Crypto Protocols
 
-**Expected first revenue:** Day 3–10  
-**Effort level:** Medium (requires research + exploitation)  
-**Estimated annual capacity:** $20k–$100k (depends on bug severity and bounty pool)
+> **⚠ Updated 2026-05-15 (issue #1642):** "Immunefi via API" is **not viable**.
+> `api.immunefi.com` does not resolve (NXDOMAIN) — there is no public Immunefi submission API.
+> The `ImmunefiAdapter` implementation was retired. Immunefi submissions require their web UI only.
+> This path is now reframed around **direct GitHub PRs** to protocol repos — same targets,
+> no broken API dependency, and reputation compounds via public commit history.
+
+**Expected first revenue:** Day 3–14 (bounty payout timelines vary per protocol)  
+**Effort level:** Medium (requires research + genuine security or improvement work)  
+**Estimated annual capacity:** $20k–$100k (depends on finding quality and protocol bounty budgets)
 
 **Mechanism:**
-1. Fleet continuously scans Immunefi.com and Gitcoin.io for **crypto-native bounties** (payouts in USDC/ETH, no KYC for under $1k claims).
-2. Fleet's parallel agents analyze security reports, source code, on-chain transactions for vulnerabilities:
-   - Smart contract bugs (Immunefi focus)
-   - Protocol exploits
-   - Critical infrastructure weaknesses
-3. Submits findings + proof-of-concept. If approved, bounty paid directly to wallet address.
-4. Reputation compounds: each approved bounty raises fleet's profile on platforms, increases bounty assignments.
+1. Fleet identifies security vulnerabilities or high-quality improvements in protocol repos:
+   - Sky/MakerDAO — github.com/makerdao (DAI payout, no KYC, $10M ceiling)
+   - Ethena — github.com/ethena-labs (USDC payout, no KYC, $3M ceiling)
+   - ENS — github.com/ensdomains (ETH payout, no KYC, $250k ceiling)
+   - IPOR — github.com/IPOR-Labs
+2. Fleet opens a GitHub PR or issue with:
+   - Diff or proof-of-concept demonstrating the finding
+   - Impact analysis (severity, exploitability, affected contracts)
+   - Fleet wallet address for payout: `0x468EC325f3797F5968dEcC757FA0B960Bd0f78Ef` (Base L2)
+3. Protocol security team reviews; if accepted, payout sent to wallet address.
+4. Reputation compounds via public GitHub commit history — each merged PR is permanent evidence
+   of fleet capability.
 
 **Why zero-touch:**
-- Immunefi and Gitcoin accept wallet-based payouts for claims <$1k (no KYC, no bank account)
-- Bounty eligibility: autonomous agents are legal entities under most platforms' ToS
-- All submissions public (compounding reputation + marketing)
-- No payment processor, no operator involvement
+- GitHub PR creation uses fleet's App auth — no operator sign-up
+- Wallet address in PR description is plain text — no payment processor
+- Direct-to-protocol bypasses broken Immunefi API entirely
+- Compounding: every merged PR builds fleet credibility on-chain and on-GitHub
 
-**First-revenue blocker:** None. Fleet can audit bounties today; first submissions within 24h.
+**First-revenue blocker:** Requires genuine, accurate security finding or improvement. No shortcuts.
+The `github-pr-opener.ts` hustle-agent adapter replaces the retired `bounty-submitter.ts`.
 
-**Implementation issue:** #1324 (filed separately below)
+**Implementation issue:** #1642 (direct-GitHub-PR pivot); #1324 (original bounty scanning)
 
 ---
 
