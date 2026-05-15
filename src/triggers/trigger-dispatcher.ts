@@ -12,6 +12,7 @@ import { validateLinearCredential } from "../client/linear-credential-validator.
 import { sanitizeBountyContent, isExternalRepoAllowed } from "../orchestrator/bounty-sanitizer.js";
 import { ulid } from "ulid";
 export { dispatchRevenueWatcher } from "./revenue-watcher.js";
+export { dispatchBountyMonitor } from "./bounty-monitor.js";
 
 /**
  * Module-level dedupe flag: once we've logged a warning that the Linear

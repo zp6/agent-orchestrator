@@ -20,6 +20,7 @@ import {
   dispatchLinearChecks,
   dispatchRevenueExecutor,
   dispatchRevenueWatcher,
+  dispatchBountyMonitor,
   dispatchSlackChecks,
   type TriggerResult,
 } from "../triggers/trigger-dispatcher.js";
@@ -131,6 +132,7 @@ const CLOSED_ISSUE_FAILURE_CLEANUP_EVERY_N_CYCLES = 60; // ~5h — clear stale f
 const PROACTIVE_REBASE_EVERY_N_CYCLES = 3; // ~15min — proactively rebase stale branches
 const SEMANTIC_MEMORY_AUDIT_EVERY_N_CYCLES = 288; // ~24h — check semantic memory effectiveness (issue #1016)
 const STALE_TASK_SWEEP_EVERY_N_CYCLES = 288; // ~24h at 5min interval — sweep stale pending/paused tasks (issue #1646)
+const BOUNTY_MONITOR_EVERY_N_CYCLES = 3; // ~15min at 5min interval — poll crypto-native bounty sources (issue #1598)
 
 /**
  * Get the current git HEAD commit hash (short form) for audit logging.
@@ -2246,7 +2248,7 @@ export class Daemon {
 
   private async dispatchTriggers(time: string, registeredAgents: Set<string>): Promise<void> {
     try {
-      const results = await Promise.allSettled([
+      const triggerPromises: Array<Promise<TriggerResult | { dispatched: number; skipped: number; errors: string[] }>> = [
         dispatchGitHubIssues(
           this.config,
           this.store,
@@ -2265,7 +2267,17 @@ export class Daemon {
         dispatchSlackChecks(this.config, this.store, this.dispatcher, registeredAgents),
         dispatchRevenueExecutor(this.config, this.store, this.dispatcher, registeredAgents),
         dispatchRevenueWatcher(this.store),
-      ]);
+      ];
+
+      // Bounty monitor — feature-flagged crypto-native source poller (issue #1598).
+      // Fires every BOUNTY_MONITOR_EVERY_N_CYCLES (~15min at the default poll
+      // interval). The trigger itself is also gated by BOUNTY_MONITOR_ENABLED;
+      // cycle-gating here just keeps the HTTP polling cadence reasonable.
+      if (this.cycleCount % BOUNTY_MONITOR_EVERY_N_CYCLES === 0) {
+        triggerPromises.push(dispatchBountyMonitor(this.store));
+      }
+
+      const results = await Promise.allSettled(triggerPromises);
 
       const totals: TriggerResult = { dispatched: 0, skipped: 0, errors: [] };
       for (const r of results) {
