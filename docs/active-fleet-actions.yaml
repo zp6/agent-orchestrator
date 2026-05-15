@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-15T12:21:59.475Z
+generated_at: 2026-05-15T12:22:01.275Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -913,4 +913,53 @@ actions:
       completed_at: 2026-05-15T12:21:59.475Z
       artifact_url: null
       outcome: failure
+      revenue_received_usd: null
+  - id: hustle-agent-2026-05-15T12-22-00-716Z-1925fix
+    proposed_by: hustle-agent
+    proposed_at: 2026-05-15T12:22:00.716Z
+    type: github-pr-open
+    target: https://github.com/dydxprotocol/v4-web/issues/1925
+    summary: "Open PR fixing stale issue dydxprotocol/v4-web#1925: BonsaiCore.network.indexerHeight.data"
+    reasoning: |-
+      Stale 221 days, 1 comment — no maintainer response.
+
+      Repo: dydxprotocol/v4-web. Issue: https://github.com/dydxprotocol/v4-web/issues/1925
+
+      Impact score: 63/100 (age + comment-velocity heuristic).
+      Breakdown: age_score = min(100, (221-7)/173×100) = 100 (capped at 180d); comment_score = min(100, 1×8) = 8;
+      impactScore = round(100×0.6 + 8×0.4) = 63.
+
+      Issue points to src/hooks/useApiState.ts#L82 — likely a null/undefined access on
+      BonsaiCore.network.indexerHeight.data. Fleet capability: TypeScript, React, blockchain
+      frontend — dydxprotocol/v4-web is a TypeScript/React SPA, well within scope.
+
+      Action type: open a PR with the fix and the fleet wallet address in the description
+      as a voluntary tip jar. Per the #1642 pivot, direct-PR-to-project is the fleet-native
+      zero-touch path.
+
+      Dedup note: #1961 (the higher-ordered scan result) was already in the ledger as
+      abandoned (ID 9bcfa39a). Skipped per reviewer feedback — propose next non-ledgered
+      candidate only.
+    expected_value:
+      currency: USD
+      amount: 315
+      confidence: low
+    source_signals:
+      - "stale-issue-scanner: dydxprotocol/v4-web#1925 stale 221d"
+      - "comment-velocity: 1 comment"
+    okr_alignment:
+      - okr-1
+      - okr-5
+    status: proposed
+    auditor_review:
+      reviewed_at: null
+      reviewer: null
+      decision: null
+      reasoning: null
+      conditions: []
+    execution:
+      started_at: null
+      completed_at: null
+      artifact_url: null
+      outcome: null
       revenue_received_usd: null
