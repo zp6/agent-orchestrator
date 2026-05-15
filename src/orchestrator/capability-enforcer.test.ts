@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   isImplementationTask,
   checkCapabilityEnforcement,
+  checkRepoOwnership,
 } from "./capability-enforcer.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 
@@ -422,5 +423,124 @@ describe("checkCapabilityEnforcement — reviewer agent code-authorship guard (i
       sourceRef: "rapartlu/agent-dashboard#424",
     });
     expect(result!.toAgent).toBe("claude-orchestrator-dashboard");
+  });
+});
+
+// ── checkRepoOwnership (issue #1614) ──────────────────────────────────────────
+
+describe("checkRepoOwnership", () => {
+  it("returns null when agent has no github field", () => {
+    const config = makeConfig({
+      "claude-agent-orchestrator": {},
+    });
+    expect(
+      checkRepoOwnership({
+        config,
+        agentName: "claude-agent-orchestrator",
+        sourceRef: "rapartlu/agent-reviewer#100",
+      }),
+    ).toBeNull();
+  });
+
+  it("returns null when source_ref has no '#' separator (non-GitHub ref)", () => {
+    const config = makeConfig({
+      "claude-agent-orchestrator": { github: "rapartlu/agent-orchestrator" },
+    });
+    expect(
+      checkRepoOwnership({
+        config,
+        agentName: "claude-agent-orchestrator",
+        sourceRef: "linear-check:claude-agent-orchestrator:2026-01-01T00",
+      }),
+    ).toBeNull();
+  });
+
+  it("returns null when source_ref is undefined", () => {
+    const config = makeConfig({
+      "claude-agent-orchestrator": { github: "rapartlu/agent-orchestrator" },
+    });
+    expect(
+      checkRepoOwnership({
+        config,
+        agentName: "claude-agent-orchestrator",
+        sourceRef: undefined,
+      }),
+    ).toBeNull();
+  });
+
+  it("returns null when agent owns the target repo", () => {
+    const config = makeConfig({
+      "claude-agent-orchestrator": { github: "rapartlu/agent-orchestrator" },
+    });
+    expect(
+      checkRepoOwnership({
+        config,
+        agentName: "claude-agent-orchestrator",
+        sourceRef: "rapartlu/agent-orchestrator#1614",
+      }),
+    ).toBeNull();
+  });
+
+  it("returns block descriptor when agent doesn't own the target repo and an owner exists", () => {
+    const config = makeConfig({
+      "claude-orchestrator-dashboard": { github: "rapartlu/agent-dashboard" },
+      "claude-orchestrator-reviewer": { github: "rapartlu/agent-reviewer" },
+      "claude-agent-orchestrator": { github: "rapartlu/agent-orchestrator" },
+    });
+    const result = checkRepoOwnership({
+      config,
+      agentName: "claude-orchestrator-dashboard",
+      sourceRef: "rapartlu/agent-reviewer#100",
+    });
+    expect(result).not.toBeNull();
+    expect(result!.blockedAgent).toBe("claude-orchestrator-dashboard");
+    expect(result!.targetRepo).toBe("rapartlu/agent-reviewer");
+  });
+
+  it("redirects to the correct owner agent when one is registered", () => {
+    const config = makeConfig({
+      "claude-orchestrator-dashboard": { github: "rapartlu/agent-dashboard" },
+      "claude-orchestrator-reviewer": { github: "rapartlu/agent-reviewer" },
+      "claude-agent-orchestrator": { github: "rapartlu/agent-orchestrator" },
+    });
+    const result = checkRepoOwnership({
+      config,
+      agentName: "claude-orchestrator-dashboard",
+      sourceRef: "rapartlu/agent-reviewer#100",
+    });
+    expect(result!.toAgent).toBe("claude-orchestrator-reviewer");
+    expect(result!.redirectReason).toContain("rapartlu/agent-reviewer");
+    expect(result!.redirectReason).toContain("claude-orchestrator-reviewer");
+  });
+
+  it("returns null (allow-fallback) when no owner agent is registered for the target repo", () => {
+    const config = makeConfig({
+      "claude-orchestrator-dashboard": { github: "rapartlu/agent-dashboard" },
+    });
+    // No agent owns "rapartlu/unknown-repo"
+    const result = checkRepoOwnership({
+      config,
+      agentName: "claude-orchestrator-dashboard",
+      sourceRef: "rapartlu/unknown-repo#42",
+    });
+    expect(result).toBeNull();
+  });
+
+  it("blocks the exact failure case from issue #1614: dashboard agent dispatched to agent-reviewer repo", () => {
+    const config = makeConfig({
+      "claude-orchestrator-dashboard": { github: "rapartlu/agent-dashboard" },
+      "claude-orchestrator-reviewer": { github: "rapartlu/agent-reviewer" },
+      "claude-agent-orchestrator": { github: "rapartlu/agent-orchestrator" },
+    });
+    // Mirrors task 01KR9R1J: dashboard agent dispatched to agent-reviewer repo
+    const result = checkRepoOwnership({
+      config,
+      agentName: "claude-orchestrator-dashboard",
+      sourceRef: "rapartlu/agent-orchestrator#1599",
+    });
+    expect(result).not.toBeNull();
+    expect(result!.blockedAgent).toBe("claude-orchestrator-dashboard");
+    expect(result!.toAgent).toBe("claude-agent-orchestrator");
+    expect(result!.targetRepo).toBe("rapartlu/agent-orchestrator");
   });
 });

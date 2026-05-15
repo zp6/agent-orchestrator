@@ -45,9 +45,11 @@ import {
 import {
   checkCapabilityEnforcement,
   checkAgentScopeGuard,
+  checkRepoOwnership,
   runRemoteCapabilityCheck,
   type CapabilityEnforcementReroute,
   type AgentScopeGuardReroute,
+  type RepoOwnershipBlock,
 } from "./capability-enforcer.js";
 import { checkAndRebaseBeforeDispatch } from "./proactive-rebase-scheduler.js";
 import { buildSemanticMemoryBlock } from "./semantic-memory.js";
@@ -693,9 +695,10 @@ export class Dispatcher {
     // Resolve agent
     let agentName = options?.agentName;
     let routeReason = "Explicitly specified";
-    let routeMethod: "deterministic" | "llm" | "explicit" | "agent-scope-guard" | "capability-enforcement" = "explicit";
+    let routeMethod: "deterministic" | "llm" | "explicit" | "agent-scope-guard" | "capability-enforcement" | "repo-ownership" = "explicit";
     let routeConfidence: number | null = null;
     let capabilityReroute: CapabilityEnforcementReroute | null = null;
+    let repoOwnershipBlock: RepoOwnershipBlock | null = null;
     let genomeRedirectReason: string | null = null;
     let routeCandidates: AgentMatch[] = [];
 
@@ -917,6 +920,35 @@ export class Dispatcher {
         health: healthRecords.find((h) => h.agent_name === selected),
       });
       agentName = selected;
+    }
+
+    // Repo-ownership block (issue #1614): hard gate that prevents an agent from
+    // receiving tasks for a repo it doesn't own.  Fires before all other
+    // capability checks so no agent budget or pre-flight resources are consumed.
+    repoOwnershipBlock = checkRepoOwnership({
+      config: this.config,
+      agentName,
+      sourceRef: options?.sourceRef,
+    });
+    if (repoOwnershipBlock) {
+      this.log.warn("dispatch-blocked:wrong-repo — rerouting to repo owner", {
+        blockedAgent: repoOwnershipBlock.blockedAgent,
+        toAgent: repoOwnershipBlock.toAgent,
+        targetRepo: repoOwnershipBlock.targetRepo,
+        sourceRef: options?.sourceRef,
+      });
+      agentName = repoOwnershipBlock.toAgent;
+      routeMethod = "repo-ownership";
+      routeReason = repoOwnershipBlock.redirectReason;
+      await notifyOperator(
+        "dispatch-blocked:wrong-repo — routing corrected",
+        `Agent \`${repoOwnershipBlock.blockedAgent}\` was dispatched a task for \`${repoOwnershipBlock.targetRepo}\`, which it doesn't own.\n` +
+          `Redirected to \`${repoOwnershipBlock.toAgent}\` (repo owner).\n` +
+          (options?.title ? `Task: "${options.title}"\n` : "") +
+          (options?.sourceRef ? `Source: ${options.sourceRef}` : ""),
+        "warning",
+        `dispatch-blocked:wrong-repo:${repoOwnershipBlock.blockedAgent}:${repoOwnershipBlock.targetRepo}`,
+      );
     }
 
     // Agent-scope guard (issue #974): pre-dispatch validation that rejects
@@ -1445,7 +1477,7 @@ export class Dispatcher {
       routeMethod,
       routeConfidence,
       sourceRef: options?.sourceRef,
-      redirectReason: capabilityReroute?.redirectReason ?? genomeRedirectReason ?? undefined,
+      redirectReason: repoOwnershipBlock?.redirectReason ?? capabilityReroute?.redirectReason ?? genomeRedirectReason ?? undefined,
     });
 
     // Prepend the target-repo header so the agent always knows which repo to

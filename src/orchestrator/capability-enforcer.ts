@@ -309,6 +309,114 @@ function findImplementationAgent(
   return null;
 }
 
+// ── Repo-ownership block (issue #1614) ───────────────────────────────────────
+
+/**
+ * Extract the owner/repo portion from a source_ref like "owner/repo#42".
+ * Returns undefined when the ref has no "#" separator or doesn't look like
+ * a GitHub repo ref (e.g. "linear-check:agentName:2026-01-01T00").
+ *
+ * Mirrors `extractRepoFromSourceRef` in dispatcher.ts — kept local to avoid a
+ * circular dependency (dispatcher imports capability-enforcer, not vice versa).
+ */
+function extractRepo(sourceRef: string | undefined): string | undefined {
+  if (!sourceRef) return undefined;
+  const hashIdx = sourceRef.lastIndexOf("#");
+  if (hashIdx <= 0) return undefined;
+  const candidate = sourceRef.slice(0, hashIdx);
+  if (!candidate.includes("/")) return undefined;
+  return candidate;
+}
+
+export interface RepoOwnershipBlock {
+  /** The original agent that was selected (doesn't own the target repo). */
+  blockedAgent: string;
+  /** The agent that owns the target repo and should receive the task instead. */
+  toAgent: string;
+  /** The target repo extracted from source_ref. */
+  targetRepo: string;
+  /** Human-readable reason recorded in routing decisions and logs. */
+  redirectReason: string;
+}
+
+/**
+ * Hard gate: block dispatch when the selected agent doesn't own the repo that
+ * the task's source_ref points to.
+ *
+ * Only fires when ALL of the following are true:
+ *  • The selected agent has a `github` field in agents.yaml (owns a repo).
+ *  • The source_ref contains a GitHub repo slug ("owner/repo#N").
+ *  • That slug does NOT match the agent's `github` field.
+ *
+ * When a block is triggered the function attempts to find the agent that does
+ * own the target repo.  If none is found it returns null (allow-fallback) so
+ * dispatch is never deadlocked.
+ *
+ * Issue #1614: "Hard repo-ownership block at task creation time"
+ */
+export function checkRepoOwnership(params: {
+  config: OrchestratorConfig;
+  agentName: string;
+  sourceRef?: string;
+}): RepoOwnershipBlock | null {
+  const { config, agentName, sourceRef } = params;
+  const agent = config.agents[agentName];
+  if (!agent?.github) return null; // agent has no ownership claim — skip
+
+  const targetRepo = extractRepo(sourceRef);
+  if (!targetRepo) return null; // non-GitHub source_ref — skip
+
+  if (agent.github === targetRepo) return null; // correct owner — no block
+
+  // Violation: agent doesn't own this repo.  Find the true owner.
+  const ownerAgent = findRepoOwnerAgent(config, targetRepo, agentName);
+  if (!ownerAgent) {
+    // No registered owner — allow rather than deadlock; operator can triage.
+    log.warn("dispatch-blocked:wrong-repo — no owner agent found, allowing dispatch", {
+      agentName,
+      agentGithub: agent.github,
+      targetRepo,
+      sourceRef,
+    });
+    return null;
+  }
+
+  const redirectReason =
+    `Agent "${agentName}" owns "${agent.github}" but received a task for "${targetRepo}". ` +
+    `Redirected to "${ownerAgent}" (repo owner).`;
+
+  log.warn("dispatch-blocked:wrong-repo", {
+    blockedAgent: agentName,
+    agentGithub: agent.github,
+    targetRepo,
+    toAgent: ownerAgent,
+    sourceRef,
+  });
+
+  return {
+    blockedAgent: agentName,
+    toAgent: ownerAgent,
+    targetRepo,
+    redirectReason,
+  };
+}
+
+/**
+ * Find the agent whose `github` field matches `targetRepo`.
+ * Skips the blocked agent itself. Returns null if none is found.
+ */
+function findRepoOwnerAgent(
+  config: OrchestratorConfig,
+  targetRepo: string,
+  blockedAgent: string,
+): string | null {
+  for (const [name, a] of Object.entries(config.agents)) {
+    if (name === blockedAgent) continue;
+    if (a.github === targetRepo) return name;
+  }
+  return null;
+}
+
 // ── Agent-scope guard (pre-dispatch allowed_types check) ─────────────────────
 
 export interface AgentScopeGuardReroute {
