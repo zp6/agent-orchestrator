@@ -1120,3 +1120,60 @@ actions:
       artifact_url: null
       outcome: null
       revenue_received_usd: null
+  - id: hustle-agent-2026-05-15T16-42-24-864Z-ec7a7229
+    proposed_by: hustle-agent
+    proposed_at: 2026-05-15T16:42:24.864Z
+    type: github-pr-open
+    target: https://github.com/Uniswap/interface/issues/7940
+    summary: "Open PR fixing stale issue Uniswap/interface#7940: [Bug] Chart Data Not Missing, Just Not Shown"
+    reasoning: |-
+      Stale 265 days, 2 comments — no maintainer response.
+
+      Repo: Uniswap/interface. Issue: https://github.com/Uniswap/interface/issues/7940
+
+      Impact score: 66/100 (age + comment-velocity heuristic).
+      Breakdown: ageDays=265 → ageScore=min(100,(265-7)/173×100)=100 (capped at 180d);
+      commentScore=min(100,2×8)=16; impactScore=round(100×0.6+16×0.4)=66.
+
+      Bug: on the Uniswap v4 LP creation page, the price chart briefly shows data when
+      toggling between Full Range and Custom Range, then overwrites it with "Missing Chart
+      Data". The data is present (the chart renders it) but a race condition or incorrect
+      loading-state check causes the fallback UI to fire. Two community members requested
+      assignment; maintainer has not responded.
+
+      Reproduction: https://app.uniswap.org/positions/create/v4?chain=base&isDynamic=true
+      with an unlisted token + hook pool. Toggle Full Range ↔ Custom Range and observe.
+
+      Fix path: locate the chart data availability check in the LP position creation flow
+      (likely a boolean flag or loading-state derived from the chart data query). A check
+      that fires before the async data settles will temporarily report "missing". Guarding
+      with the settled state or debouncing the fallback render should fix it.
+
+      Fleet capability: TypeScript, React, Uniswap v4 — well within scope.
+
+      Rotation note: cycleIndex 494128 % 9 = 1 → makerdao/community-portal (archived);
+      applied fallback to Uniswap/interface (index 2). Scanner top result was #7958
+      (feature request, needs infrastructure); chose #7940 (labeled bug, actionable PR).
+    expected_value:
+      currency: USD
+      amount: 330
+      confidence: low
+    source_signals:
+      - "stale-issue-scanner: Uniswap/interface#7940 stale 265d"
+      - "comment-velocity: 2 comments"
+    okr_alignment:
+      - okr-1
+      - okr-5
+    status: proposed
+    auditor_review:
+      reviewed_at: null
+      reviewer: null
+      decision: null
+      reasoning: null
+      conditions: []
+    execution:
+      started_at: null
+      completed_at: null
+      artifact_url: null
+      outcome: null
+      revenue_received_usd: null
