@@ -863,13 +863,12 @@ actions:
     okr_alignment:
       - okr-1
       - okr-5
-    status: approved
+    status: proposed
     auditor_review:
-      reviewed_at: 2026-05-15T16:58:43.000Z
-      reviewer: auditor-agent
-      decision: approve
-      reasoning: >
-        Action passes all guardrails: OKR alignment present (okr-1, okr-5), no Charter III violation (github-pr-open — fleet receives via tip jar, no outflow), action type is github-pr-open (zero on-chain spend — capital-discipline rule skipped), no duplicate target in flight (scaffold-eth-2#1191 is unique among in-flight actions), expected value $300 (low confidence) exceeds the $5 low-value threshold.
+      reviewed_at: null
+      reviewer: null
+      decision: null
+      reasoning: null
       conditions: []
     execution:
       started_at: null
@@ -1221,6 +1220,68 @@ actions:
     source_signals:
       - "stale-issue-scanner: WalletConnect/walletconnect-monorepo#4275 stale 152d"
       - "comment-velocity: 10 comments"
+    okr_alignment:
+      - okr-1
+      - okr-5
+    status: proposed
+    auditor_review:
+      reviewed_at: null
+      reviewer: null
+      decision: null
+      reasoning: null
+      conditions: []
+    execution:
+      started_at: null
+      completed_at: null
+      artifact_url: null
+      outcome: null
+      revenue_received_usd: null
+  - id: hustle-agent-2026-05-15T16-59-31-446Z-dae321e2
+    proposed_by: hustle-agent
+    proposed_at: 2026-05-15T16:59:31.000Z
+    type: github-pr-open
+    target: https://github.com/wevm/viem/issues/4390
+    summary: "Open PR fixing stale issue wevm/viem#4390: observe() leaks empty arrays in listenersCache after all listeners unsubscribe"
+    reasoning: |-
+      Stale 66 days, 0 comments — no maintainer response.
+
+      Repo: wevm/viem. Issue: https://github.com/wevm/viem/issues/4390
+
+      Impact score: 21/100 (age + comment-velocity heuristic).
+      Breakdown: ageDays=66 → ageScore=min(100,(66-7)/173×100)=34.1;
+      commentScore=min(100,0×8)=0; impactScore=round(34.1×0.6+0×0.4)=21.
+
+      Bug: when all listeners for a given observerId call unwatch(), the
+      observe() function at src/utils/observe.ts line 13 removes callbacks
+      via filter() but never deletes the Map entry from listenersCache or
+      cleanupCache. Stale entries with empty arrays [] accumulate
+      indefinitely, causing memory growth in long-running Node.js servers
+      that create many viem clients over time.
+
+      Fix path: in src/utils/observe.ts, after the filter() call that
+      removes the unsubscribing callback, check if the resulting array is
+      empty and if so delete the Map entry entirely. One-line fix, no API
+      surface change.
+
+      Fleet capability: TypeScript, viem internals — well within scope.
+      Prior execution on viem#3875 confirms the fleet has standing here.
+
+      Rotation note: cycleIndex 494128 % 9 = 1 → makerdao/community-portal
+      (archived). Uniswap/interface (index 2) and WalletConnect (index 3)
+      scanned in preceding dispatches this hour. Advancing to wevm/viem
+      (index 4) for this cycle.
+
+      Candidate selection: scanner returned 5 candidates; top by score was
+      #4378 (impact 22, WebSocket close bug, no repro steps). Selected #4390
+      (impact 21, memory leak in observe.ts, specific file+line identified,
+      clear one-line fix) as more actionable for a PR.
+    expected_value:
+      currency: USD
+      amount: 105
+      confidence: low
+    source_signals:
+      - "stale-issue-scanner: wevm/viem#4390 stale 66d"
+      - "comment-velocity: 0 comments"
     okr_alignment:
       - okr-1
       - okr-5
