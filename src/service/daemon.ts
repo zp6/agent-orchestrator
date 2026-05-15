@@ -810,6 +810,33 @@ export class Daemon {
           "critical",
           `deadlock:${this.cycleCount}`,
         ).catch(() => {});
+
+        // Realign cycleCount to the next cadence boundary so critical
+        // cadence-gated work fires on the next cycle instead of staying
+        // misaligned.  After a 20-min deadlock, the zombie pollCycle has
+        // already incremented this.cycleCount; the next real cycle will
+        // increment it once more.  Setting it to ceil(x / LCM) * LCM - 1
+        // makes that increment land exactly on a LCM multiple (0 mod LCM).
+        //
+        // LCM(3, 5) = 15 covers the two most impactful cadence gates:
+        //   - every-3-cycle: supervisor check, auto-merge sweep, PR review
+        //   - every-5-cycle: fleet-actions (producer/critic loop) — P1 blocker
+        //
+        // We do NOT include 6 or 10 here deliberately: improvement detection
+        // and agent-sync are LLM-heavy / network-heavy; triggering them right
+        // after a deadlock risks making the recovery cycle slow too.
+        const CADENCE_RESET_LCM = 15; // LCM(3, 5)
+        const prevCount = this.cycleCount;
+        this.cycleCount = Math.ceil((this.cycleCount + 1) / CADENCE_RESET_LCM) * CADENCE_RESET_LCM - 1;
+        this.log.info("cycleCount realigned after deadlock", {
+          prev: prevCount,
+          next: this.cycleCount + 1,
+          lcm: CADENCE_RESET_LCM,
+        });
+        console.log(
+          `[DEADLOCK] cycleCount realigned: ${prevCount} → next cycle #${this.cycleCount + 1} ` +
+          `(0 mod ${CADENCE_RESET_LCM} — cadence gates reset)`,
+        );
       }
 
       if (!this.running) break;
@@ -825,7 +852,23 @@ export class Daemon {
 
   /** Run a batch of steps in parallel, logging any that reject. */
   private async runBatch(name: string, promises: Promise<unknown>[]): Promise<void> {
+    const batchStartMs = Date.now();
     const results = await Promise.allSettled(promises);
+    const durationMs = Date.now() - batchStartMs;
+
+    // Per-batch timing: always log so operators can identify the slow phase
+    // in journalctl output without needing a dedicated profiler.
+    this.log.info("Batch timing", { batch: name, durationMs, tasks: promises.length });
+    if (durationMs > 60_000) {
+      // Log at warn level so it shows up even in filtered log views.
+      console.warn(
+        `[batch/${name}] ${durationMs}ms (cycle #${this.cycleCount}) — unexpectedly slow; ` +
+        `check batch for blocking LLM calls or gh CLI timeouts`,
+      );
+    } else {
+      console.log(`[batch/${name}] ${durationMs}ms (cycle #${this.cycleCount})`);
+    }
+
     for (const r of results) {
       if (r.status === "rejected") {
         this.log.error(`Batch "${name}" step failed`, {
