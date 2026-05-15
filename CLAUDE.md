@@ -375,6 +375,7 @@ Common `orch` commands:
 - `orch routing-mismatches` - audit routing mismatches (expected vs. actual agent)
 - `orch dispatch-efficiency` - dispatch waste-rate widget
 - `orch skip-blockers` - top dispatch skip blockers
+- `orch pr-guard-feed` - chronological feed of suppressed already-in-review dispatch blocks, grouped by blocking PR (#1618)
 - `orch variant-duplicates` - Claude vs Codex variant duplicate pairs
 
 **Tracing & lineage**

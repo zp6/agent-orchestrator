@@ -11150,6 +11150,75 @@ export class StateStore {
     return row !== undefined;
   }
 
+  /**
+   * Return a chronological list of PR-guard dispatch blocks for operator inspection.
+   *
+   * Used by `orch pr-guard-feed` (issue #1618) to give operators a per-PR
+   * timeline view that neither `orch dispatch-efficiency` (aggregated rates)
+   * nor `orch skip-blockers` (ranked skip patterns) provides.
+   *
+   * @param opts.windowHours   Look-back window in hours (default: 2)
+   * @param opts.repo          Filter to source_refs whose repo prefix matches
+   *                           (e.g. "rapartlu/agent-orchestrator")
+   * @param opts.prNumber      Filter to a specific blocking PR number
+   * @param opts.limit         Maximum rows (default: 200)
+   */
+  listPRGuardBlocks(opts: {
+    windowHours?: number;
+    repo?: string;
+    prNumber?: number;
+    limit?: number;
+  } = {}): DispatchBlock[] {
+    this.runDispatchBlocksMigration();
+    const windowHours = opts.windowHours ?? 2;
+    const limit = opts.limit ?? 200;
+    const cutoff = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
+
+    const conditions: string[] = [
+      "block_code IN ('open_pr_exists', 'approved_pr_waiting')",
+      "timestamp >= ?",
+    ];
+    const params: (string | number)[] = [cutoff];
+
+    if (opts.repo) {
+      conditions.push("source_ref LIKE ?");
+      params.push(`${opts.repo}#%`);
+    }
+    if (opts.prNumber != null) {
+      conditions.push("blocking_pr_number = ?");
+      params.push(opts.prNumber);
+    }
+
+    params.push(limit);
+    const rows = this.db
+      .prepare(
+        `SELECT id, source_ref, agent_name, reason, block_code, blocking_pr_number, timestamp
+         FROM dispatch_blocks
+         WHERE ${conditions.join(" AND ")}
+         ORDER BY timestamp DESC
+         LIMIT ?`,
+      )
+      .all(...params) as Array<{
+        id: number;
+        source_ref: string;
+        agent_name: string | null;
+        reason: string;
+        block_code: string;
+        blocking_pr_number: number | null;
+        timestamp: string;
+      }>;
+
+    return rows.map((r) => ({
+      id: r.id,
+      source_ref: r.source_ref,
+      agent_name: r.agent_name,
+      reason: r.reason,
+      block_code: r.block_code,
+      blocking_pr_number: r.blocking_pr_number,
+      timestamp: r.timestamp,
+    }));
+  }
+
   // ── PR Guard Cooldown Locks (issue #1095) ────────────────────────────────────
   //
   // Atomic lock table for PR guard deduplication.  The existing dispatch_blocks
