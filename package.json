@@ -4,6 +4,9 @@
   "description": "Orchestrator for coordinating multiple Claude Code agent directories",
   "license": "MIT",
   "type": "module",
+  "bin": {
+    "orch": "./dist/cli/orch.js"
+  },
   "scripts": {
     "dev": "tsx src/cli/index.ts",
     "build": "tsc",

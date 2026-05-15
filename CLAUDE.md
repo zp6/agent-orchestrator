@@ -399,6 +399,7 @@ Common `orch` commands:
 - `orch audit` - issue-to-PR traceability gap report
 - `orch audit-infra` - detect built-but-unwired features (exported but never imported)
 - `orch preflight` - run the PR pre-flight checklist before `gh pr create`
+- `orch preflight` now includes an external-URL reachability gate; use `--skip-url-check` only for intentional stubs marked with `// @preflight-skip-url-check`
 - `orch config` - discover and inspect configuration parameters
 - `orch signals` - inspect stigmergy signals written by agents into state.db
 - `orch dag` - DAG parallel subtask execution management
