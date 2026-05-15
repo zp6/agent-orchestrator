@@ -5,7 +5,9 @@ import { StateStore, type Task } from "../state/store.js";
 import {
   buildSupervisorContext,
   checkGitHubArtifactExists,
+  containsMisroutingPhrase,
   detectImprovements,
+  detectMisroutedTask,
   extractIssueRefs,
   filterPhantomArtifactDispatches,
   gateResolvedIssues,
@@ -525,5 +527,200 @@ describe("filterPhantomArtifactDispatches", () => {
     const { passed, phantom } = filterPhantomArtifactDispatches(phantomConfig, decisions);
     expect(passed).toHaveLength(1);
     expect(phantom).toHaveLength(0);
+  });
+});
+
+// ── Misrouting detection (issue #1620) ────────────────────────────────────
+
+describe("containsMisroutingPhrase", () => {
+  it("returns true for exact ownership-rejection phrases", () => {
+    expect(containsMisroutingPhrase("I don't own this repo")).toBe(true);
+    expect(containsMisroutingPhrase("I do not own this repo")).toBe(true);
+    expect(containsMisroutingPhrase("a repo I don't own")).toBe(true);
+    expect(containsMisroutingPhrase("This is misfiled")).toBe(true);
+    expect(containsMisroutingPhrase("Not my repository")).toBe(true);
+    expect(containsMisroutingPhrase("Not my repo")).toBe(true);
+    expect(containsMisroutingPhrase("This task belongs to another team")).toBe(true);
+  });
+
+  it("matches case-insensitively", () => {
+    expect(containsMisroutingPhrase("I DON'T OWN THIS REPO")).toBe(true);
+    expect(containsMisroutingPhrase("MISFILED")).toBe(true);
+    expect(containsMisroutingPhrase("NOT MY REPO")).toBe(true);
+  });
+
+  it("matches the targeted-repo pattern", () => {
+    expect(containsMisroutingPhrase("targeted rapartlu/other — a repo I don't own")).toBe(true);
+    expect(containsMisroutingPhrase("This targeted rapartlu/foo, a repo I do not own")).toBe(true);
+  });
+
+  it("returns false for normal result text", () => {
+    expect(containsMisroutingPhrase("PR opened and merged successfully")).toBe(false);
+    expect(containsMisroutingPhrase("Fixed the bug in owner/repo by updating the function")).toBe(false);
+    expect(containsMisroutingPhrase("")).toBe(false);
+    expect(containsMisroutingPhrase("Implemented the feature as requested")).toBe(false);
+  });
+
+  it("returns false when the phrase appears only as a quote", () => {
+    // Text that discusses ownership but not as a self-assertion doesn't need to
+    // be excluded — it will be caught by the repo-match check in detectMisroutedTask.
+    // containsMisroutingPhrase only looks at text content.
+    expect(containsMisroutingPhrase("The docs say agents should note when they don't own a repo")).toBe(false);
+  });
+});
+
+describe("detectMisroutedTask", () => {
+  it("returns misrouted=false when result has no rejection phrase", () => {
+    const task = makeTask({
+      agent_name: "agent-a",
+      source_ref: "owner/b#42",
+      result: "Completed the task successfully",
+    });
+    expect(detectMisroutedTask(task, config).misrouted).toBe(false);
+  });
+
+  it("returns misrouted=false when repos match despite rejection phrase", () => {
+    // Phrase present but source_ref repo == agent's declared repo — false positive guard.
+    const task = makeTask({
+      agent_name: "agent-a",
+      source_ref: "owner/a#7",
+      result: "Note: I don't own this repo — just kidding, did the work",
+    });
+    expect(detectMisroutedTask(task, config).misrouted).toBe(false);
+  });
+
+  it("returns misrouted=false when config is missing the agent's github field", () => {
+    const configNoGithub: OrchestratorConfig = {
+      ...config,
+      agents: {
+        "agent-a": { dir: "a", description: "A", capabilities: [], owns_topics: [] },
+      },
+    };
+    const task = makeTask({
+      agent_name: "agent-a",
+      source_ref: "owner/b#55",
+      result: "I don't own this repo",
+    });
+    expect(detectMisroutedTask(task, configNoGithub).misrouted).toBe(false);
+  });
+
+  it("returns misrouted=false when source_ref has no repo component", () => {
+    const task = makeTask({
+      agent_name: "agent-a",
+      source_ref: null,
+      result: "I don't own this repo",
+    });
+    expect(detectMisroutedTask(task, config).misrouted).toBe(false);
+  });
+
+  it("returns misrouted=true with correct repos when phrase + mismatch", () => {
+    const task = makeTask({
+      agent_name: "agent-a",
+      source_ref: "owner/b#99",
+      result: "This is misfiled — I don't own this repo (owner/b), my repo is owner/a",
+    });
+    const result = detectMisroutedTask(task, config);
+    expect(result.misrouted).toBe(true);
+    expect(result.taskRepo).toBe("owner/b");
+    expect(result.agentRepo).toBe("owner/a");
+    expect(result.reason).toContain("agent-a");
+    expect(result.reason).toContain("owner/b");
+    expect(result.reason).toContain("owner/a");
+  });
+});
+
+describe("verifyTask misrouting pre-check", () => {
+  let store: StateStore;
+  let dbPath: string;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dbPath = join(tmpdir(), `orch-misroute-${Date.now()}.db`);
+    store = new StateStore(dbPath);
+    mockCaptureDisciplineContext.mockReturnValue(makeDisciplineSnapshot("current"));
+    mockReadTaskDisciplineSnapshot.mockReturnValue(makeDisciplineSnapshot("current"));
+  });
+
+  afterEach(() => {
+    store.close();
+    try { unlinkSync(dbPath); } catch {}
+  });
+
+  it("short-circuits without LLM call when misrouting detected", async () => {
+    const task = store.createTask({
+      title: "Fix issue in B",
+      description: "Do stuff",
+      source: "github",
+      agent_name: "agent-a",
+    });
+    store.updateTask(task.id, {
+      status: "done",
+      source_ref: "owner/b#77",
+      result: "I don't own this repo (owner/b). This task is misfiled.",
+    });
+
+    const client = new ReviewerClient(config);
+    const result = await verifyTask(store, client, task.id, config);
+
+    expect(result.approved).toBe(false);
+    expect(result.score).toBe(0);
+    expect(result.notes).toContain("owner/b");
+    // LLM (mockCreate) must NOT have been called
+    expect(mockCreate).not.toHaveBeenCalled();
+
+    // State updated correctly
+    const updated = store.getTask(task.id);
+    expect(updated?.verification_status).toBe("rejected");
+    expect(updated?.quality_score).toBe(0);
+  });
+
+  it("fires Telegram alert when misrouting detected", async () => {
+    const { notifyOperator } = await import("./notify.js");
+    const task = store.createTask({
+      title: "Fix issue in B",
+      description: "Do stuff",
+      source: "github",
+      agent_name: "agent-a",
+    });
+    store.updateTask(task.id, {
+      status: "done",
+      source_ref: "owner/b#88",
+      result: "Not my repo — targeted owner/b which I do not own",
+    });
+
+    const client = new ReviewerClient(config);
+    await verifyTask(store, client, task.id, config);
+
+    expect(notifyOperator).toHaveBeenCalledWith(
+      "Misrouting auto-close",
+      expect.stringContaining("agent-a"),
+      "warning",
+      expect.stringContaining("misroute:agent-a"),
+    );
+  });
+
+  it("proceeds normally (LLM call) when result has no rejection phrase", async () => {
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify({ approved: true, score: 0.85, notes: "Good" }) }],
+    });
+
+    const task = store.createTask({
+      title: "Normal task on B",
+      description: "Do stuff on owner/b",
+      source: "github",
+      agent_name: "agent-a",
+    });
+    store.updateTask(task.id, {
+      status: "done",
+      source_ref: "owner/b#11",
+      result: "Opened PR #42 on owner/b with the fix.",
+    });
+
+    const client = new ReviewerClient(config);
+    const result = await verifyTask(store, client, task.id, config);
+
+    // LLM was consulted (misrouting check didn't trigger)
+    expect(mockCreate).toHaveBeenCalled();
+    expect(result.approved).toBe(true);
   });
 });

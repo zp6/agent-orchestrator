@@ -57,6 +57,79 @@ export interface GateResult {
   blocked: Array<{ decision: SupervisorDecision; skipReason: string }>;
 }
 
+// ── Misrouting detection (issue #1620) ────────────────────────────────────
+
+/**
+ * Phrases that indicate the agent explicitly acknowledged it doesn't own the
+ * target repo. Matched case-insensitively against task.result.
+ */
+const MISROUTING_REJECTION_PHRASES = [
+  "i don't own this repo",
+  "i do not own this repo",
+  "a repo i don't own",
+  "a repo i do not own",
+  "targeted.*a repo i don",
+  "misfiled",
+  "this task belongs to",
+  "not my repository",
+  "not my repo",
+] as const;
+
+/**
+ * Returns true when any known ownership-rejection phrase appears in the
+ * agent's result text.
+ */
+export function containsMisroutingPhrase(resultText: string): boolean {
+  const lower = resultText.toLowerCase();
+  return MISROUTING_REJECTION_PHRASES.some((phrase) => {
+    // Support simple regex patterns (phrases containing ".*")
+    if (phrase.includes(".*")) {
+      return new RegExp(phrase, "i").test(resultText);
+    }
+    return lower.includes(phrase);
+  });
+}
+
+/**
+ * Returns true when:
+ *   1. The task result contains a known misrouting rejection phrase AND
+ *   2. The source_ref repo differs from the agent's declared repo in config
+ *
+ * Either condition alone is not sufficient — both must hold to auto-close.
+ * This avoids false-positives on agents that quote ownership language while
+ * legitimately working cross-repo on coordinated changes.
+ */
+export function detectMisroutedTask(
+  task: Task,
+  config?: OrchestratorConfig,
+): { misrouted: boolean; taskRepo?: string; agentRepo?: string; reason?: string } {
+  const resultText = task.result ?? "";
+  if (!containsMisroutingPhrase(resultText)) {
+    return { misrouted: false };
+  }
+
+  const taskRepo = extractRepoFromSourceRef(task.source_ref);
+  const agentRepo = task.agent_name ? config?.agents?.[task.agent_name]?.github : undefined;
+
+  // If we can't determine either side, don't short-circuit — let LLM judge.
+  if (!taskRepo || !agentRepo) {
+    return { misrouted: false };
+  }
+
+  const normalise = (r: string) => r.toLowerCase().replace(/^https?:\/\/github\.com\//, "");
+  if (normalise(taskRepo) === normalise(agentRepo)) {
+    // Phrase present but repo matches — likely a quote or cross-repo ref; skip.
+    return { misrouted: false };
+  }
+
+  return {
+    misrouted: true,
+    taskRepo,
+    agentRepo,
+    reason: `Task targets ${taskRepo} but agent ${task.agent_name} owns ${agentRepo}. Agent result contains ownership-rejection language — closing without LLM scoring.`,
+  };
+}
+
 export async function verifyTask(
   store: StateStore,
   reviewerClient: ReviewerClient,
@@ -95,6 +168,45 @@ export async function verifyTask(
         score_source: "llm",
       };
     }
+  }
+
+  // Misrouting pre-check (issue #1620): deterministic short-circuit before
+  // the LLM call. If the agent explicitly rejected the task on ownership
+  // grounds AND the source_ref repo doesn't match the agent's declared repo,
+  // close immediately — no LLM budget spent.
+  const misrouteCheck = detectMisroutedTask(task, config);
+  if (misrouteCheck.misrouted) {
+    const notes = misrouteCheck.reason ?? "Task auto-closed: misrouted to wrong agent.";
+    verifierLog.warn("Misrouting detected — closing without LLM scoring", {
+      taskId,
+      taskRepo: misrouteCheck.taskRepo,
+      agentRepo: misrouteCheck.agentRepo,
+      agent: task.agent_name,
+    });
+    store.updateTask(taskId, {
+      verification_status: "rejected",
+      quality_score: 0,
+      verification_notes: notes,
+    });
+    try {
+      await notifyOperator(
+        "Misrouting auto-close",
+        `Task \`${taskId}\` was dispatched to *${task.agent_name}* but targets ` +
+          `\`${misrouteCheck.taskRepo}\` (agent owns \`${misrouteCheck.agentRepo}\`).\n` +
+          `Closed without LLM scoring. Check routing config for \`${task.agent_name}\`.`,
+        "warning",
+        `misroute:${task.agent_name}:${misrouteCheck.taskRepo}`,
+      );
+    } catch {
+      // Telegram alert is best-effort; don't fail the verification pipeline on it.
+    }
+    return {
+      approved: false,
+      score: 0,
+      notes,
+      revision: `Re-route this task to an agent that owns ${misrouteCheck.taskRepo}.`,
+      score_source: "llm",
+    };
   }
 
   store.updateTask(taskId, { verification_status: "pending" });
