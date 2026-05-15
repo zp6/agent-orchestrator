@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-15T09:45:26.712Z
+generated_at: 2026-05-15T09:46:01.238Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -695,6 +695,45 @@ actions:
     source_signals:
       - "stale-issue-scanner: dydxprotocol/v4-web#1961 stale 194d"
       - "comment-velocity: 1 comment"
+    okr_alignment:
+      - okr-1
+      - okr-5
+    status: proposed
+    auditor_review:
+      reviewed_at: null
+      reviewer: null
+      decision: null
+      reasoning: null
+      conditions: []
+    execution:
+      started_at: null
+      completed_at: null
+      artifact_url: null
+      outcome: null
+      revenue_received_usd: null
+  - id: hustle-agent-2026-05-15T09-46-00-720Z-a02d84b1
+    proposed_by: hustle-agent
+    proposed_at: 2026-05-15T09:46:00.720Z
+    type: github-pr-open
+    target: https://github.com/ensdomains/ens-app-v3/issues/1038
+    summary: "Open PR fixing stale issue ensdomains/ens-app-v3#1038: ApeChain Support"
+    reasoning: |-
+      Stale 288 days, 0 comments — likely abandoned by maintainer.
+
+      Repo: ensdomains/ens-app-v3. Issue: https://github.com/ensdomains/ens-app-v3/issues/1038
+
+      Impact score: 60/100 (age + comment-velocity heuristic).
+
+      Fleet capability: TypeScript, GitHub workflow, code review across multiple languages.
+
+      Action type: open a PR with the fix and the fleet wallet address in the description as a voluntary tip jar. Per the #1642 pivot (Immunefi has no submission API), direct-PR-to-project is the fleet-native zero-touch path.
+    expected_value:
+      currency: USD
+      amount: 300
+      confidence: low
+    source_signals:
+      - "stale-issue-scanner: ensdomains/ens-app-v3#1038 stale 288d"
+      - "comment-velocity: 0 comments"
     okr_alignment:
       - okr-1
       - okr-5
