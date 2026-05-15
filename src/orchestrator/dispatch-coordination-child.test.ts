@@ -379,6 +379,63 @@ describe("Dispatcher.dispatchCoordinationChild", () => {
     expect(typeof dispatchedUpdate![1].conversation_id).toBe("string");
     expect(dispatchedUpdate![1].conversation_id!.length).toBeGreaterThan(0);
   });
+
+  // ── issue #1537: target-repo header must name the implementing repo, not the origin ──
+
+  it("uses the implementing repo from the coordination group for the Target repository header", async () => {
+    // The child task's source_ref inherits from the parent (origin) task and
+    // points to rapartlu/agent-dashboard.  The implementing repo for this child
+    // is rapartlu/agent-orchestrator (different repo).
+    // The dispatched message MUST say "Target repository: rapartlu/agent-orchestrator",
+    // not "rapartlu/agent-dashboard".
+    const task = makeChildTask({
+      source_ref: "rapartlu/agent-dashboard#746", // ← origin repo, NOT implementing repo
+      agent_name: "claude-agent-orchestrator",
+    });
+
+    const coordinationGroupFixture = {
+      id: "01GROUPID",
+      parentTaskId: "01PARENTTASK",
+      parentSourceRef: "rapartlu/agent-dashboard#746",
+      changeSets: [],
+      childTaskIds: {
+        "rapartlu/agent-orchestrator": task.id, // ← implementing repo → this task
+        "rapartlu/agent-dashboard": "01SIBLINGTASK",
+      },
+      childPRNumbers: {},
+      childPRUrls: {},
+      status: "pending" as const,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const storeWithGroup = makeMockStore({
+      getCoordinationGroupByChildTaskId: vi.fn().mockReturnValue(coordinationGroupFixture),
+    });
+
+    const localDispatcher = makeDispatcher(storeWithGroup, client);
+    await localDispatcher.dispatchCoordinationChild(task);
+
+    const [, messageArg] = (client.send as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    // Header must reference the implementing repo, not the origin repo
+    expect(messageArg).toContain("Target repository: `rapartlu/agent-orchestrator`");
+    expect(messageArg).not.toContain("Target repository: `rapartlu/agent-dashboard`");
+  });
+
+  it("falls back to source_ref repo when no coordination group is found", async () => {
+    // When getCoordinationGroupByChildTaskId returns null (legacy or unknown task),
+    // fall back to extracting the repo from source_ref as before.
+    const task = makeChildTask({
+      source_ref: "rapartlu/agent-dashboard#612",
+      agent_name: "claude-orchestrator-dashboard",
+    });
+
+    // Default mock already returns null for getCoordinationGroupByChildTaskId
+    await dispatcher.dispatchCoordinationChild(task);
+
+    const [, messageArg] = (client.send as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(messageArg).toContain("Target repository: `rapartlu/agent-dashboard`");
+  });
 });
 
 // ── Tests: daemon dispatchPendingCoordinationGroups (via store mock) ──────────

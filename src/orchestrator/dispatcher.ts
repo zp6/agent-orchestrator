@@ -315,6 +315,20 @@ export function extractRepoFromSourceRef(sourceRef: string | undefined | null): 
 }
 
 /**
+ * Build the structured target-repo header directly from a known repo slug.
+ * Use this when the implementing repo is already resolved (e.g. coordinated-change
+ * child tasks where source_ref points to the origin repo, not the implementing
+ * repo — issue #1537).
+ */
+export function buildTargetRepoHeaderFromRepo(repo: string): string {
+  return (
+    `> **Target repository: \`${repo}\`**\n` +
+    `> All git operations (branches, commits, PRs) for this task must target **${repo}** only.\n` +
+    `> Do NOT open PRs or push branches to any other repository.\n`
+  );
+}
+
+/**
  * Build the structured target-repo header injected at the top of every
  * dispatched message when a GitHub source_ref is available.  The header
  * makes the destination repository unambiguous, preventing agents from
@@ -323,11 +337,7 @@ export function extractRepoFromSourceRef(sourceRef: string | undefined | null): 
 export function buildTargetRepoHeader(sourceRef: string | undefined | null): string | undefined {
   const repo = extractRepoFromSourceRef(sourceRef);
   if (!repo) return undefined;
-  return (
-    `> **Target repository: \`${repo}\`**\n` +
-    `> All git operations (branches, commits, PRs) for this task must target **${repo}** only.\n` +
-    `> Do NOT open PRs or push branches to any other repository.\n`
-  );
+  return buildTargetRepoHeaderFromRepo(repo);
 }
 
 export interface DispatchResult {
@@ -2213,7 +2223,20 @@ export class Dispatcher {
 
     const conversationId = ulid();
     const message = task.description ?? task.title;
-    const repoHeader = buildTargetRepoHeader(task.source_ref);
+
+    // Issue #1537: child tasks inherit source_ref from the parent (origin) task,
+    // so extracting the repo from source_ref yields the origin repo, not the
+    // implementing repo.  Resolve the correct target repo from the coordination
+    // group's childTaskIds map first; fall back to source_ref extraction only
+    // when the group record is unavailable (e.g. legacy tasks, test stubs).
+    const coordinationGroup = this.store.getCoordinationGroupByChildTaskId(task.id);
+    const implementingRepo = coordinationGroup
+      ? Object.entries(coordinationGroup.childTaskIds)
+          .find(([, taskId]) => taskId === task.id)?.[0]
+      : undefined;
+    const repoHeader = implementingRepo
+      ? buildTargetRepoHeaderFromRepo(implementingRepo)
+      : buildTargetRepoHeader(task.source_ref);
     const messageToSend = repoHeader ? `${repoHeader}\n${message}` : message;
     const disciplineSnapshot = captureDisciplineContext(this.config.orchestrator_dir);
     const disciplineBlock = formatDisciplineRefreshBlock(disciplineSnapshot, message);
