@@ -50,6 +50,18 @@ vi.mock("./issue-state-bridge.js", () => ({
   logCacheMetrics: vi.fn(),
 }));
 
+// Mock merge-stall-guard so tests don't shell out to real `gh pr list` calls
+// against dummy repos (owner/my-repo). Without this mock, each call takes
+// ~350 ms (GitHub 404), and surge tests with 11 iterations push past the
+// default 5 s timeout. (#1523)
+vi.mock("./merge-stall-guard.js", () => ({
+  checkMergeStall: vi.fn().mockResolvedValue({ blocked: false, reason: "no stale PRs", stalePRs: [] }),
+  clearMergeStallCache: vi.fn(),
+  setMergeStallThresholdHours: vi.fn(),
+  getMergeStallThresholdHours: vi.fn().mockReturnValue(4),
+  DEFAULT_MERGE_STALL_THRESHOLD_HOURS: 4,
+}));
+
 import { fetchOpenIssues, findApprovedPRForIssue, findBranchForIssue, findExistingPRsForIssue, isIssueOpen, validateGhAuth } from "./github.js";
 import { cachedGetIssueState } from "./issue-state-bridge.js";
 import { sendTelegramAlert } from "../service/telegram.js";
@@ -3617,7 +3629,7 @@ describe("PR guard surge alert (issue #1082)", () => {
     expect(totalDispatched).toBe(0);
     expect(totalSkipped).toBe(11);
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
-  }, 15_000); // generous timeout: 11 sequential gh CLI calls under test-suite load
+  });
 
   // ─────────────────────────────────────────────────────────────────────────
   // Dispatch surge auto-suppression (issue #1113)

@@ -8,6 +8,23 @@ import {
   type WeeklyActivityReport,
 } from "./activity-generator.js";
 import type { StateStore, MeetingRecord } from "../state/store.js";
+import { execSync } from "child_process";
+
+// Mock child_process at module level so Vitest's ESM resolver intercepts the
+// import before activity-generator.ts loads it. The previous pattern used
+// `vi.spyOn(require("child_process"), "execSync")` which does not work in ESM
+// mode — `require` is unavailable so the spy is silently ignored and the real
+// execSync runs `gh pr list` against 6 fleet repos (~400 ms each, ~2400 ms
+// total per test). (#1523)
+vi.mock("child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("child_process")>();
+  return {
+    ...actual,
+    execSync: vi.fn().mockReturnValue(""),
+  };
+});
+
+const mockExecSync = vi.mocked(execSync);
 
 describe("Activity Generator", () => {
   beforeEach(() => {
@@ -20,9 +37,6 @@ describe("Activity Generator", () => {
 
   describe("getWeeklyMergedPRs", () => {
     it("returns PRs from this week only", async () => {
-      // Mock execSync for gh command
-      const mockExecSync = vi.spyOn(require("child_process"), "execSync");
-
       const weekAgoDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
       const mockOutput = `{"number":123,"title":"Fix bug","author":{"login":"agent-1"},"mergedAt":"${new Date().toISOString()}","url":"https://github.com/..."}`;
 
@@ -32,12 +46,9 @@ describe("Activity Generator", () => {
 
       expect(Array.isArray(prs)).toBe(true);
       expect(prs.every((pr) => new Date(pr.mergedAt) >= new Date(weekAgoDate))).toBe(true);
-
-      mockExecSync.mockRestore();
     });
 
     it("handles API errors gracefully", async () => {
-      const mockExecSync = vi.spyOn(require("child_process"), "execSync");
       mockExecSync.mockImplementation(() => {
         throw new Error("Connection failed");
       });
@@ -45,8 +56,6 @@ describe("Activity Generator", () => {
       const prs = await getWeeklyMergedPRs(7);
 
       expect(prs).toEqual([]);
-
-      mockExecSync.mockRestore();
     });
   });
 
@@ -180,7 +189,7 @@ describe("Activity Generator", () => {
         getMeetings: vi.fn().mockReturnValue([]),
       } as unknown as StateStore;
 
-      vi.spyOn(require("child_process"), "execSync").mockReturnValue("");
+      mockExecSync.mockReturnValue("");
       global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { team: { issues: { nodes: [] } } } }) });
 
       const report = await generateWeeklyActivityReport(mockStore, 7);
@@ -206,7 +215,7 @@ describe("Activity Generator", () => {
         getMeetings: vi.fn().mockReturnValue([]),
       } as unknown as StateStore;
 
-      vi.spyOn(require("child_process"), "execSync").mockReturnValue("");
+      mockExecSync.mockReturnValue("");
       global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { team: { issues: { nodes: [] } } } }) });
 
       const report = await generateWeeklyActivityReport(mockStore, 7);

@@ -91,6 +91,18 @@ vi.mock("./capability-enforcer.js", async (importOriginal) => {
   return { ...actual, runRemoteCapabilityCheck: vi.fn().mockResolvedValue(null) };
 });
 
+// Mock proactive-rebase-scheduler so dispatch() doesn't shell out to the real
+// `gh api` endpoint. Without this mock the fire-and-forget
+// checkAndRebaseBeforeDispatch() call makes a real network request (~1200 ms)
+// for every test that supplies a sourceRef, pushing affinity guardrail tests
+// past the 5 s timeout. (#1523)
+vi.mock("./proactive-rebase-scheduler.js", () => ({
+  checkAndRebaseBeforeDispatch: vi.fn().mockResolvedValue(null),
+  runScheduledRebases: vi.fn().mockResolvedValue([]),
+  PROACTIVE_REBASE_THRESHOLD: 3,
+  PROACTIVE_REBASE_MAX_BEHIND: 20,
+}));
+
 import { reportEscalation } from "../triggers/reporters.js";
 const mockReportEscalation = vi.mocked(reportEscalation);
 
@@ -160,6 +172,15 @@ vi.mock("../service/logger.js", () => ({
     error: vi.fn(),
     debug: vi.fn(),
   }),
+}));
+
+// Mock cross-repo-tracker so dispatch() doesn't shell out to `gh pr list` /
+// `gh issue view` against dummy repos (owner/orchestrator, owner/repo).
+// Without this mock, each dispatch with a sourceRef triggers two real gh CLI
+// calls in detectAndCreateFollowUps() (~900 ms each). (#1523)
+vi.mock("./cross-repo-tracker.js", () => ({
+  detectAndCreateFollowUps: vi.fn().mockReturnValue([]),
+  formatFollowUpNote: vi.fn().mockReturnValue(""),
 }));
 
 const makeConfig = (): OrchestratorConfig => ({
@@ -3384,7 +3405,7 @@ describe("dispatch() — repo-to-agent affinity guardrail (issue #928)", () => {
       expect.any(String),
       expect.any(String),
     );
-  }, 15000);
+  });
 
   it("affinity guardrail is skipped when mapped agent is not registered", async () => {
     const config = makeAffinityConfig();
