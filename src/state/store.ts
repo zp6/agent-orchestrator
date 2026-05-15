@@ -1707,6 +1707,29 @@ export interface VerificationCalibrationRecommendationRow {
   review_notes: string | null;
 }
 
+// ── Low-score-approved entry (issue #1706) ────────────────────────────────────
+
+/**
+ * One row returned by getLowScoreApproved().
+ *
+ * Consumed by:
+ *  - the dashboard /api/low-score-approved endpoint (agent-dashboard, order 2)
+ *  - the auditor-agent bypass-path-monitor classifier
+ *
+ * `bypass_path` is null for records written before agent-reviewer#685 was
+ * deployed. The auditor treats any null entry after that deploy date as a
+ * regression.
+ */
+export interface LowScoreApprovedEntry {
+  task_id: string;
+  pr_url: string | null;
+  verifier_agent: string;
+  verification_score: number;
+  bypass_path: string | null;
+  verified_at: string;
+  task_type: string;
+}
+
 // ── Dispatch-hang suppression types (issue #1374) ────────────────────────────
 
 /**
@@ -9968,13 +9991,35 @@ export class StateStore {
         resolved_at      TEXT,
 
         -- Derived weight for calibration (1.0 | 0.5 | 0.0)
-        merge_weight     REAL
+        merge_weight     REAL,
+
+        -- Bypass path recorded by agent-reviewer when a sub-0.10-score task
+        -- is approved via a non-standard codepath (issue #1706 / agent-reviewer#685).
+        -- e.g. "triage-schema-gate-passed / llm-score-zero"
+        bypass_path      TEXT
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_vol_task_id ON verification_outcome_logs(task_id);
       CREATE INDEX IF NOT EXISTS idx_vol_verifier ON verification_outcome_logs(verifier_agent, score_bucket, task_type);
       CREATE INDEX IF NOT EXISTS idx_vol_verified_at ON verification_outcome_logs(verified_at);
       CREATE INDEX IF NOT EXISTS idx_vol_pr_outcome ON verification_outcome_logs(pr_outcome);
     `);
+    // Lazy column addition for DBs created before this field was added.
+    this.ensureBypassPathColumn();
+  }
+
+  /**
+   * Lazily add bypass_path to verification_outcome_logs for databases created
+   * before issue #1706. The ALTER TABLE is a no-op if the column already exists
+   * (SQLite silently raises "duplicate column name"; we swallow that error).
+   */
+  private ensureBypassPathColumn(): void {
+    try {
+      this.db.exec(
+        `ALTER TABLE verification_outcome_logs ADD COLUMN bypass_path TEXT;`,
+      );
+    } catch {
+      // Column already present — normal on any DB created after this migration.
+    }
   }
 
   /**
@@ -10020,13 +10065,16 @@ export class StateStore {
     verification_score: number;
     task_type: string;
     verified_at?: string;
+    /** Codepath that approved the task when score < 0.10 (agent-reviewer#685). */
+    bypass_path?: string | null;
   }): void {
     const score = params.verification_score;
     const bucket = this.scoreToCalibrationBucket(score);
     this.db.prepare(`
       INSERT OR IGNORE INTO verification_outcome_logs
-        (task_id, pr_url, verifier_agent, verification_score, score_bucket, task_type, verified_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+        (task_id, pr_url, verifier_agent, verification_score, score_bucket,
+         task_type, verified_at, bypass_path)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       params.task_id,
       params.pr_url ?? null,
@@ -10035,6 +10083,7 @@ export class StateStore {
       bucket,
       params.task_type ?? "implementation",
       params.verified_at ?? new Date().toISOString(),
+      params.bypass_path ?? null,
     );
   }
 
@@ -10246,6 +10295,47 @@ export class StateStore {
       verifier_agent: string;
       verified_at: string;
     }>;
+  }
+
+  /**
+   * Return sub-0.10-score verification outcome entries for the trailing
+   * `windowDays` days, newest first. Used by:
+   *   - GET /api/low-score-approved in the metrics server (issue #1706)
+   *   - the auditor-agent bypass-path-monitor classifier (auditor-agent#24)
+   *
+   * @param windowDays  Trailing window in days (default 7).
+   * @param limit       Max rows returned (default 200, hard cap 1000).
+   */
+  getLowScoreApproved(windowDays = 7, limit = 200): LowScoreApprovedEntry[] {
+    const safeLimit = Math.min(Math.max(1, limit), 1000);
+    const cutoff = new Date(Date.now() - windowDays * 86400_000).toISOString();
+    return this.db.prepare(`
+      SELECT task_id, pr_url, verifier_agent, verification_score,
+             bypass_path, verified_at, task_type
+      FROM verification_outcome_logs
+      WHERE verification_score < 0.10
+        AND verified_at >= ?
+      ORDER BY verified_at DESC
+      LIMIT ?
+    `).all(cutoff, safeLimit) as LowScoreApprovedEntry[];
+  }
+
+  /**
+   * Total count of verified tasks (all scores) in the trailing `windowDays` days.
+   *
+   * Used by the auditor-agent bypass-path-monitor to compute bypass frequency
+   * as a percentage of all verified tasks — not just low-score ones.
+   *
+   * @param windowDays  Trailing window in days (default 7).
+   */
+  getVerifiedTaskCount(windowDays = 7): number {
+    const cutoff = new Date(Date.now() - windowDays * 86400_000).toISOString();
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS n
+      FROM verification_outcome_logs
+      WHERE verified_at >= ?
+    `).get(cutoff) as { n: number };
+    return row?.n ?? 0;
   }
 
   /** Map a verification score to its calibration bucket string. */

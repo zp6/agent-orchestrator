@@ -294,4 +294,145 @@ describe("MetricsServer", () => {
       expect(body.collisions[1].colliding_id).toBe("ID001");
     });
   });
+
+  // ── GET /api/low-score-approved (issue #1706) ────────────────────────────────
+
+  describe("GET /api/low-score-approved", () => {
+    it("returns empty entries when no low-score tasks exist", async () => {
+      const { status, body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/low-score-approved`,
+      ) as { status: number; body: { window_days: number; count: number; entries: unknown[] } };
+
+      expect(status).toBe(200);
+      expect(body.window_days).toBe(7);
+      expect(body.count).toBe(0);
+      expect(body.entries).toEqual([]);
+    });
+
+    it("returns low-score entries (< 0.10) and excludes higher scores", async () => {
+      // Low-score (should appear)
+      store.insertVerificationOutcome({
+        task_id: "task-low-001",
+        pr_url: "https://github.com/rapartlu/test/pull/1",
+        verifier_agent: "claude-orchestrator-reviewer",
+        verification_score: 0.05,
+        task_type: "implementation",
+        bypass_path: "triage-schema-gate-passed / llm-score-zero",
+      });
+      // Exactly 0.10 (should NOT appear — threshold is strictly < 0.10)
+      store.insertVerificationOutcome({
+        task_id: "task-threshold-010",
+        verifier_agent: "claude-orchestrator-reviewer",
+        verification_score: 0.10,
+        task_type: "implementation",
+      });
+      // High score (should not appear)
+      store.insertVerificationOutcome({
+        task_id: "task-high-001",
+        verifier_agent: "claude-orchestrator-reviewer",
+        verification_score: 0.85,
+        task_type: "implementation",
+      });
+
+      const { status, body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/low-score-approved`,
+      ) as {
+        status: number;
+        body: {
+          count: number;
+          entries: Array<{
+            task_id: string;
+            bypass_path: string | null;
+            verification_score: number;
+          }>;
+        };
+      };
+
+      expect(status).toBe(200);
+      expect(body.count).toBe(1);
+      expect(body.entries[0].task_id).toBe("task-low-001");
+      expect(body.entries[0].bypass_path).toBe("triage-schema-gate-passed / llm-score-zero");
+      expect(body.entries[0].verification_score).toBe(0.05);
+    });
+
+    it("returns null bypass_path when not set", async () => {
+      store.insertVerificationOutcome({
+        task_id: "task-no-bypass",
+        verifier_agent: "claude-orchestrator-reviewer",
+        verification_score: 0.02,
+        task_type: "implementation",
+        // bypass_path intentionally omitted
+      });
+
+      const { body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/low-score-approved`,
+      ) as { body: { entries: Array<{ bypass_path: unknown }> } };
+
+      expect(body.entries[0].bypass_path).toBeNull();
+    });
+
+    it("respects ?days query parameter", async () => {
+      const { body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/low-score-approved?days=30`,
+      ) as { body: { window_days: number } };
+
+      expect(body.window_days).toBe(30);
+    });
+
+    it("caps days at 90", async () => {
+      const { body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/low-score-approved?days=999`,
+      ) as { body: { window_days: number } };
+
+      expect(body.window_days).toBe(90);
+    });
+
+    it("returns 405 for POST method", async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/api/low-score-approved`, { method: "POST" });
+      expect(res.status).toBe(405);
+    });
+  });
+
+  // ── GET /api/verified-task-count (issue #1706) ───────────────────────────────
+
+  describe("GET /api/verified-task-count", () => {
+    it("returns 0 when no tasks exist", async () => {
+      const { status, body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/verified-task-count`,
+      ) as { status: number; body: { window_days: number; count: number } };
+
+      expect(status).toBe(200);
+      expect(body.window_days).toBe(7);
+      expect(body.count).toBe(0);
+    });
+
+    it("counts all verified tasks regardless of score", async () => {
+      store.insertVerificationOutcome({
+        task_id: "task-low",
+        verifier_agent: "claude-orchestrator-reviewer",
+        verification_score: 0.05,
+        task_type: "implementation",
+      });
+      store.insertVerificationOutcome({
+        task_id: "task-high",
+        verifier_agent: "claude-orchestrator-reviewer",
+        verification_score: 0.92,
+        task_type: "implementation",
+      });
+
+      const { body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/verified-task-count`,
+      ) as { body: { count: number } };
+
+      expect(body.count).toBe(2);
+    });
+
+    it("respects ?days query parameter", async () => {
+      const { body } = await fetchJson(
+        `http://127.0.0.1:${port}/api/verified-task-count?days=14`,
+      ) as { body: { window_days: number } };
+
+      expect(body.window_days).toBe(14);
+    });
+  });
 });

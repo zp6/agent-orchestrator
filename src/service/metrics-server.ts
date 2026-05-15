@@ -32,6 +32,10 @@
  *   GET /monologue?agent=<name>&task=<id>&kind=<kind>&limit=50&offset=0
  *   POST /api/fingerprint/check                       — check if a (kind, fingerprint) pair was seen before (issue #1494)
  *   POST /api/fingerprint/record                      — record a (kind, fingerprint) pair with TTL (issue #1494)
+ *   GET /api/low-score-approved                       — sub-0.10-score verified tasks with bypass_path for auditor (issue #1706)
+ *   GET /api/low-score-approved?days=7&limit=200
+ *   GET /api/verified-task-count                      — total verified task count for bypass frequency denominator (issue #1706)
+ *   GET /api/verified-task-count?days=7
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
@@ -51,6 +55,7 @@ import {
   type IncidentRecord,
   type FingerprintCheckResult,
   type FingerprintRecordResult,
+  type LowScoreApprovedEntry,
 } from "../state/store.js";
 import { createLogger } from "./logger.js";
 
@@ -1107,6 +1112,33 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
       return;
     }
 
+    // ── GET /api/low-score-approved (issue #1706) ─────────────────────────────
+    // Sub-0.10-score verified tasks with bypass_path for the auditor classifier.
+    // Consumed by:
+    //   - agent-dashboard /api/low-score-approved proxy (order 2)
+    //   - auditor-agent bypass-path-monitor (auditor-agent#24)
+    if (url.pathname === "/api/low-score-approved" && req.method === "GET") {
+      const days = Math.min(Math.max(1, parseInt(url.searchParams.get("days") ?? "7", 10) || 7), 90);
+      const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") ?? "200", 10) || 200), 1000);
+      const entries: LowScoreApprovedEntry[] = store.getLowScoreApproved(days, limit);
+      sendJson(res, 200, {
+        window_days: days,
+        count: entries.length,
+        entries,
+      });
+      return;
+    }
+
+    // ── GET /api/verified-task-count (issue #1706) ────────────────────────────
+    // Total verified task count for the trailing window — denominator for the
+    // auditor-agent bypass frequency percentage.
+    if (url.pathname === "/api/verified-task-count" && req.method === "GET") {
+      const days = Math.min(Math.max(1, parseInt(url.searchParams.get("days") ?? "7", 10) || 7), 90);
+      const count = store.getVerifiedTaskCount(days);
+      sendJson(res, 200, { window_days: days, count });
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found" });
   });
 
@@ -1136,6 +1168,8 @@ export function startMetricsServer(store: StateStore, port = DEFAULT_METRICS_POR
         "/api/incidents",
         "POST /api/fingerprint/check",
         "POST /api/fingerprint/record",
+        "/api/low-score-approved",
+        "/api/verified-task-count",
       ],
     });
   });
