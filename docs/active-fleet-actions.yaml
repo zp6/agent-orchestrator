@@ -4,7 +4,7 @@
 # CLI: orch fleet-actions {list,propose,review,execute,history,stats}
 
 schema_version: 1
-generated_at: 2026-05-14T19:53:33.113Z
+generated_at: 2026-05-15T09:45:26.712Z
 actions:
   - id: hustle-agent-2026-05-13T20-35-22-999Z-5b73c93b
     proposed_by: hustle-agent
@@ -578,12 +578,12 @@ actions:
     okr_alignment:
       - okr-1
       - okr-5
-    status: proposed
+    status: approved
     auditor_review:
-      reviewed_at: null
-      reviewer: null
-      decision: null
-      reasoning: null
+      reviewed_at: 2026-05-15T09:45:26.712Z
+      reviewer: auditor-agent
+      decision: approve
+      reasoning: "Action passes all guardrails: OKR alignment present (okr-1, okr-5), no charter violation, no duplicate target in flight, expected value $500 (medium confidence). Treasury live probe: $2.060151 USDC total (Base mainnet, Morpho vault $2.060151 + liquid $0, probed 2026-05-15T09:44:50.879Z). Action type github-pr-open is in ZERO_SPEND_ACTION_TYPES - capital-discipline floor check skipped by design. WalletConnect/walletconnect-monorepo#4064 is 477 days stale with 21 comments; impact score 100/100. In-flight actions (3, excluding target): ethereum/ethereum-org-website#13144, scaffold-eth/scaffold-eth-2#807, dydxprotocol/v4-web#1961 - none target walletconnect-monorepo#4064. Anomaly noted: execution section on this action contains data belonging to safe-fndn/safe-smart-account#714 (artifact_url mismatch) - data integrity drift, does not affect this review decision."
       conditions: []
     execution:
       started_at: 2026-05-15T04:39:00.000Z
