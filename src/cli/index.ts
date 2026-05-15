@@ -69,6 +69,7 @@ import { registerGoalsSnapshotCommand } from "./commands/goals-snapshot.js";
 import { registerDnsCommand } from "./commands/dns.js";
 import { registerFleetActionsCommand } from "./commands/fleet-actions.js";
 import { registerTasksCommand } from "./commands/tasks.js";
+import { registerCoordDispatchesCommand } from "./commands/coord-dispatches.js";
 
 const program = new Command();
 
@@ -147,6 +148,7 @@ registerGoalsSnapshotCommand(program);
 registerDnsCommand(program);
 registerFleetActionsCommand(program);
 registerTasksCommand(program);
+registerCoordDispatchesCommand(program);
 
 program.parse();
 // docs PR ci-trigger

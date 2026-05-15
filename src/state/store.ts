@@ -9634,6 +9634,50 @@ export class StateStore {
   }
 
   /**
+   * List the most recent coordination groups, newest first, with optional
+   * status filter. Used by the operator-facing `orch coord-dispatches`
+   * surface (issue #1530) to audit the per-repo "What to implement" payloads
+   * actually sent to peer agents.
+   */
+  listRecentCoordinationGroups(opts: { limit?: number; status?: string } = {}): Array<{
+    id: string;
+    parentTaskId: string;
+    parentSourceRef: string | null;
+    changeSets: unknown[];
+    childTaskIds: Record<string, string>;
+    childPRNumbers: Record<string, number>;
+    childPRUrls: Record<string, string>;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+  }> {
+    this.ensureCoordinationGroupsTable();
+    const limit = Math.max(1, Math.min(opts.limit ?? 20, 500));
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (opts.status) {
+      where.push("status = ?");
+      params.push(opts.status);
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const rows = this.db.prepare(
+      `SELECT * FROM coordination_groups ${whereSql} ORDER BY created_at DESC LIMIT ?`,
+    ).all(...params, limit) as Array<{
+      id: string;
+      parent_task_id: string;
+      parent_source_ref: string | null;
+      change_sets_json: string;
+      child_task_ids_json: string;
+      child_pr_numbers_json: string;
+      child_pr_urls_json: string;
+      status: string;
+      created_at: string;
+      updated_at: string;
+    }>;
+    return rows.map((r) => this.deserializeCoordinationGroupRow(r));
+  }
+
+  /**
    * Return coordination groups in a given status (for daemon polling).
    */
   getCoordinationGroupsByStatus(status: string): Array<{
@@ -9701,6 +9745,165 @@ export class StateStore {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
+  }
+
+  // ── Coordination dispatch audit (issue #1530) ─────────────────────────────
+
+  /**
+   * Lazily create the coordination_dispatch_audit table. One row per time
+   * `validateChangeSetDescription` rejects an extracted snippet and falls back
+   * to the safe sentinel. Lets operators audit how often the dispatch-boundary
+   * validation is firing, which repos are most affected, and what the original
+   * raw snippet looked like.
+   *
+   * See issue #1530 (introspection surface) and agent-reviewer#668 (the
+   * underlying truncation bug that motivated the validation).
+   */
+  private ensureCoordinationDispatchAuditTable(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS coordination_dispatch_audit (
+        id                TEXT PRIMARY KEY,
+        group_id          TEXT,
+        parent_source_ref TEXT,
+        repo              TEXT NOT NULL,
+        agent_name        TEXT,
+        matched_token     TEXT,
+        raw_snippet       TEXT NOT NULL,
+        reason            TEXT NOT NULL,
+        fallback_used     INTEGER NOT NULL DEFAULT 1,
+        created_at        TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_coordination_dispatch_audit_created
+        ON coordination_dispatch_audit(created_at);
+      CREATE INDEX IF NOT EXISTS idx_coordination_dispatch_audit_repo
+        ON coordination_dispatch_audit(repo);
+      CREATE INDEX IF NOT EXISTS idx_coordination_dispatch_audit_reason
+        ON coordination_dispatch_audit(reason);
+    `);
+  }
+
+  /**
+   * Record a coordination-dispatch validation event. Called from
+   * `validateChangeSetDescription` whenever an extracted snippet is rejected
+   * and substituted with `NO_CODE_CHANGES_FALLBACK`.
+   */
+  recordCoordinationDispatchAudit(entry: {
+    id: string;
+    groupId?: string | null;
+    parentSourceRef?: string | null;
+    repo: string;
+    agentName?: string | null;
+    matchedToken?: string | null;
+    rawSnippet: string;
+    reason: string;
+    fallbackUsed?: boolean;
+    createdAt?: string;
+  }): void {
+    this.ensureCoordinationDispatchAuditTable();
+    this.db.prepare(`
+      INSERT INTO coordination_dispatch_audit
+        (id, group_id, parent_source_ref, repo, agent_name, matched_token,
+         raw_snippet, reason, fallback_used, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      entry.id,
+      entry.groupId ?? null,
+      entry.parentSourceRef ?? null,
+      entry.repo,
+      entry.agentName ?? null,
+      entry.matchedToken ?? null,
+      entry.rawSnippet,
+      entry.reason,
+      entry.fallbackUsed === false ? 0 : 1,
+      entry.createdAt ?? new Date().toISOString(),
+    );
+  }
+
+  /**
+   * List recent coordination-dispatch audit entries, newest first. Optional
+   * filters narrow by repo, reason, or recency window.
+   */
+  listCoordinationDispatchAudits(opts: {
+    limit?: number;
+    repo?: string;
+    reason?: string;
+    sinceISO?: string;
+  } = {}): Array<{
+    id: string;
+    groupId: string | null;
+    parentSourceRef: string | null;
+    repo: string;
+    agentName: string | null;
+    matchedToken: string | null;
+    rawSnippet: string;
+    reason: string;
+    fallbackUsed: boolean;
+    createdAt: string;
+  }> {
+    this.ensureCoordinationDispatchAuditTable();
+    const limit = Math.max(1, Math.min(opts.limit ?? 50, 500));
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (opts.repo) {
+      where.push("repo = ?");
+      params.push(opts.repo);
+    }
+    if (opts.reason) {
+      where.push("reason = ?");
+      params.push(opts.reason);
+    }
+    if (opts.sinceISO) {
+      where.push("created_at >= ?");
+      params.push(opts.sinceISO);
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const rows = this.db.prepare(
+      `SELECT * FROM coordination_dispatch_audit ${whereSql} ORDER BY created_at DESC LIMIT ?`,
+    ).all(...params, limit) as Array<{
+      id: string;
+      group_id: string | null;
+      parent_source_ref: string | null;
+      repo: string;
+      agent_name: string | null;
+      matched_token: string | null;
+      raw_snippet: string;
+      reason: string;
+      fallback_used: number;
+      created_at: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      groupId: r.group_id,
+      parentSourceRef: r.parent_source_ref,
+      repo: r.repo,
+      agentName: r.agent_name,
+      matchedToken: r.matched_token,
+      rawSnippet: r.raw_snippet,
+      reason: r.reason,
+      fallbackUsed: r.fallback_used !== 0,
+      createdAt: r.created_at,
+    }));
+  }
+
+  /**
+   * Aggregate audit counts grouped by reason for a given window. Useful for
+   * health summaries (`orch coord-dispatches --summary`).
+   */
+  countCoordinationDispatchAuditsByReason(opts: { sinceISO?: string } = {}): Record<string, number> {
+    this.ensureCoordinationDispatchAuditTable();
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (opts.sinceISO) {
+      where.push("created_at >= ?");
+      params.push(opts.sinceISO);
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const rows = this.db.prepare(
+      `SELECT reason, COUNT(*) AS n FROM coordination_dispatch_audit ${whereSql} GROUP BY reason`,
+    ).all(...params) as Array<{ reason: string; n: number }>;
+    const out: Record<string, number> = {};
+    for (const row of rows) out[row.reason] = row.n;
+    return out;
   }
 
   // ── Follow-up Chain Tracker ───────────────────────────────────────────────

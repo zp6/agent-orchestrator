@@ -36,6 +36,7 @@ import {
   detectMultiRepoChangeSets,
   createCoordinationGroup,
   checkAndAdvanceCoordination,
+  makeStoreAuditRecorder,
 } from "./multi-repo-coordinator.js";
 import {
   runGitHubPreDispatchValidation,
@@ -1840,7 +1841,9 @@ export class Dispatcher {
         // prevent cascade creation (child tasks should not spawn more groups).
         const isCoordinationChild = !!this.store.getCoordinationGroupByChildTaskId(task.id);
         if (!isCoordinationChild && completedTask.task_type === "implementation") {
-          const changeSets = detectMultiRepoChangeSets(completedTask, agentName, this.config);
+          const changeSets = detectMultiRepoChangeSets(completedTask, agentName, this.config, {
+            recordAudit: makeStoreAuditRecorder(this.store),
+          });
           if (changeSets.length > 0) {
             try {
               const coordGroup = createCoordinationGroup(completedTask, changeSets, this.store);

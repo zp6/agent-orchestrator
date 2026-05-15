@@ -119,6 +119,7 @@ export function detectMultiRepoChangeSets(
   task: Task,
   agentName: string,
   config: OrchestratorConfig,
+  opts: { recordAudit?: ValidationAuditRecorder } = {},
 ): MultiRepoChangeSet[] {
   // Only detect cross-repo requirements for genuine implementation tasks.
   // Skip research, facilitation, housekeeping, revisions, and coordinated
@@ -190,6 +191,8 @@ export function detectMultiRepoChangeSets(
     const safeSnippet = validateChangeSetDescription(rawSnippet, matchedToken, {
       repo: peerRepo,
       sourceRef: task.source_ref ?? undefined,
+      agentName: candidateName,
+      recordAudit: opts.recordAudit,
     });
     detected.push({
       repo: peerRepo,
@@ -260,6 +263,7 @@ export function createCoordinationGroup(
       cs,
       changeSets.filter((x) => x.repo !== cs.repo),
       groupId,
+      makeStoreAuditRecorder(store, { groupId }),
     );
 
     const childTask = store.createTask({
@@ -653,6 +657,7 @@ function buildChildTaskDescription(
   cs: MultiRepoChangeSet,
   siblings: MultiRepoChangeSet[],
   coordinationGroupId: string,
+  recordAudit?: ValidationAuditRecorder,
 ): string {
   const parentRef = parentTask.source_ref
     ? `Part of coordinated change originating from: ${parentTask.source_ref}`
@@ -690,6 +695,8 @@ function buildChildTaskDescription(
   const safeDescription = validateChangeSetDescription(cs.description, null, {
     repo: cs.repo,
     sourceRef: parentTask.source_ref ?? undefined,
+    agentName: cs.agentName,
+    recordAudit,
   });
 
   return (
@@ -768,6 +775,31 @@ export const NO_CODE_CHANGES_FALLBACK =
   "No code changes required — review only. (The dispatch could not extract a reliable per-repo description from the parent issue.)";
 
 /**
+ * Build a `ValidationAuditRecorder` that persists rejections to
+ * `coordination_dispatch_audit` (issue #1530). `groupId` may be unknown at
+ * detection time — passed through so rows created during dispatch can be
+ * tied back to the eventual coordination group when one exists.
+ */
+export function makeStoreAuditRecorder(
+  store: StateStore,
+  opts: { groupId?: string | null } = {},
+): ValidationAuditRecorder {
+  return (entry) => {
+    store.recordCoordinationDispatchAudit({
+      id: ulid(),
+      groupId: opts.groupId ?? null,
+      parentSourceRef: entry.sourceRef ?? null,
+      repo: entry.repo,
+      agentName: entry.agentName ?? null,
+      matchedToken: entry.matchedToken ?? null,
+      rawSnippet: entry.rawSnippet,
+      reason: entry.reason,
+      fallbackUsed: true,
+    });
+  };
+}
+
+/**
  * Heuristic: does this snippet look like a fragment of a fleet-antibody /
  * learned-pattern hint rather than a real per-repo description?
  *
@@ -819,6 +851,21 @@ function looksTruncated(text: string): boolean {
 }
 
 /**
+ * Optional sink for validation rejections. The orchestrator passes a closure
+ * that writes to `coordination_dispatch_audit` (issue #1530); tests pass a
+ * spy or omit entirely. Kept as an injection point so the validation logic
+ * stays pure and easy to test in isolation.
+ */
+export type ValidationAuditRecorder = (entry: {
+  repo: string;
+  agentName?: string | null;
+  sourceRef?: string | null;
+  matchedToken?: string | null;
+  rawSnippet: string;
+  reason: "empty" | "antibody_fragment" | "truncated" | "token_missing";
+}) => void;
+
+/**
  * Validate that an extracted change-set description is suitable to send as
  * the "What to implement" payload. If the description looks corrupted
  * (truncated mid-sentence, mismatches the matched token, or looks like an
@@ -833,67 +880,80 @@ function looksTruncated(text: string): boolean {
  * dispatch boundary where the original matched token isn't tracked, so we
  * only flag the easy-to-detect failure modes (empty, antibody fragment,
  * truncation).
+ *
+ * `ctx.recordAudit` is invoked once per rejection so the orchestrator can
+ * persist the original snippet and reason to `coordination_dispatch_audit`
+ * (issue #1530). It's optional — tests and detection-only callers can omit.
  */
 export function validateChangeSetDescription(
   description: string,
   matchedToken: string | null,
-  ctx: { repo: string; sourceRef?: string },
+  ctx: {
+    repo: string;
+    sourceRef?: string;
+    agentName?: string;
+    recordAudit?: ValidationAuditRecorder;
+  },
 ): string {
   const trimmed = description.trim();
 
-  if (trimmed.length === 0) {
-    log.warn("Coordinated change description is empty — falling back to review-only", {
-      repo: ctx.repo,
-      sourceRef: ctx.sourceRef,
-      reason: "empty",
-    });
+  const reject = (
+    reason: "empty" | "antibody_fragment" | "truncated" | "token_missing",
+    rawSnippet: string,
+    extraLog: Record<string, unknown> = {},
+  ): string => {
+    log.warn(
+      `Coordinated change description rejected (${reason}) — falling back to review-only`,
+      {
+        repo: ctx.repo,
+        sourceRef: ctx.sourceRef,
+        reason,
+        snippet: rawSnippet.slice(0, 120),
+        ...extraLog,
+      },
+    );
+    if (ctx.recordAudit) {
+      try {
+        ctx.recordAudit({
+          repo: ctx.repo,
+          agentName: ctx.agentName ?? null,
+          sourceRef: ctx.sourceRef ?? null,
+          matchedToken: matchedToken ?? null,
+          rawSnippet,
+          reason,
+        });
+      } catch (err) {
+        // Audit failure must not break dispatch — log and continue.
+        log.error("Failed to record coordination dispatch audit entry", {
+          repo: ctx.repo,
+          reason,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     return NO_CODE_CHANGES_FALLBACK;
+  };
+
+  if (trimmed.length === 0) {
+    return reject("empty", description);
   }
 
   // Already-replaced fallback short-circuits; treat it as a valid payload.
   if (trimmed === NO_CODE_CHANGES_FALLBACK) return trimmed;
 
   if (looksLikeAntibodyFragment(trimmed)) {
-    log.warn(
-      "Coordinated change description looks like an antibody/learned-pattern fragment — falling back to review-only",
-      {
-        repo: ctx.repo,
-        sourceRef: ctx.sourceRef,
-        snippet: trimmed.slice(0, 120),
-        reason: "antibody_fragment",
-      },
-    );
-    return NO_CODE_CHANGES_FALLBACK;
+    return reject("antibody_fragment", trimmed);
   }
 
   if (looksTruncated(trimmed)) {
-    log.warn(
-      "Coordinated change description appears truncated mid-sentence — falling back to review-only",
-      {
-        repo: ctx.repo,
-        sourceRef: ctx.sourceRef,
-        snippet: trimmed.slice(0, 120),
-        reason: "truncated",
-      },
-    );
-    return NO_CODE_CHANGES_FALLBACK;
+    return reject("truncated", trimmed);
   }
 
   // Sanity: the snippet should mention the matched token (when known). If
   // it doesn't, the extraction crossed a paragraph or list-item boundary
   // and is likely noise rather than a meaningful per-repo description.
   if (matchedToken && !trimmed.toLowerCase().includes(matchedToken.toLowerCase())) {
-    log.warn(
-      "Coordinated change description does not contain the matched repo token — falling back to review-only",
-      {
-        repo: ctx.repo,
-        sourceRef: ctx.sourceRef,
-        matchedToken,
-        snippet: trimmed.slice(0, 120),
-        reason: "token_missing",
-      },
-    );
-    return NO_CODE_CHANGES_FALLBACK;
+    return reject("token_missing", trimmed, { matchedToken });
   }
 
   return trimmed;

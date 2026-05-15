@@ -440,6 +440,86 @@ export async function handleCommand(text: string, ctx: TelegramContext): Promise
     }
   }
 
+  // Coordinated-change dispatch audit (issue #1530)
+  // Surfaces recent multi-repo coordination groups + the per-repo "What to
+  // implement" payload each child agent received, plus rejection log entries
+  // from validateChangeSetDescription. Helps operators spot truncated,
+  // empty, or antibody-fragment payloads before they cause downstream harm.
+  if (cmd === "coord-dispatches" || cmd === "/coord-dispatches" ||
+      cmd.startsWith("coord-dispatches ") || cmd.startsWith("/coord-dispatches ")) {
+    const parts = text.trim().split(/\s+/).slice(1);
+    let limit = 5;
+    let repoFilter: string | undefined;
+    for (const part of parts) {
+      if (/^\d+$/.test(part)) {
+        limit = Math.min(Math.max(parseInt(part, 10), 1), 20);
+      } else if (!repoFilter) {
+        repoFilter = part;
+      }
+    }
+
+    const groups = ctx.store.listRecentCoordinationGroups({ limit });
+    const audits = ctx.store.listCoordinationDispatchAudits({
+      limit: 10,
+      repo: repoFilter,
+    });
+    const sinceISO = new Date(Date.now() - 7 * 86_400_000).toISOString();
+    const reasonCounts = ctx.store.countCoordinationDispatchAuditsByReason({ sinceISO });
+    const totalLast7d = Object.values(reasonCounts).reduce((a, b) => a + b, 0);
+
+    const NO_FALLBACK =
+      "No code changes required — review only. (The dispatch could not extract a reliable per-repo description from the parent issue.)";
+    const SHORT = 30;
+
+    const lines: string[] = [`🔗 *Coordinated dispatches* (last ${groups.length})`];
+    if (groups.length === 0) {
+      lines.push("\n_No coordination groups recorded yet._");
+    } else {
+      for (const g of groups) {
+        const ts = g.createdAt.slice(0, 16).replace("T", " ");
+        const parent = g.parentSourceRef ? ` ${g.parentSourceRef}` : "";
+        lines.push(`\n*${g.id.slice(0, 10)}…* \`${g.status}\`  _${ts}_${parent}`);
+        const changeSets = g.changeSets as Array<{
+          repo: string;
+          agentName: string;
+          description: string;
+          mergeOrder: number;
+        }>;
+        for (const cs of [...changeSets].sort((a, b) => a.mergeOrder - b.mergeOrder)) {
+          const desc = (cs.description ?? "").trim();
+          let flag = "";
+          if (desc === NO_FALLBACK) flag = " ⚠️ FALLBACK";
+          else if (desc.length < SHORT) flag = ` ⚠️ short(${desc.length})`;
+          const oneLine = desc.replace(/\s+/g, " ");
+          const snippet = oneLine.length > 140 ? oneLine.slice(0, 139) + "…" : oneLine;
+          lines.push(`  ${cs.mergeOrder}. \`${cs.repo}\` → ${cs.agentName}${flag}`);
+          lines.push(`     _${snippet || "(empty)"}_`);
+        }
+      }
+    }
+
+    lines.push(`\n📋 *Validation rejections (last 7d):* ${totalLast7d}`);
+    if (totalLast7d > 0) {
+      const breakdown = Object.entries(reasonCounts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([r, n]) => `${r}=${n}`)
+        .join("  ");
+      lines.push(`_${breakdown}_`);
+    }
+
+    if (audits.length > 0) {
+      lines.push(`\n_Most recent rejections:_`);
+      for (const a of audits.slice(0, 5)) {
+        const ts = a.createdAt.slice(0, 16).replace("T", " ");
+        const snippet = (a.rawSnippet ?? "").replace(/\s+/g, " ").slice(0, 80);
+        lines.push(`  • _${ts}_  \`${a.reason}\`  \`${a.repo}\``);
+        if (snippet) lines.push(`    "${snippet}${snippet.length === 80 ? "…" : ""}"`);
+      }
+    }
+
+    return lines.join("\n");
+  }
+
   // Issues (parallel across repos)
   if (cmd === "issues" || cmd === "/issues") {
     const results = await Promise.all(repos.map(async (repo) => {
@@ -1012,6 +1092,7 @@ queue — pending operator approvals
 /submission-approve <id> — approve a submission for shipping
 /submission-reject <id> <reason> — reject a submission
 antibodies — failure immunity panel
+/coord-dispatches [N] [repo] — recent coordinated-change dispatches + validation rejections
 config — config reload history & status
 chat <agent> <msg> — talk to agent (persistent)
 newchat <agent> — reset conversation
