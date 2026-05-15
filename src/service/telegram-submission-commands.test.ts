@@ -1,5 +1,5 @@
 /**
- * Tests for submission queue Telegram commands (issue #1608).
+ * Tests for submission queue Telegram commands (issue #1608 / #1611).
  *
  * Covers:
  *  - parseSubmissionId: integer-only matcher (ULIDs must NOT match)
@@ -7,9 +7,11 @@
  *  - buildSubmissionShow: missing + present rows
  *  - tryHandleSubmissionApprove: matched/unmatched, status guards
  *  - tryHandleSubmissionReject: matched/unmatched, reason required, status guards
+ *  - handleSubmitCommand (#1611): dry-run preview + live approve-and-ship flow
  *
  * Plus integration via handleCommand for routing:
  *  - /submissions, /submission-show, /submission-approve, /submission-reject
+ *  - /submit <id> — approve + ship one-step command
  *  - Disambiguation: /approve <int> hits the submission queue while
  *    /approve <ULID> falls through to the borderline-task queue.
  */
@@ -20,10 +22,12 @@ import { handleCommand } from "./telegram.js";
 import {
   buildSubmissionsList,
   buildSubmissionShow,
+  handleSubmitCommand,
   parseSubmissionId,
   tryHandleSubmissionApprove,
   tryHandleSubmissionReject,
 } from "./telegram-submission-commands.js";
+import { SubmissionAgent } from "../orchestrator/submission-agent.js";
 import type { OrchestratorConfig } from "../config/schema.js";
 
 // ── shared mocks (same shape as telegram.test.ts) ─────────────────────────
@@ -319,5 +323,227 @@ describe("handleCommand integration: submission queue", () => {
     });
     expect(reply).toContain("No approval queue entry");
     expect(reply).toContain(ulid);
+  });
+});
+
+// ── handleSubmitCommand (#1611) ───────────────────────────────────────────────
+
+/**
+ * Minimal stub for SubmissionAgent: only `submitApproved` needs to be
+ * overrideable for these tests. Real adapter registration is tested
+ * in submission-agent.test.ts.
+ */
+function makeAgent(
+  store: StateStore,
+  submitOutcome: "ok" | "network-error" | "platform-rejected" | "no-adapter" = "ok",
+): SubmissionAgent {
+  const agent = new SubmissionAgent(store, []);
+  // Override submitApproved with a controlled stub.
+  agent.submitApproved = async (id: number) => {
+    if (submitOutcome === "ok") {
+      return {
+        ok: true as const,
+        submission: {
+          id: 1,
+          pending_id: id,
+          platform: "immunefi",
+          program: "ipor",
+          title: "Reentrancy in withdraw()",
+          severity: "high",
+          platform_submission_id: "stub-sub-001",
+          status_url: "https://bugs.example.invalid/ipor/001",
+          expected_payout_usd: 25_000,
+          actual_payout_usd: null,
+          status: "submitted" as const,
+          submitted_at: "2026-05-15T06:00:00.000Z",
+          updated_at: "2026-05-15T06:00:00.000Z",
+        },
+      };
+    }
+    if (submitOutcome === "network-error") {
+      return { ok: false as const, reason: "network-error" as const, detail: "timeout after 30s" };
+    }
+    if (submitOutcome === "platform-rejected") {
+      return { ok: false as const, reason: "platform-rejected" as const, detail: "duplicate submission" };
+    }
+    // no-adapter
+    return { ok: false as const, reason: "platform-rejected" as const, detail: "No adapter registered" };
+  };
+  return agent;
+}
+
+describe("handleSubmitCommand", () => {
+  let store: StateStore;
+  const savedFlag = process.env.SUBMISSION_AGENT_ENABLED;
+
+  beforeEach(() => {
+    store = new StateStore(":memory:");
+    delete process.env.SUBMISSION_AGENT_ENABLED;
+  });
+
+  afterEach(() => {
+    store.close();
+    if (savedFlag !== undefined) process.env.SUBMISSION_AGENT_ENABLED = savedFlag;
+    else delete process.env.SUBMISSION_AGENT_ENABLED;
+  });
+
+  // ── argument parsing ────────────────────────────────────────────────────
+
+  it("returns usage for missing id", async () => {
+    const { reply } = await handleSubmitCommand(store, makeAgent(store), undefined);
+    expect(reply).toMatch(/Usage:.*\/submit/i);
+  });
+
+  it("returns usage for a ULID-shaped id", async () => {
+    const { reply } = await handleSubmitCommand(store, makeAgent(store), "01KPFBW5");
+    expect(reply).toMatch(/Usage:.*\/submit/i);
+  });
+
+  // ── dry-run (flag off) ──────────────────────────────────────────────────
+
+  it("dry-run: shows preview when SUBMISSION_AGENT_ENABLED is not set", async () => {
+    const p = seed(store, { title: "Overflow in fee accumulator" });
+    const { reply } = await handleSubmitCommand(store, makeAgent(store), String(p.id));
+    expect(reply).toContain("Dry run");
+    expect(reply).toContain("SUBMISSION_AGENT_ENABLED");
+    expect(reply).toContain("Overflow in fee accumulator");
+    expect(reply).toContain("immunefi/ipor");
+    // Must not mutate state
+    expect(store.getPendingSubmission(p.id)?.status).toBe("awaiting-approval");
+  });
+
+  it("dry-run: not-found returns a clear error (no state change)", async () => {
+    const { reply } = await handleSubmitCommand(store, makeAgent(store), "999");
+    expect(reply).toContain("No pending submission");
+    // Nothing was approved
+    expect(store.getPendingSubmission(999)).toBeNull();
+  });
+
+  it("dry-run: shows status note when submission is not awaiting-approval", async () => {
+    const p = seed(store);
+    store.approvePendingSubmission(p.id); // status → approved
+    const { reply } = await handleSubmitCommand(store, makeAgent(store), String(p.id));
+    expect(reply).toContain("Dry run");
+    expect(reply).toMatch(/status.*approved/i);
+    // Still approved — dry-run did not change anything
+    expect(store.getPendingSubmission(p.id)?.status).toBe("approved");
+  });
+
+  // ── live mode (flag on) ─────────────────────────────────────────────────
+
+  it("live: not-found returns a clear error", async () => {
+    process.env.SUBMISSION_AGENT_ENABLED = "true";
+    const { reply } = await handleSubmitCommand(store, makeAgent(store), "999");
+    expect(reply).toContain("No pending submission");
+  });
+
+  it("live: approves awaiting-approval submission then ships it", async () => {
+    process.env.SUBMISSION_AGENT_ENABLED = "true";
+    const p = seed(store, { title: "Reentrancy in withdraw()" });
+    const agent = makeAgent(store, "ok");
+    const { reply } = await handleSubmitCommand(store, agent, String(p.id));
+    expect(reply).toContain("approved + shipped");
+    expect(reply).toContain("immunefi/ipor");
+    expect(reply).toContain("bugs.example.invalid/ipor/001");
+    // Row was approved (then consumed by agent.submitApproved in a real impl;
+    // our stub doesn't update the store, so check it reached approved)
+    expect(store.getPendingSubmission(p.id)?.status).toBe("approved");
+  });
+
+  it("live: skips approve step when submission is already approved", async () => {
+    process.env.SUBMISSION_AGENT_ENABLED = "true";
+    const p = seed(store);
+    store.approvePendingSubmission(p.id); // pre-approved via /submission-approve
+    const agent = makeAgent(store, "ok");
+    const { reply } = await handleSubmitCommand(store, agent, String(p.id));
+    expect(reply).toContain("approved + shipped");
+    // Still approved (stub doesn't consume; real agent would mark consumed)
+    expect(store.getPendingSubmission(p.id)?.status).toBe("approved");
+  });
+
+  it("live: errors when submission is rejected", async () => {
+    process.env.SUBMISSION_AGENT_ENABLED = "true";
+    const p = seed(store);
+    store.rejectPendingSubmission(p.id, "severity inflated");
+    const { reply } = await handleSubmitCommand(store, makeAgent(store, "ok"), String(p.id));
+    expect(reply).toContain("rejected");
+    expect(reply).toContain("cannot approve-and-ship");
+  });
+
+  it("live: errors when submission is consumed", async () => {
+    process.env.SUBMISSION_AGENT_ENABLED = "true";
+    const p = seed(store);
+    store.approvePendingSubmission(p.id);
+    store.markPendingSubmissionConsumed(p.id);
+    const { reply } = await handleSubmitCommand(store, makeAgent(store, "ok"), String(p.id));
+    expect(reply).toContain("consumed");
+    expect(reply).toContain("cannot approve-and-ship");
+  });
+
+  it("live: shows approve success + ship failure when network errors", async () => {
+    process.env.SUBMISSION_AGENT_ENABLED = "true";
+    const p = seed(store);
+    const agent = makeAgent(store, "network-error");
+    const { reply } = await handleSubmitCommand(store, agent, String(p.id));
+    expect(reply).toContain("approved");
+    expect(reply).toContain("Ship failed");
+    expect(reply).toContain("network-error");
+    expect(reply).toContain("timeout after 30s");
+  });
+
+  it("live: shows approve success + ship failure on platform rejection", async () => {
+    process.env.SUBMISSION_AGENT_ENABLED = "true";
+    const p = seed(store);
+    const agent = makeAgent(store, "platform-rejected");
+    const { reply } = await handleSubmitCommand(store, agent, String(p.id));
+    expect(reply).toContain("approved");
+    expect(reply).toContain("Ship failed");
+    expect(reply).toContain("duplicate submission");
+  });
+});
+
+// ── /submit handleCommand integration ────────────────────────────────────────
+
+describe("handleCommand integration: /submit", () => {
+  let store: StateStore;
+  const savedFlag = process.env.SUBMISSION_AGENT_ENABLED;
+
+  beforeEach(() => {
+    store = new StateStore(":memory:");
+    delete process.env.SUBMISSION_AGENT_ENABLED;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, result: { message_id: 1 } }),
+    }));
+  });
+
+  afterEach(() => {
+    store.close();
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+    if (savedFlag !== undefined) process.env.SUBMISSION_AGENT_ENABLED = savedFlag;
+    else delete process.env.SUBMISSION_AGENT_ENABLED;
+  });
+
+  it("/submit <id> returns dry-run preview when flag is off", async () => {
+    const p = seed(store, { title: "Flash loan price manipulation" });
+    const reply = await handleCommand(`/submit ${p.id}`, {
+      config,
+      store,
+      dispatcher: { dispatch: vi.fn() } as never,
+    });
+    expect(reply).toContain("Dry run");
+    expect(reply).toContain("Flash loan price manipulation");
+    // No state mutation
+    expect(store.getPendingSubmission(p.id)?.status).toBe("awaiting-approval");
+  });
+
+  it("/submit returns usage for missing id", async () => {
+    const reply = await handleCommand("/submit", {
+      config,
+      store,
+      dispatcher: { dispatch: vi.fn() } as never,
+    });
+    expect(reply).toMatch(/Usage:.*\/submit/i);
   });
 });

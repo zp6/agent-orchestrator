@@ -21,10 +21,12 @@ import type { MonologueEntry } from "../state/store.js";
 import {
   buildSubmissionsList,
   buildSubmissionShow,
+  handleSubmitCommand,
   parseSubmissionId,
   tryHandleSubmissionApprove,
   tryHandleSubmissionReject,
 } from "./telegram-submission-commands.js";
+import { SubmissionAgent } from "../orchestrator/submission-agent.js";
 
 const log = createLogger("telegram");
 
@@ -957,6 +959,13 @@ Steps:
     return r.reply;
   }
 
+  // /submit <id> — approve + ship in one step (issue #1611)
+  if (cmd === "submit" || cmd === "/submit" || cmd.startsWith("submit ") || cmd.startsWith("/submit ")) {
+    const arg = text.trim().split(/\s+/)[1];
+    const agent = new SubmissionAgent(ctx.store, []);
+    return (await handleSubmitCommand(ctx.store, agent, arg)).reply;
+  }
+
   // /approve <taskId> [reason] — operator force-approves a borderline-rejected task
   if (cmd.startsWith("approve ") || cmd.startsWith("/approve ")) {
     const parts = text.trim().split(/\s+/);
@@ -1091,6 +1100,7 @@ queue — pending operator approvals
 /submission-show <id> — full submission body
 /submission-approve <id> — approve a submission for shipping
 /submission-reject <id> <reason> — reject a submission
+/submit <id> — approve + ship in one step (needs SUBMISSION_AGENT_ENABLED=true)
 antibodies — failure immunity panel
 /coord-dispatches [N] [repo] — recent coordinated-change dispatches + validation rejections
 config — config reload history & status

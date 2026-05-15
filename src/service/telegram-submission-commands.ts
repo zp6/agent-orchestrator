@@ -21,6 +21,10 @@
  */
 
 import type { StateStore, PendingSubmission } from "../state/store.js";
+import {
+  SubmissionAgent,
+  isSubmissionAgentEnabled,
+} from "../orchestrator/submission-agent.js";
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -206,6 +210,100 @@ export function tryHandleSubmissionApprove(
       `*Platform:* ${pending.platform}/${pending.program}\n` +
       `*Title:* ${pending.title.slice(0, 120)}\n\n` +
       `Run \`orch submission submit ${id}\` to ship it (requires SUBMISSION_AGENT_ENABLED=true).`,
+  };
+}
+
+// ── /submit <id> ─────────────────────────────────────────────────────────
+
+/**
+ * One-step approve-and-ship Telegram command (issue #1611).
+ *
+ * When `SUBMISSION_AGENT_ENABLED` is not set, returns a dry-run preview
+ * without touching state — operators can practice the command before live mode.
+ *
+ * When the flag is on:
+ *   1. If status is `awaiting-approval`, calls `store.approvePendingSubmission`.
+ *   2. If status is already `approved`, skips the approve step.
+ *   3. Calls `agent.submitApproved(id)`.
+ *   4. Returns the platform status URL on success, or a structured error on failure.
+ */
+export async function handleSubmitCommand(
+  store: StateStore,
+  agent: SubmissionAgent,
+  idArg: string | undefined,
+): Promise<{ reply: string }> {
+  const id = parseSubmissionId(idArg);
+  if (id == null) {
+    return { reply: "Usage: /submit <id>\nExample: /submit 7" };
+  }
+
+  // Feature flag off — dry-run preview only, no state changes.
+  if (!isSubmissionAgentEnabled()) {
+    const pending = store.getPendingSubmission(id);
+    if (!pending) {
+      return {
+        reply:
+          `❌ No pending submission with id \`#${id}\`.\n` +
+          `Use \`/submissions\` to see what's awaiting approval.`,
+      };
+    }
+    const stateNote =
+      pending.status !== "awaiting-approval"
+        ? `\n⚠️ Status is *${pending.status}* — must be awaiting-approval to ship.`
+        : "";
+    return {
+      reply:
+        `🔍 *Dry run* — SUBMISSION_AGENT_ENABLED is not set.\n\n` +
+        `Would approve-and-ship *${pending.title.slice(0, 80)}*\n` +
+        `Platform: ${pending.platform}/${pending.program} | ` +
+        `Severity: ${pending.severity} | ` +
+        `Expected payout: ${formatPayout(pending.expected_payout_usd)}` +
+        stateNote +
+        `\n\nSet \`SUBMISSION_AGENT_ENABLED=true\` to ship for real.`,
+    };
+  }
+
+  // Read current state.
+  const pending = store.getPendingSubmission(id);
+  if (!pending) {
+    return {
+      reply:
+        `❌ No pending submission with id \`#${id}\`.\n` +
+        `Use \`/submissions\` to see what's awaiting approval.`,
+    };
+  }
+
+  // Approve if still awaiting; pass through if already approved; reject otherwise.
+  if (pending.status === "awaiting-approval") {
+    const ok = store.approvePendingSubmission(id);
+    if (!ok) {
+      const reread = store.getPendingSubmission(id);
+      return {
+        reply: `⚠️ Submission \`#${id}\` could not be approved (now *${reread?.status ?? "unknown"}*).`,
+      };
+    }
+  } else if (pending.status !== "approved") {
+    return {
+      reply: `⚠️ Submission \`#${id}\` is *${pending.status}* — cannot approve-and-ship.`,
+    };
+  }
+
+  // Ship.
+  const result = await agent.submitApproved(id);
+  if (!result.ok) {
+    return {
+      reply:
+        `✅ Submission \`#${id}\` approved.\n` +
+        `❌ Ship failed (${result.reason}): ${result.detail}`,
+    };
+  }
+
+  const s = result.submission;
+  return {
+    reply:
+      `✅ Submission \`#${id}\` approved + shipped to *${s.platform}/${s.program}*\n\n` +
+      `*Title:* ${s.title.slice(0, 100)}\n` +
+      `*Status URL:* ${s.status_url}`,
   };
 }
 
