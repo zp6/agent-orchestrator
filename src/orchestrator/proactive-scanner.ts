@@ -26,6 +26,22 @@ export interface ScanResult {
   labels: string[];
 }
 
+function shellEscape(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function branchStillExists(repo: string, branch: string): boolean {
+  try {
+    execSync(`gh api ${shellEscape(`repos/${repo}/git/refs/heads/${branch}`)} --jq .ref`, {
+      encoding: "utf-8",
+      timeout: 10_000,
+    }).trim();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Run all proactive scans and file issues for discovered problems.
  * Returns count of issues filed (after dedup).
@@ -149,13 +165,14 @@ function scanStaleBranches(repo: string): ScanResult[] {
       }
     }
 
-    if (stale.length < 5) return []; // only flag if there's a significant accumulation
+    const liveStale = stale.filter((branch) => branchStillExists(repo, branch));
+    if (liveStale.length < 5) return []; // only flag if there's a significant accumulation
 
     return [{
       source: "stale-branches",
       repo,
-      title: `${stale.length} orphan branches with no open PR`,
-      body: `The following branches have no associated open PR and may be stale:\n\n${stale.slice(0, 10).map((b) => `- \`${b}\``).join("\n")}${stale.length > 10 ? `\n- ...and ${stale.length - 10} more` : ""}\n\nConsider deleting branches that are no longer needed.`,
+      title: `${liveStale.length} orphan branches with no open PR`,
+      body: `The following branches have no associated open PR and may be stale:\n\n${liveStale.slice(0, 10).map((b) => `- \`${b}\``).join("\n")}${liveStale.length > 10 ? `\n- ...and ${liveStale.length - 10} more` : ""}\n\nConsider deleting branches that are no longer needed.`,
       labels: ["enhancement"],
     }];
   } catch {
