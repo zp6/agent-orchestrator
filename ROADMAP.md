@@ -1,9 +1,11 @@
 # Roadmap - agent-orchestrator
 
-_Last updated: 2026-05-10 (triage cycle 20) — 3 open PRs in flight: #1610 (Telegram submission queue, closes #1608), #1609 (Layer 4 on-chain revenue watcher, closes #1562), #1596 (selfUpdate timeouts + observability, closes #1594). Revenue layer count: still 1.5/4 layers shipped; Layer 4 merges with #1609._
+_Last updated: 2026-05-15 (zero-revenue retro #1511 landing). 12 days to Article V deadline. Treasury ~$62 USD-equivalent, $0 revenue earned. Retro documents the structural failure: every revenue dispatch routes to a coder, no agent owns `dollar_deposited`. See `docs/retros/2026-05-15-zero-revenue-retro.md`._
 
 ## Recently shipped
 
+- **#1511 (this PR)** — Zero-revenue retro filed at `docs/retros/2026-05-15-zero-revenue-retro.md`. Names the "builders code, sellers don't exist" pattern. Re-scopes the original issue's Path 1 (Algora/Replit/Gitcoin Earn) per Charter Article V (operator-signup paths excised). Surfaces four operator decisions (subscription renewal, capital recovery, Polymarket rail, `IMMUNEFI_API_TOKEN` provisioning). Recommends decommissioning FlashArbBot/arb-monitor and parking Polymarket. P1 follow-up (executor agent role) deferred to next agent-design sprint to avoid repeating the build-more-infrastructure pattern.
+- **#1714** — Live bounty monitor (Layer 2). Crypto-native sources only.
 - **#1599 (Phase A)** — Submission agent Layer 3: `pending_submissions` + `submissions` tables, `SubmissionAdapter` interface, Immunefi adapter (no-KYC allow-list + stubbed `submit()` until `IMMUNEFI_API_TOKEN` provisioned), `SubmissionAgent` orchestrator with sanitizer defense-in-depth, `orch submission queue/list/show/approve/reject/submit/platforms` CLI, feature flag `SUBMISSION_AGENT_ENABLED`. 31 new tests. Phase B (live network call) is a follow-up once token is provisioned.
 - **#1512** — Fleet autonomous-revenue umbrella closed: Layer 1 shipped via #1527/#1528/#1557. Layer 2 → #1598 (live opportunity monitor — Immunefi/GitHub only, Algora dropped per Article V). Layer 3 → #1599 (submission agent — Immunefi USDC payout, no KYC). Layer 4 → #1562 (on-chain revenue watcher; Stripe webhook variant explicitly dropped, see agent-proxy#567). Crypto-native scope only — Stripe Connect / Algora / KYC paths excised.
 - **#1542** — env-gate proactive-rebase-scheduler (hot-fix, closes daemon crash on divergent config)
@@ -43,17 +45,21 @@ Prior P0 sweep — issues closed in the last 7 days:
 
 ## Master program
 
-**Charter Article V — fleet self-funding by 2026-05-27.** Currently **17 days out**. Treasury at $2 USDC in Morpho Steakhouse vault (bridging losses to Polygon cost ~$46; see CLAUDE.md treasury section). Revenue rails are shipped; critical reliability bugs are now the top blocker (37% task failure rate from connection errors + .claude.json corruption).
+**Charter Article V, fleet self-funding by 2026-05-27.** Currently **12 days out**. Treasury at ~$62 USD-equivalent ($2 Morpho on Base, $42 USDC.e + $15 MATIC on Polygon, $3 ETH on Base). Revenue earned to date: $0. Per the zero-revenue retro (`docs/retros/2026-05-15-zero-revenue-retro.md`, closes #1511), the bottleneck is no longer "ship more revenue infrastructure" but "run what's already shipped, end-to-end, once." Day-30 target of $400 is **not achievable** on organic revenue; see retro for the three operator decisions that reframe the timeline.
 
 ## Next up
 
-1. **#1518/1532 — Replace spawnSync with async git calls** — blocks event loop, causes daemon freeze. Root cause of connection-error retry storms and exit-143 timeout pattern. Every freeze means missed dispatches and amplified failure rate.
-2. **#1531 — Housekeeping-PR JSON validator re-dispatches closed issues** — dispatch loop bug. Validator incorrectly re-queues already-closed issues, wasting cycles and inflating the failure count. Pair with #1537 (coordinated-change 'target repository' field bug).
-3. **#1520 — .claude.json corruption (150–200 task failures)** — CLI spawn issues corrupt agent config. Paired with #1539 (daemon env load) and #1540 (daemon selfUpdate) for full reliability sprint.
-4. **#1598 — Layer 2 live opportunity monitor (Immunefi/GitHub)** — P0 survival. Feeds the bounty queue that Layer 1 dispatcher (shipped) consumes. Crypto-native sources only; Algora dropped per Article V. 17 days to Article V deadline.
-5. **#1607 — Layer 3 Phase B: activate ImmunefiAdapter live submission** — Phase A (#1599) is merged; Phase B unlocks once `IMMUNEFI_API_TOKEN` is provisioned. After that, #1611 (Telegram `/submit <id>` one-step approve-and-ship) closes the loop end-to-end.
-6. **#1568 — Director must auto-act on /api/compliance incident state** — closes the operator-substitution loop. Compliance incidents already detected; missing the action layer.
-7. **#1588 — fleet-signer container has no restart policy** — infrastructure gap. Signer flaps and blocks treasury ops; `restart: unless-stopped` is a one-line fix that unblocks all on-chain revenue paths.
+1. **#1511 retro follow-through** — surface the four operator decisions (subscription renewal, capital recovery, Polymarket rail status, `IMMUNEFI_API_TOKEN` provisioning) via `RESOURCES.md`, not Telegram (per operator-communication-discipline). No code; this is execution of a routing-structure problem, not a coding problem.
+2. **#1607 — Layer 3 Phase B: activate ImmunefiAdapter live submission** — Phase A (#1599) merged; Phase B unlocks the moment `IMMUNEFI_API_TOKEN` is provisioned. This is the closest-to-end-to-end revenue path the fleet has. P0 survival.
+3. **Decommission FlashArbBot + arb-monitor** — 3.5 days runtime, 0 profitable arbs, dominated by sub-second MEV bots. Park the contract (`0x41ea5a80...`); kill the monitor permanently. File as a separate small issue, do not bundle into this PR.
+4. **Park Polymarket rail** — CLOB auth black box + no demonstrated market-selection edge = two unsolved layers in 12 days. Stop debugging; revisit only when (a) a real edge is identified or (b) someone has time to crack the auth without burning runway.
+5. **#1518/1532 — Replace spawnSync with async git calls** — blocks event loop, causes daemon freeze. Root cause of connection-error retry storms.
+6. **#1568 — Director must auto-act on /api/compliance incident state** — closes the operator-substitution loop.
+7. **#1588 — fleet-signer container has no restart policy** — `restart: unless-stopped` is a one-line fix that unblocks all on-chain revenue paths.
+
+## Architectural P1 (next agent-design sprint, not this PR)
+
+**Executor agent role.** Every revenue dispatch currently routes to a coder agent whose success metric is `pr_merged`. No agent in the fleet owns `dollar_deposited`. Until a non-coding executor role exists (whose loop is "pick a path, run it end-to-end, report dollar outcome"), every revenue sprint will produce more infrastructure and zero dollars. This is the structural finding from the zero-revenue retro and the deepest fix. Filed separately from this PR per the "describing without doing" anti-pattern; a single design pass deserves its own issue and dispatch.
 
 ## In flight (open PRs)
 
@@ -106,6 +112,7 @@ Prior P0 sweep — issues closed in the last 7 days:
 
 ## Triage log
 
+- **2026-05-15 (zero-revenue retro #1511):** Closed #1511 via `docs/retros/2026-05-15-zero-revenue-retro.md`. Audit of $0 revenue across 18 days of Article V doctrine; the retro names the structural failure ("builders code, sellers don't exist") and explicitly re-scopes the original issue's Algora/Replit/Gitcoin Earn path per Charter Article V (operator-signup paths are doctrine-blocked). Capital state refreshed (~$62, 12 days to deadline). Day-30 $400 target marked as not achievable on organic revenue; three operator decisions surfaced via `RESOURCES.md`. P1 executor-agent-role design deferred to a separate issue + dispatch to avoid repeating the build-more-infrastructure pattern this retro is naming. No new revenue-infrastructure code shipped in this PR; that is the point.
 - **2026-05-10 (cycle 20):** Closed #1534 (2026-05-09 standup tracker — superseded by today's standup #1582; action items already split out as separate issues, e.g. #1581 idempotency-key follow-up). Verified all 3 open PRs (#1610, #1609, #1596) include `Closes #N` references and pre-flight requirements. No issues cross the 14-day stale threshold (#1228 baseline-snapshot at ~13 days is the oldest and still labeled P0 — held for next cycle). No duplicate product issues: #1611 (Telegram one-step `/submit`) is a discipline-clean follow-up to #1608's separate approve/reject commands, not a dupe. Next-up list refreshed to retire `#1599 Layer 3` (shipped) and `#1562 Layer 4` (in flight via PR #1609), adding #1607 Phase B and #1568 Director auto-act as the next P0 levers. Survival timeline still 17 days to Article V; treasury at $2 USDC (Morpho).
 - **2026-05-10 (cycle 18):** Closed #1512 umbrella for the fleet autonomous-revenue layer. Layer 1 was already shipped (#1527/#1528/#1557 — daily `dispatchRevenueExecutor` wired into daemon at `src/service/daemon.ts:2168` with deny-list + prompt-injection sanitizer + 19 tests). Layers 2-4 broken out as discipline-clean follow-ups: #1598 Layer 2 (Immunefi/GitHub monitor only — Algora dropped), #1599 Layer 3 (Immunefi USDC submission agent — no KYC adapters), #1562 Layer 4 (on-chain USDC watcher — Stripe webhook variant dropped, supersedes agent-proxy#567). Doctrine drift in the original umbrella (Stripe Connect, Algora signup, KYC chain) excised in the follow-ups. Survival timeline still 17 days to Article V — Layers 2-4 are the active critical path.
 - **2026-05-10 (cycle 17):** Closed 2 duplicate standup action items: #1579 (→ #1532, ship async git patch) and #1580 (→ #1533, merge idle PRs). No stale issues (oldest is #1223 at 13 days). No open PRs. Next Up refreshed: added #1531 dispatch-loop bug and #1588 fleet-signer restart gap; updated day count to 17 and corrected treasury balance ($2 after bridging losses).

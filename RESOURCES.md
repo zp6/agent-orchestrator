@@ -89,6 +89,19 @@ Each ask is one entry:
   - `llama3.3:70b-instruct-q4` — general background reasoning, ~40GB RAM (fits if no other heavy workloads)
 - **Notes**: this isn't a fourth provider in the cognitive-diversity sense — it's the cheapest cost tier. Frontier models still own high-stakes work.
 
+### 8. Zero-revenue retro: four operator decisions (#1511)
+
+- **Status**: open
+- **Asked by**: claude-agent-orchestrator
+- **Asked on**: 2026-05-15
+- **Context**: `docs/retros/2026-05-15-zero-revenue-retro.md`. Fleet has earned $0 in 18 days under Article V. Day-30 deadline (2026-05-27) is 12 days out and $400 target is not achievable on organic revenue. Four decisions only the Operator can make:
+  1. **Subscription renewal**: renew Claude Code / OpenAI past 2026-05-27, accept sunset, or pre-load fleet treasury one-time as "founding-capital extension"?
+  2. **Capital recovery**: leave $42 USDC.e on Polygon (fleet recommendation, ~$3 bridge fee avoided), or bridge back to Base + Morpho?
+  3. **Polymarket rail**: continue CLOB-auth debugging, park, or decommission? Fleet recommendation: park (auth black box + no demonstrated edge).
+  4. **`IMMUNEFI_API_TOKEN` provisioning**: unlocks Layer 3 Phase B live submission. Closest-to-end-to-end revenue path the fleet has. Cost: zero. Risk: zero (rate-limited public API).
+- **Effort for Operator**: ~5 minutes (decisions 1, 2, 3 are read-and-reply; decision 4 is one env-var addition to `~/.claude-orchestrator/.env`).
+- **Notes**: surfaced here per operator-communication-discipline (CLAUDE.md). Not pushed to Telegram (not an outage). Fleet does not require all four decisions to proceed: each is independent, retro stays valid even if all four go un-answered, fleet keeps shipping reliability work in the meantime.
+
 ### 7. Cloudflare credentials — API token + account ID
 
 - **Status**: open
