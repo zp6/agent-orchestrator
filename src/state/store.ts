@@ -33,6 +33,35 @@ export interface DaemonLifecycleEntry {
   timestamp: string;
 }
 
+// ── selfUpdate cycle health tracking (issue #1621) ───────────────────────────
+
+/**
+ * One invocation of the daemon's `selfUpdate()` method, regardless of outcome.
+ * Written to `self_update_cycles` so the dashboard can surface:
+ *   - Last successful self-update timestamp + duration
+ *   - Slow-cycle trend (unexpected rebuild times)
+ */
+export interface SelfUpdateCycleRecord {
+  id: number;
+  /** ISO timestamp when selfUpdate() was entered. */
+  started_at: string;
+  /** ISO timestamp when selfUpdate() returned or threw. */
+  completed_at: string;
+  /** Wall-clock duration of the selfUpdate() call in milliseconds. */
+  duration_ms: number;
+  /** 1 = completed without error, 0 = caught an exception. */
+  success: number;
+  /**
+   * Human-readable outcome:
+   *   "up-to-date"             — no new commits; in-place dist rebuild if needed
+   *   "updated to <hash>"      — pull + rebuild succeeded
+   *   error message            — caught exception
+   */
+  outcome: string | null;
+  /** New commit hash after a successful pull (null for up-to-date or failed cycles). */
+  commit_hash: string | null;
+}
+
 // ── Config reload audit types ─────────────────────────────────────────────────
 
 /** What triggered a config reload event. */
@@ -2030,6 +2059,7 @@ export class StateStore {
     this.runDMOutreachMigration();
     this.runFingerprintMigration();
     this.runSecurityFpExemptionsMigration();
+    this.runSelfUpdateCycleMigration();
   }
 
   private runPhase2Migration(): void {
@@ -9238,6 +9268,88 @@ export class StateStore {
     return this.db
       .prepare("SELECT * FROM daemon_lifecycle ORDER BY timestamp DESC LIMIT ?")
       .all(limit) as DaemonLifecycleEntry[];
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // selfUpdate cycle health tracking (issue #1621)
+  //
+  // Every invocation of daemon.selfUpdate() is recorded here regardless of
+  // outcome. The dashboard reads this to surface "last successful self-update"
+  // and detect slow-rebuild trends.
+  // ────────────────────────────────────────────────────────────────────────
+
+  private runSelfUpdateCycleMigration(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS self_update_cycles (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at   TEXT    NOT NULL,
+        completed_at TEXT    NOT NULL,
+        duration_ms  INTEGER NOT NULL,
+        success      INTEGER NOT NULL,
+        outcome      TEXT,
+        commit_hash  TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_self_update_cycles_started
+        ON self_update_cycles(started_at);
+      CREATE INDEX IF NOT EXISTS idx_self_update_cycles_success
+        ON self_update_cycles(success, started_at);
+    `);
+  }
+
+  /**
+   * Record one selfUpdate() invocation.
+   *
+   * @param params.durationMs  - Wall-clock time the call took in ms.
+   * @param params.success     - true if selfUpdate() returned without throwing.
+   * @param params.outcome     - Human-readable summary ("up-to-date", "updated to <hash>", or error message).
+   * @param params.commitHash  - New HEAD after a successful pull (omit for up-to-date / failed cycles).
+   */
+  recordSelfUpdateCycle(params: {
+    durationMs: number;
+    success: boolean;
+    outcome?: string;
+    commitHash?: string;
+  }): void {
+    const completedAt = new Date().toISOString();
+    const startedAt = new Date(Date.now() - params.durationMs).toISOString();
+    this.db.prepare(`
+      INSERT INTO self_update_cycles (started_at, completed_at, duration_ms, success, outcome, commit_hash)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      startedAt,
+      completedAt,
+      params.durationMs,
+      params.success ? 1 : 0,
+      params.outcome ?? null,
+      params.commitHash ?? null,
+    );
+  }
+
+  /**
+   * Return the most recent selfUpdate cycle record, optionally filtered to
+   * successful-only.  Returns null when no records exist yet.
+   *
+   * @param options.successOnly - If true, only consider cycles where success=1.
+   * @param options.limit       - Maximum rows to return (default 1).
+   */
+  getLastSelfUpdateCycle(options?: { successOnly?: boolean; limit?: number }): SelfUpdateCycleRecord | null {
+    const where = options?.successOnly ? "WHERE success = 1" : "";
+    const limit = options?.limit ?? 1;
+    const rows = this.db
+      .prepare(`SELECT * FROM self_update_cycles ${where} ORDER BY started_at DESC LIMIT ?`)
+      .all(limit) as SelfUpdateCycleRecord[];
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Return the last N selfUpdate cycle records newest-first.
+   *
+   * @param limit - Maximum number of rows (default 20).
+   */
+  getSelfUpdateCycleHistory(limit = 20): SelfUpdateCycleRecord[] {
+    return this.db
+      .prepare("SELECT * FROM self_update_cycles ORDER BY started_at DESC LIMIT ?")
+      .all(limit) as SelfUpdateCycleRecord[];
   }
 
   // ────────────────────────────────────────────────────────────────────────

@@ -3283,4 +3283,94 @@ describe("StateStore", () => {
       expect(store.countAutoMergesIn(24 * 60 * 60 * 1000)).toBe(0);
     });
   });
+
+  // ── selfUpdate cycle health tracking (issue #1621) ──────────────────────────
+
+  describe("self_update_cycles", () => {
+    it("getLastSelfUpdateCycle returns null when table is empty", () => {
+      expect(store.getLastSelfUpdateCycle()).toBeNull();
+    });
+
+    it("recordSelfUpdateCycle + getLastSelfUpdateCycle round-trips a successful up-to-date cycle", () => {
+      store.recordSelfUpdateCycle({ durationMs: 1_500, success: true, outcome: "up-to-date" });
+      const rec = store.getLastSelfUpdateCycle();
+      expect(rec).not.toBeNull();
+      expect(rec!.success).toBe(1);
+      expect(rec!.duration_ms).toBe(1_500);
+      expect(rec!.outcome).toBe("up-to-date");
+      expect(rec!.commit_hash).toBeNull();
+    });
+
+    it("recordSelfUpdateCycle stores commit_hash on a full-update cycle", () => {
+      store.recordSelfUpdateCycle({
+        durationMs: 45_000,
+        success: true,
+        outcome: "updated to abc1234 (3 commits)",
+        commitHash: "abc1234",
+      });
+      const rec = store.getLastSelfUpdateCycle();
+      expect(rec!.commit_hash).toBe("abc1234");
+      expect(rec!.duration_ms).toBe(45_000);
+    });
+
+    it("recordSelfUpdateCycle stores a failure cycle with success=0", () => {
+      store.recordSelfUpdateCycle({ durationMs: 31_000, success: false, outcome: "git fetch timed out" });
+      const rec = store.getLastSelfUpdateCycle();
+      expect(rec!.success).toBe(0);
+      expect(rec!.outcome).toBe("git fetch timed out");
+    });
+
+    it("getLastSelfUpdateCycle with successOnly skips failed cycles", () => {
+      // Use decreasing durations so records appear in insertion order when sorted
+      // by started_at DESC: 1s-ago failure is most recent, 5s-ago success is
+      // second, 10s-ago failure is oldest.
+      store.recordSelfUpdateCycle({ durationMs: 10_000, success: false, outcome: "error" });     // started ~10s ago
+      store.recordSelfUpdateCycle({ durationMs: 5_000, success: true, outcome: "up-to-date" });  // started ~5s ago
+      store.recordSelfUpdateCycle({ durationMs: 1_000, success: false, outcome: "error 2" });    // started ~1s ago (most recent)
+
+      // Without filter: most recent started_at = 1s-ago failure
+      const latest = store.getLastSelfUpdateCycle();
+      expect(latest!.success).toBe(0);
+      expect(latest!.outcome).toBe("error 2");
+
+      // With successOnly: skip both failures, return the 5s-ago success
+      const lastSuccess = store.getLastSelfUpdateCycle({ successOnly: true });
+      expect(lastSuccess!.success).toBe(1);
+      expect(lastSuccess!.outcome).toBe("up-to-date");
+    });
+
+    it("getSelfUpdateCycleHistory returns records newest-first (by started_at)", () => {
+      // Use decreasing durations so earliest insert has oldest started_at.
+      // After sorting by started_at DESC: 1s-ago error, 2s-ago success, 3s-ago success.
+      store.recordSelfUpdateCycle({ durationMs: 3_000, success: true, outcome: "up-to-date" });   // started ~3s ago
+      store.recordSelfUpdateCycle({ durationMs: 2_000, success: true, outcome: "up-to-date" });   // started ~2s ago
+      store.recordSelfUpdateCycle({ durationMs: 1_000, success: false, outcome: "error" });       // started ~1s ago (most recent)
+
+      const history = store.getSelfUpdateCycleHistory(10);
+      expect(history).toHaveLength(3);
+      // Newest first: 1s-ago failure is first
+      expect(history[0]!.duration_ms).toBe(1_000);
+      expect(history[0]!.success).toBe(0);
+      expect(history[0]!.outcome).toBe("error");
+    });
+
+    it("getSelfUpdateCycleHistory respects the limit parameter", () => {
+      for (let i = 0; i < 5; i++) {
+        store.recordSelfUpdateCycle({ durationMs: i * 1_000, success: true, outcome: "up-to-date" });
+      }
+      expect(store.getSelfUpdateCycleHistory(3)).toHaveLength(3);
+      expect(store.getSelfUpdateCycleHistory(1)).toHaveLength(1);
+    });
+
+    it("started_at and completed_at are valid ISO timestamps", () => {
+      store.recordSelfUpdateCycle({ durationMs: 5_000, success: true, outcome: "up-to-date" });
+      const rec = store.getLastSelfUpdateCycle()!;
+      expect(() => new Date(rec.started_at)).not.toThrow();
+      expect(() => new Date(rec.completed_at)).not.toThrow();
+      // started_at should be ~5s before completed_at
+      const gap = new Date(rec.completed_at).getTime() - new Date(rec.started_at).getTime();
+      expect(gap).toBeGreaterThanOrEqual(4_900); // small tolerance
+      expect(gap).toBeLessThanOrEqual(5_100);
+    });
+  });
 });

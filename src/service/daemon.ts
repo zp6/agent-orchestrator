@@ -1406,6 +1406,10 @@ export class Daemon {
     const time = new Date().toISOString().slice(11, 19);
     this.reapOrphanComposeProcesses(time, "selfUpdate");
 
+    // Issue #1621: track wall-clock duration of this selfUpdate() call so we
+    // can persist it to self_update_cycles and alert if it exceeds 60 seconds.
+    const selfUpdateStartMs = Date.now();
+
     // See note in the startup-rebuild block above: this module compiles to
     // dist/service/daemon.js, so two segments up reaches the repo root.
     const repoDir = resolve(new URL("../..", import.meta.url).pathname);
@@ -1428,6 +1432,24 @@ export class Daemon {
         // because this is an in-place fix that takes effect on the next cycle.
         this.log.info("Self-update: up to date", { commit: beforeHash });
         this.rebuildIfDistStale(repoDir);
+        // Record this successful up-to-date cycle for health tracking.
+        const cycleDurationMs = Date.now() - selfUpdateStartMs;
+        try {
+          this.store.recordSelfUpdateCycle({ durationMs: cycleDurationMs, success: true, outcome: "up-to-date" });
+        } catch (recordErr) {
+          this.log.warn("selfUpdate: failed to record up-to-date cycle", { error: String(recordErr) });
+        }
+        if (cycleDurationMs > 60_000) {
+          // An up-to-date check should complete in seconds. >60s suggests a
+          // network stall approaching the git fetch timeout (issue #1621).
+          await notifyOperator(
+            `Daemon selfUpdate: slow check (${Math.round(cycleDurationMs / 1000)}s)`,
+            `Self-update "up-to-date" check took ${Math.round(cycleDurationMs / 1000)}s — threshold is 60s. ` +
+              `Possible network stall near the git-fetch timeout. ` +
+              `Repo: ${repoDir}`,
+            "warning",
+          ).catch(() => {});
+        }
         return;
       }
 
@@ -1548,17 +1570,42 @@ export class Daemon {
       });
 
       // Record self-update event in the audit trail (issue #1337).
-      const durationMs = this.startedAt > 0 ? Date.now() - this.startedAt : undefined;
+      const daemonUptimeMs = this.startedAt > 0 ? Date.now() - this.startedAt : undefined;
       try {
         this.store.recordDaemonLifecycleEvent({
           event: "self-update",
           pid: process.pid,
           reason: `updated ${beforeHash} → ${afterHash} (${behind} commit${Number(behind) === 1 ? "" : "s"}): ${commits.split("\n").slice(0, 5).join("; ")}`,
-          duration_ms: durationMs,
+          duration_ms: daemonUptimeMs,
           commit_hash: afterHash,
         });
       } catch (auditErr) {
         this.log.warn("Failed to record self-update lifecycle event", { error: String(auditErr) });
+      }
+
+      // Issue #1621: record selfUpdate() cycle duration and alert if slow.
+      // Must happen BEFORE process.exit(0) so the write reaches the DB.
+      const cycleDurationMs = Date.now() - selfUpdateStartMs;
+      try {
+        this.store.recordSelfUpdateCycle({
+          durationMs: cycleDurationMs,
+          success: true,
+          outcome: `updated to ${afterHash} (${behind} commit${Number(behind) === 1 ? "" : "s"})`,
+          commitHash: afterHash,
+        });
+      } catch (recordErr) {
+        this.log.warn("selfUpdate: failed to record cycle", { error: String(recordErr) });
+      }
+      if (cycleDurationMs > 60_000) {
+        // A full pull + rebuild exceeding 60s may indicate network or build
+        // performance degradation worth flagging before the daemon re-execs.
+        await notifyOperator(
+          `Daemon selfUpdate: slow rebuild (${Math.round(cycleDurationMs / 1000)}s)`,
+          `Pull and rebuild took ${Math.round(cycleDurationMs / 1000)}s — threshold is 60s. ` +
+            `${beforeHash} → ${afterHash} (${behind} commit${Number(behind) === 1 ? "" : "s"}). ` +
+            `Repo: ${repoDir}`,
+          "warning",
+        ).catch(() => {});
       }
 
       await notifyOperator(
@@ -1598,6 +1645,25 @@ export class Daemon {
       writePid(child.pid!);
       process.exit(0);
     } catch (err) {
+      // Issue #1621: record failed cycle and alert if it was slow before failing.
+      const cycleDurationMs = Date.now() - selfUpdateStartMs;
+      try {
+        this.store.recordSelfUpdateCycle({
+          durationMs: cycleDurationMs,
+          success: false,
+          outcome: err instanceof Error ? err.message : String(err),
+        });
+      } catch (recordErr) {
+        this.log.warn("selfUpdate: failed to record failed cycle", { error: String(recordErr) });
+      }
+      if (cycleDurationMs > 60_000) {
+        await notifyOperator(
+          `Daemon selfUpdate: slow failure (${Math.round(cycleDurationMs / 1000)}s)`,
+          `Self-update failed after ${Math.round(cycleDurationMs / 1000)}s: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+          "warning",
+        ).catch(() => {});
+      }
       this.log.warn("Self-update failed", { error: err instanceof Error ? err.message : String(err) });
     }
   }
