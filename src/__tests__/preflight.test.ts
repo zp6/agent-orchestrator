@@ -59,12 +59,15 @@ describe("scanPreflightUrlCandidates", () => {
     expect(candidates[0]?.filePath).toBe("src/adapters/immunefi.ts");
   });
 
-  it("skips files marked with @preflight-skip-url-check", () => {
+  it("skips only the stub line marked with @preflight-skip-url-check", () => {
     const diff = makeDiff("src/stubs/offline.ts", [
       `// @preflight-skip-url-check`,
       `const URL = "https://api.example.invalid/v1";`,
+      `const LIVE = "https://api.live.invalid/v1";`,
     ]);
-    expect(scanPreflightUrlCandidates(diff)).toEqual([]);
+    expect(scanPreflightUrlCandidates(diff).map((c) => c.url)).toEqual([
+      "https://api.live.invalid/v1",
+    ]);
   });
 });
 
@@ -86,6 +89,31 @@ describe("checkUrlsInDiff", () => {
     expect(report.failures).toHaveLength(1);
     expect(report.failures[0]?.reason).toContain("api.immunefi.com unreachable: ECONNREFUSED");
     expect(report.failures[0]?.filePath).toBe("src/adapters/immunefi.ts");
+  });
+
+  it("does not fail on reachable hosts that return 4xx at the root", async () => {
+    const diff = makeDiff("src/adapters/auth.ts", [
+      `const SUBMISSIONS = "https://api.auth-test.invalid/v1/submissions";`,
+    ]);
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === "HEAD" && url === "https://api.auth-test.invalid/") {
+        return new Response("", { status: 401 });
+      }
+      if (init?.method === "HEAD" && url === "https://api.auth-test.invalid/v1/submissions") {
+        return new Response("", { status: 200 });
+      }
+      throw new Error(`unexpected request: ${url} ${init?.method ?? "GET"}`);
+    });
+
+    const report = await checkUrlsInDiff(diff, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      cachePath: join(makeTempDir(), "cache.json"),
+      now: () => 0,
+    });
+
+    expect(report.failures).toHaveLength(0);
+    expect(fetchImpl).toHaveBeenCalled();
   });
 
   it("deduplicates host probes and performs a path probe per unique URL", async () => {
@@ -120,6 +148,28 @@ describe("checkUrlsInDiff", () => {
     expect(seen.filter((line) => line === "HEAD https://api.preflight-demo.invalid/")).toHaveLength(1);
     expect(seen.filter((line) => line === "HEAD https://api.preflight-demo.invalid/v1/submissions")).toHaveLength(1);
     expect(seen.filter((line) => line === "HEAD https://api.preflight-demo.invalid/v1/status")).toHaveLength(1);
+  });
+
+  it("does not path probe non-API URLs", async () => {
+    const diff = makeDiff("src/content/site.ts", [
+      `const DOCS = "https://docs.preflight-demo.invalid/guide";`,
+    ]);
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === "HEAD" && url === "https://docs.preflight-demo.invalid/") {
+        return new Response("", { status: 200 });
+      }
+      throw new Error(`unexpected request: ${url} ${init?.method ?? "GET"}`);
+    });
+
+    const report = await checkUrlsInDiff(diff, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      cachePath: join(makeTempDir(), "cache.json"),
+      now: () => 0,
+    });
+
+    expect(report.failures).toHaveLength(0);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("skips internal hostnames without probing", async () => {
