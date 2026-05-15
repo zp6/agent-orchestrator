@@ -1,3 +1,4 @@
+import { join } from "path";
 import type { OrchestratorConfig } from "../config/schema.js";
 import type {
   DispatchValidationCheck,
@@ -22,6 +23,7 @@ import {
   validateEngagementProposal,
   writeEngagementProposalSignal,
 } from "./oss-engagement-validator.js";
+import { checkPhasePromotionGate } from "./phase-promotion-gate.js";
 
 export interface PreDispatchIssueRef {
   repo: string;
@@ -250,6 +252,51 @@ export function runGitHubPreDispatchValidation(params: {
   }
   if (agent.github === issue.repo) {
     checks.push(makePassedCheck("issue_ownership", "owned_by_agent", `issue belongs to ${agent.github}`));
+  }
+
+  // ── Phase A/B promotion gate (issue #1645) ───────────────────────────────
+  // Block go-live dispatch against adapters that are still in Phase A.
+  // Pure filesystem check — runs before any network call.
+  {
+    const adaptersDir = join(config.orchestrator_dir, "src/orchestrator/submission-adapters");
+    const phaseResult = checkPhasePromotionGate({
+      issueTitle,
+      issueBody,
+      adaptersDir,
+    });
+    if (!phaseResult.allowed) {
+      const failed = makeFailedResult(
+        base,
+        "phase_promotion_gate",
+        "PHASE_A_GO_LIVE_BLOCKED",
+        phaseResult.reason,
+      );
+      store.addDispatchValidation({
+        source,
+        source_ref: sourceRef,
+        agent_name: agentName,
+        repo: issue.repo,
+        issue_number: issue.number,
+        outcome: failed.outcome,
+        failure_check: failed.failureCheck,
+        failure_code: failed.failureCode,
+        failure_reason: failed.failureReason,
+        checklist: failed.checks,
+      });
+      return failed;
+    }
+    if (phaseResult.adapterName !== null) {
+      // A known adapter was checked and is Phase B — record as passed
+      checks.push(
+        makePassedCheck(
+          "phase_promotion_gate",
+          "PHASE_B_VERIFIED",
+          phaseResult.reason,
+        ),
+      );
+    }
+    // If adapterName is null (not a go-live task or no adapter matched),
+    // the gate does not emit a check — it's a no-op for non-adapter tasks.
   }
 
   // ── OSS external engagement check (issue #1212) ─────────────────────────
